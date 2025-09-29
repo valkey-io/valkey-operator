@@ -1,8 +1,11 @@
 # valkey-operator
-// TODO(user): Add simple overview of use/purpose
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+
+A Kubernetes operator for deploying Valkey, Valkey Clusters and managing its lifecycle.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey, a secure and scalable key management solution. The operator simplifies the process of deploying Valkey on Kubernetes clusters, ensuring that it is configured correctly and operates efficiently. It provides features such as automated installation, configuration management, and lifecycle management of Valkey instances.
 
 ## Getting Started
 

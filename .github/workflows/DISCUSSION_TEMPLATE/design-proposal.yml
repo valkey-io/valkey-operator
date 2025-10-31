@@ -1,0 +1,160 @@
+title: "[Design] "
+labels: ["design", "needs-discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🏗️ Design Proposal
+
+        Use this template to propose architectural changes, major features, or API modifications.
+        This helps the community discuss significant changes before implementation.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Brief one-paragraph summary of the proposal
+      placeholder: This proposal adds support for...
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change needed? What problems does it solve?
+      placeholder: |
+        Currently, users cannot...
+        This limits...
+        With this change, users will be able to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Detailed Design
+      description: |
+        Explain your design in detail. Include:
+        - How it works
+        - What components are involved
+        - How users will interact with it
+      placeholder: |
+        The operator will...
+
+        Components:
+        1. Controller changes:
+        2. New resources:
+        3. User workflow:
+    validations:
+      required: true
+
+  - type: textarea
+    id: api-changes
+    attributes:
+      label: API Changes
+      description: Any changes to the ValkeyCluster CRD or other APIs?
+      placeholder: |
+        Add new fields to ValkeyClusterSpec:
+        ```yaml
+        spec:
+          # new field
+          newFeature:
+            enabled: true
+            configuration: {}
+        ```
+
+        Add new status fields:
+        ```yaml
+        status:
+          newFeatureStatus: Ready
+        ```
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: user-stories
+    attributes:
+      label: User Stories
+      description: How would users use this feature?
+      placeholder: |
+        As a cluster operator, I want to...
+        As a developer, I need to...
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other designs did you consider and why didn't you choose them?
+      placeholder: |
+        ## Alternative 1: ...
+        Pros: ...
+        Cons: ...
+
+        ## Alternative 2: ...
+        Pros: ...
+        Cons: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Backward Compatibility
+      description: Is this a breaking change? How does it affect existing users?
+      placeholder: |
+        - Breaking change: Yes/No
+        - Migration path: ...
+        - Default behavior: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing Strategy
+      description: How will this be tested?
+      placeholder: |
+        - Unit tests: ...
+        - E2E tests: ...
+        - Manual testing: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open Questions
+      description: What still needs to be decided or discussed?
+      placeholder: |
+        - Should we support...?
+        - What happens when...?
+        - Alternative naming: ...?
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links to related issues, PRs, docs, or other resources
+      placeholder: |
+        - Related issue: #123
+        - Similar feature in Redis Operator: https://...
+        - Valkey documentation: https://...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: implementation
+    attributes:
+      label: Implementation
+      description: Implementation details
+      options:
+        - label: I'm willing to implement this design and submit a PR
+          required: false
+        - label: This design has been discussed with maintainers
+          required: false

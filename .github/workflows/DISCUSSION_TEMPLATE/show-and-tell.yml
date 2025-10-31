@@ -1,0 +1,88 @@
+title: "[Show] "
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🚀 Show and Tell
+
+        We'd love to see how you're using the Valkey Operator! Share your deployment, use case, or interesting configuration.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What Did You Build?
+      description: Tell us about your Valkey deployment and use case
+      placeholder: |
+        I deployed Valkey for...
+        My setup includes...
+        It's running in production and handles...
+    validations:
+      required: true
+
+  - type: textarea
+    id: scale
+    attributes:
+      label: Scale and Performance
+      description: Share some numbers about your deployment (optional)
+      placeholder: |
+        - Number of shards: 
+        - Replicas per shard: 
+        - Total memory: 
+        - Request rate: 
+        - Data size:
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Share your ValkeyCluster CR (sanitize sensitive data!)
+      placeholder: |
+        apiVersion: valkey.io/v1alpha1
+        kind: ValkeyCluster
+        metadata:
+          name: my-cluster
+        spec:
+          shards: 3
+          replicas: 2
+          # ...
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: lessons
+    attributes:
+      label: Lessons Learned
+      description: Any tips, tricks, or gotchas for others?
+      placeholder: |
+        - Make sure to set resource limits appropriately
+        - We found that...
+        - A common mistake is...
+    validations:
+      required: false
+
+  - type: textarea
+    id: features
+    attributes:
+      label: Features You Love
+      description: What operator features are most valuable to you?
+      placeholder: |
+        - The automatic failover works great
+        - Being able to scale easily is crucial
+        - Metrics integration is helpful
+    validations:
+      required: false
+
+  - type: textarea
+    id: wishlist
+    attributes:
+      label: Wishlist
+      description: What features would make your life even better?
+      placeholder: |
+        - Would love to see...
+        - It would be great if...
+    validations:
+      required: false

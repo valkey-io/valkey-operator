@@ -38,13 +38,7 @@ make run
 
 ### Reporting Bugs
 
-Found a bug? Please [open an issue](https://github.com/valkey-io/valkey-operator/issues/new) with:
-
-- Clear description of the problem
-- Steps to reproduce
-- Expected vs actual behavior
-- Your environment (K8s version, operator version, etc.)
-- Relevant logs and configuration (sanitize secrets!)
+Found a bug? Please [open an issue](https://github.com/valkey-io/valkey-operator/issues/new).
 
 ### Suggesting Features
 

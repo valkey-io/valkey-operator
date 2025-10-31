@@ -62,6 +62,82 @@ Have an idea? Start a discussion in [GitHub Discussions](https://github.com/valk
 
 We'll review your PR as soon as possible. Be patient and responsive to feedback.
 
+## Developer Certificate of Origin (DCO)
+
+This project requires all contributors to sign off on their commits, certifying that you have the right to submit the code under the project's license.
+
+By signing off, you agree to the [Developer Certificate of Origin (DCO)](https://developercertificate.org/):
+
+```
+Developer Certificate of Origin
+Version 1.1
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+
+Developer's Certificate of Origin 1.1
+
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
+
+### How to Sign Off
+
+Add a `Signed-off-by` line to your commit messages:
+
+```bash
+git commit -s -m "Add new feature"
+```
+
+The `-s` flag automatically adds the sign-off line with your name and email:
+
+```
+Add new feature
+
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+### Signing Off Previous Commits
+
+If you forgot to sign off your commits, you can amend them:
+
+```bash
+# For the last commit
+git commit --amend --signoff
+
+# For multiple commits (interactive rebase)
+git rebase -i HEAD~N  # where N is the number of commits
+# Mark commits as 'edit', then for each:
+git commit --amend --signoff
+git rebase --continue
+```
+
+**Important:** All commits in a PR must be signed off. PRs without sign-offs will not be merged.
+
 ## Coding Standards
 
 - Follow standard Go conventions and idiomatic Go code

@@ -1,0 +1,66 @@
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🙏 Ask a Question
+
+        Before asking, please:
+        - 🔍 Search existing discussions and issues
+        - 📖 Check the [documentation](https://github.com/valkey-io/valkey-operator/tree/main/docs)
+        - 👀 Review the [examples](https://github.com/valkey-io/valkey-operator/tree/main/config/samples)
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What would you like to know?
+      placeholder: How do I...?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What You're Trying to Achieve
+      description: Describe your use case and what you've tried so far
+      placeholder: |
+        I'm trying to deploy a Valkey cluster with...
+        I've tried...
+        The result was...
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your setup details
+      placeholder: |
+        - Kubernetes version: 1.28
+        - Operator version: v0.1.0
+        - Valkey version: 8.0
+        - Cloud provider: AWS/GCP/Azure/On-prem
+        - Installation method: Helm/kubectl/Kustomize
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: yaml
+    attributes:
+      label: Relevant Configuration
+      description: Your ValkeyCluster spec or relevant YAML (sanitize secrets!)
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Error Messages
+      description: Any relevant logs or error messages
+      render: shell
+    validations:
+      required: false

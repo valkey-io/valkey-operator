@@ -1,0 +1,42 @@
+name: Bug report
+description: Help us improve by reporting a bug
+title: "[BUG]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A short description of the bug in 1-2 sentences.
+      validations:
+        required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this behavior?
+      validations:
+        required: true
+
+  - type: textarea
+    id: behaviors
+    attributes:
+      label: Expected vs actual behavior
+      description: A detailed description of what you expected to happen vs. what actually happened.
+      validations:
+        required: true
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional information
+      description: Any additional information that is relevant to the problem
+      placeholder: |
+        - K8s version
+        - Operator version
+        - Relevant logs and configuration (santize secrets!)
+      validations:
+        required: false

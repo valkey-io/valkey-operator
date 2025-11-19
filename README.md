@@ -26,12 +26,8 @@ Valkey Operator is a Kubernetes operator that automates the deployment and manag
 ## Getting Started
 
 ### Prerequisites
-<<<<<<< HEAD
-- go version v1.24.6+
-=======
 
-- go version v1.24.0+
->>>>>>> tmp-original-18-11-25-00-21
+- go version v1.24.6+
 - docker version 17.03+.
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.

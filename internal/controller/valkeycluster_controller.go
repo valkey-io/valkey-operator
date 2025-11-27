@@ -19,12 +19,19 @@ package controller
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+)
+
+const (
+	DefaultPort = 6379
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -36,22 +43,63 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the ValkeyCluster object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
+	log.V(1).Info("Reconcile...")
 
-	// TODO(user): your logic here
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
+	if err := r.upsertService(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.V(1).Info("Reconcile done")
 	return ctrl.Result{}, nil
+}
+
+// Create or update a headless service (client connects to pods directly)
+func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+			Labels:    labels(cluster),
+		},
+		Spec: corev1.ServiceSpec{
+			Type:      corev1.ServiceTypeClusterIP,
+			ClusterIP: "None",
+			Selector:  labels(cluster),
+			Ports: []corev1.ServicePort{
+				{
+					Name: "valkey",
+					Port: DefaultPort,
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, svc); err != nil {
+		if errors.IsAlreadyExists(err) {
+			if err := r.Update(ctx, svc); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

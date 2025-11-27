@@ -268,15 +268,68 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	})
+
+	var valkeyClusterName string
+
+	Context("when a ValkeyCluster CR is applied", func() {
+		It("creates a Valkey Cluster deployment", func() {
+			By("creating the CR")
+			cmd := exec.Command("kubectl", "create", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+
+			By("validating the CR")
+			verifyCrExists := func(g Gomega) {
+				// Get the name of the ValkeyCluster CR
+				cmd := exec.Command("kubectl", "get",
+					"ValkeyCluster", "-o", "go-template={{ range .items }}"+
+						"{{ .metadata.name }}"+
+						"{{ \"\\n\" }}{{ end }}",
+				)
+				crOutput, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster information")
+				crNames := utils.GetNonEmptyLines(crOutput)
+				g.Expect(crNames).To(HaveLen(1), "Expected 1 instance of a ValkeyCluster")
+				valkeyClusterName = crNames[0]
+				g.Expect(valkeyClusterName).To(ContainSubstring("valkeycluster-sample"))
+			}
+			Eventually(verifyCrExists).Should(Succeed())
+
+			By("validating the Service")
+			verifyServiceExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyServiceExists).Should(Succeed())
+		})
+	})
+
+	Context("when a ValkeyCluster CR is deleted", func() {
+		It("deletes the Valkey Cluster deployment", func() {
+			By("deleting the CR")
+			cmd := exec.Command("kubectl", "delete", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete ValkeyCluster CR")
+
+			By("validating that the CR does not exist")
+			verifyCrRemoved := func(g Gomega) {
+				// Get the name of the ValkeyCluster CR
+				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}
+			Eventually(verifyCrRemoved).Should(Succeed())
+
+			By("validating that the Service does not exist")
+			verifyServiceRemoved := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}
+			Eventually(verifyServiceRemoved).Should(Succeed())
+		})
 	})
 })
 

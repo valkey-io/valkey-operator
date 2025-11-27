@@ -1,9 +1,7 @@
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
-  labels:
-    app.kubernetes.io/name: valkey-operator
-    app.kubernetes.io/managed-by: kustomize
   name: valkeycluster-sample
 spec:
-  # TODO(user): Add fields here
+  shards: 3
+  replicas: 0

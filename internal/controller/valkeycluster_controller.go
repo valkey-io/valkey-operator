@@ -44,6 +44,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -60,6 +61,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if err := r.upsertService(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -93,6 +98,35 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	if err := r.Create(ctx, svc); err != nil {
 		if errors.IsAlreadyExists(err) {
 			if err := r.Update(ctx, svc); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	return nil
+}
+
+// Create or update a basic valkey.conf
+func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+			Labels:    labels(cluster),
+		},
+		Data: map[string]string{
+			"valkey.conf": `
+cluster-enabled yes
+protected-mode no`,
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, cm); err != nil {
+		if errors.IsAlreadyExists(err) {
+			if err := r.Update(ctx, cm); err != nil {
 				return err
 			}
 		} else {

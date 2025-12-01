@@ -303,6 +303,14 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 			Eventually(verifyServiceExists).Should(Succeed())
+
+			By("validating the ConfigMap")
+			verifyConfigMapExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyConfigMapExists).Should(Succeed())
 		})
 	})
 
@@ -329,6 +337,15 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).To(HaveOccurred())
 			}
 			Eventually(verifyServiceRemoved).Should(Succeed())
+
+			By("validating that the ConfigMap does not exist")
+			verifyConfigMapRemoved := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}
+			Eventually(verifyConfigMapRemoved).Should(Succeed())
+
 		})
 	})
 })

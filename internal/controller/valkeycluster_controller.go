@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"embed"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +40,9 @@ type ValkeyClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+//go:embed scripts/*
+var scripts embed.FS
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
@@ -109,6 +113,15 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 
 // Create or update a basic valkey.conf
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
+	if err != nil {
+		return err
+	}
+	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
+	if err != nil {
+		return err
+	}
+
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
@@ -116,6 +129,8 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			Labels:    labels(cluster),
 		},
 		Data: map[string]string{
+			"readiness-check.sh": string(readiness),
+			"liveness-check.sh":  string(liveness),
 			"valkey.conf": `
 cluster-enabled yes
 protected-mode no`,

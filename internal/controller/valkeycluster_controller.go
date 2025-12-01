@@ -20,6 +20,7 @@ import (
 	"context"
 	"embed"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +33,9 @@ import (
 )
 
 const (
-	DefaultPort = 6379
+	DefaultPort           = 6379
+	DefaultClusterBusPort = 16379
+	DefaultImage          = "valkey/valkey:9.0.0"
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -49,6 +52,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -69,6 +73,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.upsertDeployments(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -148,6 +156,31 @@ protected-mode no`,
 			return err
 		}
 	}
+	return nil
+}
+
+// Create Valkey instances, one Deployment and Pod each
+func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	existing := &appsv1.DeploymentList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace)); err != nil {
+		return err
+	}
+
+	replicas := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
+
+	// Create missing deployments
+	for i := len(existing.Items); i < replicas; i++ {
+		deployment := createClusterDeployment(cluster)
+		if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, deployment); err != nil {
+			return err
+		}
+	}
+
+	// TODO: update existing
+
 	return nil
 }
 

@@ -45,6 +45,9 @@ const metricsServiceName = "valkey-operator-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "valkey-operator-metrics-binding"
 
+// valkeyClientImage is the image used to verify cluster access.
+const valkeyClientImage = "valkey/valkey:9.0.0"
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -311,6 +314,63 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 			Eventually(verifyConfigMapExists).Should(Succeed())
+
+			By("validating Deployments")
+			verifyDeploymentsExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				deployments := utils.GetNonEmptyLines(output)
+				g.Expect(deployments).To(HaveLen(3), "Expected 3 Deployments")
+			}
+			Eventually(verifyDeploymentsExists).Should(Succeed())
+
+			By("validating Pods")
+			verifyPodStatuses := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
+						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
+						"{{ $.metadata.name}} {{ \"\\n\" }}"+
+						"{{ end }}{{ end }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podStatuses := utils.GetNonEmptyLines(output)
+				g.Expect(podStatuses).To(HaveLen(3), "Expected 3 Pods to be ready")
+			}
+			Eventually(verifyPodStatuses).Should(Succeed())
+
+			By("validating cluster access")
+			verifyClusterAccess := func(g Gomega) {
+				// Start a Valkey client pod to access the cluster and get its status.
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// The cluster has not been initiated yet, expect failure.
+				g.Expect(output).To(ContainSubstring("cluster_state:fail"))
+			}
+			Eventually(verifyClusterAccess).Should(Succeed())
 		})
 	})
 
@@ -346,6 +406,15 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyConfigMapRemoved).Should(Succeed())
 
+			By("validating that no Deployment exist")
+			verifyDeploymentsRemoved := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve Deployments")
+				g.Expect(output).To(ContainSubstring("No resources found"))
+			}
+			Eventually(verifyDeploymentsRemoved).Should(Succeed())
 		})
 	})
 })

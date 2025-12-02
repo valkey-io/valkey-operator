@@ -21,17 +21,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // ValkeyClusterSpec defines the desired state of ValkeyCluster
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
 	Image string `json:"image,omitempty"`
-
-	// Override the default Valkey exporter image
-	ExporterImage string `json:"exporterImage,omitempty"`
 
 	// The number of shards groups. Each shard group contains one primary and N replicas.
 	// +kubebuilder:validation:Minimum=1
@@ -45,10 +39,6 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Override resource requirements for the Valkey exporter container in each pod
-	// +optional
-	ExporterResources corev1.ResourceRequirements `json:"exporterResources,omitempty"`
-
 	// Tolerations to apply to the pods
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
@@ -61,6 +51,24 @@ type ValkeyClusterSpec struct {
 	// Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// Metrics exporter options
+	// +optional
+	Exporter ExporterSpec `json:"exporter,omitempty"`
+}
+
+type ExporterSpec struct {
+
+	// Override the default exporter image
+	Image string `json:"image,omitempty"`
+
+	// Override resource requirements for the exporter container in each pod
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Enable or disable the exporter sidecar container
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

@@ -188,6 +188,9 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyCluster{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&appsv1.Deployment{}).
 		Named("valkeycluster").
 		Complete(r)
 }

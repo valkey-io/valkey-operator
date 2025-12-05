@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const (
@@ -52,6 +53,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -79,6 +81,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.upsertDeployments(ctx, cluster); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Get all pods and their current Valkey Cluster state
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "Failed to list pods")
+		return ctrl.Result{}, err
+	}
+	state := r.getValkeyClusterState(ctx, pods)
+	defer state.CloseClients()
+
+	//log.V(1).Info("Current Valkey state", "state", state)
 
 	log.V(1).Info("Reconcile done")
 	return ctrl.Result{}, nil
@@ -182,6 +195,20 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 	// TODO: update existing
 
 	return nil
+}
+
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pods *corev1.PodList) *valkey.ClusterState {
+	// Create a list of addresses to possible Valkey nodes
+	ips := []string{}
+	for _, pod := range pods.Items {
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		ips = append(ips, pod.Status.PodIP)
+	}
+
+	// Get current state of the Valkey cluster
+	return valkey.GetClusterState(ctx, ips, DefaultPort)
 }
 
 // SetupWithManager sets up the controller with the Manager.

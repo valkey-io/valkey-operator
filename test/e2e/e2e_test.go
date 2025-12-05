@@ -323,7 +323,7 @@ var _ = Describe("Manager", Ordered, func() {
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				deployments := utils.GetNonEmptyLines(output)
-				g.Expect(deployments).To(HaveLen(3), "Expected 3 Deployments")
+				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments")
 			}
 			Eventually(verifyDeploymentsExists).Should(Succeed())
 
@@ -338,7 +338,7 @@ var _ = Describe("Manager", Ordered, func() {
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				podStatuses := utils.GetNonEmptyLines(output)
-				g.Expect(podStatuses).To(HaveLen(3), "Expected 3 Pods to be ready")
+				g.Expect(podStatuses).To(HaveLen(6), "Expected 6 Pods to be ready")
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
@@ -367,8 +367,8 @@ var _ = Describe("Manager", Ordered, func() {
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// The cluster has not been initiated yet, expect failure.
-				g.Expect(output).To(ContainSubstring("cluster_state:fail"))
+				// The cluster should be ok.
+				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
 		})

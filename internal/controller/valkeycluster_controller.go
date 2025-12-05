@@ -19,10 +19,14 @@ package controller
 import (
 	"context"
 	"embed"
+	"errors"
+	"slices"
+	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -91,10 +95,35 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
 
-	//log.V(1).Info("Current Valkey state", "state", state)
+	// Check if we need to forget stale nonexiting nodes
+	r.forgetStaleNodes(ctx, state, pods)
+
+	// Add new nodes
+	if len(state.PendingNodes) > 0 {
+		node := state.PendingNodes[0]
+		log.V(1).Info("Adding node", "address", node.Address, "Id", node.Id)
+		if err := r.addValkeyNode(ctx, cluster, state, node); err != nil {
+			log.Error(err, "Unable to add cluster node")
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		// Let the added node stabilize, and refetch the cluster state.
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	// Check cluster status
+	if len(state.Shards) < int(cluster.Spec.Shards) {
+		log.V(1).Info("Missing shards, requeue..")
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	for _, shard := range state.Shards {
+		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
+			log.V(1).Info("Missing replicas, requeue..")
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
 
 	log.V(1).Info("Reconcile done")
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // Create or update a headless service (client connects to pods directly)
@@ -121,7 +150,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		return err
 	}
 	if err := r.Create(ctx, svc); err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			if err := r.Update(ctx, svc); err != nil {
 				return err
 			}
@@ -154,14 +183,15 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			"liveness-check.sh":  string(liveness),
 			"valkey.conf": `
 cluster-enabled yes
-protected-mode no`,
+protected-mode no
+cluster-node-timeout 2000`,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
 		return err
 	}
 	if err := r.Create(ctx, cm); err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			if err := r.Update(ctx, cm); err != nil {
 				return err
 			}
@@ -209,6 +239,103 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 
 	// Get current state of the Valkey cluster
 	return valkey.GetClusterState(ctx, ips, DefaultPort)
+}
+
+func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState) error {
+	log := logf.FromContext(ctx)
+
+	shardsExists := len(state.Shards)
+	shardsRequired := int(cluster.Spec.Shards)
+	replicasRequired := int(cluster.Spec.Replicas)
+
+	// Meet other nodes in shards
+	if sval, ok := node.ClusterInfo["cluster_known_nodes"]; ok {
+		if val, err := strconv.Atoi(sval); err == nil {
+			if val <= 1 && len(state.Shards) > 0 {
+				// This node does not know any other nodes.
+				for _, shard := range state.Shards {
+					primary := shard.GetPrimaryNode()
+					if primary == nil {
+						continue
+					}
+					log.V(1).Info("Meet other node", "this node", node.Address, "other node", primary.Address)
+					if err = node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(primary.Address).Port(int64(primary.Port)).Build()).Error(); err != nil {
+						log.Error(err, "Command failed: CLUSTER MEET", "from", node.Address, "to", primary.Address)
+						return err
+					}
+				}
+				return nil
+			}
+		}
+	}
+
+	// Add a new primary when more shards are expected.
+	if shardsExists < shardsRequired {
+		slots := state.GetUnassignedSlots()
+		if len(slots) == 0 {
+			return errors.New("no slots range to assign")
+		}
+
+		// Assign unbalanced slot ranges for now, i.e.
+		// the last range contains more slots.
+		slotStart := slots[0].Start
+		slotEnd := slotStart + (16384 / shardsRequired) - 1
+		if shardsRequired-shardsExists == 1 {
+			if len(slots) != 1 {
+				return errors.New("assigning multiple ranges to shard not yet supported")
+			}
+			slotEnd = slots[0].End
+		}
+
+		log.V(1).Info("Add a new primary", "slotStart", slotStart, "slotEnd", slotEnd)
+
+		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
+			log.Error(err, "Command failed: CLUSTER ADDSLOTSRANGE", "slotStart", slotStart, "slotEnd", slotEnd)
+			return err
+		}
+		return nil
+	}
+
+	// Add a new replica when primary is ok
+	for _, shard := range state.Shards {
+		if len(shard.Nodes) < (1 + replicasRequired) {
+			primary := shard.GetPrimaryNode()
+			if primary == nil {
+				log.Error(nil, "Primary lost in shard", "Shard Id", shard.Id)
+				continue
+			}
+
+			log.V(1).Info("Add a new replica", "primary address", primary.Address, "primary Id", primary.Id, "replica address", node.Address)
+
+			if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primary.Id).Build()).Error(); err != nil {
+				log.Error(err, "Command failed: CLUSTER REPLICATE", "nodeId", primary.Id)
+				return err
+			}
+			return nil
+		}
+	}
+	return errors.New("node not added")
+}
+
+// Check each cluster node and forget stale nodes (noaddr or status fail)
+func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, state *valkey.ClusterState, pods *corev1.PodList) {
+	log := logf.FromContext(ctx)
+	for _, shard := range state.Shards {
+		for _, node := range shard.Nodes {
+			// Get known nodes that are failing.
+			for _, failing := range node.GetFailingNodes() {
+				idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == failing.Address })
+				if idx == -1 {
+					// Could not find a pod with the address of a failing node. Lets forget this node.
+					log.V(1).Info("Forget a failing node", "address", failing.Address, "Id", failing.Id)
+					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
+						log.Error(err, "Command failed: CLUSTER FORGET")
+					}
+				}
+
+			}
+		}
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

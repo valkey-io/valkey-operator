@@ -4,4 +4,4 @@ metadata:
   name: valkeycluster-sample
 spec:
   shards: 3
-  replicas: 0
+  replicas: 1

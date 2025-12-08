@@ -204,15 +204,18 @@ cluster-node-timeout 2000`,
 
 // Create Valkey instances, one Deployment and Pod each
 func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
 	existing := &appsv1.DeploymentList{}
-	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace)); err != nil {
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list Deployments")
 		return err
 	}
 
-	replicas := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
+	expected := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
 
 	// Create missing deployments
-	for i := len(existing.Items); i < replicas; i++ {
+	for i := len(existing.Items); i < expected; i++ {
 		deployment := createClusterDeployment(cluster)
 		if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
 			return err

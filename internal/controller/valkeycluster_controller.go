@@ -67,7 +67,7 @@ var scripts embed.FS
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.V(1).Info("Reconcile...")
+	log.V(1).Info("reconcile...")
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
@@ -89,21 +89,21 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Get all pods and their current Valkey Cluster state
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
-		log.Error(err, "Failed to list pods")
+		log.Error(err, "failed to list Pods")
 		return ctrl.Result{}, err
 	}
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
 
-	// Check if we need to forget stale nonexiting nodes
+	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, state, pods)
 
 	// Add new nodes
 	if len(state.PendingNodes) > 0 {
 		node := state.PendingNodes[0]
-		log.V(1).Info("Adding node", "address", node.Address, "Id", node.Id)
+		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
 		if err := r.addValkeyNode(ctx, cluster, state, node); err != nil {
-			log.Error(err, "Unable to add cluster node")
+			log.Error(err, "unable to add cluster node")
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		// Let the added node stabilize, and refetch the cluster state.
@@ -112,17 +112,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Check cluster status
 	if len(state.Shards) < int(cluster.Spec.Shards) {
-		log.V(1).Info("Missing shards, requeue..")
+		log.V(1).Info("missing shards, requeue..")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	for _, shard := range state.Shards {
 		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
-			log.V(1).Info("Missing replicas, requeue..")
+			log.V(1).Info("missing replicas, requeue..")
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 	}
 
-	log.V(1).Info("Reconcile done")
+	log.V(1).Info("reconcile done")
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
@@ -261,9 +261,9 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 					if primary == nil {
 						continue
 					}
-					log.V(1).Info("Meet other node", "this node", node.Address, "other node", primary.Address)
+					log.V(1).Info("meet other node", "this node", node.Address, "other node", primary.Address)
 					if err = node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(primary.Address).Port(int64(primary.Port)).Build()).Error(); err != nil {
-						log.Error(err, "Command failed: CLUSTER MEET", "from", node.Address, "to", primary.Address)
+						log.Error(err, "command failed: CLUSTER MEET", "from", node.Address, "to", primary.Address)
 						return err
 					}
 				}
@@ -290,10 +290,10 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 			slotEnd = slots[0].End
 		}
 
-		log.V(1).Info("Add a new primary", "slotStart", slotStart, "slotEnd", slotEnd)
+		log.V(1).Info("add a new primary", "slotStart", slotStart, "slotEnd", slotEnd)
 
 		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
-			log.Error(err, "Command failed: CLUSTER ADDSLOTSRANGE", "slotStart", slotStart, "slotEnd", slotEnd)
+			log.Error(err, "command failed: CLUSTER ADDSLOTSRANGE", "slotStart", slotStart, "slotEnd", slotEnd)
 			return err
 		}
 		return nil
@@ -304,14 +304,14 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 		if len(shard.Nodes) < (1 + replicasRequired) {
 			primary := shard.GetPrimaryNode()
 			if primary == nil {
-				log.Error(nil, "Primary lost in shard", "Shard Id", shard.Id)
+				log.Error(nil, "primary lost in shard", "Shard Id", shard.Id)
 				continue
 			}
 
-			log.V(1).Info("Add a new replica", "primary address", primary.Address, "primary Id", primary.Id, "replica address", node.Address)
+			log.V(1).Info("add a new replica", "primary address", primary.Address, "primary Id", primary.Id, "replica address", node.Address)
 
 			if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primary.Id).Build()).Error(); err != nil {
-				log.Error(err, "Command failed: CLUSTER REPLICATE", "nodeId", primary.Id)
+				log.Error(err, "command failed: CLUSTER REPLICATE", "nodeId", primary.Id)
 				return err
 			}
 			return nil
@@ -330,9 +330,9 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, state *v
 				idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == failing.Address })
 				if idx == -1 {
 					// Could not find a pod with the address of a failing node. Lets forget this node.
-					log.V(1).Info("Forget a failing node", "address", failing.Address, "Id", failing.Id)
+					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
-						log.Error(err, "Command failed: CLUSTER FORGET")
+						log.Error(err, "command failed: CLUSTER FORGET")
 					}
 				}
 

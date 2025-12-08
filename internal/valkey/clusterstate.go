@@ -201,7 +201,7 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		log.Info("Failed to create Valkey client", "err", err)
+		log.Info("failed to create Valkey client", "err", err)
 		return nil
 	}
 
@@ -211,31 +211,31 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 
 	id, err := client.Do(ctx, client.B().ClusterMyid().Build()).ToString()
 	if err != nil {
-		log.Error(err, "Command failed: CLUSTER MYID")
+		log.Error(err, "command failed: CLUSTER MYID")
 	}
 	node.Id = id
 
 	shardid, err := client.Do(ctx, client.B().ClusterMyshardid().Build()).ToString()
 	if err != nil {
-		log.Error(err, "Command failed: CLUSTER MYSHARDID")
+		log.Error(err, "command failed: CLUSTER MYSHARDID")
 	}
 	node.ShardId = shardid
 
 	info, err := client.Do(ctx, client.B().Info().Build()).ToString()
 	if err != nil {
-		log.Error(err, "Command failed: INFO")
+		log.Error(err, "command failed: INFO")
 	}
 	node.Info = infoStringToMap(info)
 
 	cinfo, err := client.Do(ctx, client.B().ClusterInfo().Build()).ToString()
 	if err != nil {
-		log.Error(err, "Command failed: CLUSTER INFO")
+		log.Error(err, "command failed: CLUSTER INFO")
 	}
 	node.ClusterInfo = infoStringToMap(cinfo)
 
 	cnodes, err := client.Do(ctx, client.B().ClusterNodes().Build()).ToString()
 	if err != nil {
-		log.Error(err, "Command failed: CLUSTER NODES")
+		log.Error(err, "command failed: CLUSTER NODES")
 	}
 	// Remove the encoding string included in a verbatim string.
 	node.ClusterNodes = strings.TrimPrefix(cnodes, "txt:")

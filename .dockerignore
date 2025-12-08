@@ -9,3 +9,7 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include scripts
+!internal/controller/scripts/readiness-check.sh
+!internal/controller/scripts/liveness-check.sh

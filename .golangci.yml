@@ -36,6 +36,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - path: _test\.go
+        # Allow repeated strings in tests.
+        linters:
+          - goconst
     paths:
       - third_party$
       - builtin$

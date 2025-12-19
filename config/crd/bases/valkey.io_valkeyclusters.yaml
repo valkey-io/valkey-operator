@@ -17,22 +17,23 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Number of Ready Shard Groups
-      jsonPath: .status.conditions[?(@.type=='Available')].status
-      name: Ready
+    - description: Current state of the cluster
+      jsonPath: .status.state
+      name: State
+      type: string
+    - description: Reason for current state
+      jsonPath: .status.reason
+      name: Reason
+      type: string
+    - description: Ready shards
+      jsonPath: .status.readyShards
+      name: ReadyShards
+      priority: 1
       type: integer
-    - description: Time since creation of ValkeyCluster
+    - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    - description: Number of Shard Groups
-      jsonPath: .spec.shards
-      name: Shards
-      type: integer
-    - description: Number of Replicas per Shard Group
-      jsonPath: .spec.replicas
-      name: Replicas
-      type: integer
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -1167,15 +1168,14 @@ spec:
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the ValkeyCluster resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  Conditions represent the current state of the ValkeyCluster resource.
+                  Standard condition types:
+                  - "Ready": the cluster is fully functional and serving traffic
+                  - "Progressing": the cluster is being created, updated, or scaled
+                  - "Degraded": the cluster is impaired but may be partially functional
+                  Valkey-specific condition types:
+                  - "ClusterFormed": all nodes have joined and meet the shard/replica layout
+                  - "SlotsAssigned": all 16384 hash slots are assigned to primaries
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -1234,6 +1234,37 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              message:
+                description: Message provides human-readable details about the current
+                  state.
+                type: string
+              readyShards:
+                default: 0
+                description: ReadyShards represents the number of shards that are
+                  fully healthy.
+                format: int32
+                type: integer
+              reason:
+                description: Reason provides a brief machine-readable explanation
+                  for the current state.
+                type: string
+              shards:
+                default: 0
+                description: Shards represents the number of shards currently formed
+                  in the cluster.
+                format: int32
+                type: integer
+              state:
+                default: Initializing
+                description: State provides a high-level summary of the cluster's
+                  current state.
+                enum:
+                - Initializing
+                - Reconciling
+                - Ready
+                - Degraded
+                - Failed
+                type: string
             type: object
         required:
         - spec

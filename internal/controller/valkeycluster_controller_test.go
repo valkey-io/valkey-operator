@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -77,8 +78,125 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			// Check status conditions
+			updatedValkeyCluster := &valkeyiov1alpha1.ValkeyCluster{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedValkeyCluster)).To(Succeed())
+			Expect(updatedValkeyCluster.Status.Conditions).ToNot(BeEmpty())
+
+			// Verify that the Ready condition is set to False initially
+			readyCondition := findCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+			Expect(readyCondition).NotTo(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+
+			// Verify that the Progressing condition is set to True
+			progressingCondition := findCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+			Expect(progressingCondition).NotTo(BeNil())
+			Expect(progressingCondition.Status).To(Equal(metav1.ConditionTrue))
 		})
+	})
+})
+
+func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+var _ = Describe("updateStatus", func() {
+	var (
+		cluster *valkeyiov1alpha1.ValkeyCluster
+		r       *ValkeyClusterReconciler
+		ctx     context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		cluster = &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-cluster",
+				Namespace: "default",
+			},
+		}
+		// In a real scenario, the reconciler would be created with a real client,
+		// but for this focused unit test, we can use a fake client if needed,
+		// or pass nil if the tested function doesn't use the client.
+		// For updateStatus, we need a client to Get the current object.
+		// The envtest client is used here.
+		r = &ValkeyClusterReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		// Create the cluster object in the fake client
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("should set state to Ready when Ready condition is True", func() {
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+			Reason: valkeyiov1alpha1.ReasonClusterHealthy,
+		})
+
+		err := r.updateStatus(ctx, cluster, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
+	})
+
+	It("should set state to Degraded when Degraded condition is True", func() {
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionDegraded,
+			Status: metav1.ConditionTrue,
+			Reason: valkeyiov1alpha1.ReasonNodeAddFailed,
+		})
+		// A degraded cluster can still be progressing
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionProgressing,
+			Status: metav1.ConditionTrue,
+			Reason: valkeyiov1alpha1.ReasonAddingNodes,
+		})
+
+		err := r.updateStatus(ctx, cluster, nil)
+		Expect(err).NotTo(HaveOccurred())
+		// Degraded takes precedence over Progressing
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateDegraded))
+		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed))
+	})
+
+	It("should set state to Reconciling when Progressing is True and shards > 0", func() {
+		cluster.Status.Shards = 1 // Simulate that the cluster is not new
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionProgressing,
+			Status: metav1.ConditionTrue,
+			Reason: valkeyiov1alpha1.ReasonReconciling,
+		})
+
+		err := r.updateStatus(ctx, cluster, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReconciling))
+		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonReconciling))
+	})
+
+	It("should set state to Initializing when Progressing is True and shards = 0", func() {
+		cluster.Status.Shards = 0 // This is a new cluster
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionProgressing,
+			Status: metav1.ConditionTrue,
+			Reason: valkeyiov1alpha1.ReasonInitializing,
+		})
+
+		err := r.updateStatus(ctx, cluster, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateInitializing))
+		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonInitializing))
 	})
 })

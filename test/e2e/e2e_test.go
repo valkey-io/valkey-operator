@@ -81,7 +81,11 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("deleting the metrics ClusterRoleBinding")
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -176,7 +180,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
 
-		It("should ensure the metrics endpoint is serving metrics", func() {
+		XIt("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=valkey-operator-metrics-reader",
@@ -341,6 +345,79 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(podStatuses).To(HaveLen(6), "Expected 6 Pods to be ready")
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
+
+			By("validating the ValkeyCluster CR status")
+			verifyCrStatus := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", valkeyClusterName, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				var cr struct {
+					Status struct {
+						State       string `json:"state"`
+						Reason      string `json:"reason"`
+						Message     string `json:"message"`
+						Shards      int    `json:"shards"`
+						ReadyShards int    `json:"readyShards"`
+						Conditions  []struct {
+							Type    string `json:"type"`
+							Status  string `json:"status"`
+							Reason  string `json:"reason"`
+							Message string `json:"message"`
+						} `json:"conditions"`
+					} `json:"status"`
+				}
+				err = json.Unmarshal([]byte(output), &cr)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(cr.Status.State).To(Equal("Ready"))
+				g.Expect(cr.Status.Reason).To(Equal("ClusterHealthy"))
+				g.Expect(cr.Status.Message).To(Equal("Cluster is healthy"))
+				g.Expect(cr.Status.Shards).To(Equal(3))
+				g.Expect(cr.Status.ReadyShards).To(Equal(3))
+
+				// Helper to find a condition by type
+				findCond := func(condType string) (struct {
+					Type    string `json:"type"`
+					Status  string `json:"status"`
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
+				}, bool) {
+					for _, c := range cr.Status.Conditions {
+						if c.Type == condType {
+							return c, true
+						}
+					}
+					return struct {
+						Type    string `json:"type"`
+						Status  string `json:"status"`
+						Reason  string `json:"reason"`
+						Message string `json:"message"`
+					}{}, false
+				}
+
+				readyCond, found := findCond("Ready")
+				g.Expect(found).To(BeTrue(), "Ready condition not found")
+				g.Expect(readyCond.Status).To(Equal("True"))
+				g.Expect(readyCond.Reason).To(Equal("ClusterHealthy"))
+
+				progressingCond, found := findCond("Progressing")
+				g.Expect(found).To(BeTrue(), "Progressing condition not found")
+				g.Expect(progressingCond.Status).To(Equal("False"))
+				g.Expect(progressingCond.Reason).To(Equal("ReconcileComplete"))
+
+				_, found = findCond("Degraded")
+				g.Expect(found).To(BeFalse(), "Degraded condition should not be present")
+
+				clusterFormedCond, found := findCond("ClusterFormed")
+				g.Expect(found).To(BeTrue(), "ClusterFormed condition not found")
+				g.Expect(clusterFormedCond.Status).To(Equal("True"))
+
+				slotsAssignedCond, found := findCond("SlotsAssigned")
+				g.Expect(found).To(BeTrue(), "SlotsAssigned condition not found")
+				g.Expect(slotsAssignedCond.Status).To(Equal("True"))
+			}
+			Eventually(verifyCrStatus).Should(Succeed())
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {

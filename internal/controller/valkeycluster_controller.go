@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -41,6 +42,9 @@ const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
 	DefaultImage          = "valkey/valkey:9.0.0"
+
+	// Error messages
+	statusUpdateFailedMsg = "failed to update status"
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -74,15 +78,29 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Set initial Progressing condition for new clusters
+	if len(cluster.Status.Conditions) == 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Initializing cluster", metav1.ConditionTrue)
+		if err := r.updateStatus(ctx, cluster, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	if err := r.upsertService(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 
 	if err := r.upsertDeployments(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 
@@ -90,6 +108,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
 		log.Error(err, "failed to list Pods")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodListError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 	state := r.getValkeyClusterState(ctx, pods)
@@ -102,8 +122,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(state.PendingNodes) > 0 {
 		node := state.PendingNodes[0]
 		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Adding nodes to cluster", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
 		if err := r.addValkeyNode(ctx, cluster, state, node); err != nil {
 			log.Error(err, "unable to add cluster node")
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		// Let the added node stabilize, and refetch the cluster state.
@@ -113,13 +138,46 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check cluster status
 	if len(state.Shards) < int(cluster.Spec.Shards) {
 		log.V(1).Info("missing shards, requeue..")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingShards, "Waiting for all shards to be created", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating shards", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingShards, "Waiting for shards", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	for _, shard := range state.Shards {
 		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
 			log.V(1).Info("missing replicas, requeue..")
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
+			setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+	}
+
+	// Cluster is healthy - set all positive conditions
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
+	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonClusterFormed, "Cluster is formed", metav1.ConditionTrue)
+
+	// Check if all slots are assigned
+	allSlotsAssigned := len(state.Shards) > 0
+	for _, shard := range state.Shards {
+		if len(shard.Slots) == 0 {
+			allSlotsAssigned = false
+			break
+		}
+	}
+	if allSlotsAssigned {
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.AllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
+	} else {
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
+	}
+
+	if err := r.updateStatus(ctx, cluster, state); err != nil {
+		log.Error(err, statusUpdateFailedMsg)
+		return ctrl.Result{}, err
 	}
 
 	log.V(1).Info("reconcile done")
@@ -276,6 +334,8 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 	if shardsExists < shardsRequired {
 		slots := state.GetUnassignedSlots()
 		if len(slots) == 0 {
+			log.Error(nil, "no unassigned slots available for new shard")
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNoSlots, "No unassigned slots available for new shard", metav1.ConditionTrue)
 			return errors.New("no slots range to assign")
 		}
 
@@ -305,6 +365,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 			primary := shard.GetPrimaryNode()
 			if primary == nil {
 				log.Error(nil, "primary lost in shard", "Shard Id", shard.Id)
+				setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPrimaryLost, "Primary lost in one or more shards", metav1.ConditionTrue)
 				continue
 			}
 
@@ -339,6 +400,82 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, state *v
 			}
 		}
 	}
+}
+
+// updateStatus updates the status with the current conditions and derives the summary state
+func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
+	log := logf.FromContext(ctx)
+	// Fetch current status to compare
+	current := &valkeyiov1alpha1.ValkeyCluster{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+		return err
+	}
+	// Update shard counts
+	if state != nil {
+		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
+		cluster.Status.Shards = int32(len(state.Shards))
+	}
+	// Derive summary state from conditions (priority order: Ready > Degraded > Progressing > Failed)
+	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+
+	switch {
+	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
+		cluster.Status.Reason = readyCondition.Reason
+		cluster.Status.Message = readyCondition.Message
+	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateDegraded
+		cluster.Status.Reason = degradedCondition.Reason
+		cluster.Status.Message = degradedCondition.Message
+	case progressingCondition != nil && progressingCondition.Status == metav1.ConditionTrue:
+		// If initial state is initializing, move to reconciling
+		if current.Status.State == valkeyiov1alpha1.ClusterStateInitializing {
+			cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
+		}
+		cluster.Status.Reason = progressingCondition.Reason
+		cluster.Status.Message = progressingCondition.Message
+	case readyCondition != nil && readyCondition.Status == metav1.ConditionFalse:
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateFailed
+		cluster.Status.Reason = readyCondition.Reason
+		cluster.Status.Message = readyCondition.Message
+	}
+
+	// Only update if status has changed
+	if statusChanged(current.Status, cluster.Status) {
+		if err := r.Status().Update(ctx, cluster); err != nil {
+			log.Error(err, statusUpdateFailedMsg)
+			return err
+		}
+		log.V(1).Info("status updated", "state", cluster.Status.State, "reason", cluster.Status.Reason)
+	} else {
+		log.V(2).Info("status unchanged, skipping update")
+	}
+	return nil
+}
+
+// countReadyShards counts shards that have all required nodes and are healthy
+func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, cluster *valkeyiov1alpha1.ValkeyCluster) int32 {
+	var readyCount int32 = 0
+	requiredNodes := 1 + int(cluster.Spec.Replicas)
+	for _, shard := range state.Shards {
+		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
+			continue
+		}
+		// Check if all nodes in this shard are healthy
+		allHealthy := true
+		for _, node := range shard.Nodes {
+			if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+				allHealthy = false
+				break
+			}
+		}
+		if allHealthy {
+			readyCount++
+		}
+	}
+	return readyCount
 }
 
 // SetupWithManager sets up the controller with the Manager.

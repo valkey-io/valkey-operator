@@ -52,7 +52,10 @@ var _ = Describe("ValkeyCluster Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+						Shards:   3,
+						Replicas: 1,
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -173,7 +176,12 @@ var _ = Describe("updateStatus", func() {
 	})
 
 	It("should set state to Reconciling when Progressing is True and shards > 0", func() {
+		// First set the cluster to Initializing
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateInitializing
 		cluster.Status.Shards = 1 // Simulate that the cluster is not new
+		Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
+
+		// Now set the Progressing condition
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 			Type:   valkeyiov1alpha1.ConditionProgressing,
 			Status: metav1.ConditionTrue,

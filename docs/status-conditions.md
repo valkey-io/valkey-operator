@@ -1,6 +1,5 @@
 # ValkeyCluster status conditions
 
-
 The `ValkeyCluster` custom resource uses its `status` field to provide detailed feedback about the current state of the Valkey cluster. This document explains the different fields and conditions you can use to monitor and understand the health of cluster.
 
 ## Status fields
@@ -267,8 +266,6 @@ status:
     observedGeneration: 1
 ```
 
-
-
 ---
 
 ## Sample: `kubectl describe vkc valkeycluster-sample`
@@ -358,7 +355,6 @@ default     valkeycluster-sample   Reconciling    AddingNodes      0            
 default     valkeycluster-sample   Reconciling    AddingNodes      1             11s
 default     valkeycluster-sample   Reconciling    AddingNodes      2             11s
 default     valkeycluster-sample   Ready          ClusterHealthy   3             11s
-default     valkeycluster-sample   Ready          ClusterHealthy   3             12m
 ```
 
 ### What this indicates
@@ -373,3 +369,4 @@ default     valkeycluster-sample   Ready          ClusterHealthy   3            
 
 - **Ready (ClusterHealthy)**
   - Once `READYSHARDS` reaches the desired shard count and the cluster is healthy, the summary switches to `Ready / ClusterHealthy`.
+

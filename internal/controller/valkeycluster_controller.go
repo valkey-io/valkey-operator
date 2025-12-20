@@ -402,7 +402,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, state *v
 	}
 }
 
-// updateStatus updates the status with the current conditions and derives the summary state
+// updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
 	// Fetch current status to compare
@@ -415,7 +415,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
 		cluster.Status.Shards = int32(len(state.Shards))
 	}
-	// Derive summary state from conditions (priority order: Ready > Degraded > Progressing > Failed)
+	// compute Valkey Cluster state from conditions (priority order: Ready > Degraded > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)

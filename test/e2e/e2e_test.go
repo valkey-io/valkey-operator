@@ -494,6 +494,146 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyDeploymentsRemoved).Should(Succeed())
 		})
 	})
+
+	Context("when a ValkeyCluster experiences degraded state", func() {
+		var degradedClusterName string
+
+		It("should reflect degraded status when a shard deployment is deleted", func() {
+			By("creating a ValkeyCluster")
+			degradedClusterManifest := `apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-degraded-status-test
+spec:
+  shards: 3
+  replicas: 1
+`
+
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-degraded.yaml")
+			err := os.WriteFile(manifestFile, []byte(degradedClusterManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer os.Remove(manifestFile)
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+			degradedClusterName = "valkeycluster-degraded-status-test"
+
+			By("waiting for cluster to become ready first")
+			verifyClusterReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				var cr struct {
+					Status struct {
+						State       string `json:"state"`
+						ReadyShards int    `json:"readyShards"`
+						Shards      int    `json:"shards"`
+					} `json:"status"`
+				}
+
+				err = json.Unmarshal([]byte(output), &cr)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal("Ready"))
+				g.Expect(cr.Status.ReadyShards).To(Equal(3))
+			}
+			Eventually(verifyClusterReady, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("getting a deployment to delete")
+			var deploymentToDelete string
+			getDeployment := func(g Gomega) {
+				cmd := exec.Command(
+					"kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				deployments := utils.GetNonEmptyLines(output)
+				g.Expect(len(deployments)).To(BeNumerically(">", 0))
+
+				// Get the first deployment
+				deploymentToDelete = deployments[0]
+			}
+			Eventually(getDeployment).Should(Succeed())
+
+			By(fmt.Sprintf("deleting deployment %s to simulate shard loss", deploymentToDelete))
+			cmd = exec.Command("kubectl", "delete", "deployment", deploymentToDelete, "--wait=false")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete deployment")
+
+			By("waiting for the cluster to enter degraded state with NodeAddFailed")
+			verifyDegradedState := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName, "-o", "json")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				var cr struct {
+					Status struct {
+						State       string `json:"state"`
+						Reason      string `json:"reason"`
+						Message     string `json:"message"`
+						Shards      int    `json:"shards"`
+						ReadyShards int    `json:"readyShards"`
+						Conditions  []struct {
+							Type    string `json:"type"`
+							Status  string `json:"status"`
+							Reason  string `json:"reason"`
+							Message string `json:"message"`
+						} `json:"conditions"`
+					} `json:"status"`
+				}
+
+				err = json.Unmarshal([]byte(output), &cr)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// The cluster should be in Degraded state
+				g.Expect(cr.Status.State).To(Equal("Degraded"),
+					fmt.Sprintf("Expected Degraded state, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
+
+				// The reason should be NodeAddFailed
+				g.Expect(cr.Status.Reason).To(Equal("NodeAddFailed"),
+					fmt.Sprintf("Expected NodeAddFailed reason, but got: %s", cr.Status.Reason))
+
+				// Verify the Degraded condition is present and True
+				degradedFound := false
+				for _, c := range cr.Status.Conditions {
+					if c.Type == "Degraded" && c.Status == "True" {
+						degradedFound = true
+						g.Expect(c.Reason).To(Equal("NodeAddFailed"),
+							fmt.Sprintf("Degraded condition should have NodeAddFailed reason, got: %s", c.Reason))
+						fmt.Fprintf(GinkgoWriter, "✓ Cluster is in Degraded state with reason: %s\n", c.Reason)
+						break
+					}
+				}
+				g.Expect(degradedFound).To(BeTrue(), "Degraded condition with status=True should be present")
+
+				// Ready condition should be False
+				for _, c := range cr.Status.Conditions {
+					if c.Type == "Ready" {
+						g.Expect(c.Status).To(Equal("False"), "Ready condition should be False when degraded")
+						break
+					}
+				}
+			}
+			Eventually(verifyDegradedState, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("cleaning up the degraded cluster")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", degradedClusterName, "--wait=false")
+			_, _ = utils.Run(cmd)
+
+			By("waiting for cluster to be deleted")
+			verifyClusterDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
+			}
+			Eventually(verifyClusterDeleted, 2*time.Minute).Should(Succeed())
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

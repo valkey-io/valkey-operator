@@ -196,7 +196,7 @@ var _ = Describe("updateStatus", func() {
 
 		err := r.updateStatus(ctx, cluster, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateInitializing))
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReconciling))
 		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonInitializing))
 	})
 })

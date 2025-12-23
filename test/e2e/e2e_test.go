@@ -30,6 +30,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/test/utils"
 )
 
@@ -348,74 +350,35 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "valkeycluster", valkeyClusterName, "-o", "json")
-				output, err := utils.Run(cmd)
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				var cr struct {
-					Status struct {
-						State       string `json:"state"`
-						Reason      string `json:"reason"`
-						Message     string `json:"message"`
-						Shards      int    `json:"shards"`
-						ReadyShards int    `json:"readyShards"`
-						Conditions  []struct {
-							Type    string `json:"type"`
-							Status  string `json:"status"`
-							Reason  string `json:"reason"`
-							Message string `json:"message"`
-						} `json:"conditions"`
-					} `json:"status"`
-				}
-				err = json.Unmarshal([]byte(output), &cr)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				g.Expect(cr.Status.State).To(Equal("Ready"))
-				g.Expect(cr.Status.Reason).To(Equal("ClusterHealthy"))
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
 				g.Expect(cr.Status.Message).To(Equal("Cluster is healthy"))
-				g.Expect(cr.Status.Shards).To(Equal(3))
-				g.Expect(cr.Status.ReadyShards).To(Equal(3))
+				g.Expect(cr.Status.Shards).To(Equal(int32(3)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 
-				// Helper to find a condition by type
-				findCond := func(condType string) (struct {
-					Type    string `json:"type"`
-					Status  string `json:"status"`
-					Reason  string `json:"reason"`
-					Message string `json:"message"`
-				}, bool) {
-					for _, c := range cr.Status.Conditions {
-						if c.Type == condType {
-							return c, true
-						}
-					}
-					return struct {
-						Type    string `json:"type"`
-						Status  string `json:"status"`
-						Reason  string `json:"reason"`
-						Message string `json:"message"`
-					}{}, false
-				}
+				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+				g.Expect(readyCond).NotTo(BeNil(), "Ready condition not found")
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
 
-				readyCond, found := findCond("Ready")
-				g.Expect(found).To(BeTrue(), "Ready condition not found")
-				g.Expect(readyCond.Status).To(Equal("True"))
-				g.Expect(readyCond.Reason).To(Equal("ClusterHealthy"))
+				progressingCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+				g.Expect(progressingCond).NotTo(BeNil(), "Progressing condition not found")
+				g.Expect(progressingCond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonReconcileComplete))
 
-				progressingCond, found := findCond("Progressing")
-				g.Expect(found).To(BeTrue(), "Progressing condition not found")
-				g.Expect(progressingCond.Status).To(Equal("False"))
-				g.Expect(progressingCond.Reason).To(Equal("ReconcileComplete"))
+				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+				g.Expect(degradedCond).To(BeNil(), "Degraded condition should not be present")
 
-				_, found = findCond("Degraded")
-				g.Expect(found).To(BeFalse(), "Degraded condition should not be present")
+				clusterFormedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+				g.Expect(clusterFormedCond).NotTo(BeNil(), "ClusterFormed condition not found")
+				g.Expect(clusterFormedCond.Status).To(Equal(metav1.ConditionTrue))
 
-				clusterFormedCond, found := findCond("ClusterFormed")
-				g.Expect(found).To(BeTrue(), "ClusterFormed condition not found")
-				g.Expect(clusterFormedCond.Status).To(Equal("True"))
-
-				slotsAssignedCond, found := findCond("SlotsAssigned")
-				g.Expect(found).To(BeTrue(), "SlotsAssigned condition not found")
-				g.Expect(slotsAssignedCond.Status).To(Equal("True"))
+				slotsAssignedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
+				g.Expect(slotsAssignedCond).NotTo(BeNil(), "SlotsAssigned condition not found")
+				g.Expect(slotsAssignedCond.Status).To(Equal(metav1.ConditionTrue))
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
 
@@ -522,24 +485,12 @@ spec:
 
 			By("waiting for cluster to become ready first")
 			verifyClusterReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName, "-o", "json")
-				output, err := utils.Run(cmd)
+				cr, err := utils.GetValkeyClusterStatus(degradedClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
-
-				var cr struct {
-					Status struct {
-						State       string `json:"state"`
-						ReadyShards int    `json:"readyShards"`
-						Shards      int    `json:"shards"`
-					} `json:"status"`
-				}
-
-				err = json.Unmarshal([]byte(output), &cr)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(cr.Status.State).To(Equal("Ready"))
-				g.Expect(cr.Status.ReadyShards).To(Equal(3))
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 			}
-			Eventually(verifyClusterReady, 3*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(verifyClusterReady).Should(Succeed())
 
 			By("getting a deployment to delete")
 			var deploymentToDelete string
@@ -567,59 +518,77 @@ spec:
 
 			By("waiting for the cluster to enter degraded state with NodeAddFailed")
 			verifyDegradedState := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName, "-o", "json")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				var cr struct {
-					Status struct {
-						State       string `json:"state"`
-						Reason      string `json:"reason"`
-						Message     string `json:"message"`
-						Shards      int    `json:"shards"`
-						ReadyShards int    `json:"readyShards"`
-						Conditions  []struct {
-							Type    string `json:"type"`
-							Status  string `json:"status"`
-							Reason  string `json:"reason"`
-							Message string `json:"message"`
-						} `json:"conditions"`
-					} `json:"status"`
-				}
-
-				err = json.Unmarshal([]byte(output), &cr)
+				cr, err := utils.GetValkeyClusterStatus(degradedClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 
 				// The cluster should be in Degraded state
-				g.Expect(cr.Status.State).To(Equal("Degraded"),
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateDegraded),
 					fmt.Sprintf("Expected Degraded state, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
 
 				// The reason should be NodeAddFailed
-				g.Expect(cr.Status.Reason).To(Equal("NodeAddFailed"),
+				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed),
 					fmt.Sprintf("Expected NodeAddFailed reason, but got: %s", cr.Status.Reason))
 
 				// Verify the Degraded condition is present and True
-				degradedFound := false
-				for _, c := range cr.Status.Conditions {
-					if c.Type == "Degraded" && c.Status == "True" {
-						degradedFound = true
-						g.Expect(c.Reason).To(Equal("NodeAddFailed"),
-							fmt.Sprintf("Degraded condition should have NodeAddFailed reason, got: %s", c.Reason))
-						fmt.Fprintf(GinkgoWriter, "✓ Cluster is in Degraded state with reason: %s\n", c.Reason)
-						break
-					}
-				}
-				g.Expect(degradedFound).To(BeTrue(), "Degraded condition with status=True should be present")
+				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+				g.Expect(degradedCond).NotTo(BeNil(), "Degraded condition should be present")
+				g.Expect(degradedCond.Status).To(Equal(metav1.ConditionTrue), "Degraded condition should be True")
+				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed),
+					fmt.Sprintf("Degraded condition should have NodeAddFailed reason, got: %s", degradedCond.Reason))
 
 				// Ready condition should be False
-				for _, c := range cr.Status.Conditions {
-					if c.Type == "Ready" {
-						g.Expect(c.Status).To(Equal("False"), "Ready condition should be False when degraded")
-						break
-					}
+				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+				if readyCond != nil {
+					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when degraded")
 				}
 			}
-			Eventually(verifyDegradedState, 2*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(verifyDegradedState).Should(Succeed())
+
+			By("waiting for the operator to recreate the deployment and recover the cluster")
+			verifyClusterRecovery := func(g Gomega) {
+				// First, verify all deployments are present (should be 6 total for 3 shards with 1 replica each)
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				deployments := utils.GetNonEmptyLines(output)
+				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments after operator recreates the deleted one")
+
+				// Verify all pods are ready
+				cmd = exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
+					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
+						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
+						"{{ $.metadata.name}} {{ \"\\n\" }}"+
+						"{{ end }}{{ end }}{{ end }}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podStatuses := utils.GetNonEmptyLines(output)
+				g.Expect(podStatuses).To(HaveLen(6), "Expected 6 Pods to be ready after recovery")
+
+				// Then verify the cluster returns to Ready state
+				cr, err := utils.GetValkeyClusterStatus(degradedClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
+					fmt.Sprintf("Expected cluster to recover to Ready state, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
+				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy),
+					fmt.Sprintf("Expected ClusterHealthy reason after recovery but got: %s", cr.Status.Reason))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)), "All shards should be ready after recovery")
+
+				// Verify Ready condition is True
+				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+				g.Expect(readyCond).NotTo(BeNil(), "Ready condition should be present")
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready condition should be True after recovery")
+				g.Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
+
+				// Verify Degraded condition is no longer present or is False
+				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+				if degradedCond != nil {
+					g.Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse), "Degraded condition should be False after recovery")
+				}
+			}
+			Eventually(verifyClusterRecovery).Should(Succeed())
 
 			By("cleaning up the degraded cluster")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", degradedClusterName, "--wait=false")
@@ -631,7 +600,7 @@ spec:
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
 			}
-			Eventually(verifyClusterDeleted, 2*time.Minute).Should(Succeed())
+			Eventually(verifyClusterDeleted).Should(Succeed())
 		})
 	})
 })

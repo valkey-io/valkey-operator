@@ -78,14 +78,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Set initial Progressing condition for new clusters
-	if len(cluster.Status.Conditions) == 0 {
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Initializing cluster", metav1.ConditionTrue)
-		if err := r.updateStatus(ctx, cluster, nil); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
@@ -115,6 +107,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
 
+	// Check if all slots are assigned (early check to gate cluster health)
+	allSlotsAssigned := len(state.Shards) > 0
+	for _, shard := range state.Shards {
+		if len(shard.Slots) == 0 {
+			allSlotsAssigned = false
+			break
+		}
+	}
+	// If we have all shards but slots aren't assigned yet, wait for slot assignment
+	if !allSlotsAssigned && len(state.Shards) == int(cluster.Spec.Shards) {
+		log.V(1).Info("slots not assigned yet, requeue..")
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for slots assignment", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Assigning slots", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, state, pods)
 
@@ -160,20 +169,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonClusterFormed, "Cluster is formed", metav1.ConditionTrue)
-
-	// Check if all slots are assigned
-	allSlotsAssigned := len(state.Shards) > 0
-	for _, shard := range state.Shards {
-		if len(shard.Slots) == 0 {
-			allSlotsAssigned = false
-			break
-		}
-	}
-	if allSlotsAssigned {
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.AllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
-	} else {
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
-	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.AllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		log.Error(err, statusUpdateFailedMsg)
@@ -415,25 +411,22 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
 		cluster.Status.Shards = int32(len(state.Shards))
 	}
-	// compute Valkey Cluster state from conditions (priority order: Ready > Degraded > Progressing > Failed)
+	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 
 	switch {
-	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
 		cluster.Status.State = valkeyiov1alpha1.ClusterStateDegraded
 		cluster.Status.Reason = degradedCondition.Reason
 		cluster.Status.Message = degradedCondition.Message
+	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
+		cluster.Status.Reason = readyCondition.Reason
+		cluster.Status.Message = readyCondition.Message
 	case progressingCondition != nil && progressingCondition.Status == metav1.ConditionTrue:
-		// If initial state is initializing, move to reconciling
-		if current.Status.State == valkeyiov1alpha1.ClusterStateInitializing {
-			cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
-		}
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
 		cluster.Status.Reason = progressingCondition.Reason
 		cluster.Status.Message = progressingCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionFalse:

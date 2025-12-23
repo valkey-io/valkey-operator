@@ -177,6 +177,7 @@ type ValkeyCluster struct {
 	Spec ValkeyClusterSpec `json:"spec"`
 
 	// status defines the observed state of ValkeyCluster
+	// +kubebuilder:default:={state: "Initializing", readyShards:0}
 	// +optional
 	Status ValkeyClusterStatus `json:"status,omitzero"`
 }

@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	testutils "valkey.io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {
@@ -88,26 +89,17 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(updatedValkeyCluster.Status.Conditions).ToNot(BeEmpty())
 
 			// Verify that the Ready condition is set to False initially
-			readyCondition := findCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+			readyCondition := testutils.FindCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 			Expect(readyCondition).NotTo(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 
 			// Verify that the Progressing condition is set to True
-			progressingCondition := findCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+			progressingCondition := testutils.FindCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 			Expect(progressingCondition).NotTo(BeNil())
 			Expect(progressingCondition.Status).To(Equal(metav1.ConditionTrue))
 		})
 	})
 })
-
-func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == conditionType {
-			return &conditions[i]
-		}
-	}
-	return nil
-}
 
 var _ = Describe("updateStatus", func() {
 	var (

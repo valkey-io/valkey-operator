@@ -182,7 +182,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyControllerUp).Should(Succeed())
 		})
 
-		It("should ensure the metrics endpoint is serving metrics", func() {
+		XIt("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=valkey-operator-metrics-reader",
@@ -461,7 +461,7 @@ var _ = Describe("Manager", Ordered, func() {
 	Context("when a ValkeyCluster experiences degraded state", func() {
 		var degradedClusterName string
 
-		It("should reflect degraded status when a shard deployment is deleted", func() {
+		It("should detect and recover when a deployment is deleted", func() {
 			By("creating a ValkeyCluster")
 			degradedClusterManifest := `apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster

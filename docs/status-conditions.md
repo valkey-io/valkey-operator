@@ -110,7 +110,7 @@ Indicates whether all **16384** hash slots are assigned to primaries.
 | Status | Meaning |
 |---|---|
 | `True` | All slots are assigned. |
-| `False` | Some slots remain unassigned. |
+| `False` (or absent) | Some slots remain unassigned. |
 
 Common reasons:
 - `AllSlotsAssigned` – all 16384 slots are assigned
@@ -195,7 +195,7 @@ status:
   - type: ClusterFormed
     status: "True"
     reason: TopologyComplete
-    message: Cluster is formed
+    message: All nodes joined cluster
     lastTransitionTime: "2025-12-19T09:59:45Z"
     observedGeneration: 1
   - type: SlotsAssigned
@@ -249,7 +249,7 @@ status:
   - type: Ready
     status: "False"
     reason: Reconciling
-    message: Cluster is reconciling
+    message: Cluster is Reconciling
     lastTransitionTime: "2025-12-19T10:00:00Z"
     observedGeneration: 1
   - type: Progressing
@@ -264,6 +264,12 @@ status:
     message: "Failed to add node: connection timeout"
     lastTransitionTime: "2025-12-19T10:00:05Z"
     observedGeneration: 1
+ - type: SlotsAssigned
+   status: "False"
+   reason: SlotsUnassigned
+   message: Assigning slots to nodes
+   lastTransitionTime: "2025-12-19T10:00:05Z"
+   observedGeneration: 1
 ```
 
 ---
@@ -291,21 +297,21 @@ Spec:
 Status:
   Conditions:
     Last Transition Time:  2025-12-19T06:07:21Z
-    Message:               No changes needed
-    Observed Generation:   1
-    Reason:                ReconcileComplete
-    Status:                False
-    Type:                  Progressing
-    Last Transition Time:  2025-12-19T06:07:21Z
     Message:               Cluster is healthy
     Observed Generation:   1
     Reason:                ClusterHealthy
     Status:                True
     Type:                  Ready
     Last Transition Time:  2025-12-19T06:07:21Z
-    Message:               Cluster is formed
+    Message:               No changes needed
     Observed Generation:   1
-    Reason:                ClusterFormed
+    Reason:                ReconcileComplete
+    Status:                False
+    Type:                  Progressing
+    Last Transition Time:  2025-12-19T06:07:21Z
+    Message:               All nodes joined cluster
+	Observed Generation:   1
+    Reason:                TopologyComplete
     Status:                True
     Type:                  ClusterFormed
     Last Transition Time:  2025-12-19T06:07:21Z
@@ -331,7 +337,7 @@ Events:                    <none>
 - **Conditions**
   - `Progressing=False (ReconcileComplete)` → controller is not actively changing anything.
   - `Ready=True (ClusterHealthy)` → cluster is fully functional.
-  - `ClusterFormed=True (ClusterFormed)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicas=1`).
+  - `ClusterFormed=True (TopologyComplete)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicas=1`).
   - `SlotsAssigned=True (AllSlotsAssigned)` → all 16384 hash slots are assigned.
 
 - **Observed Generation**

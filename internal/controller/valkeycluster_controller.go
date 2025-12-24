@@ -107,23 +107,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
 
-	// Check if all slots are assigned (early check to gate cluster health)
-	allSlotsAssigned := len(state.Shards) > 0
-	for _, shard := range state.Shards {
-		if len(shard.Slots) == 0 {
-			allSlotsAssigned = false
-			break
-		}
-	}
-	// If we have all shards but slots aren't assigned yet, wait for slot assignment
-	if !allSlotsAssigned && len(state.Shards) == int(cluster.Spec.Shards) {
-		log.V(1).Info("slots not assigned yet, requeue..")
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for slots assignment", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Assigning slots", metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, state)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
 	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, state, pods)
 
@@ -133,6 +116,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Adding nodes to cluster", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Assigning slots to nodes", metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, state)
 		if err := r.addValkeyNode(ctx, cluster, state, node); err != nil {
 			log.Error(err, "unable to add cluster node")
@@ -164,11 +148,24 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// Check if all slots are assigned
+	unassignedSlots := state.GetUnassignedSlots()
+	allSlotsAssigned := len(unassignedSlots) == 0
+	if !allSlotsAssigned {
+		log.V(1).Info("slots are not assigned, requeue..", "unassignedSlots", unassignedSlots)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for all slots to be assigned", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for slots to be assigned", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.SlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	// Cluster is healthy - set all positive conditions
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonClusterFormed, "Cluster is formed", metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonClusterFormed, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.AllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
@@ -362,7 +359,8 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 			if primary == nil {
 				log.Error(nil, "primary lost in shard", "Shard Id", shard.Id)
 				setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPrimaryLost, "Primary lost in one or more shards", metav1.ConditionTrue)
-				continue
+				// Cannot add replica without a primary - return error to trigger degraded state.
+				return errors.New("primary lost in shard, cannot add replica")
 			}
 
 			log.V(1).Info("add a new replica", "primary address", primary.Address, "primary Id", primary.Id, "replica address", node.Address)

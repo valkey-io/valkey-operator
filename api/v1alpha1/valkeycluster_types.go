@@ -149,7 +149,7 @@ const (
 	ReasonMissingShards     = "MissingShards"
 	ReasonMissingReplicas   = "MissingReplicas"
 	ReasonReconcileComplete = "ReconcileComplete"
-	ReasonClusterFormed     = "ClusterFormed"
+	ReasonClusterFormed     = "TopologyComplete"
 	AllSlotsAssigned        = "AllSlotsAssigned"
 	SlotsUnassigned         = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"

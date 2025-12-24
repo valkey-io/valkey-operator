@@ -516,30 +516,23 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to delete deployment")
 
-			By("waiting for the cluster to enter degraded state with NodeAddFailed")
+			By("waiting for the cluster to detect the deployment loss and start recovery")
 			verifyDegradedState := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(degradedClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// The cluster should be in Degraded state
-				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateDegraded),
-					fmt.Sprintf("Expected Degraded state, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
+				// The Cluster should detect the deployment loss and not be in Ready state
+				// Note: The operator immediately recreates missing deployments, so the cluster
+				// transitions through Reconciling/AddingNodes states, and may briefly enter
+				// Degraded state (with NodeAddFailed reason), if adding the node fails temporarily).
+				// However, this is not guaranteed, so we only check for Recovery here.
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReconciling),
+					fmt.Sprintf("Expected cluster to be reconciling after deployment deletion, but got:%s (reason: %s)", cr.Status.State, cr.Status.Reason))
 
-				// The reason should be NodeAddFailed
-				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed),
-					fmt.Sprintf("Expected NodeAddFailed reason, but got: %s", cr.Status.Reason))
-
-				// Verify the Degraded condition is present and True
-				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-				g.Expect(degradedCond).NotTo(BeNil(), "Degraded condition should be present")
-				g.Expect(degradedCond.Status).To(Equal(metav1.ConditionTrue), "Degraded condition should be True")
-				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed),
-					fmt.Sprintf("Degraded condition should have NodeAddFailed reason, got: %s", degradedCond.Reason))
-
-				// Ready condition should be False
+				// Ready condition should be False during recovery
 				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 				if readyCond != nil {
-					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when degraded")
+					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when deployment is being recreated")
 				}
 			}
 			Eventually(verifyDegradedState).Should(Succeed())

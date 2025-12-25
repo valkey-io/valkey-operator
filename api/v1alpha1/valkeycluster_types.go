@@ -149,7 +149,7 @@ const (
 	ReasonMissingShards     = "MissingShards"
 	ReasonMissingReplicas   = "MissingReplicas"
 	ReasonReconcileComplete = "ReconcileComplete"
-	ReasonTopologyComplete     = "TopologyComplete"
+	ReasonTopologyComplete  = "TopologyComplete"
 	ReasonAllSlotsAssigned  = "AllSlotsAssigned"
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
@@ -194,4 +194,3 @@ type ValkeyClusterList struct {
 func init() {
 	SchemeBuilder.Register(&ValkeyCluster{}, &ValkeyClusterList{})
 }
-

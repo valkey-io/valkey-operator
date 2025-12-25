@@ -19,12 +19,15 @@ package utils
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -104,6 +107,7 @@ func InstallCertManager() error {
 // by verifying the existence of key CRDs related to Cert Manager.
 func IsCertManagerCRDsInstalled() bool {
 	// List of common Cert Manager CRDs
+
 	certManagerCRDs := []string{
 		"certificates.cert-manager.io",
 		"issuers.cert-manager.io",
@@ -223,4 +227,29 @@ func UncommentCode(filename, target, prefix string) error {
 	}
 
 	return nil
+}
+
+// FindCondition searches for a condition with the specified type in a list of conditions.
+// Returns the condition if found, nil otherwise.
+func FindCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+func GetValkeyClusterStatus(name string) (*valkeyiov1alpha1.ValkeyCluster, error) {
+	cmd := exec.Command("kubectl", "get", "valkeycluster", name, "-o", "json")
+	output, err := Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+	var cr valkeyiov1alpha1.ValkeyCluster
+	err = json.Unmarshal([]byte(output), &cr)
+	if err != nil {
+		return nil, err
+	}
+	return &cr, nil
 }

@@ -21,7 +21,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ValkeyClusterSpec defines the desired state of ValkeyCluster
+// ClusterState represents the high-level state of the ValkeyCluster.
+// +kubebuilder:validation:Enum=Initializing;Reconciling;Ready;Degraded;Failed
+type ClusterState string
+
+const (
+	// ClusterStateInitializing indicates the cluster is being created for the first time.
+	ClusterStateInitializing ClusterState = "Initializing"
+	// ClusterStateReconciling indicates the cluster is being updated.
+	ClusterStateReconciling ClusterState = "Reconciling"
+	// ClusterStateReady indicates the cluster is healthy and serving traffic.
+	ClusterStateReady ClusterState = "Ready"
+	// ClusterStateDegraded indicates the cluster is partially functional.
+	ClusterStateDegraded ClusterState = "Degraded"
+	// ClusterStateFailed indicates the cluster has failed and cannot recover.
+	ClusterStateFailed ClusterState = "Failed"
+)
+
+// ValkeyClusterSpec defines the desired state of ValkeyCluster.
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -73,36 +90,81 @@ type ExporterSpec struct {
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// State provides a high-level summary of the cluster's current state.
+	// +kubebuilder:default=Initializing
+	// +optional
+	State ClusterState `json:"state,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// Reason provides a brief machine-readable explanation for the current state.
+	// +optional
+	Reason string `json:"reason,omitempty"`
 
-	// conditions represent the current state of the ValkeyCluster resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Message provides human-readable details about the current state.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// Shards represents the number of shards currently formed in the cluster.
+	// +kubebuilder:default=0
+	// +optional
+	Shards int32 `json:"shards,omitempty"`
+
+	// ReadyShards represents the number of shards that are fully healthy.
+	// +kubebuilder:default=0
+	// +optional
+	ReadyShards int32 `json:"readyShards,omitempty"`
+
+	// Conditions represent the current state of the ValkeyCluster resource.
+	// Standard condition types:
+	// - "Ready": the cluster is fully functional and serving traffic
+	// - "Progressing": the cluster is being created, updated, or scaled
+	// - "Degraded": the cluster is impaired but may be partially functional
+	// Valkey-specific condition types:
+	// - "ClusterFormed": all nodes have joined and meet the shard/replica layout
+	// - "SlotsAssigned": all 16384 hash slots are assigned to primaries
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+const (
+	ConditionReady         = "Ready"
+	ConditionProgressing   = "Progressing"
+	ConditionDegraded      = "Degraded"
+	ConditionClusterFormed = "ClusterFormed"
+	ConditionSlotsAssigned = "SlotsAssigned"
+)
+
+const (
+	// Common reasons for conditions
+	ReasonInitializing      = "Initializing"
+	ReasonReconciling       = "Reconciling"
+	ReasonClusterHealthy    = "ClusterHealthy"
+	ReasonServiceError      = "ServiceError"
+	ReasonConfigMapError    = "ConfigMapError"
+	ReasonDeploymentError   = "DeploymentError"
+	ReasonPodListError      = "PodListError"
+	ReasonAddingNodes       = "AddingNodes"
+	ReasonNodeAddFailed     = "NodeAddFailed"
+	ReasonMissingShards     = "MissingShards"
+	ReasonMissingReplicas   = "MissingReplicas"
+	ReasonReconcileComplete = "ReconcileComplete"
+	ReasonTopologyComplete  = "TopologyComplete"
+	ReasonAllSlotsAssigned  = "AllSlotsAssigned"
+	ReasonSlotsUnassigned   = "SlotsUnassigned"
+	ReasonPrimaryLost       = "PrimaryLost"
+	ReasonNoSlots           = "NoSlotsAvailable"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=vkc
 
 // ValkeyCluster is the Schema for the valkeyclusters API
-// +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Number of Ready Shard Groups"
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation of ValkeyCluster"
-// +kubebuilder:printcolumn:name="Shards",type="integer",JSONPath=".spec.shards",description="Number of Shard Groups"
-// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas",description="Number of Replicas per Shard Group"
+// +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
+// +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -115,6 +177,7 @@ type ValkeyCluster struct {
 	Spec ValkeyClusterSpec `json:"spec"`
 
 	// status defines the observed state of ValkeyCluster
+	// +kubebuilder:default:={state: "Initializing", readyShards:0}
 	// +optional
 	Status ValkeyClusterStatus `json:"status,omitzero"`
 }

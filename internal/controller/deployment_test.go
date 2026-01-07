@@ -19,6 +19,8 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -32,9 +34,7 @@ func TestCreateClusterDeployment(t *testing.T) {
 			Image: "container:version",
 		},
 	}
-
 	d := createClusterDeployment(cluster)
-
 	if d.Name != "" {
 		t.Errorf("Expected empty name field, got %v", d.Name)
 	}
@@ -50,4 +50,78 @@ func TestCreateClusterDeployment(t *testing.T) {
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
 	}
+}
+
+func TestCreateClusterDeploymentWithOnlyResourceRequests(t *testing.T) {
+	resourceReqs := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
+			corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
+		},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mycluster",
+		},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:     "container:version",
+			Resources: resourceReqs,
+		},
+	}
+	d := createClusterDeployment(cluster)
+	if len(d.Spec.Template.Spec.Containers[0].Resources.Requests) != 2 {
+		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Requests))
+	}
+}
+
+func TestCreateClusterDeploymentWithOnlyResourceLimits(t *testing.T) {
+	resourceReqs := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceLimitsMemory: resource.MustParse("100Mi"),
+			corev1.ResourceLimitsCPU:    resource.MustParse("100m"),
+		},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mycluster",
+		},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:     "container:version",
+			Resources: resourceReqs,
+		},
+	}
+	d := createClusterDeployment(cluster)
+	if len(d.Spec.Template.Spec.Containers[0].Resources.Limits) != 2 {
+		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Limits))
+	}
+}
+
+func TestCreateClusterDeploymentWithBothResourceRequestsAndLimits(t *testing.T) {
+	resourceReqs := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceLimitsMemory: resource.MustParse("500Mi"),
+			corev1.ResourceLimitsCPU:    resource.MustParse("200m"),
+		},
+		Requests: corev1.ResourceList{
+			corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
+			corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
+		},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mycluster",
+		},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:     "container:version",
+			Resources: resourceReqs,
+		},
+	}
+	d := createClusterDeployment(cluster)
+	if len(d.Spec.Template.Spec.Containers[0].Resources.Requests) != 2 {
+		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Requests))
+	}
+	if len(d.Spec.Template.Spec.Containers[0].Resources.Limits) != 2 {
+		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Limits))
+	}
+
 }

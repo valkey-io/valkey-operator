@@ -406,6 +406,14 @@ var _ = Describe("Manager", Ordered, func() {
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
+				// Verify user configMap took effect. The sample config sets maxmemory to 50Mb.
+				cmd := exec.Command("kubectl", "run", "client2",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "CONFIG", "GET", "maxmemory")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to verify sample config")
+				g.Expect(output).To(ContainSubstring("52428800"))
+
 				cmd = exec.Command("kubectl", "wait", "pod/client",
 					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
 				_, err = utils.Run(cmd)
@@ -416,6 +424,11 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client2",
 					"--wait=true", "--timeout=30s")
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())

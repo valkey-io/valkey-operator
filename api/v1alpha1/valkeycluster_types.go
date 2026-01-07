@@ -72,6 +72,10 @@ type ValkeyClusterSpec struct {
 	// Metrics exporter options
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// Attached Volumes
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
 }
 
 type ExporterSpec struct {

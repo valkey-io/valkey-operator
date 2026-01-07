@@ -105,32 +105,15 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 									MountPath: "/config",
 									ReadOnly:  true,
 								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "scripts",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
-									},
-									DefaultMode: func(i int32) *int32 { return &i }(0755),
-								},
-							},
-						},
-						{
-							Name: "valkey-conf",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
-									},
+								{
+									Name:      "user-conf",
+									MountPath: "/config/valkey.conf.d",
+									ReadOnly:  true,
 								},
 							},
 						},
 					},
+					Volumes: cluster.Spec.Volumes,
 				},
 			},
 		},

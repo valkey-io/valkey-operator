@@ -283,7 +283,12 @@ var _ = Describe("Manager", Ordered, func() {
 
 	Context("when a ValkeyCluster CR is applied", func() {
 		It("creates a Valkey Cluster deployment", func() {
-			By("creating the CR")
+			By("creating a custom configMap")
+			cmd := exec.Command("kubectl", "create", "-f", "config/samples/sample_config.yaml")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster custom configMap")
+
+			By("creating the ValkeyCluster CR")
 			cmd := exec.Command("kubectl", "create", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
@@ -313,9 +318,17 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyServiceExists).Should(Succeed())
 
-			By("validating the ConfigMap")
+			By("validating the default ConfigMap")
 			verifyConfigMapExists := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyConfigMapExists).Should(Succeed())
+
+			By("validating the custom ConfigMap")
+			verifyConfigMapExists = func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName + "-conf")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -438,13 +451,21 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyServiceRemoved).Should(Succeed())
 
-			By("validating that the ConfigMap does not exist")
+			By("validating that the default ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
 			Eventually(verifyConfigMapRemoved).Should(Succeed())
+
+			By("validating that the user ConfigMap remains")
+			verifyConfigMapRemains := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName + "-conf")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyConfigMapRemains).Should(Succeed())
 
 			By("validating that no Deployment exist")
 			verifyDeploymentsRemoved := func(g Gomega) {

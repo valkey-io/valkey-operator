@@ -47,8 +47,9 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "valkey-server",
-							Image: image,
+							Name:      "valkey-server",
+							Image:     image,
+							Resources: cluster.Spec.Resources,
 							Command: []string{
 								"valkey-server",
 								"/config/valkey.conf",

@@ -61,12 +61,11 @@ func attachVolumesToCluster(ctx context.Context, c client.Client, cluster *valke
 	}
 
 	// Add volumes to spec
-	cluster.Spec.Volumes = append(
-		cluster.Spec.Volumes,
+	cluster.Spec.Volumes = []corev1.Volume{
 		scriptsVolume,
 		defaultConfigVolume,
 		userConfigVolume,
-	)
+	}
 
 	return nil
 }

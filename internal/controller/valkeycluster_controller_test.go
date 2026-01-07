@@ -245,7 +245,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			err := r.upsertService(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -268,7 +268,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			err := r.upsertConfigMap(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -291,7 +291,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			err := r.upsertDeployments(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -318,7 +318,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			_, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
@@ -340,7 +340,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			Expect(r.upsertService(ctx, cluster)).To(Succeed())
 			events := collectEvents(fakeRecorder)
@@ -362,7 +362,7 @@ var _ = Describe("EventRecorder", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			defer k8sClient.Delete(ctx, cluster)
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			// Trigger deployment creation to verify formatted message
 			err := r.upsertDeployments(ctx, cluster)
@@ -370,7 +370,7 @@ var _ = Describe("EventRecorder", func() {
 
 			events := collectEvents(fakeRecorder)
 			deploymentEvents := filterEvents(events, "DeploymentCreated")
-			Expect(len(deploymentEvents)).To(BeNumerically(">", 0))
+			Expect(deploymentEvents).ToNot(BeEmpty())
 
 			for _, event := range deploymentEvents {
 				Expect(event).To(MatchRegexp(`Created deployment \d+ of \d+`))

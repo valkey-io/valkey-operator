@@ -143,6 +143,89 @@ stateDiagram-v2
 
 ---
 
+## Kubernetes Events
+
+Events complement the status conditions described above. While `conditions` represent the current state of the cluster (e.g., `Ready=True`), events provide a historical timeline of actions and changes (e.g., "Created deployment 1 of 6"). Use conditions for monitoring the current state and events for understanding what happened and troubleshooting issues.
+
+### Event types
+
+Events are categorized as:
+- **Normal**: Successful operations and informational messages
+- **Warning**: Failures, errors, or degraded conditions
+
+### Infrastructure events
+
+These events are emitted during the creation and management of Kubernetes resources.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `ServiceCreated` | Normal | Headless Service is created |
+| `ServiceUpdateFailed` | Warning | Service update fails |
+| `ConfigMapCreated` | Normal | ConfigMap with Valkey configuration is created |
+| `ConfigMapUpdateFailed` | Warning | ConfigMap update fails |
+| `ConfigMapCreationFailed` | Warning | ConfigMap creation fails |
+| `DeploymentCreated` | Normal | Each Deployment (shard/replica) is created |
+| `DeploymentCreationFailed` | Warning | Deployment creation fails |
+
+### Cluster topology events
+
+These events track the formation and changes to the Valkey cluster topology.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `NodeAdding` | Normal | Starting to add a node to the cluster |
+| `NodeAdded` | Normal | Node successfully joins the cluster |
+| `NodeAddFailed` | Warning | Node addition fails |
+| `ClusterMeet` | Normal | Node successfully meets another node (CLUSTER MEET) |
+| `ClusterMeetFailed` | Warning | CLUSTER MEET command fails |
+| `PrimaryCreated` | Normal | Primary node is created with slot assignment |
+| `SlotAssignmentFailed` | Warning | Slot assignment to primary fails |
+| `ReplicaCreated` | Normal | Replica is created for a primary |
+| `ReplicaCreationFailed` | Warning | Replica creation fails |
+| `PrimaryLost` | Warning | Primary is lost in a shard (requires failover) |
+
+### Maintenance events
+
+These events are emitted during cluster maintenance operations.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `StaleNodeForgotten` | Normal | Stale node is forgotten from the cluster |
+| `NodeForgetFailed` | Warning | Forgetting a node fails |
+
+### Status events
+
+These events provide high-level status information about the cluster.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `WaitingForShards` | Normal | Waiting for shards to be created |
+| `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
+| `ClusterReady` | Normal | Cluster is fully ready and healthy |
+
+### Viewing events
+
+Events can be viewed using standard `kubectl` commands.
+
+```bash
+# View all events in namespace
+kubectl get events -n default
+
+# Watch events in real-time
+kubectl get events -n default --watch
+
+# View events for a specific cluster
+kubectl get events --field-selector involvedObject.name=valkeycluster-sample
+
+# View events sorted by time
+kubectl get events -n default --sort-by='.lastTimestamp'
+
+# View events in describe output
+kubectl describe valkeycluster valkeycluster-sample
+```
+
+---
+
 ## Monitoring status
 
 ### Quick status check
@@ -236,6 +319,17 @@ status:
     observedGeneration: 1
 ```
 
+**Recent events** (from `kubectl describe`):
+```text
+Events:
+  Type    Reason             Age   From                      Message
+  ----    ------             ----  ----                      -------
+  Normal  ServiceCreated     30s   valkeycluster-controller  Created headless Service
+  Normal  ConfigMapCreated   30s   valkeycluster-controller  Created ConfigMap with configuration
+  Normal  DeploymentCreated  25s   valkeycluster-controller  Created deployment 1 of 6
+  Normal  WaitingForShards   20s   valkeycluster-controller  0 of 3 shards exist
+```
+
 ### Degraded cluster
 
 ```yaml
@@ -270,6 +364,18 @@ status:
    message: Assigning slots to nodes
    lastTransitionTime: "2025-12-19T10:00:05Z"
    observedGeneration: 1
+```
+**Recent events** (from `kubectl describe`):
+```text
+Events:
+  Type    Reason             Age   From                      Message
+  ----    ------             ----  ----                      -------
+  Normal  ServiceCreated     30s   valkeycluster-controller  Created headless Service
+  Normal  ConfigMapCreated   30s   valkeycluster-controller  Created ConfigMap with configuration
+  Normal  DeploymentCreated  25s   valkeycluster-controller  Created deployment 1 of 6
+  Normal  NodeAdding         15m   valkeycluster-controller  Adding node 10.244.0.10 to cluster
+  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.10 joined cluster
+  Warning NodeAddFailed      14m   valkeycluster-controller  Failed to add node: connection timeout
 ```
 
 ---
@@ -325,7 +431,29 @@ Status:
   Reason:                  ClusterHealthy
   Shards:                  3
   State:                   Ready
-Events:                    <none>
+Events:
+  Type    Reason             Age   From                      Message
+  ----    ------             ----  ----                      -------
+  Normal  ServiceCreated     15m   valkeycluster-controller  Created headless Service
+  Normal  ConfigMapCreated   15m   valkeycluster-controller  Created ConfigMap with configuration
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 1 of 6
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 2 of 6
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 3 of 6
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 4 of 6
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 5 of 6
+  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 6 of 6
+  Normal  NodeAdding         15m   valkeycluster-controller  Adding node 10.244.0.10 to cluster
+  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.10 joined cluster
+  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary with slots 0-5460
+  Normal  NodeAdding         14m   valkeycluster-controller  Adding node 10.244.0.11 to cluster
+  Normal  ClusterMeet        14m   valkeycluster-controller  Node 10.244.0.11 met node 10.244.0.10
+  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.11 joined cluster
+  Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary abc123
+  Normal  NodeAdding         14m   valkeycluster-controller  Adding node 10.244.0.12 to cluster
+  Normal  ClusterMeet        14m   valkeycluster-controller  Node 10.244.0.12 met node 10.244.0.10
+  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.12 joined cluster
+  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary with slots 5461-10922
+  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready with 3 shards and 1 replicas
 ```
 
 ### How to read it
@@ -342,6 +470,12 @@ Events:                    <none>
 
 - **Observed Generation**
   - `Observed Generation: 1` on all conditions means status reflects **Generation 1** of the spec (i.e., the latest desired configuration at the time).
+
+- **Events**
+  - Events show the historical timeline of what the operator did to reach the current state.
+  - All events are `Normal` type, indicating successful operations.
+  - Events are retained for ~1 hour by default (configurable in Kubernetes).
+  - Events are rate-limited by Kubernetes to prevent flooding (e.g., identical events are aggregated).
 
 ---
 

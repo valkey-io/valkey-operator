@@ -19,6 +19,7 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -33,7 +34,9 @@ func TestCreateClusterDeployment(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster)
+	volumes := []corev1.Volume{getConfigVolume("mycluster", "myvol", false)}
+
+	d := createClusterDeployment(cluster, volumes)
 
 	if d.Name != "" {
 		t.Errorf("Expected empty name field, got %v", d.Name)
@@ -49,5 +52,10 @@ func TestCreateClusterDeployment(t *testing.T) {
 	}
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
+	}
+
+	// Volume check
+	if volLen := len(d.Spec.Template.Spec.Volumes); volLen != 1 {
+		t.Errorf("Expected %v volume, got %v", 1, volLen)
 	}
 }

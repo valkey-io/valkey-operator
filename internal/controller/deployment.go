@@ -23,7 +23,7 @@ import (
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, configVolumes []corev1.Volume) *appsv1.Deployment {
 	image := DefaultImage
 	if cluster.Spec.Image != "" {
 		image = cluster.Spec.Image
@@ -113,7 +113,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 							},
 						},
 					},
-					Volumes: cluster.Spec.Volumes,
+					Volumes: configVolumes,
 				},
 			},
 		},

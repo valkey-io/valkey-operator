@@ -27,7 +27,7 @@ import (
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func attachVolumesToCluster(ctx context.Context, c client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+func getConfigVolumes(ctx context.Context, c client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) ([]corev1.Volume, error) {
 
 	// Volume containing health, and liveliness scripts
 	scriptsVolume := corev1.Volume{
@@ -57,17 +57,14 @@ func attachVolumesToCluster(ctx context.Context, c client.Client, cluster *valke
 	// User config volume
 	userConfigVolume, err := getUserConfigVolume(ctx, c, cluster)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Add volumes to spec
-	cluster.Spec.Volumes = []corev1.Volume{
+	return []corev1.Volume{
 		scriptsVolume,
 		defaultConfigVolume,
 		userConfigVolume,
-	}
-
-	return nil
+	}, nil
 }
 
 // Discover user-created Valkey configuration. This can be either a Secret, or ConfigMap, created by the user

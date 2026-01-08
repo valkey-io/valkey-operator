@@ -267,14 +267,15 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 
 	expected := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
 
-	// Attach script volume, and config volumes to cluster
-	if err := attachVolumesToCluster(ctx, r.Client, cluster); err != nil {
+	// Get script volume, default config, and user config volumes
+	configVolumes, err := getConfigVolumes(ctx, r.Client, cluster)
+	if err != nil {
 		return err
 	}
 
 	// Create missing deployments
 	for i := len(existing.Items); i < expected; i++ {
-		deployment := createClusterDeployment(cluster)
+		deployment := createClusterDeployment(cluster, configVolumes)
 		if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
 			return err
 		}

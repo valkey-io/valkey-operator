@@ -559,7 +559,7 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	FContext("when a ValkeyCluster experiences degraded state", func() {
+	Context("when a ValkeyCluster experiences degraded state", func() {
 		var degradedClusterName string
 
 		It("should detect and recover when a deployment is deleted", func() {

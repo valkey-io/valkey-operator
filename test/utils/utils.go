@@ -253,3 +253,37 @@ func GetValkeyClusterStatus(name string) (*valkeyiov1alpha1.ValkeyCluster, error
 	}
 	return &cr, nil
 }
+
+// GetEvents fetches and categorizes Kubernetes events for a given resource.
+func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
+	cmd := exec.Command("kubectl", "get", "events", "--field-selector", fmt.Sprintf("involvedObject.name=%s", resourceName), "-o", "json")
+	output, err := Run(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var eventList struct {
+		Items []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"items"`
+	}
+	err = json.Unmarshal([]byte(output), &eventList)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	normalEvents := make(map[string]bool)
+	warningEvents := make(map[string]bool)
+	for _, event := range eventList.Items {
+		switch event.Type {
+		case "Normal":
+			normalEvents[event.Reason] = true
+		case "Warning":
+			warningEvents[event.Reason] = true
+		}
+	}
+
+	return normalEvents, warningEvents, nil
+}

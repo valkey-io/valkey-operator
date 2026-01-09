@@ -270,7 +270,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			err := r.upsertConfigMap(ctx, cluster)
+			err := r.upsertConfigMaps(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)

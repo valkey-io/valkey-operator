@@ -1162,6 +1162,9 @@ spec:
                       type: string
                   type: object
                 type: array
+              valkeyConfig:
+                description: Additional valkey configuration
+                type: string
             type: object
           status:
             default:

@@ -87,7 +87,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertConfigMap(ctx, cluster); err != nil {
+	if err := r.upsertConfigMaps(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -224,8 +224,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
-// Create or update a basic valkey.conf
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+// Create or update a default valkey.conf
+// If additional config is provided, append to the default map
+func (r *ValkeyClusterReconciler) upsertConfigMaps(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return err
@@ -235,19 +236,26 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return err
 	}
 
+	serverConfig := `# Base operator config
+cluster-enabled yes
+protected-mode no
+cluster-node-timeout 2000
+`
+
+	if cluster.Spec.ValkeyConfig != "" {
+		serverConfig += "\n# Extra config\n" + cluster.Spec.ValkeyConfig
+	}
+
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
+			Name:      cluster.Name + "-config",
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		},
 		Data: map[string]string{
 			"readiness-check.sh": string(readiness),
 			"liveness-check.sh":  string(liveness),
-			"valkey.conf": `
-cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000`,
+			"valkey.conf":        serverConfig,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {

@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,9 +75,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
+			fakeRecorder := record.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -97,6 +101,15 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			progressingCondition := testutils.FindCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 			Expect(progressingCondition).NotTo(BeNil())
 			Expect(progressingCondition.Status).To(Equal(metav1.ConditionTrue))
+
+			// Verify that events were recorded
+			By("Verifying that events were recorded")
+			events := collectEvents(fakeRecorder)
+			Expect(events).ToNot(BeEmpty())
+			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+
 		})
 	})
 })
@@ -122,8 +135,9 @@ var _ = Describe("updateStatus", func() {
 		// For updateStatus, we need a client to Get the current object.
 		// The envtest client is used here.
 		r = &ValkeyClusterReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(100),
 		}
 
 		// Create the cluster object in the fake client
@@ -200,3 +214,202 @@ var _ = Describe("updateStatus", func() {
 		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonInitializing))
 	})
 })
+
+var _ = Describe("EventRecorder", func() {
+	var (
+		r            *ValkeyClusterReconciler
+		ctx          context.Context
+		fakeRecorder *record.FakeRecorder
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		fakeRecorder = record.NewFakeRecorder(100)
+		r = &ValkeyClusterReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+	})
+
+	Context("When creating infrastructure resources", func() {
+		It("should emit ServiceCreated event on successful service creation", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "event-test-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			err := r.upsertService(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := collectEvents(fakeRecorder)
+			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("Normal")))
+			Expect(events).To(ContainElement(ContainSubstring("Created headless Service")))
+		})
+
+		It("should emit ConfigMapCreated event on successful configmap creation", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "event-test-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			err := r.upsertConfigMap(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := collectEvents(fakeRecorder)
+			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("Normal")))
+			Expect(events).To(ContainElement(ContainSubstring("Created ConfigMap with configuration")))
+		})
+
+		It("should emit DeploymentCreated event on successful deployment creation", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "event-test-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			err := r.upsertDeployments(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := collectEvents(fakeRecorder)
+			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("Normal")))
+			deploymentEvents := filterEventsByType(events, "DeploymentCreated")
+			Expect(len(deploymentEvents)).To(BeNumerically(">", 1))
+			Expect(deploymentEvents[0]).To(ContainSubstring("Normal"))
+		})
+	})
+
+	Context("When reconciling cluster state", func() {
+		It("should emit WaitingForShards event when shards are missing", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "shards-test-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			events := collectEvents(fakeRecorder)
+			Expect(events).To(ContainElement(ContainSubstring("WaitingForShards")))
+			Expect(events).To(ContainElement(ContainSubstring("Normal")))
+		})
+	})
+
+	Context("When handling event types", func() {
+		It("should emit normal events for successful operations", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "event-type-test",
+					Namespace: "default",
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			Expect(r.upsertService(ctx, cluster)).To(Succeed())
+			events := collectEvents(fakeRecorder)
+			Expect(events).To(ContainElement(ContainSubstring("Normal")))
+			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
+		})
+	})
+
+	Context("When verifying event content", func() {
+		It("should include meaningful messages in events", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "content-test-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			// Trigger deployment creation to verify formatted message
+			err := r.upsertDeployments(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := collectEvents(fakeRecorder)
+			deploymentEvents := filterEvents(events, "DeploymentCreated")
+			Expect(deploymentEvents).ToNot(BeEmpty())
+
+			for _, event := range deploymentEvents {
+				Expect(event).To(MatchRegexp(`Created deployment \d+ of \d+`))
+			}
+		})
+	})
+})
+
+// Helper function to collect events from the fake recorder
+func collectEvents(recorder *record.FakeRecorder) []string {
+	events := []string{}
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			return events
+		}
+	}
+}
+
+// Helper function to filter events by reason
+func filterEvents(events []string, reason string) []string {
+	filtered := []string{}
+	for _, event := range events {
+		if strings.Contains(event, reason) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+// Helper function to filter events by type (normal or warning)
+func filterEventsByType(events []string, eventType string) []string {
+	filtered := []string{}
+	for _, event := range events {
+		if strings.Contains(event, eventType) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}

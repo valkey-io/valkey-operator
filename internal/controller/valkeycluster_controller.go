@@ -49,7 +49,7 @@ const (
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
 type ValkeyClusterReconciler struct {
-	Client client.Client
+	client.Client
 	Scheme *runtime.Scheme
 }
 
@@ -75,7 +75,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log.V(1).Info("reconcile...")
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
-	if err := r.Client.Get(ctx, req.NamespacedName, cluster); err != nil {
+	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -99,7 +99,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Get all pods and their current Valkey Cluster state
 	pods := &corev1.PodList{}
-	if err := r.Client.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
 		log.Error(err, "failed to list Pods")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodListError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
@@ -201,9 +201,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Client.Create(ctx, svc); err != nil {
+	if err := r.Create(ctx, svc); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if err := r.Client.Update(ctx, svc); err != nil {
+			if err := r.Update(ctx, svc); err != nil {
 				return err
 			}
 		} else {
@@ -243,9 +243,9 @@ include /config/valkey.conf.d/*.conf`,
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Client.Create(ctx, cm); err != nil {
+	if err := r.Create(ctx, cm); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if err := r.Client.Update(ctx, cm); err != nil {
+			if err := r.Update(ctx, cm); err != nil {
 				return err
 			}
 		} else {
@@ -260,7 +260,7 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 	log := logf.FromContext(ctx)
 
 	existing := &appsv1.DeploymentList{}
-	if err := r.Client.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
 		log.Error(err, "failed to list Deployments")
 		return err
 	}
@@ -279,7 +279,7 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 		if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
 			return err
 		}
-		if err := r.Client.Create(ctx, deployment); err != nil {
+		if err := r.Create(ctx, deployment); err != nil {
 			return err
 		}
 	}
@@ -409,7 +409,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	log := logf.FromContext(ctx)
 	// Fetch current status to compare
 	current := &valkeyiov1alpha1.ValkeyCluster{}
-	if err := r.Client.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
 	// Update shard counts
@@ -443,7 +443,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 
 	// Only update if status has changed
 	if statusChanged(current.Status, cluster.Status) {
-		if err := r.Client.Status().Update(ctx, cluster); err != nil {
+		if err := r.Status().Update(ctx, cluster); err != nil {
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}

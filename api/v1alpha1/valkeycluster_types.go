@@ -74,7 +74,7 @@ type ValkeyClusterSpec struct {
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
 	// Additional valkey configuration
-	ValkeyConfig string `json:"valkeyConfig,omitempty"`
+	ValkeyConfig map[string]string `json:"valkeyConfig,omitempty"`
 }
 
 type ExporterSpec struct {

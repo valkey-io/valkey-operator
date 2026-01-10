@@ -5,6 +5,6 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  valkeyConfig: |
-    maxmemory 50mb
-    maxmemory-policy allkeys-lfu
+  valkeyConfig:
+    maxmemory: 50mb
+    maxmemory-policy: allkeys-lfu

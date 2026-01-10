@@ -38,8 +38,8 @@ func TestLabels(t *testing.T) {
 	if testLabels["app"] != result["app"] {
 		t.Errorf("Expected %v, got %v", testLabels["app"], result["app"])
 	}
-	if result["app.kubernetes.io/name"] != "valkey" {
-		t.Errorf("Expected %v, got %v", "valkey", result["app.kubernetes.io/name"])
+	if result["app.kubernetes.io/name"] != appName {
+		t.Errorf("Expected %v, got %v", appName, result["app.kubernetes.io/name"])
 	}
 	if result["app.kubernetes.io/instance"] != "test-resource" {
 		t.Errorf("Expected %v, got %v", "test-resource", result["app.kubernetes.io/instance"])

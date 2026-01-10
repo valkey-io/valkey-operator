@@ -22,6 +22,8 @@ import (
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
+const appName = "valkey"
+
 // Labels returns a copy of user defined labels including recommended:
 // https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
 func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
@@ -29,10 +31,10 @@ func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 		cluster.Labels = make(map[string]string)
 	}
 	l := maps.Clone(cluster.Labels)
-	l["app.kubernetes.io/name"] = "valkey"
+	l["app.kubernetes.io/name"] = appName
 	l["app.kubernetes.io/instance"] = cluster.Name
 	l["app.kubernetes.io/component"] = "valkey-cluster"
-	l["app.kubernetes.io/part-of"] = "valkey"
+	l["app.kubernetes.io/part-of"] = appName
 	l["app.kubernetes.io/managed-by"] = "valkey-operator"
 	return l
 }

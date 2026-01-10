@@ -114,7 +114,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
+										Name: cluster.Name + "-config",
 									},
 									DefaultMode: func(i int32) *int32 { return &i }(0755),
 								},
@@ -125,7 +125,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
+										Name: cluster.Name + "-config",
 									},
 								},
 							},

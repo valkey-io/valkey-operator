@@ -74,6 +74,7 @@ type ValkeyClusterSpec struct {
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
 	// Additional valkey configuration
+	// TODO Updating the config of an existing CR currently does not trigger cluster restart
 	ValkeyConfig map[string]string `json:"valkeyConfig,omitempty"`
 }
 

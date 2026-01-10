@@ -87,7 +87,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertConfigMaps(ctx, cluster); err != nil {
+	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -226,7 +226,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
-func (r *ValkeyClusterReconciler) upsertConfigMaps(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return err

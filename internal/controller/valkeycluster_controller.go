@@ -242,7 +242,7 @@ protected-mode no
 cluster-node-timeout 2000
 `
 
-	if cluster.Spec.ValkeyConfig != nil && len(cluster.Spec.ValkeyConfig) > 0 {
+	if len(cluster.Spec.ValkeyConfig) > 0 {
 		serverConfig += "\n# Extra config\n"
 		for k, v := range cluster.Spec.ValkeyConfig {
 			serverConfig += k + " " + v + "\n"

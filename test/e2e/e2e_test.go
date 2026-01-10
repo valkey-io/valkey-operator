@@ -495,7 +495,7 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				// Verify additional config took effect. The sample config sets maxmemory to 50Mb.
-				cmd := exec.Command("kubectl", "run", "client2",
+				cmd = exec.Command("kubectl", "run", "client2",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
 					"valkey-cli", "-c", "-h", clusterFqdn, "CONFIG", "GET", "maxmemory")
 				output, err := utils.Run(cmd)
@@ -508,7 +508,7 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "logs", "client")
-				output, err := utils.Run(cmd)
+				output, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "delete", "pod", "client",

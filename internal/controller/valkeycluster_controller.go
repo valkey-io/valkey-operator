@@ -413,8 +413,8 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 					// When The failing node is this replica’s master. Valkey rejects CLUSTER FORGET from a replica
 					if !node.IsPrimary() && node.PrimaryNodeId == failing.Id {
 						log.V(1).Info("failing node is this replica's master, cannot forget - triggering failover instead", "replica", node.Address, "masterId", failing.Id)
-						// Trigger CLUSTER FAILOVER to promote this replica to master
-						// since the master is gone and cluster is unable to auto recover in this scenario.
+						// Valkey rejects CLUSTER FORGET on a replica when the target node is its current master.
+						// Trigger CLUSTER FAILOVER FORCE so the replica can be promoted and cluster can be recovered.
 						if err := node.Client.Do(ctx, node.Client.B().ClusterFailover().Force().Build()).Error(); err != nil {
 							log.Error(err, "command failed: CLUSTER FAILOVER FORCE", "replica", node.Address)
 							r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "FailoverFailed", "Failed to trigger failover for replica %v: %v", node.Address, err)

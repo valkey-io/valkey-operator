@@ -29,15 +29,16 @@ import (
 
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
-	Client       vclient.Client
-	Address      string
-	Port         int
-	Id           string
-	Flags        []string
-	ShardId      string
-	Info         map[string]string
-	ClusterInfo  map[string]string
-	ClusterNodes string
+	Client        vclient.Client
+	Address       string
+	Port          int
+	Id            string
+	Flags         []string
+	ShardId       string
+	PrimaryNodeId string // The master node ID if this is a replica, empty otherwise.
+	Info          map[string]string
+	ClusterInfo   map[string]string
+	ClusterNodes  string
 }
 
 // ShardState represents the current state of a shard.
@@ -240,7 +241,7 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 	// Remove the encoding string included in a verbatim string.
 	node.ClusterNodes = strings.TrimPrefix(cnodes, "txt:")
 
-	// Extract flags
+	// Extract flags and primary node ID if this is a replica.
 	for _, line := range strings.Split(node.ClusterNodes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 8 {
@@ -249,6 +250,10 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 		flags := strings.Split(fields[2], ",")
 		if slices.Contains(flags, "myself") {
 			node.Flags = flags
+			// If this is a replica, field3 contains the master node ID.
+			if slices.Contains(flags, "slave") && len(fields) > 3 {
+				node.PrimaryNodeId = fields[3]
+			}
 		}
 	}
 	return &node

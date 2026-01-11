@@ -409,6 +409,21 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 			for _, failing := range node.GetFailingNodes() {
 				idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == failing.Address })
 				if idx == -1 {
+					// Check if this node is a replica and the failing node is its master.
+					// When The failing node is this replica’s master. Valkey rejects CLUSTER FORGET from a replica
+					if !node.IsPrimary() && node.PrimaryNodeId == failing.Id {
+						log.V(1).Info("failing node is this replica's master, cannot forget - triggering failover instead", "replica", node.Address, "masterId", failing.Id)
+						// Trigger CLUSTER FAILOVER to promote this replica to master
+						// since the master is gone and cluster is unable to auto recover in this scenario.
+						if err := node.Client.Do(ctx, node.Client.B().ClusterFailover().Force().Build()).Error(); err != nil {
+							log.Error(err, "command failed: CLUSTER FAILOVER FORCE", "replica", node.Address)
+							r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "FailoverFailed", "Failed to trigger failover for replica %v: %v", node.Address, err)
+						} else {
+							r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "FailoverTriggered", "Triggered failover for replica %v to replace failed master %v", node.Address, failing.Id)
+						}
+						continue
+					}
+
 					// Could not find a pod with the address of a failing node. Lets forget this node.
 					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {

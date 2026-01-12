@@ -229,6 +229,8 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return err
@@ -244,16 +246,23 @@ protected-mode no
 cluster-node-timeout 2000
 `
 
-	if len(cluster.Spec.ValkeyConfig) > 0 {
+	if len(cluster.Spec.ValkeySpec.Configuration) > 0 {
 		serverConfig += "\n# Extra config\n"
-		for k, v := range cluster.Spec.ValkeyConfig {
+		for k, v := range cluster.Spec.ValkeySpec.Configuration {
+
+			if slices.Contains(valkeyiov1alpha1.NonUserOverrideConfigParameters, k) {
+				log.Error(nil, "Prohibited valkey server config", "parameter", k)
+				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "Prohibited config: %v", k)
+				continue
+			}
+
 			serverConfig += k + " " + v + "\n"
 		}
 	}
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name + "-config",
+			Name:      getConfigMapName(cluster.Name),
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		},

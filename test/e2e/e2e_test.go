@@ -409,24 +409,17 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyDescribeEvents).Should(Succeed())
 
-			By("validating cluster access")
-			verifyClusterAccess := func(g Gomega) {
-				// Start a Valkey client pod to access the cluster and get its status.
+			By("validating client commands")
+			verifyClusterAccess := func(g Gomega, expected string, command ...string) {
+				// Start a Valkey client pod to access the cluster and execute commands
 				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
 
-				cmd := exec.Command("kubectl", "run", "client",
+				// Append the client command to the overall kubectl run command
+				cmd := exec.Command("kubectl", append([]string{"run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
-					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
+					"valkey-cli", "-c", "-h", clusterFqdn}, command...)...)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-
-				// Verify additional config took effect. The sample config sets maxmemory to 50Mb.
-				cmd = exec.Command("kubectl", "run", "client2",
-					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
-					"valkey-cli", "-c", "-h", clusterFqdn, "CONFIG", "GET", "maxmemory")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to verify sample config")
-				g.Expect(output).To(ContainSubstring("52428800"))
 
 				cmd = exec.Command("kubectl", "wait", "pod/client",
 					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
@@ -434,7 +427,7 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "logs", "client")
-				output, err = utils.Run(cmd)
+				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "delete", "pod", "client",
@@ -442,15 +435,15 @@ var _ = Describe("Manager", Ordered, func() {
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "delete", "pod", "client2",
-					"--wait=true", "--timeout=30s")
-				_, err = utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
 				// The cluster should be ok.
-				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
+				g.Expect(output).To(ContainSubstring(expected))
 			}
-			Eventually(verifyClusterAccess).Should(Succeed())
+			Eventually(verifyClusterAccess).
+				WithArguments("cluster_state:ok", "CLUSTER", "INFO").
+				Should(Succeed(), "Failed CLUSTER INFO")
+			Eventually(verifyClusterAccess).
+				WithArguments("52428800", "CONFIG", "GET", "maxmemory").
+				Should(Succeed(), "Failed CONFIG GET maxmemory")
 		})
 	})
 

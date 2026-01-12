@@ -35,7 +35,7 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
-// TODO divide this file into multiple files (manager_test.go, valkeycluster_test.go, degraded_state_test.go, etc)
+// TODO divide this file into multiple files (manager_test.go, valkeycluster_test.go, etc)
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 	// After each test, check for failures and collect logs, events,

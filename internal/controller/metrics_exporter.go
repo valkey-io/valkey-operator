@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -31,7 +33,7 @@ func generateMetricsExporterContainerDef(cluster *valkeyiov1alpha1.ValkeyCluster
 	return corev1.Container{
 		Name:  "metrics-exporter",
 		Image: exporterImage,
-		Args:  []string{"--redis.addr=localhost:6379"},
+		Args:  []string{fmt.Sprintf("--redis.addr=localhost:%d", DefaultPort)},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "metrics",

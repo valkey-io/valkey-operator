@@ -70,6 +70,7 @@ type ValkeyClusterSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// Metrics exporter options
+	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 

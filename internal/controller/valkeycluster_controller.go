@@ -43,6 +43,8 @@ const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
 	DefaultImage          = "valkey/valkey:9.0.0"
+	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
+	DefaultExporterPort   = 9121
 
 	// Error messages
 	statusUpdateFailedMsg = "failed to update status"

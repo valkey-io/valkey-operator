@@ -974,6 +974,8 @@ spec:
                     type: object
                 type: object
               exporter:
+                default:
+                  enabled: true
                 description: Metrics exporter options
                 properties:
                   enabled:

@@ -19,6 +19,9 @@ package controller
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -50,4 +53,101 @@ func TestCreateClusterDeployment(t *testing.T) {
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
 	}
+}
+
+func TestGenerateContainersDef(t *testing.T) {
+	t.Run("should return only valkey-server when exporter is disabled", func(t *testing.T) {
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Exporter: valkeyv1.ExporterSpec{
+					Enabled: false,
+				},
+			},
+		}
+		containers := generateContainersDef(cluster)
+		assert.Len(t, containers, 1, "should have only one container")
+		assert.Equal(t, "valkey-server", containers[0].Name, "container should be valkey-server")
+	})
+
+	t.Run("should include metrics-exporter when exporter is enabled", func(t *testing.T) {
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Exporter: valkeyv1.ExporterSpec{
+					Enabled: true,
+				},
+			},
+		}
+		containers := generateContainersDef(cluster)
+		assert.Len(t, containers, 2, "should have two containers")
+		assert.True(t, containerExists(containers, "valkey-server"), "valkey-server container should exist")
+		assert.True(t, containerExists(containers, "metrics-exporter"), "metrics-exporter container should exist")
+	})
+
+	t.Run("should use default exporter image when not specified", func(t *testing.T) {
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Exporter: valkeyv1.ExporterSpec{
+					Enabled: true,
+				},
+			},
+		}
+		containers := generateContainersDef(cluster)
+		exporter := findContainer(containers, "metrics-exporter")
+		assert.NotNil(t, exporter, "exporter container should not be nil")
+		assert.Equal(t, DefaultExporterImage, exporter.Image, "should use default exporter image")
+	})
+
+	t.Run("should use custom exporter image when specified", func(t *testing.T) {
+		customImage := "my-exporter:1.2.3"
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Exporter: valkeyv1.ExporterSpec{
+					Enabled: true,
+					Image:   customImage,
+				},
+			},
+		}
+		containers := generateContainersDef(cluster)
+		exporter := findContainer(containers, "metrics-exporter")
+		assert.NotNil(t, exporter, "exporter container should not be nil")
+		assert.Equal(t, customImage, exporter.Image, "should use custom exporter image")
+	})
+
+	t.Run("should set custom resources for exporter", func(t *testing.T) {
+		resources := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Exporter: valkeyv1.ExporterSpec{
+					Enabled:   true,
+					Resources: resources,
+				},
+			},
+		}
+		containers := generateContainersDef(cluster)
+		exporter := findContainer(containers, "metrics-exporter")
+		assert.NotNil(t, exporter, "exporter container should not be nil")
+		assert.Equal(t, resources, exporter.Resources, "should set custom resources on exporter")
+	})
+}
+
+func containerExists(containers []corev1.Container, name string) bool {
+	return findContainer(containers, name) != nil
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
 }

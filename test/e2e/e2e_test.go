@@ -35,74 +35,10 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
-// namespace where the project is deployed in
-const namespace = "valkey-operator-system"
-
-// serviceAccountName created for the project
-const serviceAccountName = "valkey-operator-controller-manager"
-
-// metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "valkey-operator-controller-manager-metrics-service"
-
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "valkey-operator-metrics-binding"
-
-// valkeyClientImage is the image used to verify cluster access.
-const valkeyClientImage = "valkey/valkey:9.0.0"
-
+// TODO divide this file into multiple files (manager_test.go, valkeycluster_test.go, etc)
+// https://github.com/valkey-io/valkey-operator/issues/51
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
-
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
-	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
-
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
-
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-	})
-
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	AfterAll(func() {
-		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
-		_, _ = utils.Run(cmd)
-
-		By("deleting the metrics ClusterRoleBinding")
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
-		_, _ = utils.Run(cmd)
-
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
-	})
-
 	// After each test, check for failures and collect logs, events,
 	// and pod descriptions for debugging.
 	AfterEach(func() {
@@ -145,9 +81,6 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		}
 	})
-
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Context("Manager", func() {
 		It("should run successfully", func() {
@@ -288,20 +221,13 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
+			valkeyClusterName = "valkeycluster-sample"
 			By("validating the CR")
 			verifyCrExists := func(g Gomega) {
-				// Get the name of the ValkeyCluster CR
-				cmd := exec.Command("kubectl", "get",
-					"ValkeyCluster", "-o", "go-template={{ range .items }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}",
-				)
-				crOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster information")
-				crNames := utils.GetNonEmptyLines(crOutput)
-				g.Expect(crNames).To(HaveLen(1), "Expected 1 instance of a ValkeyCluster")
-				valkeyClusterName = crNames[0]
-				g.Expect(valkeyClusterName).To(ContainSubstring("valkeycluster-sample"))
+				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster CR")
+				g.Expect(output).To(Equal(valkeyClusterName))
 			}
 			Eventually(verifyCrExists).Should(Succeed())
 

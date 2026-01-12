@@ -35,6 +35,7 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
+// TODO divide this file into multiple files (manager_test.go, valkeycluster_test.go, degraded_state_test.go, etc)
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 	// After each test, check for failures and collect logs, events,
@@ -219,20 +220,13 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
+			valkeyClusterName = "valkeycluster-sample"
 			By("validating the CR")
 			verifyCrExists := func(g Gomega) {
-				// Get the name of the ValkeyCluster CR
-				cmd := exec.Command("kubectl", "get",
-					"ValkeyCluster", "-o", "go-template={{ range .items }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}",
-				)
-				crOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster information")
-				crNames := utils.GetNonEmptyLines(crOutput)
-				g.Expect(crNames).To(HaveLen(1), "Expected 1 instance of a ValkeyCluster")
-				valkeyClusterName = crNames[0]
-				g.Expect(valkeyClusterName).To(ContainSubstring("valkeycluster-sample"))
+				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster CR")
+				g.Expect(output).To(Equal(valkeyClusterName))
 			}
 			Eventually(verifyCrExists).Should(Succeed())
 

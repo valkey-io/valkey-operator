@@ -110,6 +110,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
 
+	// Check if failover is needed (has replica but no primary)
+	// and trigger manual failover if needed
+	if r.triggerFailoverIfNeeded(ctx, cluster, state) {
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, cluster, state, pods)
 
@@ -379,6 +386,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 		if len(shard.Nodes) < (1 + replicasRequired) {
 			primary := shard.GetPrimaryNode()
 			if primary == nil {
+				// Shard has no primary, this could be because Primary lost and failover is in progress.
 				log.Error(nil, "primary lost in shard", "Shard Id", shard.Id)
 				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "PrimaryLost", "Primary lost in shard %v", shard.Id)
 				setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPrimaryLost, "Primary lost in one or more shards", metav1.ConditionTrue)
@@ -400,9 +408,67 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 	return errors.New("node not added")
 }
 
+// triggerFailoverIfNeeded checks if any shard is missing its primary and triggers manual failover if
+// automatic failover hasn't completed after a reasonable time (10 seconds).
+// Returns true if failover was triggered, false otherwise.
+func (r *ValkeyClusterReconciler) triggerFailoverIfNeeded(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) bool {
+	log := logf.FromContext(ctx)
+
+	for _, shard := range state.Shards {
+		// Check if shard is missing its primary
+		if shard.GetPrimaryNode() == nil && len(shard.Nodes) > 0 {
+			// Check the Degraded condition to see how long we've been in this state
+			degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+
+			// Only trigger manual failover if we've been degraded for at least 10 seconds
+			// This gives automatic failover time to complete first
+			if degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue {
+				timeSinceDegraded := time.Since(degradedCondition.LastTransitionTime.Time)
+				if timeSinceDegraded < 10*time.Second {
+					log.V(1).Info("shard missing primary, waiting for automatic failover", "shardId", shard.Id, "waitTime", timeSinceDegraded.String(), "threshold", "10s")
+					return false
+				}
+
+				// Automatic failover hasn't completed after 10 seconds, trigger manual failover
+				log.Info("automatic failover did not complete, triggering manual failover", "shardId", shard.Id, "degradedFor", timeSinceDegraded.String())
+
+				// Find a replica in this shard to promote
+				for _, node := range shard.Nodes {
+					if !node.IsPrimary() {
+						log.V(1).Info("triggering manual failover on replica", "replica", node.Address, "shardId", shard.Id)
+
+						// Use CLUSTER FAILOVER FORCE which promotes the replica to primary
+						if err := node.Client.Do(ctx, node.Client.B().ClusterFailover().Force().Build()).Error(); err != nil {
+							log.Error(err, "command failed: CLUSTER FAILOVER FORCE", "replica", node.Address)
+							r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "FailoverFailed", "Failed to trigger failover for replica %v: %v", node.Address, err)
+						} else {
+							r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "FailoverTriggered", "Triggered manual failover for replica %v in shard %v", node.Address, shard.Id)
+							return true
+						}
+					}
+				}
+			} else {
+				return false
+			}
+		}
+	}
+	return false
+}
+
 // Check each cluster node and forget stale nodes (noaddr or status fail)
 func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) {
 	log := logf.FromContext(ctx)
+
+	// Don't forget nodes if any shard is missing its primary.
+	// When The failing node is replica’s master. Valkey rejects CLUSTER FORGET from a replica
+	// This allows time for automatic failover to complete before we clean up stale nodes.
+	for _, shard := range state.Shards {
+		if shard.GetPrimaryNode() == nil && len(shard.Nodes) > 0 {
+			log.V(1).Info("delaying forget: shard is missing primary, waiting for failover", "shardId", shard.Id, "numNodes", len(shard.Nodes))
+			return
+		}
+	}
+
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
 			// Get known nodes that are failing.

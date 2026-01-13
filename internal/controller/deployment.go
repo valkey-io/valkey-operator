@@ -23,12 +23,84 @@ import (
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Container {
 	image := DefaultImage
 	if cluster.Spec.Image != "" {
 		image = cluster.Spec.Image
 	}
+	containers := []corev1.Container{
+		{
+			Name:  "valkey-server",
+			Image: image,
+			Command: []string{
+				"valkey-server",
+				"/config/valkey.conf",
+			},
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "client",
+					ContainerPort: DefaultPort,
+				},
+				{
+					Name:          "cluster-bus",
+					ContainerPort: DefaultClusterBusPort,
+				},
+			},
+			LivenessProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				FailureThreshold:    5,
+				TimeoutSeconds:      5,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/bash",
+							"-c",
+							"/scripts/liveness-check.sh",
+						},
+					},
+				},
+			},
+			ReadinessProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				FailureThreshold:    5,
+				TimeoutSeconds:      2,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/bash",
+							"-c",
+							"/scripts/readiness-check.sh",
+						},
+					},
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "scripts",
+					MountPath: "/scripts",
+				},
+				{
+					Name:      "valkey-conf",
+					MountPath: "/config",
+					ReadOnly:  true,
+				},
+			},
+		},
+	}
 
+	// Add exporter sidecar if enabled
+	if cluster.Spec.Exporter.Enabled {
+		containers = append(containers, generateMetricsExporterContainerDef(cluster))
+	}
+	return containers
+}
+
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+	containers := generateContainersDef(cluster)
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
@@ -45,70 +117,8 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 					Labels: labels(cluster),
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "valkey-server",
-							Image: image,
-							Command: []string{
-								"valkey-server",
-								"/config/valkey.conf",
-							},
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          "client",
-									ContainerPort: DefaultPort,
-								},
-								{
-									Name:          "cluster-bus",
-									ContainerPort: DefaultClusterBusPort,
-								},
-							},
-							LivenessProbe: &corev1.Probe{
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
-								FailureThreshold:    5,
-								TimeoutSeconds:      5,
-								SuccessThreshold:    1,
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/scripts/liveness-check.sh",
-										},
-									},
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
-								FailureThreshold:    5,
-								TimeoutSeconds:      2,
-								SuccessThreshold:    1,
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/scripts/readiness-check.sh",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "scripts",
-									MountPath: "/scripts",
-								},
-								{
-									Name:      "valkey-conf",
-									MountPath: "/config",
-									ReadOnly:  true,
-								},
-							},
-						},
-					},
-					Affinity: cluster.Spec.Affinity,
+					Containers: containers,
+					Affinity:   cluster.Spec.Affinity,
 					Volumes: []corev1.Volume{
 						{
 							Name: "scripts",

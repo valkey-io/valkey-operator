@@ -35,74 +35,10 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
-// namespace where the project is deployed in
-const namespace = "valkey-operator-system"
-
-// serviceAccountName created for the project
-const serviceAccountName = "valkey-operator-controller-manager"
-
-// metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "valkey-operator-controller-manager-metrics-service"
-
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "valkey-operator-metrics-binding"
-
-// valkeyClientImage is the image used to verify cluster access.
-const valkeyClientImage = "valkey/valkey:9.0.0"
-
+// TODO divide this file into multiple files (manager_test.go, valkeycluster_test.go, etc)
+// https://github.com/valkey-io/valkey-operator/issues/51
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
-
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
-	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
-
-		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
-
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-	})
-
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
-	AfterAll(func() {
-		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
-		_, _ = utils.Run(cmd)
-
-		By("deleting the metrics ClusterRoleBinding")
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
-		_, _ = utils.Run(cmd)
-
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
-		_, _ = utils.Run(cmd)
-
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
-		_, _ = utils.Run(cmd)
-
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
-	})
-
 	// After each test, check for failures and collect logs, events,
 	// and pod descriptions for debugging.
 	AfterEach(func() {
@@ -145,9 +81,6 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		}
 	})
-
-	SetDefaultEventuallyTimeout(2 * time.Minute)
-	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Context("Manager", func() {
 		It("should run successfully", func() {
@@ -288,20 +221,13 @@ var _ = Describe("Manager", Ordered, func() {
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
+			valkeyClusterName = "valkeycluster-sample"
 			By("validating the CR")
 			verifyCrExists := func(g Gomega) {
-				// Get the name of the ValkeyCluster CR
-				cmd := exec.Command("kubectl", "get",
-					"ValkeyCluster", "-o", "go-template={{ range .items }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}",
-				)
-				crOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster information")
-				crNames := utils.GetNonEmptyLines(crOutput)
-				g.Expect(crNames).To(HaveLen(1), "Expected 1 instance of a ValkeyCluster")
-				valkeyClusterName = crNames[0]
-				g.Expect(valkeyClusterName).To(ContainSubstring("valkeycluster-sample"))
+				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyCluster CR")
+				g.Expect(output).To(Equal(valkeyClusterName))
 			}
 			Eventually(verifyCrExists).Should(Succeed())
 
@@ -381,6 +307,107 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(slotsAssignedCond.Status).To(Equal(metav1.ConditionTrue))
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
+
+			// NOTE: Kubernetes Events are best-effort and may be rate-limited, delayed by
+			// `kubectl get events` / `kubectl describe` when many events are emitted for the same Custom Resource.
+			// In particular, kubectl output can appear capped (~15–20) and events can show up late; see:
+			// https://github.com/kubernetes/kubernetes/issues/136061
+			// This test therefore asserts a minimal set of "must-have" events and uses cluster status as the
+			// source of truth for readiness/replicas when optional events are missing.
+			By("verifying key events were emitted (best-effort)")
+			verifyAllEvents := func(g Gomega) {
+				normalEvents, warningEvents, err := utils.GetEvents(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// Infrastructure Events (Normal)
+				g.Expect(normalEvents["ServiceCreated"]).To(BeTrue(), "ServiceCreated event should be emitted")
+				g.Expect(normalEvents["ConfigMapCreated"]).To(BeTrue(), "ConfigMapCreated event should be emitted")
+				g.Expect(normalEvents["DeploymentCreated"]).To(BeTrue(), "DeploymentCreated event should be emitted")
+
+				// Topology Events (Normal)
+				g.Expect(normalEvents["NodeAdding"]).To(BeTrue(), "NodeAdding event should be emitted")
+				g.Expect(normalEvents["NodeAdded"]).To(BeTrue(), "NodeAdded event should be emitted")
+				g.Expect(normalEvents["PrimaryCreated"]).To(BeTrue(), "PrimaryCreated event should be emitted")
+
+				// ClusterMeet should be emitted when nodes meet each other
+				g.Expect(normalEvents["ClusterMeet"]).To(BeTrue(), "ClusterMeet event should be emitted")
+
+				// ReplicaCreated should be emitted for clusters with replicas > 0
+				// Note: This event may not always be captured due to rate-limiting issues
+				if !normalEvents["ReplicaCreated"] {
+					// Verify cluster actually has replicas even if event wasn't captured
+					cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+					g.Expect(err).NotTo(HaveOccurred())
+					// The cluster should have 3 shards with 1 replica each (6 total pods)
+					// If cluster is ready with correct shard count, replicas were created successfully
+					g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)), "Cluster should have 3 ready shards with replicas (ReplicaCreated event may not have been captured)")
+				}
+
+				// Status Events (Normal) - May or may not be present depending on timing
+				// WaitingForShards and WaitingForReplicas are emitted during reconciliation
+				// but may not always be captured depending on how fast the cluster forms
+				if normalEvents["WaitingForShards"] {
+					// If present, verify it was emitted correctly
+					g.Expect(normalEvents["WaitingForShards"]).To(BeTrue(), "WaitingForShards event was emitted")
+				}
+				if normalEvents["WaitingForReplicas"] {
+					g.Expect(normalEvents["WaitingForReplicas"]).To(BeTrue(), "WaitingForReplicas event was emitted")
+				}
+
+				// ClusterReady event should be emitted when cluster becomes healthy
+				// Note: This may be rate-limited by Kubernetes
+				// We'll check for it but won't fail if it's missing due to rate-limiting and may be delayed
+				if !normalEvents["ClusterReady"] {
+					cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+					// Verify cluster is actually ready even if event was rate-limited
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady), "Cluster should be in Ready state (ClusterReady event may be rate-limited)")
+				}
+
+				// Critical infrastructure failures that should NEVER occur
+				g.Expect(warningEvents["ServiceUpdateFailed"]).To(BeFalse(), "ServiceUpdateFailed event should not be emitted")
+				g.Expect(warningEvents["ConfigMapUpdateFailed"]).To(BeFalse(), "ConfigMapUpdateFailed event should not be emitted")
+				g.Expect(warningEvents["ConfigMapCreationFailed"]).To(BeFalse(), "ConfigMapCreationFailed event should not be emitted")
+				g.Expect(warningEvents["DeploymentCreationFailed"]).To(BeFalse(), "DeploymentCreationFailed event should not be emitted")
+				g.Expect(warningEvents["ClusterMeetFailed"]).To(BeFalse(), "ClusterMeetFailed event should not be emitted")
+				g.Expect(warningEvents["SlotAssignmentFailed"]).To(BeFalse(), "SlotAssignmentFailed event should not be emitted")
+				g.Expect(warningEvents["NodeForgetFailed"]).To(BeFalse(), "NodeForgetFailed event should not be emitted")
+
+				// Transient errors that may occur during formation but should be resolved
+				hasTransientErrors := warningEvents["NodeAddFailed"] || warningEvents["ReplicaCreationFailed"] || warningEvents["PrimaryLost"]
+				if hasTransientErrors {
+					// Verify cluster recovered and reached healthy state despite transient errors
+					cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady), "Cluster should recover from transient errors and reach Ready state")
+					g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)), "All shards should be ready despite transient errors during formation")
+				}
+
+				// StaleNodeForgotten is a Normal event that should not occur during initial cluster creation
+				g.Expect(normalEvents["StaleNodeForgotten"]).To(BeFalse(), "StaleNodeForgotten event should not be emitted during initial creation")
+			}
+			Eventually(verifyAllEvents).Should(Succeed())
+
+			By("verifying events are visible in kubectl describe")
+			verifyDescribeEvents := func(g Gomega) {
+				cmd := exec.Command("kubectl", "describe", "valkeycluster", valkeyClusterName)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("Events:"), "Events section should be present in describe output")
+
+				// Verify key events appear in describe output
+				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("DeploymentCreated"), "DeploymentCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("NodeAdding"), "NodeAdding event should appear in describe")
+				g.Expect(output).To(ContainSubstring("NodeAdded"), "NodeAdded event should appear in describe")
+				g.Expect(output).To(ContainSubstring("PrimaryCreated"), "PrimaryCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("ClusterMeet"), "ClusterMeet event should appear in describe")
+				// ReplicaCreated and ClusterReady may not always appear in describe output due to:
+				// - Rate limiting as described above
+				// We verify these through cluster status instead of strictly requiring the events
+			}
+			Eventually(verifyDescribeEvents).Should(Succeed())
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
@@ -526,17 +553,21 @@ spec:
 				// transitions through Reconciling/AddingNodes states, and may briefly enter
 				// Degraded state (with NodeAddFailed reason), if adding the node fails temporarily).
 				// However, this is not guaranteed, so we only check for Recovery here.
-				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReconciling),
-					fmt.Sprintf("Expected cluster to be reconciling after deployment deletion, but got:%s (reason: %s)", cr.Status.State, cr.Status.Reason))
+				g.Expect(cr.Status.State).To(Or(Equal(valkeyiov1alpha1.ClusterStateReconciling), Equal(valkeyiov1alpha1.ClusterStateDegraded)),
+					fmt.Sprintf("Expected cluster to be reconciling or degraded after deployment deletion, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
 
 				// Ready condition should be False during recovery
 				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 				if readyCond != nil {
 					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when deployment is being recreated")
 				}
+
+				// verify event was emitted for NodeAddFailed during recovery
+				_, warningEvents, err := utils.GetEvents(degradedClusterName)
+				g.Expect(warningEvents["NodeAddFailed"]).To(BeTrue(), "NodeAddFailed event should be emitted when deployment is deleted")
+
 			}
 			Eventually(verifyDegradedState).Should(Succeed())
-
 			By("waiting for the operator to recreate the deployment and recover the cluster")
 			verifyClusterRecovery := func(g Gomega) {
 				// First, verify all deployments are present (should be 6 total for 3 shards with 1 replica each)

@@ -303,6 +303,9 @@ func GetReplicaDeployment(selector string) (string, error) {
 	}
 	podNames := strings.Fields(output)
 
+	// Compile the regex once
+	replicaPattern := regexp.MustCompile(`(?m)^\s*\d+:S`)
+
 	for _, podName := range podNames {
 		// Get logs (last 100 lines should be enough to see the role)
 		cmd = exec.Command("kubectl", "logs", podName, "--tail=100")
@@ -314,8 +317,7 @@ func GetReplicaDeployment(selector string) (string, error) {
 
 		// Check for specific pattern indicating a replica (e.g., "1:S ...")
 		// The user specified "logs start with :S", which refers to the standard Valkey log format column.
-		matched, _ := regexp.MatchString(`(?m)^\s*\d+:S`, logs)
-		if matched {
+		if replicaPattern.MatchString(logs) {
 			// Found a replica pod, now find its deployment.
 			// 1. Get ReplicaSet owner of the pod
 			cmd = exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")

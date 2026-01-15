@@ -135,6 +135,60 @@ func TestGenerateContainersDef(t *testing.T) {
 		assert.NotNil(t, exporter, "exporter container should not be nil")
 		assert.Equal(t, resources, exporter.Resources, "should set custom resources on exporter")
 	})
+
+	t.Run("should set custom resources requests for valkey-server", func(t *testing.T) {
+		resourceReqs := corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
+				corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Resources: resourceReqs,
+			},
+		}
+		containers := generateContainersDef(cluster)
+		valkeyContainer := findContainer(containers, "valkey-server")
+		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources requests on valkey-server")
+	})
+
+	t.Run("should set custom resources limits for valkey-server", func(t *testing.T) {
+		resourceReqs := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceLimitsMemory: resource.MustParse("500Mi"),
+				corev1.ResourceLimitsCPU:    resource.MustParse("200m"),
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Resources: resourceReqs,
+			},
+		}
+		containers := generateContainersDef(cluster)
+		valkeyContainer := findContainer(containers, "valkey-server")
+		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources limits on valkey-server")
+	})
+	t.Run("should set custom resources for valkey-server", func(t *testing.T) {
+		resourceReqs := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceLimitsMemory: resource.MustParse("500Mi"),
+				corev1.ResourceLimitsCPU:    resource.MustParse("200m"),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
+				corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Resources: resourceReqs,
+			},
+		}
+		containers := generateContainersDef(cluster)
+		valkeyContainer := findContainer(containers, "valkey-server")
+		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources on valkey-server")
+	})
 }
 
 func containerExists(containers []corev1.Container, name string) bool {
@@ -148,77 +202,4 @@ func findContainer(containers []corev1.Container, name string) *corev1.Container
 		}
 	}
 	return nil
-}
-func TestCreateClusterDeploymentWithOnlyResourceRequests(t *testing.T) {
-	resourceReqs := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
-			corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
-		},
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "mycluster",
-		},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:     "container:version",
-			Resources: resourceReqs,
-		},
-	}
-	d := createClusterDeployment(cluster)
-	if len(d.Spec.Template.Spec.Containers[0].Resources.Requests) != 2 {
-		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Requests))
-	}
-}
-
-func TestCreateClusterDeploymentWithOnlyResourceLimits(t *testing.T) {
-	resourceReqs := corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceLimitsMemory: resource.MustParse("100Mi"),
-			corev1.ResourceLimitsCPU:    resource.MustParse("100m"),
-		},
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "mycluster",
-		},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:     "container:version",
-			Resources: resourceReqs,
-		},
-	}
-	d := createClusterDeployment(cluster)
-	if len(d.Spec.Template.Spec.Containers[0].Resources.Limits) != 2 {
-		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Limits))
-	}
-}
-
-func TestCreateClusterDeploymentWithBothResourceRequestsAndLimits(t *testing.T) {
-	resourceReqs := corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceLimitsMemory: resource.MustParse("500Mi"),
-			corev1.ResourceLimitsCPU:    resource.MustParse("200m"),
-		},
-		Requests: corev1.ResourceList{
-			corev1.ResourceRequestsMemory: resource.MustParse("100Mi"),
-			corev1.ResourceRequestsCPU:    resource.MustParse("100m"),
-		},
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "mycluster",
-		},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:     "container:version",
-			Resources: resourceReqs,
-		},
-	}
-	d := createClusterDeployment(cluster)
-	if len(d.Spec.Template.Spec.Containers[0].Resources.Requests) != 2 {
-		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Requests))
-	}
-	if len(d.Spec.Template.Spec.Containers[0].Resources.Limits) != 2 {
-		t.Errorf("Expected %v, got %v", 2, len(d.Spec.Template.Spec.Containers[0].Resources.Limits))
-	}
-
 }

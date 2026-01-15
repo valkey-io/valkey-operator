@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -287,4 +288,52 @@ func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
 	}
 
 	return normalEvents, warningEvents, nil
+}
+
+// TODO: use this function until we have a better way to find the replica deployment.
+// maybe we need to update valkey cluster status to include master and replica deployment identifiers.
+// GetReplicaDeployment finds a deployment that is running a replica instance
+// by checking the logs of its pods for the ":S" role indicator.
+func GetReplicaDeployment(selector string) (string, error) {
+	// List pods matching the selector
+	cmd := exec.Command("kubectl", "get", "pods", "-l", selector, "-o", "jsonpath={.items[*].metadata.name}")
+	output, err := Run(cmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to list pods: %w", err)
+	}
+	podNames := strings.Fields(output)
+
+	for _, podName := range podNames {
+		// Get logs (last 100 lines should be enough to see the role)
+		cmd = exec.Command("kubectl", "logs", podName, "--tail=100")
+		logs, err := Run(cmd)
+		if err != nil {
+			// Ignore errors getting logs (pod might be initializing)
+			continue
+		}
+
+		// Check for specific pattern indicating a replica (e.g., "1:S ...")
+		// The user specified "logs start with :S", which refers to the standard Valkey log format column.
+		matched, _ := regexp.MatchString(`(?m)^\s*\d+:S`, logs)
+		if matched {
+			// Found a replica pod, now find its deployment.
+			// 1. Get ReplicaSet owner of the pod
+			cmd = exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+			rsName, err := Run(cmd)
+			if err != nil || rsName == "" {
+				continue
+			}
+
+			// 2. Get Deployment owner of the ReplicaSet
+			cmd = exec.Command("kubectl", "get", "rs", rsName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+			deployName, err := Run(cmd)
+			if err != nil || deployName == "" {
+				continue
+			}
+
+			return deployName, nil
+		}
+	}
+
+	return "", fmt.Errorf("no replica deployment found with selector %q", selector)
 }

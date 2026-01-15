@@ -522,19 +522,13 @@ spec:
 			By("getting a deployment to delete")
 			var deploymentToDelete string
 			getDeployment := func(g Gomega) {
-				cmd := exec.Command(
-					"kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
-					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}",
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				deployments := utils.GetNonEmptyLines(output)
-				g.Expect(len(deployments)).To(BeNumerically(">", 0))
-
-				// Get the first deployment
-				deploymentToDelete = deployments[0]
+				// selecting replica deployment to delete as we have intermittent issue
+				// with master deployment deletion resulting in cluster not being able to recover
+				// https://github.com/valkey-io/valkey-operator/issues/43
+				var err error
+				deploymentToDelete, err = utils.GetReplicaDeployment(fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName))
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a replica deployment")
+				g.Expect(deploymentToDelete).NotTo(BeEmpty())
 			}
 			Eventually(getDeployment).Should(Succeed())
 

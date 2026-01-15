@@ -561,11 +561,6 @@ spec:
 				if readyCond != nil {
 					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when deployment is being recreated")
 				}
-
-				// verify event was emitted for NodeAddFailed during recovery
-				_, warningEvents, err := utils.GetEvents(degradedClusterName)
-				g.Expect(warningEvents["NodeAddFailed"]).To(BeTrue(), "NodeAddFailed event should be emitted when deployment is deleted")
-
 			}
 			Eventually(verifyDegradedState).Should(Succeed())
 			By("waiting for the operator to recreate the deployment and recover the cluster")

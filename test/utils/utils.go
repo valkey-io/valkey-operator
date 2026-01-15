@@ -303,37 +303,45 @@ func GetReplicaDeployment(selector string) (string, error) {
 	}
 	podNames := strings.Fields(output)
 
-	// Compile the regex once
-	replicaPattern := regexp.MustCompile(`(?m)^\s*\d+:S`)
+	// Compile the regex once to capture the role (M or S)
+	rolePattern := regexp.MustCompile(`^\s*\d+:([MS])`)
 
 	for _, podName := range podNames {
-		// Get logs (last 100 lines should be enough to see the role)
-		cmd = exec.Command("kubectl", "logs", podName, "--tail=100")
+		// Get logs (last 20 lines should be enough to see the role)
+		cmd = exec.Command("kubectl", "logs", podName, "--tail=20")
 		logs, err := Run(cmd)
 		if err != nil {
 			// Ignore errors getting logs (pod might be initializing)
 			continue
 		}
 
-		// Check for specific pattern indicating a replica (e.g., "1:S ...")
-		// The user specified "logs start with :S", which refers to the standard Valkey log format column.
-		if replicaPattern.MatchString(logs) {
-			// Found a replica pod, now find its deployment.
-			// 1. Get ReplicaSet owner of the pod
-			cmd = exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
-			rsName, err := Run(cmd)
-			if err != nil || rsName == "" {
-				continue
-			}
+		lines := strings.Split(logs, "\n")
+		// Search from the end to find the most recent role
+		for i := len(lines) - 1; i >= 0; i-- {
+			matches := rolePattern.FindStringSubmatch(lines[i])
+			if len(matches) > 1 {
+				role := matches[1]
+				if role == "S" {
+					// Found a replica pod, now find its deployment.
+					// 1. Get ReplicaSet owner of the pod
+					cmd = exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+					rsName, err := Run(cmd)
+					if err != nil || rsName == "" {
+						break // Try next pod
+					}
 
-			// 2. Get Deployment owner of the ReplicaSet
-			cmd = exec.Command("kubectl", "get", "rs", rsName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
-			deployName, err := Run(cmd)
-			if err != nil || deployName == "" {
-				continue
-			}
+					// 2. Get Deployment owner of the ReplicaSet
+					cmd = exec.Command("kubectl", "get", "rs", rsName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+					deployName, err := Run(cmd)
+					if err != nil || deployName == "" {
+						break // Try next pod
+					}
 
-			return deployName, nil
+					return deployName, nil
+				}
+				// If role is "M", it's a master, so this pod is not a replica. Stop checking this pod.
+				break
+			}
 		}
 	}
 

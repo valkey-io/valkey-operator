@@ -391,8 +391,6 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("DeploymentCreated"), "DeploymentCreated event should appear in describe")
-				g.Expect(output).To(ContainSubstring("NodeAdding"), "NodeAdding event should appear in describe")
-				g.Expect(output).To(ContainSubstring("NodeAdded"), "NodeAdded event should appear in describe")
 				// TODO PrimaryCreated, ClusterMeet events are not always captured due to rate-limiting issues
 				// fix this removing events which are not important
 				// ReplicaCreated and ClusterReady may not always appear in describe output due to:

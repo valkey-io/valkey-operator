@@ -85,7 +85,6 @@ type ExporterSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Enable or disable the exporter sidecar container
-	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
 }
 

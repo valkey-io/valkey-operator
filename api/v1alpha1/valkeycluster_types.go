@@ -38,6 +38,14 @@ const (
 	ClusterStateFailed ClusterState = "Failed"
 )
 
+// This list defines specific Valkey server configuration parameters that cannot
+// be overridden by a user-supplied configuration within the CR. Doing so would
+// potentially break the operator's behavior, which could result in data loss, or
+// a non-functioning cluster
+var NonUserOverrideConfigParameters = []string{
+	"cluster-enabled",
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 type ValkeyClusterSpec struct {
 
@@ -73,6 +81,19 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// Options, or config which are specific to Valkey server
+	// +optional
+	ValkeySpec ValkeySpec `json:"valkey,omitempty"`
+}
+
+// ValkeySpec defines any options, or configuration that is specific to valkey-server
+type ValkeySpec struct {
+
+	// Additional Valkey configuration parameters
+	// TODO Updating the config of an existing CR currently does not trigger cluster restart
+	// https://github.com/valkey-io/valkey-operator/issues/50
+	Configuration map[string]string `json:"config,omitempty"`
 }
 
 type ExporterSpec struct {

@@ -43,3 +43,7 @@ func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
+
+func getConfigMapName(cn string) string {
+	return cn + "-config"
+}

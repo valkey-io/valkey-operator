@@ -73,6 +73,50 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// Options, or config which are specific to Valkey server
+	// +optional
+	ValkeySpec ValkeySpec `json:"valkeyConfig,omitempty"`
+}
+
+// ValkeySpec defines any options, or configuration that is specific to valkey-server
+type ValkeySpec struct {
+
+	// Auth-related structure for handling users, and acls
+	Auth AuthSpec `json:"auth,omitempty"`
+}
+
+// AuthSpec contains authorization, user, and ACL-related configurations
+type AuthSpec struct {
+
+	// Enable, or disable protected mode
+	// +kubebuilder:default:=true
+	ProtectedMode bool `json:"protectedmode,omitempty"`
+
+	// Users ACL Secret
+	// A reference name to a Secret containing raw user:permission entries, which will be processed first
+	// Defaults to clusterName-secret
+	// +optional
+	UsersSecretRef string `json:"usersSecretRef,omitempty"`
+
+	// Array of users with raw ACL, or reference to a key in the UsersSecretRef
+	Users map[string]UserAcl `json:"users,omitempty"`
+}
+
+type UserAcl struct {
+
+	// Raw ACL line, including password
+	Permissions string `json:"permissions,omitempty"`
+
+	// sha256 password
+	// kubebuilder:validation:MinLength=64
+	// kubebuilder:validation:MaxLength=65
+	// kubebuilder:XValidation:message="Password should be a sha256 hash"
+	Password string `json:"password,omitempty"`
+
+	// Reference to a key in UsersSecretRef containing the password for this user
+	// Defaults to the username
+	PasswordKeyRef string `json:"passwordKeyRef,omitempty"`
 }
 
 type ExporterSpec struct {
@@ -155,6 +199,7 @@ const (
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
 	ReasonNoSlots           = "NoSlotsAvailable"
+	ReasonUsersAclError     = "UsersACLError"
 )
 
 // +kubebuilder:object:root=true

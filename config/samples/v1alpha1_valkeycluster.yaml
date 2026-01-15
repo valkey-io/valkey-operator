@@ -1,3 +1,13 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: valkey-users
+data:
+  alicepw: M21wdHlQQHNzdzByZA==
+  bob: YjFjMzY4OTZkMzk5MjMwNDU5NTVjMzczZjM2NWVkNjg2Y2I5N2RiNTA1NGE0NTJjN2EzZmQ5MjAwZTMzNGYxZAo=
+  monitor: ZHIwd3NzQFB5dHBtMw==
+---
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
@@ -5,3 +15,13 @@ metadata:
 spec:
   shards: 3
   replicas: 1
+  valkeyConfig:
+    auth:
+      protectedmode: on
+      usersSecretRef: valkey-users
+      users:
+        alice:
+          permissions: +@list +@connection ~jobs:*
+          passwordKeyRef: alicepw
+        bob:
+          permissions: ~* +@all

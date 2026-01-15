@@ -1164,6 +1164,46 @@ spec:
                       type: string
                   type: object
                 type: array
+              valkeyConfig:
+                description: Options, or config which are specific to Valkey server
+                properties:
+                  auth:
+                    description: Auth-related structure for handling users, and acls
+                    properties:
+                      protectedmode:
+                        default: true
+                        description: Enable, or disable protected mode
+                        type: boolean
+                      users:
+                        additionalProperties:
+                          properties:
+                            password:
+                              description: |-
+                                sha256 password
+                                kubebuilder:validation:MinLength=64
+                                kubebuilder:validation:MaxLength=65
+                                kubebuilder:XValidation:message="Password should be a sha256 hash"
+                              type: string
+                            passwordKeyRef:
+                              description: |-
+                                Reference to a key in UsersSecretRef containing the password for this user
+                                Defaults to the username
+                              type: string
+                            permissions:
+                              description: Raw ACL line, including password
+                              type: string
+                          type: object
+                        description: Array of users with raw ACL, or reference to
+                          a key in the UsersSecretRef
+                        type: object
+                      usersSecretRef:
+                        description: |-
+                          Users ACL Secret
+                          A reference name to a Secret containing raw user:permission entries, which will be processed first
+                          Defaults to clusterName-secret
+                        type: string
+                    type: object
+                type: object
             type: object
           status:
             default:

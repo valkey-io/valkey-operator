@@ -274,11 +274,18 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
+			By("validating valkey-server containers have resources configuration")
+			cmd = exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+				"-o", "jsonpath={.items[0].spec.containers[?(@.name=='valkey-server')].resources}",
+			)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
+			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
-
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
 				g.Expect(cr.Status.Message).To(Equal("Cluster is healthy"))
@@ -628,48 +635,6 @@ spec:
 		})
 	})
 
-	Context("when a ValkeyCluster CR with Resource Configuration is applied", func() {
-		It("should apply resource requests configuration", func() {
-			By("creating a ValkeyCluster")
-			resourceConfigClusterManifest := `
-apiVersion: valkey.io/v1alpha1
-kind: ValkeyCluster
-metadata:
-  name: valkeycluster-withresourceconfig
-spec:
-  shards: 3
-  replicas: 1
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
-`
-			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-withresourceconfig.yaml")
-			err := os.WriteFile(manifestFile, []byte(resourceConfigClusterManifest), 0644)
-			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
-			// defer os.Remove(manifestFile)
-
-			By("applying the CR")
-			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
-			By("validating the CR")
-			verifyCrExists := func(g Gomega) {
-				// Get the name of the ValkeyCluster CR
-				cmd := exec.Command("kubectl", "get",
-					"pods", "-l", "app.kubernetes.io/instance=valkeycluster-withresourceconfig", "-o", "jsonpath={.items[0].spec.containers[?(@.name=='valkey-server')].resources}",
-				)
-				crOutput, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
-				g.Expect(crOutput).To(Equal(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
-			}
-			Eventually(verifyCrExists).Should(Succeed())
-
-		})
-	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

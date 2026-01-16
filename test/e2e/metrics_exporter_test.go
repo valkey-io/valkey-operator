@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -57,7 +56,7 @@ spec:
 `, valkeyName)
 
 			// Create temporary YAML file
-			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.yaml", valkeyName, time.Now().UnixNano()))
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
@@ -75,7 +74,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
 				g.Expect(out).To(ContainSubstring(valkeyName))
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying pod has 2 containers (valkey-server and metrics-exporter)")
 			Eventually(func(g Gomega) {
@@ -90,7 +89,7 @@ spec:
 				g.Expect(containers).To(HaveLen(2), "Expected 2 containers in pod")
 				g.Expect(containers).To(ContainElement("valkey-server"), "Should have valkey-server container")
 				g.Expect(containers).To(ContainElement("metrics-exporter"), "Should have metrics-exporter container")
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying metrics-exporter container uses correct image")
 			Eventually(func(g Gomega) {
@@ -102,7 +101,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get exporter image")
 				g.Expect(out).To(ContainSubstring("redis_exporter"), "Should use redis_exporter image")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying metrics-exporter container has correct port")
 			Eventually(func(g Gomega) {
@@ -114,7 +113,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get exporter port")
 				g.Expect(out).To(Equal("9121"), "Exporter should expose port 9121")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying resource requests are set correctly")
 			Eventually(func(g Gomega) {
@@ -126,7 +125,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get memory request")
 				g.Expect(out).To(Equal("32Mi"), "Memory request should be 32Mi")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying resource limits are set correctly")
 			Eventually(func(g Gomega) {
@@ -138,7 +137,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get memory limit")
 				g.Expect(out).To(Equal("64Mi"), "Memory limit should be 64Mi")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Waiting for pod to be running")
 			Eventually(func(g Gomega) {
@@ -150,7 +149,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod status")
 				g.Expect(out).To(Equal("Running"), "Pod should be running")
-			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying both containers are ready")
 			Eventually(func(g Gomega) {
@@ -166,7 +165,7 @@ spec:
 				for _, status := range readyStatuses {
 					g.Expect(status).To(Equal("true"), "All containers should be ready")
 				}
-			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Getting pod name for metrics verification")
 			var podName string
@@ -180,23 +179,71 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod name")
 				g.Expect(out).NotTo(BeEmpty(), "Pod name should not be empty")
 				podName = out
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
-			By("Setting up port-forward to metrics-exporter")
-			portForwardCmd := exec.Command("kubectl", "port-forward", podName, "9121:9121")
-			err = portForwardCmd.Start()
-			Expect(err).NotTo(HaveOccurred())
+			By("Getting pod IP for metrics verification")
+			var podIP string
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", podName,
+					"-o", "jsonpath={.status.podIP}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod IP")
+				g.Expect(out).NotTo(BeEmpty(), "Pod IP should not be empty")
+				podIP = out
+			}).Should(Succeed())
+
+			By("Creating a curl pod to test metrics")
+			curlPodName := "curl-metrics-" + valkeyName
+			cmd = exec.Command("kubectl", "run", curlPodName, "--image=curlimages/curl:latest", "--restart=Never",
+				"--overrides",
+				`{
+					"spec": {
+						"containers": [{
+							"name": "curl",
+							"image": "curlimages/curl:latest",
+							"command": ["/bin/sh", "-c"],
+							"args": ["sleep 3600"],
+							"securityContext": {
+								"readOnlyRootFilesystem": true,
+								"allowPrivilegeEscalation": false,
+								"capabilities": {
+									"drop": ["ALL"]
+								},
+								"runAsNonRoot": true,
+								"runAsUser": 1000,
+								"seccompProfile": {
+									"type": "RuntimeDefault"
+								}
+							}
+						}]
+					}
+				}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create curl pod")
 			defer func() {
-				err := portForwardCmd.Process.Kill()
-				Expect(err).NotTo(HaveOccurred())
+				cmd := exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
 			}()
 
-			// Wait a bit for port-forwarding to be ready
-			time.Sleep(2 * time.Second)
+			By("Waiting for the curl pod to be running")
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", curlPodName,
+					"-o", "jsonpath={.status.phase}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get curl pod status")
+				g.Expect(out).To(Equal("Running"), "Curl pod should be running")
+			}).Should(Succeed())
 
 			By("verifying common Valkey metrics are exposed")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("curl", "-s", "http://localhost:9121/metrics")
+				url := fmt.Sprintf("http://%s:9121/metrics", podIP)
+				cmd := exec.Command("kubectl", "exec", curlPodName, "--", "curl", "-s", url)
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get metrics")
 				// Check that redis_up is 1 (indicating successful connection)
@@ -214,15 +261,16 @@ spec:
 				for _, metric := range expectedMetrics {
 					g.Expect(out).To(ContainSubstring(metric), fmt.Sprintf("Should contain metric: %s", metric))
 				}
-			}, 2*time.Minute, 10*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying /health endpoint is accessible")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("curl", "-s", "http://localhost:9121/health")
+				url := fmt.Sprintf("http://%s:9121/health", podIP)
+				cmd := exec.Command("kubectl", "exec", curlPodName, "--", "curl", "-s", url)
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Health endpoint should be accessible")
 				g.Expect(out).NotTo(BeEmpty(), "Health endpoint should return a response")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
@@ -247,7 +295,7 @@ spec:
 `, valkeyName)
 
 			// Create temporary YAML file
-			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.yaml", valkeyName, time.Now().UnixNano()))
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
@@ -265,7 +313,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
 				g.Expect(out).To(ContainSubstring(valkeyName))
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying pod has only 1 container (valkey-server)")
 			Eventually(func(g Gomega) {
@@ -279,7 +327,7 @@ spec:
 				containers := strings.Fields(out)
 				g.Expect(containers).To(HaveLen(1), "Expected only 1 container in pod")
 				g.Expect(containers[0]).To(Equal("valkey-server"), "Should only have valkey-server container")
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Verifying metrics-exporter container is NOT present")
 			Eventually(func(g Gomega) {
@@ -291,7 +339,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod containers")
 				g.Expect(out).NotTo(ContainSubstring("metrics-exporter"), "Should NOT have metrics-exporter container")
-			}, 1*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Waiting for pod to be running")
 			Eventually(func(g Gomega) {
@@ -303,7 +351,7 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod status")
 				g.Expect(out).To(Equal("Running"), "Pod should be running")
-			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("Cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")

@@ -30,8 +30,9 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	}
 	containers := []corev1.Container{
 		{
-			Name:  "valkey-server",
-			Image: image,
+			Name:      "valkey-server",
+			Image:     image,
+			Resources: cluster.Spec.Resources,
 			Command: []string{
 				"valkey-server",
 				"/config/valkey.conf",

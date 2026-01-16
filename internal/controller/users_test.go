@@ -40,7 +40,7 @@ func TestBuildAclFileContents(t *testing.T) {
 	// alice should succeed as there is permissions, and valid password
 	expected := "user alice on #b6366487efc982bfe450c46753917ee883f71a3f4fa5cdc5bde78d1784842e73 +@list +@connection ~jobs:*"
 	acl := buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
-		"alice": valkeyiov1alpha1.UserAcl{
+		"alice": {
 			Permissions: "+@list +@connection ~jobs:*",
 			Password:    "thisisagoodpassword",
 		}}, testSecrets)
@@ -51,7 +51,7 @@ func TestBuildAclFileContents(t *testing.T) {
 	// bob fails to be added because there is no matching password ref in Secret
 	expected = ""
 	acl = buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
-		"bob": valkeyiov1alpha1.UserAcl{
+		"bob": {
 			Permissions:    "-@all",
 			PasswordKeyRef: "bobkeyref",
 		}}, testSecrets)
@@ -62,7 +62,7 @@ func TestBuildAclFileContents(t *testing.T) {
 	// charlie fails to be added because there is no password, and no password ref
 	expected = ""
 	acl = buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
-		"charlie": valkeyiov1alpha1.UserAcl{
+		"charlie": {
 			Permissions: "+@list +@connection ~jobs:*",
 		}}, testSecrets)
 	if strings.TrimRight(string(acl), "\n") != expected {
@@ -72,7 +72,7 @@ func TestBuildAclFileContents(t *testing.T) {
 	// david should succeed as there is permissions, and valid key ref
 	expected = "user david on #c90502e005ee957f29645e21d1e27f5bbfce539e38c949a00dfc12270f47fc59 +@all"
 	acl = buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
-		"david": valkeyiov1alpha1.UserAcl{
+		"david": {
 			Permissions:    "+@all",
 			PasswordKeyRef: "davidref",
 		}}, testSecrets)
@@ -83,7 +83,7 @@ func TestBuildAclFileContents(t *testing.T) {
 	// edward fails to be added because there are no permissions
 	expected = ""
 	acl = buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
-		"edward": valkeyiov1alpha1.UserAcl{
+		"edward": {
 			Password: "edwardpass",
 		}}, testSecrets)
 	if strings.TrimRight(string(acl), "\n") != expected {

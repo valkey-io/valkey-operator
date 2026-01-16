@@ -19,6 +19,8 @@ package controller
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -50,6 +52,37 @@ func TestCreateClusterDeployment(t *testing.T) {
 	}
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
+	antiAffinity := &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app.kubernetes.io/instance": "mycluster",
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:    "container:version",
+			Affinity: antiAffinity,
+		},
+	}
+
+	d := createClusterDeployment(cluster)
+
+	got := d.Spec.Template.Spec.Affinity
+	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("affinity mismatch (-want +got):\n%s", diff)
 	}
 }
 

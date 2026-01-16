@@ -169,6 +169,7 @@ func TestGenerateContainersDef(t *testing.T) {
 		valkeyContainer := findContainer(containers, "valkey-server")
 		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources limits on valkey-server")
 	})
+
 	t.Run("should set custom resources for valkey-server", func(t *testing.T) {
 		resourceReqs := corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{

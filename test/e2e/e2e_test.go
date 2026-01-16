@@ -282,10 +282,12 @@ var _ = Describe("Manager", Ordered, func() {
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
 			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
+
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
+
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
 				g.Expect(cr.Status.Message).To(Equal("Cluster is healthy"))
@@ -634,7 +636,6 @@ spec:
 			Eventually(verifyClusterDeleted).Should(Succeed())
 		})
 	})
-
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

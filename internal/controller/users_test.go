@@ -44,7 +44,7 @@ func TestBuildAclFileContents(t *testing.T) {
 			Permissions: "+@list +@connection ~jobs:*",
 			Password:    "thisisagoodpassword",
 		}}, testSecrets)
-	if strings.TrimRight(acl, "\n") != expected {
+	if strings.TrimRight(string(acl), "\n") != expected {
 		t.Errorf("alice ACL Failed. Expected %s; got %s", expected, acl)
 	}
 
@@ -55,7 +55,7 @@ func TestBuildAclFileContents(t *testing.T) {
 			Permissions:    "-@all",
 			PasswordKeyRef: "bobkeyref",
 		}}, testSecrets)
-	if strings.TrimRight(acl, "\n") != expected {
+	if strings.TrimRight(string(acl), "\n") != expected {
 		t.Errorf("bob ACL Failed. Expected %s; got %s", expected, acl)
 	}
 
@@ -65,7 +65,7 @@ func TestBuildAclFileContents(t *testing.T) {
 		"charlie": valkeyiov1alpha1.UserAcl{
 			Permissions: "+@list +@connection ~jobs:*",
 		}}, testSecrets)
-	if strings.TrimRight(acl, "\n") != expected {
+	if strings.TrimRight(string(acl), "\n") != expected {
 		t.Errorf("charlie ACL Failed. Expected %s; got %s", expected, acl)
 	}
 
@@ -76,7 +76,7 @@ func TestBuildAclFileContents(t *testing.T) {
 			Permissions:    "+@all",
 			PasswordKeyRef: "davidref",
 		}}, testSecrets)
-	if strings.TrimRight(acl, "\n") != expected {
+	if strings.TrimRight(string(acl), "\n") != expected {
 		t.Errorf("david ACL Failed. Expected %s; got %s", expected, acl)
 	}
 
@@ -86,7 +86,7 @@ func TestBuildAclFileContents(t *testing.T) {
 		"edward": valkeyiov1alpha1.UserAcl{
 			Password: "edwardpass",
 		}}, testSecrets)
-	if strings.TrimRight(acl, "\n") != expected {
+	if strings.TrimRight(string(acl), "\n") != expected {
 		t.Errorf("edward ACL Failed. Expected %s; got %s", expected, acl)
 	}
 }

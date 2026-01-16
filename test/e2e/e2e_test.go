@@ -283,6 +283,14 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
 			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
 
+			By("validating internal secret was created")
+			verifyInternalSecretsExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secrets", "internal-" + valkeyClusterName + "-secret")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyInternalSecretsExists).Should(Succeed())
+
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)

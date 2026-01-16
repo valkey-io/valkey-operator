@@ -146,7 +146,27 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+
+	replicaAttached, err := r.attachReplicaFromEmptyShard(ctx, cluster, state)
+	if err != nil {
+		log.Error(err, "unable to add cluster replica")
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ReplicaCreationFailed", "Failed to create replica: %v", err)
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if replicaAttached {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	for _, shard := range state.Shards {
+		if countSlots(shard.Slots) == 0 {
+			continue
+		}
 		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
 			log.V(1).Info("missing replicas, requeue..")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
@@ -167,6 +187,24 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for all slots to be assigned", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for slots to be assigned", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonSlotsUnassigned, "Waiting for slots to be assigned", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	// Rebalance slots across primaries if needed (scale out).
+	rebalanced, err := r.rebalanceSlots(ctx, cluster, state)
+	if err != nil {
+		log.Error(err, "slot rebalancing failed")
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "SlotRebalanceFailed", "Slot rebalancing failed: %v", err)
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed, err.Error(), metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if rebalanced {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -349,9 +387,9 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 	if shardsExists < shardsRequired {
 		slots := state.GetUnassignedSlots()
 		if len(slots) == 0 {
-			log.Error(nil, "no unassigned slots available for new shard")
-			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNoSlots, "No unassigned slots available for new shard", metav1.ConditionTrue)
-			return errors.New("no slots range to assign")
+			log.V(1).Info("no unassigned slots available; will rebalance for new shard", "address", node.Address)
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "SlotsRebalancePending", "No unassigned slots for %s; waiting for rebalance", node.Address)
+			return nil
 		}
 
 		// Assign unbalanced slot ranges for now, i.e.

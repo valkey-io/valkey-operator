@@ -73,6 +73,30 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// Workload defines the underlying workload resource used for Valkey pods.
+	// +optional
+	Workload WorkloadSpec `json:"workload,omitempty"`
+}
+
+// WorkloadKind defines the type of workload resource used for Valkey pods.
+// +kubebuilder:validation:Enum=Deployment;StatefulSet
+type WorkloadKind string
+
+const (
+	// WorkloadKindDeployment uses Deployment for Valkey pods.
+	WorkloadKindDeployment WorkloadKind = "Deployment"
+	// WorkloadKindStatefulSet uses StatefulSet for Valkey pods.
+	WorkloadKindStatefulSet WorkloadKind = "StatefulSet"
+)
+
+// WorkloadSpec defines the workload configuration.
+type WorkloadSpec struct {
+	// Kind specifies the type of workload (Deployment or StatefulSet).
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet
+	// +kubebuilder:default=Deployment
+	// +optional
+	Kind WorkloadKind `json:"kind,omitempty"`
 }
 
 type ExporterSpec struct {
@@ -143,6 +167,7 @@ const (
 	ReasonServiceError      = "ServiceError"
 	ReasonConfigMapError    = "ConfigMapError"
 	ReasonDeploymentError   = "DeploymentError"
+	ReasonStatefulSetError  = "StatefulSetError"
 	ReasonPodListError      = "PodListError"
 	ReasonAddingNodes       = "AddingNodes"
 	ReasonNodeAddFailed     = "NodeAddFailed"

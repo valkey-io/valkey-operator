@@ -292,9 +292,10 @@ func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
 
 // TODO: use this function until we have a better way to find the replica deployment.
 // maybe we need to update valkey cluster status to include master and replica deployment identifiers.
-// GetReplicaDeployment finds a deployment that is running a replica instance
+// findReplicaPod finds a pod that is running a replica instance
 // by checking the logs of its pods for the ":S" role indicator.
-func GetReplicaDeployment(selector string) (string, error) {
+// Returns the pod name if found.
+func findReplicaPod(selector string) (string, error) {
 	// List pods matching the selector
 	cmd := exec.Command("kubectl", "get", "pods", "-l", selector, "-o", "jsonpath={.items[*].metadata.name}")
 	output, err := Run(cmd)
@@ -322,22 +323,7 @@ func GetReplicaDeployment(selector string) (string, error) {
 			if len(matches) > 1 {
 				role := matches[1]
 				if role == "S" {
-					// Found a replica pod, now find its deployment.
-					// 1. Get ReplicaSet owner of the pod
-					cmd = exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
-					rsName, err := Run(cmd)
-					if err != nil || rsName == "" {
-						break // Try next pod
-					}
-
-					// 2. Get Deployment owner of the ReplicaSet
-					cmd = exec.Command("kubectl", "get", "rs", rsName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
-					deployName, err := Run(cmd)
-					if err != nil || deployName == "" {
-						break // Try next pod
-					}
-
-					return deployName, nil
+					return podName, nil
 				}
 				// If role is "M", it's a master, so this pod is not a replica. Stop checking this pod.
 				break
@@ -345,5 +331,99 @@ func GetReplicaDeployment(selector string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no replica deployment found with selector %q", selector)
+	return "", fmt.Errorf("no replica pod found with selector %q", selector)
+}
+
+// GetReplicaDeployment finds a deployment that is running a replica instance
+// by checking the logs of its pods for the ":S" role indicator.
+func GetReplicaDeployment(selector string) (string, error) {
+	podName, err := findReplicaPod(selector)
+	if err != nil {
+		return "", err
+	}
+
+	// 1. Get ReplicaSet owner of the pod
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+	rsName, err := Run(cmd)
+	if err != nil || rsName == "" {
+		return "", fmt.Errorf("failed to get ReplicaSet owner for pod %s: %w", podName, err)
+	}
+
+	// 2. Get Deployment owner of the ReplicaSet
+	cmd = exec.Command("kubectl", "get", "rs", rsName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+	deployName, err := Run(cmd)
+	if err != nil || deployName == "" {
+		return "", fmt.Errorf("failed to get Deployment owner for ReplicaSet %s: %w", rsName, err)
+	}
+
+	return deployName, nil
+}
+
+// GetReplicaStatefulSet finds a StatefulSet that is running a replica instance
+// by checking the logs of its pods for the ":S" role indicator.
+func GetReplicaStatefulSet(selector string) (string, error) {
+	podName, err := findReplicaPod(selector)
+	if err != nil {
+		return "", err
+	}
+
+	// Get StatefulSet owner of the pod
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-o", "jsonpath={.metadata.ownerReferences[0].name}")
+	stsName, err := Run(cmd)
+	if err != nil || stsName == "" {
+		return "", fmt.Errorf("failed to get StatefulSet owner for pod %s: %w", podName, err)
+	}
+
+	return stsName, nil
+}
+
+// CollectDebugInfo collects debugging information including controller logs,
+// Kubernetes events, and pod descriptions. This is useful for troubleshooting failed tests.
+func CollectDebugInfo(namespace string) {
+	var controllerPodName string
+	cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+		"-o", "go-template={{ range .items }}"+
+			"{{ if not .metadata.deletionTimestamp }}"+
+			"{{ .metadata.name }}"+
+			"{{ \"\\n\" }}{{ end }}{{ end }}",
+		"-n", namespace)
+	podOutput, err := Run(cmd)
+	if err == nil {
+		podNames := GetNonEmptyLines(podOutput)
+		if len(podNames) > 0 {
+			controllerPodName = podNames[0]
+		}
+	}
+	if controllerPodName == "" {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Warning: Could not fetch controller pod name\n")
+	}
+
+	if controllerPodName != "" {
+		By("Fetching controller manager pod logs")
+		cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+		controllerLogs, err := Run(cmd)
+		if err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
+		}
+
+		By("Fetching controller manager pod description")
+		cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
+		podDescription, err := Run(cmd)
+		if err == nil {
+			fmt.Println("Pod description:\n", podDescription)
+		} else {
+			fmt.Println("Failed to describe controller pod")
+		}
+	}
+
+	By("Fetching Kubernetes events")
+	cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+	eventsOutput, err := Run(cmd)
+	if err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
+	}
 }

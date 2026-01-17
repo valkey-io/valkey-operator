@@ -44,26 +44,10 @@ var _ = Describe("Manager", Ordered, func() {
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
-			controllerLogs, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
-			}
-
-			By("Fetching Kubernetes events")
-			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
-			eventsOutput, err := utils.Run(cmd)
-			if err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
-			} else {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
-			}
+			utils.CollectDebugInfo(namespace)
 
 			By("Fetching curl-metrics logs")
-			cmd = exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+			cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
 			metricsOutput, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Metrics logs:\n %s", metricsOutput)
@@ -71,14 +55,6 @@ var _ = Describe("Manager", Ordered, func() {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get curl-metrics logs: %s", err)
 			}
 
-			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
-			podDescription, err := utils.Run(cmd)
-			if err == nil {
-				fmt.Println("Pod description:\n", podDescription)
-			} else {
-				fmt.Println("Failed to describe controller pod")
-			}
 		}
 	})
 
@@ -437,6 +413,39 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+
+			By("validating cluster operations with SET and GET commands")
+			verifyGetSetOps := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+				testPodName := fmt.Sprintf("%s-client", valkeyClusterName)
+				key := "testkey"
+				value := "testvalue"
+
+				// Run a single pod that performs both SET and GET operations
+				cmd := exec.Command("kubectl", "run", testPodName,
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"sh", "-c",
+					fmt.Sprintf("valkey-cli -c -h %s SET %s %s && valkey-cli -c -h %s GET %s",
+						clusterFqdn, key, value, clusterFqdn, key))
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// Wait for the pod to complete
+				cmd = exec.Command("kubectl", "wait", "pod/"+testPodName,
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// Check the output contains the value we set
+				cmd = exec.Command("kubectl", "logs", testPodName)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(value), "GET command should return the set value")
+
+				// Cleanup
+				_ = exec.Command("kubectl", "delete", "pod", testPodName, "--wait=false").Run()
+			}
+			Eventually(verifyGetSetOps).Should(Succeed())
 		})
 	})
 

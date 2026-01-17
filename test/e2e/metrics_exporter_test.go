@@ -32,6 +32,16 @@ import (
 )
 
 var _ = Describe("Valkey Metrics Exporter", func() {
+
+	// After each test, check for failures and collect logs, events,
+	// and pod descriptions for debugging.
+	AfterEach(func() {
+		specReport := CurrentSpecReport()
+		if specReport.Failed() {
+			utils.CollectDebugInfo(namespace)
+		}
+	})
+
 	Context("Metrics Exporter Enabled", func() {
 		It("should deploy ValkeyCluster with metrics exporter sidecar by default", func() {
 			valkeyName := "valkeycluster-with-exporter"

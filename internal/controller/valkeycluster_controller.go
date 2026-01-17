@@ -67,6 +67,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -95,10 +96,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertDeployments(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+	if cluster.Spec.Workload.Kind == valkeyiov1alpha1.WorkloadKindStatefulSet {
+		if err := r.upsertStatefulsets(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonStatefulSetError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+	} else {
+		if err := r.upsertDeployments(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Get all pods and their current Valkey Cluster state
@@ -294,6 +303,36 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 			return err
 		}
 		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "DeploymentCreated", "Created deployment %d of %d", i+1, expected)
+	}
+
+	// TODO: update existing
+
+	return nil
+}
+
+// Create Valkey instances, singleton StatefulSet for all shards and replicas
+func (r *ValkeyClusterReconciler) upsertStatefulsets(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
+	existing := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list StatefulSets")
+		return err
+	}
+
+	desired := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
+
+	// Create missing statefulsets
+	for i := len(existing.Items); i < desired; i++ {
+		sts := createStatefulSet(cluster)
+		if err := controllerutil.SetControllerReference(cluster, sts, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, sts); err != nil {
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "StatefulSetCreationFailed", "Failed to create statefulset: %v", err)
+			return err
+		}
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "StatefulSetCreated", "Created statefulset %d of %d", i+1, desired)
 	}
 
 	// TODO: update existing
@@ -506,6 +545,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Named("valkeycluster").
 		Complete(r)
 }

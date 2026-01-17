@@ -23,6 +23,34 @@ import (
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
+// generateVolumesDef generates the volumes for the ValkeyCluster Pods.
+func generateVolumesDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Volume {
+	return []corev1.Volume{
+		{
+			Name: "scripts",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cluster.Name,
+					},
+					DefaultMode: func(i int32) *int32 { return &i }(0755),
+				},
+			},
+		},
+		{
+			Name: "valkey-conf",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cluster.Name,
+					},
+				},
+			},
+		},
+	}
+}
+
+// generateContainersDef generates the containers for the ValkeyCluster Pods.
 func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Container {
 	image := DefaultImage
 	if cluster.Spec.Image != "" {
@@ -102,6 +130,7 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 
 func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+	volumes := generateVolumesDef(cluster)
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
@@ -119,29 +148,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 				},
 				Spec: corev1.PodSpec{
 					Containers: containers,
-					Volumes: []corev1.Volume{
-						{
-							Name: "scripts",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
-									},
-									DefaultMode: func(i int32) *int32 { return &i }(0755),
-								},
-							},
-						},
-						{
-							Name: "valkey-conf",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
-									},
-								},
-							},
-						},
-					},
+					Volumes:    volumes,
 				},
 			},
 		},

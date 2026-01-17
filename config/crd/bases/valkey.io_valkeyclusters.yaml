@@ -1163,6 +1163,23 @@ spec:
                       type: string
                   type: object
                 type: array
+              workload:
+                description: Workload defines the underlying workload resource used
+                  for Valkey pods.
+                properties:
+                  kind:
+                    allOf:
+                    - enum:
+                      - Deployment
+                      - StatefulSet
+                    - enum:
+                      - Deployment
+                      - StatefulSet
+                    default: Deployment
+                    description: Kind specifies the type of workload (Deployment or
+                      StatefulSet).
+                    type: string
+                type: object
             type: object
           status:
             default:

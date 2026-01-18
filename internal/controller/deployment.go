@@ -89,6 +89,11 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 					MountPath: "/config",
 					ReadOnly:  true,
 				},
+				{
+					Name:      "users-acl",
+					MountPath: "/config/users",
+					ReadOnly:  true,
+				},
 			},
 		},
 	}
@@ -138,6 +143,14 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 									LocalObjectReference: corev1.LocalObjectReference{
 										Name: cluster.Name,
 									},
+								},
+							},
+						},
+						{
+							Name: "users-acl",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: getInternalSecretName(cluster.Name),
 								},
 							},
 						},

@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
@@ -510,10 +511,13 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyCluster{}).
-		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findReferencedSecrets),
+		).
 		Named("valkeycluster").
 		Complete(r)
 }

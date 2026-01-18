@@ -20,23 +20,84 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 const (
 	hashLength        = 64
 	hashAnnotationKey = "valkey.io/internal-acl-hash"
+	internalRefByKey  = "valkey.io/internal-acl-ref-by"
+	instanceLabel     = "app.kubernetes.io/instance"
 )
 
 func getInternalSecretName(cn string) string {
-	return "internal-" + cn + "-secret"
+	return cn + "-acl"
+}
+
+func getDefaultSecretName(cn string) string {
+	return cn + "-secret"
+}
+
+func (r *ValkeyClusterReconciler) findReferencedSecrets(ctx context.Context, secret client.Object) []reconcile.Request {
+
+	log := logf.FromContext(ctx)
+	secretName := secret.GetName()
+
+	log.V(1).Info("findReferencedSecrets...", "secret", secretName)
+
+	// Fetch a list of all Secrets
+	secretList := &corev1.SecretList{}
+	if err := r.List(ctx, secretList); err != nil {
+		log.Error(err, "failed to list referenced secrets")
+		return []reconcile.Request{}
+	}
+
+	// debug
+	for _, s := range secretList.Items {
+		log.V(1).Info("list item", "name", s.GetName())
+	}
+
+	// Look for Secrets with our reference annotation
+	for _, s := range secretList.Items {
+		refSecretName := s.GetAnnotations()[internalRefByKey]
+
+		// If the annotation references the secret that was modified, return
+		// a reconciliation request for the cluster that owns the internal secret
+		if refSecretName == secretName {
+			log.V(1).Info("found internal secret reference", "refname", s.GetName(), "secretname", secretName)
+
+			refClusterName := s.GetLabels()[instanceLabel]
+			if refClusterName == "" {
+				log.Error(nil, "empty instance from internal secret")
+				return []reconcile.Request{}
+			}
+
+			log.V(1).Info("returning RR", "name", refClusterName)
+
+			return []reconcile.Request{
+				{NamespacedName: types.NamespacedName{
+					Name:      refClusterName,
+					Namespace: s.GetNamespace(),
+				}},
+			}
+		}
+	}
+
+	log.V(1).Info("no referencing secrets found")
+
+	// No secrets found that reference our internal secret
+	return []reconcile.Request{}
 }
 
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
@@ -47,27 +108,28 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	auth := &cluster.Spec.ValkeySpec.Auth
 
 	// Look for a Secret matching the user-provided name, or clusterName-secret
-	userSecretName := cluster.Name + "-secret"
+	userSecretName := getDefaultSecretName(cluster.Name)
 	if auth.UsersSecretRef != "" {
 		userSecretName = auth.UsersSecretRef
 	}
 	log.V(2).Info("usersAcl secret", "userSecretName", userSecretName)
 
 	// Query API for user-provided secret
-	usersSecrets := &corev1.Secret{}
+	userSecrets := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      userSecretName,
 		Namespace: cluster.Namespace,
-	}, usersSecrets); err != nil {
+	}, userSecrets); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to fetch acl secret")
 			return err
 		}
-		log.V(1).Info("did not find users secret", "userSecretName", userSecretName)
+		log.V(1).Info("Users secret not found", "userSecretName", userSecretName)
 	}
 
 	// Query API for the internal secrets object
 	internalSecretName := getInternalSecretName(cluster.Name)
+	needCreateInternal := false
 
 	internalAclSecrets := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
@@ -80,6 +142,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		}
 
 		// Internal secret was not found. Add metadata to the empty object
+		needCreateInternal = true
 		log.V(2).Info("creating internal secret", "secretName", internalSecretName)
 
 		internalAclSecrets.Data = make(map[string][]byte)
@@ -88,16 +151,21 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		}
+
+		// Annotate our internal secret with a reference to the name of the user secret.
+		// This allows our operator to initiate reconciliation if the user secret is updated.
+		upsertAnnotation(internalAclSecrets, internalRefByKey, userSecretName)
 	}
 
 	// Register ownership of the internal Secret
 	if err := controllerutil.SetControllerReference(cluster, internalAclSecrets, r.Scheme); err != nil {
 		log.Error(err, "Failed to grab ownership of internal secret")
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "Failed to grab ownership of internal secret: %v", err)
 		return err
 	}
 
 	// Build the users.acl file contents from the users in the Spec, and secrets reference
-	aclFileContents := buildAclFileContents(ctx, auth.Users, usersSecrets)
+	aclFileContents := buildAclFileContents(ctx, auth.Users, userSecrets)
 
 	// Calculate hash of the ACL file contents
 	internalAclHash := fmt.Sprintf("%x", sha256.Sum256(aclFileContents))
@@ -108,29 +176,33 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	// same, don't update as that would cause infinite reconciliation
 
 	if needsUpdate := upsertAnnotation(internalAclSecrets, hashAnnotationKey, internalAclHash); !needsUpdate {
-		log.V(2).Info("internal secrets unchanged")
+		log.V(1).Info("internal secrets unchanged")
 		return nil
 	}
 
 	// Add the acl contents to the internal secret, replacing anything preexisting
 	internalAclSecrets.Data["users.acl"] = aclFileContents
 
-	// Create, or update this internal secret
-	if err := r.Create(ctx, internalAclSecrets); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			if err := r.Update(ctx, internalAclSecrets); err != nil {
-				log.Error(err, "Failed to update internal secret")
-				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "InternalSecretsUpdateFailed", "Failed to update internal secret: %v", err)
-				return err
-			}
-		} else {
+	// Create the internal secret, if needed
+	if needCreateInternal {
+		if err := r.Create(ctx, internalAclSecrets); err != nil {
 			log.Error(err, "Failed to create internal secret")
 			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "Failed to create internal secret: %v", err)
 			return err
+		} else {
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsCreated", "Created internal secret with ACLs")
+			return nil
 		}
-	} else {
-		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsCreated", "Created internal secret with ACLs")
 	}
+
+	// Otherwise update it
+	if err := r.Update(ctx, internalAclSecrets); err != nil {
+		log.Error(err, "Failed to update internal secret")
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "InternalSecretsUpdateFailed", "Failed to update internal secret: %v", err)
+		return err
+	}
+
+	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsUpdated", "Synchronized internal secret ACL")
 
 	// All is good; The internal secret will be auto-mounted in the deployment
 	return nil
@@ -145,8 +217,18 @@ func buildAclFileContents(ctx context.Context, users map[string]valkeyiov1alpha1
 	// Holds the ACLs
 	var aclFileContents string
 
+	// Extract usernames from the map, and sort to keep consistent processing order
+	sortedNames := make([]string, 0, len(users))
+	for k := range users {
+		sortedNames = append(sortedNames, k)
+	}
+	sort.Strings(sortedNames)
+
 	// Loop over users and build acl line
-	for un, acl := range users {
+	for _, un := range sortedNames {
+
+		// Get this user's ACL
+		acl := users[un]
 
 		if acl.Permissions == "" {
 			log.Error(nil, "no permissions for user", "username", un)
@@ -180,6 +262,7 @@ func buildAclFileContents(ctx context.Context, users map[string]valkeyiov1alpha1
 		// We should have a username, cleartext, or hashed password, and acl
 
 		var hashedPass string
+		pw = strings.TrimRight(pw, "\n")
 		pwLen := len(pw)
 
 		if pwLen == hashLength {

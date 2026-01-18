@@ -1169,10 +1169,6 @@ spec:
                   auth:
                     description: Auth-related structure for handling users, and acls
                     properties:
-                      protectedmode:
-                        default: true
-                        description: Enable, or disable protected mode
-                        type: boolean
                       users:
                         additionalProperties:
                           properties:

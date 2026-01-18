@@ -89,10 +89,6 @@ type ValkeySpec struct {
 // AuthSpec contains authorization, user, and ACL-related configurations
 type AuthSpec struct {
 
-	// Enable, or disable protected mode
-	// +kubebuilder:default:=true
-	ProtectedMode bool `json:"protectedmode,omitempty"`
-
 	// Users ACL Secret
 	// A reference name to a Secret containing raw user:permission entries, which will be processed first
 	// Defaults to clusterName-secret

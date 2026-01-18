@@ -17,7 +17,6 @@ spec:
   replicas: 1
   valkeyConfig:
     auth:
-      protectedmode: true
       usersSecretRef: valkey-users
       users:
         alice:

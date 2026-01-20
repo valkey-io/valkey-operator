@@ -19,6 +19,7 @@ package controller
 import (
 	"maps"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -46,4 +47,30 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 
 func getConfigMapName(cn string) string {
 	return cn + "-config"
+}
+
+// This function takes a K8S object reference (eg: pod, secret, configmap, etc),
+// and a map of annotations to add to, or replace existing, within the object.
+// Returns true if the annotation was added, or updated
+func upsertAnnotation(o metav1.Object, key string, val string) bool {
+
+	updated := false
+
+	// Get current annotations
+	annotations := o.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	// If not found, insert, or update
+	if orig := annotations[key]; orig != val {
+
+		updated = true
+		annotations[key] = val
+
+		// Set annotations
+		o.SetAnnotations(annotations)
+	}
+
+	return updated
 }

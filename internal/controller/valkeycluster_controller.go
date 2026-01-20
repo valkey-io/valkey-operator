@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"slices"
 	"strconv"
@@ -56,9 +55,6 @@ type ValkeyClusterReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 }
-
-//go:embed scripts/*
-var scripts embed.FS
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
@@ -222,71 +218,6 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		}
 	} else {
 		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ServiceCreated", "Created headless Service")
-	}
-	return nil
-}
-
-// Create or update a default valkey.conf
-// If additional config is provided, append to the default map
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
-	log := logf.FromContext(ctx)
-
-	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
-	if err != nil {
-		return err
-	}
-	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
-	if err != nil {
-		return err
-	}
-
-	serverConfig := `# Base operator config
-cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000
-`
-
-	if len(cluster.Spec.ValkeySpec.Configuration) > 0 {
-		serverConfig += "\n# Extra config\n"
-		for k, v := range cluster.Spec.ValkeySpec.Configuration {
-
-			if slices.Contains(valkeyiov1alpha1.NonUserOverrideConfigParameters, k) {
-				log.Error(nil, "Prohibited valkey server config", "parameter", k)
-				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "Prohibited config: %v", k)
-				continue
-			}
-
-			serverConfig += k + " " + v + "\n"
-		}
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      getConfigMapName(cluster.Name),
-			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
-		},
-		Data: map[string]string{
-			"readiness-check.sh": string(readiness),
-			"liveness-check.sh":  string(liveness),
-			"valkey.conf":        serverConfig,
-		},
-	}
-	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, cm); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			if err := r.Update(ctx, cm); err != nil {
-				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "Failed to update ConfigMap: %v", err)
-				return err
-			}
-		} else {
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapCreationFailed", "Failed to create ConfigMap: %v", err)
-			return err
-		}
-	} else {
-		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ConfigMapCreated", "Created ConfigMap with configuration")
 	}
 	return nil
 }

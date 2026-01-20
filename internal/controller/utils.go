@@ -50,7 +50,18 @@ func getConfigMapName(cn string) string {
 }
 
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
-// and a map of annotations to add to, or replace existing, within the object.
+// and a key, and value to compare to an existing annotation within the object.
+// Returns true if the annotation is present, and matches the value.
+func hasAnnotation(obj metav1.Object, key string, value string) bool {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+	return annotations[key] == value
+}
+
+// This function takes a K8S object reference (eg: pod, secret, configmap, etc),
+// and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated
 func upsertAnnotation(o metav1.Object, key string, val string) bool {
 

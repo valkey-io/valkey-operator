@@ -34,6 +34,7 @@ import (
 
 const (
 	configHashKey = "valkey.io/config-hash"
+	configFileKey = "valkey.conf"
 )
 
 //go:embed scripts/*
@@ -116,7 +117,7 @@ cluster-node-timeout 2000
 		serverConfigMap.Data = map[string]string{
 			"readiness-check.sh": string(readiness),
 			"liveness-check.sh":  string(liveness),
-			"valkey.conf":        serverConfig,
+			configFileKey:        serverConfig,
 		}
 	}
 
@@ -127,17 +128,28 @@ cluster-node-timeout 2000
 		return err
 	}
 
+	// Calculate hash of existing config parameters
+	origServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(serverConfigMap.Data[configFileKey])))
+
 	// Calculate hash of new config parameters
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(serverConfig)))
 
+	// Was the configMap changed? This is an invalid action, as users should modify
+	// the ValkeyCluster CR to change parameters, not the configMap itself.
+	origConfigModified := !hasAnnotation(serverConfigMap, configHashKey, origServerConfigHash)
+
 	// Compare hash to the one already attached to the configMap (if previously exists)
-	if needsUpdate := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash); !needsUpdate {
+	needsUpdate := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
+
+	// Original config is not modified, and new config doesn't change anything
+	if !origConfigModified && !needsUpdate {
 		log.V(1).Info("Server configMap unchanged")
 		return nil
 	}
 
-	// Update the config with the newly changed config
-	serverConfigMap.Data["valkey.conf"] = serverConfig
+	// In all other cases (ie: user modified configMap, or modified CR),
+	// update the config with the newly changed config
+	serverConfigMap.Data[configFileKey] = serverConfig
 
 	// Need to create new configMap
 	if needCreateConfigMap {

@@ -49,55 +49,47 @@ func getDefaultSecretName(cn string) string {
 	return cn + "-secret"
 }
 
+// When a Secret is updated, Watch() calls this function to discover
+// which object should be reconciled
 func (r *ValkeyClusterReconciler) findReferencedSecrets(ctx context.Context, secret client.Object) []reconcile.Request {
 
 	log := logf.FromContext(ctx)
-	secretName := secret.GetName()
+	secretName := secret.GetName() // the Secret that was updated
 
-	log.V(1).Info("findReferencedSecrets...", "secret", secretName)
-
-	// Fetch a list of all Secrets
-	secretList := &corev1.SecretList{}
-	if err := r.List(ctx, secretList); err != nil {
+	// List all Secrets, filtered by our reference label.
+	// This should return a list of "internal secrets" pointing to the updated Secret
+	internalSecretsList := &corev1.SecretList{}
+	if err := r.List(ctx, internalSecretsList,
+		client.InNamespace(secret.GetNamespace()),
+		client.MatchingLabels{
+			internalRefByKey: secretName,
+		},
+	); err != nil {
 		log.Error(err, "failed to list referenced secrets")
 		return []reconcile.Request{}
 	}
 
-	// debug
-	for _, s := range secretList.Items {
-		log.V(1).Info("list item", "name", s.GetName())
-	}
+	requests := []reconcile.Request{}
 
-	// Look for Secrets with our reference annotation
-	for _, s := range secretList.Items {
-		refSecretName := s.GetAnnotations()[internalRefByKey]
+	// Take our list of internal secrets, and get the controlling cluster name.
+	// Return a list of clusters to be reconciled.
+	for _, s := range internalSecretsList.Items {
 
-		// If the annotation references the secret that was modified, return
-		// a reconciliation request for the cluster that owns the internal secret
-		if refSecretName == secretName {
-			log.V(1).Info("found internal secret reference", "refname", s.GetName(), "secretname", secretName)
-
-			refClusterName := s.GetLabels()[instanceLabel]
-			if refClusterName == "" {
-				log.Error(nil, "empty instance from internal secret")
-				return []reconcile.Request{}
-			}
-
-			log.V(1).Info("returning RR", "name", refClusterName)
-
-			return []reconcile.Request{
-				{NamespacedName: types.NamespacedName{
-					Name:      refClusterName,
-					Namespace: s.GetNamespace(),
-				}},
-			}
+		clusterName := s.GetLabels()[instanceLabel]
+		if clusterName == "" {
+			log.Error(nil, "empty app-instance label from internal secret", "secretname", s.GetName())
+			continue
 		}
+
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      clusterName,
+				Namespace: s.GetNamespace(),
+			},
+		})
 	}
 
-	log.V(1).Info("no referencing secrets found")
-
-	// No secrets found that reference our internal secret
-	return []reconcile.Request{}
+	return requests
 }
 
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
@@ -149,12 +141,10 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		internalAclSecrets.ObjectMeta = metav1.ObjectMeta{
 			Name:      internalSecretName,
 			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
+			Labels: labels(cluster, map[string]string{
+				internalRefByKey: userSecretName,
+			}),
 		}
-
-		// Annotate our internal secret with a reference to the name of the user secret.
-		// This allows our operator to initiate reconciliation if the user secret is updated.
-		upsertAnnotation(internalAclSecrets, internalRefByKey, userSecretName)
 	}
 
 	// Register ownership of the internal Secret
@@ -176,7 +166,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	// same, don't update as that would cause infinite reconciliation
 
 	if needsUpdate := upsertAnnotation(internalAclSecrets, hashAnnotationKey, internalAclHash); !needsUpdate {
-		log.V(1).Info("internal secrets unchanged")
+		log.V(1).Info("Internal ACLs unchanged")
 		return nil
 	}
 
@@ -190,7 +180,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "Failed to create internal secret: %v", err)
 			return err
 		} else {
-			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsCreated", "Created internal secret with ACLs")
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsCreated", "Created internal ACLs")
 			return nil
 		}
 	}
@@ -202,7 +192,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		return err
 	}
 
-	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsUpdated", "Synchronized internal secret ACL")
+	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "InternalSecretsUpdated", "Synchronized internal ACLs")
 
 	// All is good; The internal secret will be auto-mounted in the deployment
 	return nil
@@ -235,12 +225,7 @@ func buildAclFileContents(ctx context.Context, users map[string]valkeyiov1alpha1
 			continue
 		}
 
-		if acl.Password == "" && acl.PasswordKeyRef == "" {
-			log.Error(nil, "no password found for user", "username", un)
-			continue
-		}
-
-		// If password is empty, fetch from secret
+		// If password is empty, attempt to fetch from secret
 		pw := acl.Password
 		if pw == "" {
 
@@ -253,7 +238,7 @@ func buildAclFileContents(ctx context.Context, users map[string]valkeyiov1alpha1
 			// Check if password is in Secret
 			refPw, found := usersSecrets.Data[secretKeyRef]
 			if !found {
-				log.Error(nil, "no password for user in secret", "username", un, "secretRef", secretKeyRef)
+				log.Error(nil, "no password found for user", "username", un, "secretRef", secretKeyRef)
 				continue
 			}
 			pw = string(refPw)

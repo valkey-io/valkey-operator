@@ -2,11 +2,10 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: valkey-users
+  name: valkeycluster-sample-users
 data:
   alicepw: M21wdHlQQHNzdzByZA==
   bob: YjFjMzY4OTZkMzk5MjMwNDU5NTVjMzczZjM2NWVkNjg2Y2I5N2RiNTA1NGE0NTJjN2EzZmQ5MjAwZTMzNGYxZAo=
-  monitor: ZHIwd3NzQFB5dHBtMw==
 ---
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -17,13 +16,18 @@ spec:
   replicas: 1
   valkeyConfig:
     auth:
-      usersSecretRef: valkey-users
+      usersSecretRef: valkeycluster-sample-users
       users:
         alice:
           permissions: +@list +@connection ~jobs:*
           passwordKeyRef: alicepw
         bob:
           permissions: ~* +@all
+        charlie:
+          permissions: -@all +get ~secretkey ~valkey:*
+          password: sup3rS3cr3t
+        david:
+          permissions: -@all +@admin
   resources:
     requests:
       memory: "256Mi"

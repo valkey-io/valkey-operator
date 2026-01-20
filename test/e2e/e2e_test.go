@@ -445,6 +445,40 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+
+			By("verifying created users")
+			verifyCreatedUsers := func(g Gomega) {
+				// Start a Valkey client pod to access the cluster and get its status.
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// There should be 3 defined users
+				g.Expect(output).To(SatisfyAll(
+					ContainSubstring("user alice"),
+					ContainSubstring("user bob"),
+					ContainSubstring("user charlie"),
+				))
+			}
+			Eventually(verifyCreatedUsers).Should(Succeed())
 		})
 	})
 

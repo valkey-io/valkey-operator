@@ -274,6 +274,15 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
+			By("validating valkey-server containers have resources configuration")
+			cmd = exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+				"-o", "jsonpath={.items[0].spec.containers[?(@.name=='valkey-server')].resources}",
+			)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
+			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
+
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)

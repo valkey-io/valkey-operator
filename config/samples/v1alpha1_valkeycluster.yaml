@@ -9,3 +9,10 @@ spec:
     config:
       maxmemory: 50mb
       maxmemory-policy: allkeys-lfu
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"

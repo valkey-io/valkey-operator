@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,7 +34,25 @@ import (
 
 var _ = Describe("Valkey Tolerations", Label("toleration"), func() {
 	var taintedNode string
-	// TODO: AfterEach to remove taints
+	AfterEach(func() {
+		By("getting node's taints")
+		cmd := exec.Command("kubectl", "get", "nodes", taintedNode,
+			"-o", "go-template="+
+				"{{ range .spec.taints }}"+
+				"{{ printf \"%s=%s:%s\" .key .value .effect }}"+
+				"{{ \"\\n\" }}"+
+				"{{ end}}",
+		)
+		output, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get node's taints: %s", output))
+
+		By("removing the taints")
+		taints := utils.GetNonEmptyLines(output)
+		for _, taint := range taints {
+			applyTaint(taintedNode, strings.TrimSpace(taint)+"-")
+		}
+	})
+
 	Context("Deployment have tolerations", Label("toleration-enabled"), func() {
 		It("should works with single toleration", Label("single-toleration"), func() {
 			By("getting a worker node to taint")
@@ -46,8 +65,7 @@ var _ = Describe("Valkey Tolerations", Label("toleration"), func() {
 
 			By("tainting the worker node")
 			taint := "dedicated=valkey:NoSchedule"
-			output, err = taintNode(taintedNode, taint)
-			Expect(err).NotTo(HaveOccurred(), "Failed to taint worker node: %s", output)
+			applyTaint(taintedNode, taint)
 
 			By("creating a ValkeyCluster")
 			valkeyName := "valkey-cluster-single-toleration"
@@ -78,18 +96,25 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
-			By("waiting for the deployment to be created")
+			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
-				g.Expect(out).To(ContainSubstring(valkeyName))
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-o", "jsonpath={.items[*].status.phase}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod status: %s", output))
+				g.Expect(output).To(ContainSubstring("Running"))
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
 			output, err = getPodToleration(fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
-			Expect(output).To(ContainSubstring("dedicated"), fmt.Sprintf("Pod's toleration does not matches taint: %s", output))
+			Expect(output).To(MatchJSON(`[
+			{"effect":"NoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
+			{"effect":"NoExecute","key":"node.kubernetes.io/not-ready","operator":"Exists","tolerationSeconds":300},
+			{"effect":"NoExecute","key":"node.kubernetes.io/unreachable","operator":"Exists","tolerationSeconds":300}]
+			`), fmt.Sprintf("Pod's toleration does not matches taint: %s", output))
 
 			By("verifying the pods' placement")
 			cmd = exec.Command("kubectl", "get", "pods",
@@ -99,11 +124,6 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod's placement: %s", output))
 			Expect(output).To(ContainSubstring(taintedNode), fmt.Sprintf("Pods did not get scheduled on tainted node: %s", output))
-
-			By("removing the taint")
-			output, err = taintNode(taintedNode, taint+"-")
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to remove taint from node: %s", output))
-
 		})
 
 		It("should works with multiple tolerations", Label("multi-tolerations"), func() {
@@ -118,8 +138,7 @@ spec:
 			By("tainting the worker node")
 			taints := [2]string{"dedicated=valkey:PreferNoSchedule", "high-memory=valkey:NoExecute"}
 			for i := 0; i < len(taints); i++ {
-				output, err = taintNode(taintedNode, taints[i])
-				Expect(err).NotTo(HaveOccurred(), "Failed to taint worker node: %s", output)
+				applyTaint(taintedNode, taints[i])
 			}
 
 			By("creating a ValkeyCluster")
@@ -154,19 +173,26 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
-			By("waiting for the deployment to be created")
+			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
-				g.Expect(out).To(ContainSubstring(valkeyName))
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-o", "jsonpath={.items[*].status.phase}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod status: %s", output))
+				g.Expect(output).To(ContainSubstring("Running"))
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
 			output, err = getPodToleration(fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
-			// TODO: update this to check both tolerations
-			Expect(output).To(ContainSubstring("dedicated"), fmt.Sprintf("Pod's toleration does not matches taint: %s", output))
+			Expect(output).To(MatchJSON(`[
+			{"effect":"PreferNoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
+			{"effect":"NoExecute","key":"high-memory","operator":"Exists"},
+			{"effect":"NoExecute","key":"node.kubernetes.io/not-ready","operator":"Exists","tolerationSeconds":300},
+			{"effect":"NoExecute","key":"node.kubernetes.io/unreachable","operator":"Exists","tolerationSeconds":300}
+			]`), fmt.Sprintf("Pod's toleration does not matches taint: %s", output))
 
 			By("verifying the pods' placement")
 			cmd = exec.Command("kubectl", "get", "pods",
@@ -176,12 +202,6 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod's placement: %s", output))
 			Expect(output).To(ContainSubstring(taintedNode), fmt.Sprintf("Pods did not get scheduled on tainted node: %s", output))
-
-			By("removing the taint")
-			for i := 0; i < len(taints); i++ {
-				output, err = taintNode(taintedNode, taints[i]+"-")
-				Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to remove taint from node: %s", output))
-			}
 		})
 
 	})
@@ -198,8 +218,7 @@ spec:
 
 			By("tainting the worker node")
 			taint := "dedicated=valkey:NoSchedule"
-			output, err = taintNode(taintedNode, taint)
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to taint worker node: %s", output))
+			applyTaint(taintedNode, taint)
 
 			By("creating a ValkeyCluster")
 			valkeyName := "valkey-cluster-no-tolerations"
@@ -226,12 +245,15 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
-			By("waiting for the deployment to be created")
+			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
-				g.Expect(out).To(ContainSubstring(valkeyName))
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-o", "jsonpath={.items[*].status.phase}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod status: %s", output))
+				g.Expect(output).To(ContainSubstring("Running"))
 			}).Should(Succeed())
 
 			By("verifying the pods placement")
@@ -244,21 +266,19 @@ spec:
 				g.Expect(output).NotTo(ContainSubstring(taintedNode), fmt.Sprintf("Pod got scheduled on the tainted node: %s", output))
 			}
 			Eventually(verifyPodToleration).Should(Succeed())
-
-			By("removing the taint")
-			output, err = taintNode(taintedNode, taint+"-")
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to remove taint from node: %s", output))
 		})
 	})
 })
 
-func taintNode(nodeName string, taint string) (string, error) {
-	By("applying taint to worker node")
+// applyTaint adds or updates a taint on a specific Kubernetes node
+func applyTaint(nodeName string, taint string) {
+	By("applying taint to node")
 	cmd := exec.Command("kubectl", "taint", "nodes", nodeName, taint, "--overwrite=true")
-	return utils.Run(cmd)
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to taint node: %s", output))
 }
 
-// getPodToleration returns the tolerations of the pod, except the default ones (`node.kubernetes.io/not-ready:NoExecute` and `node.kubernetes.io/unreachable:NoExecute`)
+// getPodToleration returns the tolerations of the first pod in the list found by pods' label
 func getPodToleration(podLabel string) (string, error) {
 	By("getting a pod name")
 	cmd := exec.Command("kubectl", "get", "pods",
@@ -271,7 +291,7 @@ func getPodToleration(podLabel string) (string, error) {
 
 	By("getting pod's toleration")
 	cmd = exec.Command("kubectl", "get", "pods", podName,
-		"-o", "go-template={{ range .spec.tolerations }}{{ .key }} | {{ end }}",
+		"-o", "jsonpath={.spec.tolerations}",
 	)
 	return utils.Run(cmd)
 }

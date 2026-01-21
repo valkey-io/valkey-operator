@@ -124,6 +124,10 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod's placement: %s", output))
 			Expect(output).To(ContainSubstring(taintedNode), fmt.Sprintf("Pods did not get scheduled on tainted node: %s", output))
+
+			By("Cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
 		})
 
 		It("should works with multiple tolerations", Label("multi-tolerations"), func() {
@@ -202,6 +206,10 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod's placement: %s", output))
 			Expect(output).To(ContainSubstring(taintedNode), fmt.Sprintf("Pods did not get scheduled on tainted node: %s", output))
+
+			By("Cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
 		})
 
 	})
@@ -257,15 +265,18 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying the pods placement")
-			verifyPodToleration := func(g Gomega) {
+			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
 					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
 					"-o", "go-template={{ range .items}}{{ .spec.nodeName }} | {{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pods' node placement")
 				g.Expect(output).NotTo(ContainSubstring(taintedNode), fmt.Sprintf("Pod got scheduled on the tainted node: %s", output))
-			}
-			Eventually(verifyPodToleration).Should(Succeed())
+			}).Should(Succeed())
+
+			By("Cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
 		})
 	})
 })

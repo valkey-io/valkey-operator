@@ -104,8 +104,6 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 	containers := generateContainersDef(cluster)
 	baseConfigMapName := getConfigMapName(cluster.Name)
 
-	baseConfigMapName := getConfigMapName(cluster.Name)
-
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",

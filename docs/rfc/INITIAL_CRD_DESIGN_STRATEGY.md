@@ -1,6 +1,3 @@
-> Represents the CRD design I submitted for review in this PR: TODO
-
-
 # Valkey Operator CRD Architecture - Design Proposal
 
 **Date:** 2026-01-22

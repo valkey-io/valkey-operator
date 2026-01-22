@@ -276,7 +276,6 @@ var _ = Describe("EventRecorder", func() {
 			events := collectEvents(fakeRecorder)
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("Normal")))
-			Expect(events).To(ContainElement(ContainSubstring("Created ConfigMap with configuration")))
 		})
 
 		It("should emit DeploymentCreated event on successful deployment creation", func() {

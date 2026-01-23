@@ -1603,8 +1603,12 @@ azDistribution:
 - [Valkey RFC #28](https://github.com/valkey-io/valkey-rfc/pull/28) - Operator requirements
 - [Valkey Operator Discussion #19](https://github.com/valkey-io/valkey-operator/discussions/19) - Initial design discussion
 - [Valkey Kubernetes Topologies](https://gist.githubusercontent.com/jdheyburn/88c5c67625d784d52cb1245be68a7429/raw/2a82b71b0357461721db118aa12bcf8c3cb044ec/VALKEY_KUBERNETES_TOPOLOGIES.md) - Production use cases
-- [Kubernetes CRD Design for the Long Haul](https://kccnceu2025.sched.com/) - ClusterAPI maintainers' best practices
-- [Simplify Kubernetes Operator Development With a Modular Design Pattern](https://kccnceu2025.sched.com/) - Operator patterns
+- [Kubernetes CRD Design for the Long Haul](https://www.youtube.com/watch?v=7IA-Vw1K7eg) - ClusterAPI maintainers' best practices
+- [Simplify Kubernetes Operator Development With a Modular Design Pattern](https://www.youtube.com/watch?v=m8ZnlZTo1OE) - Operator patterns
+- [Don't Do What Charlie Don't Does - Avoiding Common CRD Design errors](https://www.youtube.com/watch?v=pMnuso9KGtU)
+- [Don't Write Controllers Like Charlie Don't Does Avoiding Common Kubernetes Controller Mistakes](https://www.youtube.com/watch?v=tnSraS9JqZ8)
+- [Kubernetes - API Conventions](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md)
+- [Kubernetes - Changing the API](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api_changes.md)
 
 ### Operator References
 

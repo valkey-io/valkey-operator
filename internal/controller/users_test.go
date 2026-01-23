@@ -32,12 +32,11 @@ func TestBuildAclFileContents(t *testing.T) {
 	// Simulate a Secret
 	testSecrets := &corev1.Secret{
 		Data: map[string][]byte{
-			"charlie":  []byte("charliepassword"),
 			"davidref": []byte("c90502e005ee957f29645e21d1e27f5bbfce539e38c949a00dfc12270f47fc59"),
 		},
 	}
 
-	// alice should succeed as there is permissions, and valid password
+	// alice should succeed as there are permissions, and valid password
 	expected := "user alice on #b6366487efc982bfe450c46753917ee883f71a3f4fa5cdc5bde78d1784842e73 +@list +@connection ~jobs:*"
 	acl := buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
 		"alice": {
@@ -69,7 +68,7 @@ func TestBuildAclFileContents(t *testing.T) {
 		t.Errorf("charlie ACL Failed. Expected %s; got %s", expected, acl)
 	}
 
-	// david should succeed as there is permissions, and valid key ref
+	// david should succeed as there are permissions, and a valid key ref
 	expected = "user david on #c90502e005ee957f29645e21d1e27f5bbfce539e38c949a00dfc12270f47fc59 +@all"
 	acl = buildAclFileContents(ctx, map[string]valkeyiov1alpha1.UserAcl{
 		"david": {

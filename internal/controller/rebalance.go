@@ -19,6 +19,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -46,18 +49,125 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
+	inProgress, err := slotMigrationInProgress(ctx, move.Src)
+	if err != nil {
+		return false, err
+	}
+	if inProgress {
+		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
+		return true, nil
+	}
+
+	known, err := nodeKnownToSource(ctx, move.Src, move.Dst)
+	if err != nil {
+		return false, err
+	}
+	if !known {
+		log.V(1).Info("destination node not known to source yet; waiting", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "SlotsRebalancePending", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
+		return true, nil
+	}
+
 	log.V(1).Info("rebalancing slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
 	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "SlotsRebalancing", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
 
-	for _, slot := range move.Slots {
-		if err := migrateSlot(ctx, move.Src, move.Dst, slot); err != nil {
+	ranges := slotsToRanges(move.Slots)
+	if err := migrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
+		if !isAtomicMigrationUnsupported(err) {
 			return false, err
 		}
+		log.V(1).Info("atomic slot migration unsupported; falling back to legacy migration", "src", move.Src.Address, "dst", move.Dst.Address)
+		for _, slot := range move.Slots {
+			if err := migrateSlotLegacy(ctx, move.Src, move.Dst, slot); err != nil {
+				return false, err
+			}
+		}
+	} else {
+		log.V(1).Info("atomic slot migration started", "src", move.Src.Address, "dst", move.Dst.Address, "ranges", len(ranges))
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "SlotsRebalancingAtomic", "Atomic migration started from %s to %s for %d slot ranges", move.Src.Address, move.Dst.Address, len(ranges))
 	}
 	return true, nil
 }
 
-func migrateSlot(ctx context.Context, src *valkey.NodeState, dst *valkey.NodeState, slot int) error {
+func slotMigrationInProgress(ctx context.Context, src *valkey.NodeState) (bool, error) {
+	if src == nil || src.Client == nil {
+		return false, fmt.Errorf("missing source node")
+	}
+	log := logf.FromContext(ctx)
+	cmd := src.Client.B().Arbitrary("CLUSTER", "GETSLOTMIGRATIONS").Build()
+	migrations, err := src.Client.Do(ctx, cmd).ToArray()
+	if err != nil {
+		if isAtomicMigrationUnsupported(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getslotmigrations failed on %s: %w", src.Address, err)
+	}
+	for _, migration := range migrations {
+		values, parseErr := migration.AsStrMap()
+		if parseErr != nil {
+			log.V(1).Info("unable to parse slot migration entry; treating as in progress", "src", src.Address, "error", parseErr)
+			return true, nil
+		}
+		state := strings.ToLower(values["state"])
+		if state == "" {
+			log.V(1).Info("slot migration entry missing state; treating as in progress", "src", src.Address)
+			return true, nil
+		}
+		if !isSlotMigrationTerminal(state) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isSlotMigrationTerminal(state string) bool {
+	switch strings.ToLower(state) {
+	case "success", "failed", "canceled", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func nodeKnownToSource(ctx context.Context, src *valkey.NodeState, dst *valkey.NodeState) (bool, error) {
+	if src == nil || dst == nil || src.Client == nil {
+		return false, fmt.Errorf("missing source or destination node")
+	}
+	if dst.Id == "" {
+		return false, nil
+	}
+	cmd := src.Client.B().ClusterNodes().Build()
+	nodes, err := src.Client.Do(ctx, cmd).ToString()
+	if err != nil {
+		return false, fmt.Errorf("cluster nodes failed on %s: %w", src.Address, err)
+	}
+	return strings.Contains(nodes, dst.Id), nil
+}
+
+func migrateSlotsAtomic(ctx context.Context, src *valkey.NodeState, dst *valkey.NodeState, ranges []valkey.SlotsRange) error {
+	if src == nil || dst == nil {
+		return fmt.Errorf("missing source or destination node")
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+	cmd := src.Client.B().Arbitrary("CLUSTER", "MIGRATESLOTS")
+	for _, slotRange := range ranges {
+		cmd = cmd.Args(
+			"SLOTSRANGE",
+			strconv.Itoa(slotRange.Start),
+			strconv.Itoa(slotRange.End),
+			"NODE",
+			dst.Id,
+		)
+	}
+	if err := src.Client.Do(ctx, cmd.Build()).Error(); err != nil {
+		return fmt.Errorf("migrateslots failed from %s to %s: %w", src.Address, dst.Address, err)
+	}
+	return nil
+}
+
+func migrateSlotLegacy(ctx context.Context, src *valkey.NodeState, dst *valkey.NodeState, slot int) error {
 	if src == nil || dst == nil {
 		return fmt.Errorf("missing source or destination node")
 	}
@@ -91,4 +201,38 @@ func migrateSlot(ctx context.Context, src *valkey.NodeState, dst *valkey.NodeSta
 		return fmt.Errorf("setslot node failed for slot %d on %s: %w", slot, src.Address, err)
 	}
 	return nil
+}
+
+func slotsToRanges(slots []int) []valkey.SlotsRange {
+	if len(slots) == 0 {
+		return nil
+	}
+	ordered := append([]int(nil), slots...)
+	sort.Ints(ordered)
+	ranges := make([]valkey.SlotsRange, 0, len(ordered))
+	start := ordered[0]
+	prev := ordered[0]
+	for _, slot := range ordered[1:] {
+		if slot == prev+1 {
+			prev = slot
+			continue
+		}
+		ranges = append(ranges, valkey.SlotsRange{Start: start, End: prev})
+		start = slot
+		prev = slot
+	}
+	ranges = append(ranges, valkey.SlotsRange{Start: start, End: prev})
+	return ranges
+}
+
+func isAtomicMigrationUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown command") ||
+		strings.Contains(msg, "unknown subcommand") ||
+		strings.Contains(msg, "syntax error") ||
+		strings.Contains(msg, "wrong number of arguments") ||
+		strings.Contains(msg, "not supported")
 }

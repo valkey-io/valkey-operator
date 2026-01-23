@@ -1359,7 +1359,7 @@ status:
 - Both coexist during transition
 - Flexibility
 
-### 14. Custom Configuration - Inline Only
+### Custom Configuration - Inline Only
 
 **Decision:** Untyped `config` map for unmapped Valkey settings.
 
@@ -1367,10 +1367,6 @@ status:
 - Escape hatch
 - Simpler than ConfigMap refs
 - GitOps-friendly
-
----
-
-
 
 ## Design Rationale and Rejected Alternatives
 
@@ -1594,7 +1590,6 @@ azDistribution:
 
 - ConfigMap references for shared config
 - External config sources
-
 
 ## References
 

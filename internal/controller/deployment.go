@@ -119,6 +119,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 				},
 				Spec: corev1.PodSpec{
 					Containers: containers,
+					Affinity:   cluster.Spec.Affinity,
 					Volumes: []corev1.Volume{
 						{
 							Name: "scripts",

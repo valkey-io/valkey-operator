@@ -291,7 +291,13 @@ spec:
 
     # Valkey RDB snapshots
     rdb:
-      enabled: true
+      # +kubebuilder:validation:Enum=default;custom;disabled
+      # +kubebuilder:default=default
+      # default: Use Valkey built-in defaults (3600s/1, 300s/100, 60s/10000)
+      # custom: Use savePolicy from spec
+      # disabled: Explicitly disable RDB (generates `save ""`)
+      mode: custom
+      # Only used when mode=custom
       savePolicy:
         - seconds: 900
           changes: 1
@@ -328,12 +334,23 @@ spec:
           keys:
             - password
         permissions: "+@all ~*"
+
+      - name: app
+        # Password rotation example - multiple keys in same secret
+        passwordSecret:
+          name: app-credentials
+          keys:
+            - password
+            - password-previous
+        permissions: "+@read +@write +@connection -@admin ~app:*"
+
       - name: readonly
         passwordSecret:
           name: valkey-readonly-pw
           keys:
             - password
         permissions: "+@read ~*"
+
       - name: healthcheck
         # +kubebuilder:default=false
         nopass: true
@@ -496,7 +513,7 @@ spec:
       size: 10Gi
       storageClassName: gp3
       rdb:
-        enabled: true
+        mode: default  # Uses Valkey built-in defaults
       aof:
         enabled: true
         fsync: "everysec"
@@ -686,7 +703,7 @@ spec:
     size: 20Gi
     storageClassName: gp3
     rdb:
-      enabled: true
+      mode: default  # Uses Valkey built-in defaults
     aof:
       enabled: false
 
@@ -1012,7 +1029,15 @@ spec:
 
     # Valkey RDB snapshots
     rdb:
-      enabled: true
+      # +kubebuilder:validation:Enum=default;custom;disabled
+      # +kubebuilder:default=default
+      # default: Use Valkey built-in defaults (3600s/1, 300s/100, 60s/10000)
+      # custom: Use savePolicy from spec (requires savePolicy to be set)
+      # disabled: Explicitly disable RDB (generates `save ""`)
+      mode: custom
+
+      # Only used when mode=custom
+      # +optional
       savePolicy:
         - seconds: 900
           changes: 1
@@ -1020,6 +1045,11 @@ spec:
           changes: 10
         - seconds: 60
           changes: 10000
+
+      # Compression for RDB files (rdbcompression yes/no)
+      # Applies regardless of mode
+      # +kubebuilder:default=true
+      # +optional
       compression: true
 
     # Valkey AOF (append-only file)
@@ -1030,11 +1060,20 @@ spec:
       rewriteMinSize: 64mb
 ```
 
+**RDB mode semantics:**
+
+| `mode` | Generated Config | Use Case |
+|--------|-----------------|----------|
+| `default` | *(nothing - omit `save`)* | Let Valkey use built-in defaults |
+| `custom` | `save 900 1 300 10 ...` | Custom snapshot policy |
+| `disabled` | `save ""` | Explicitly disable RDB |
+
 **Design decisions:**
 - Nested structure for clarity
 - Both Valkey and Kubernetes volume config
-- Operator validates: warns if RDB/AOF enabled but volume disabled
+- Operator validates: warns if RDB/AOF in custom mode but volume disabled
 - PVCs created separately (not StatefulSet volumeClaimTemplate)
+- `mode` enum avoids boolean ambiguity and is extensible for future modes
 
 ### TLS Configuration
 
@@ -1094,22 +1133,21 @@ spec:
             - password
         permissions: "+@all ~*"
 
+      - name: app
+        # Password rotation example - multiple keys in same secret
+        passwordSecret:
+          name: app-credentials
+          keys:
+            - valkey-password
+            - valkey-password-previous
+        permissions: "+@read +@write +@connection -@admin ~app:*"
+
       - name: readonly
         passwordSecret:
           name: valkey-readonly-pw
           keys:
             - password
         permissions: "+@read ~*"
-
-      - name: app
-        # Password rotation example - multiple keys reference different
-        # passwords in the same secret, all valid for authentication
-        passwordSecret:
-          name: app-credentials
-          keys:
-            - valkey-password
-            - valkey-password-previous
-        permissions: "+@all -@admin ~app:*"
 
       - name: healthcheck
         # Passwordless user - any password (or none) works (Valkey ACL: "nopass")
@@ -1136,9 +1174,9 @@ spec:
   - If default user is required, it must be explicitly defined as such
 - `enabled` field maps to Valkey ACL `on`/`off` state
 - `nopass` field explicitly declares passwordless users
-  - Also considered was ommission of `passwordSecret` to imply `nopass`, however misconfiguration may expose an unauthenticated attack
+  - Also considered was omission of `passwordSecret` to imply `nopass`, however misconfiguration may expose an unauthenticated attack
 - Multiple passwords per user supported via `keys` list (enables password rotation)
-- All passwords via Secret references
+- All passwords via Secret references (no inline passwords or hashes)
 - GitOps-friendly with `+listMapKey=name`
 - Standard Valkey ACL syntax for `permissions` field
 
@@ -1290,7 +1328,7 @@ status:
 **Decision:** Use nested config structures, not CamelCase concatenation.
 
 **Examples:**
-- `persistence.rdb.enabled`, `persistence.aof.fsync`
+- `persistence.rdb.mode`, `persistence.aof.fsync`
 - `tls.clusterBus.enabled`, `tls.clientAuth`
 - `cluster.enabled`, `cluster.slots`
 
@@ -1623,6 +1661,17 @@ azDistribution:
 
 - ConfigMap references for shared config
 - External config sources
+
+### Structured ACL Permissions
+
+Abstract Valkey ACL syntax with structured fields for easier configuration:
+
+- `commands.allow`/`deny` for command control
+- `keys.readWrite`/`readOnly`/`writeOnly` for key access patterns
+- `channels.patterns` for Pub/Sub access
+- `additionalPermissions` escape hatch for advanced use cases
+
+See [FUTURE_STRUCTURED_PERMISSIONS.md](./FUTURE_STRUCTURED_PERMISSIONS.md) for full design.
 
 ## References
 

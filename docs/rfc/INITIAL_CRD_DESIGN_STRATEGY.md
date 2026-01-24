@@ -313,28 +313,31 @@ spec:
     caKey: ca.crt
     clientAuth: require  # none | request | require
 
-  # Authentication
+  # Authentication via ACL
+  # +optional
   auth:
-    # Legacy password mode
-    password:
-      secret:
-        name: valkey-password
-        key: password
-
-    # Modern ACL mode
-    acl:
-      enabled: true
-      users:
-        - name: default
-          passwordSecret:
-            name: valkey-default-pw
-            key: password
-          permissions: "+@all ~*"
-        - name: readonly
-          passwordSecret:
-            name: valkey-readonly-pw
-            key: password
-          permissions: "+@read ~*"
+    # +listType=map
+    # +listMapKey=name
+    users:
+      - name: default
+        # +kubebuilder:default=true
+        enabled: true
+        passwordSecret:
+          name: valkey-default-pw
+          # +kubebuilder:validation:MinItems=1
+          keys:
+            - password
+        permissions: "+@all ~*"
+      - name: readonly
+        passwordSecret:
+          name: valkey-readonly-pw
+          keys:
+            - password
+        permissions: "+@read ~*"
+      - name: healthcheck
+        # +kubebuilder:default=false
+        nopass: true
+        permissions: "+ping +info"
 
   # Pod scheduling
   nodeSelector: {}
@@ -1073,43 +1076,71 @@ spec:
 
 ```yaml
 spec:
+  # Authentication via ACL
+  # +optional
   auth:
-    # Legacy password mode (requirepass)
-    password:
-      secret:
-        name: valkey-password
-        key: password
+    # +listType=map
+    # +listMapKey=name
+    users:
+      - name: default
+        # User enabled state (default: true)
+        # When false, user cannot authenticate (Valkey ACL: "off")
+        # +kubebuilder:default=true
+        enabled: true
+        passwordSecret:
+          name: valkey-default-pw
+          # +kubebuilder:validation:MinItems=1
+          keys:
+            - password
+        permissions: "+@all ~*"
 
-    # Modern ACL mode
-    acl:
-      enabled: true
-      # +listType=map
-      # +listMapKey=name
-      users:
-        - name: default
-          passwordSecret:
-            name: valkey-default-pw
-            key: password
-          permissions: "+@all ~*"
+      - name: readonly
+        passwordSecret:
+          name: valkey-readonly-pw
+          keys:
+            - password
+        permissions: "+@read ~*"
 
-        - name: readonly
-          passwordSecret:
-            name: valkey-readonly-pw
-            key: password
-          permissions: "+@read ~*"
+      - name: app
+        # Password rotation example - multiple keys reference different
+        # passwords in the same secret, all valid for authentication
+        passwordSecret:
+          name: app-credentials
+          keys:
+            - valkey-password
+            - valkey-password-previous
+        permissions: "+@all -@admin ~app:*"
 
-        - name: app
-          passwordSecret:
-            name: app-credentials
-            key: valkey-password
-          permissions: "+@all -@admin ~app:*"
+      - name: healthcheck
+        # Passwordless user - any password (or none) works (Valkey ACL: "nopass")
+        # +kubebuilder:default=false
+        nopass: true
+        permissions: "+ping +info"
+
+      - name: deactivated-user
+        # Disabled user - cannot authenticate
+        enabled: false
+        nopass: true
+        permissions: "+@all ~*"
 ```
 
+**Validation rules:**
+- Must have either `passwordSecret` OR `nopass: true` (not neither)
+- Cannot have both `passwordSecret` AND `nopass: true` (mutually exclusive)
+- `enabled` defaults to `true`
+- `nopass` defaults to `false`
+
 **Design decisions:**
-- Both modes can coexist (migration path)
+- Single ACL-based authentication model (no legacy `requirepass` mode)
+  - `requirepass` sets the password for the default user
+  - If default user is required, it must be explicitly defined as such
+- `enabled` field maps to Valkey ACL `on`/`off` state
+- `nopass` field explicitly declares passwordless users
+  - Also considered was ommission of `passwordSecret` to imply `nopass`, however misconfiguration may expose an unauthenticated attack
+- Multiple passwords per user supported via `keys` list (enables password rotation)
 - All passwords via Secret references
 - GitOps-friendly with `+listMapKey=name`
-- Standard Valkey ACL syntax
+- Standard Valkey ACL syntax for `permissions` field
 
 ### Custom Configuration
 
@@ -1172,10 +1203,9 @@ spec:
   tls:
     enabled: false
 
-  # Auth
+  # Auth (ACL-based)
   auth:
-    password: {}
-    acl: {}
+    users: []
 
   # Custom config
   config: {}
@@ -1350,14 +1380,17 @@ status:
 - No external dependencies
 - Portable
 
-### Authentication - Dual Mode
+### Authentication - ACL-Only with Multi-Password Support
 
-**Decision:** Support password and ACL simultaneously.
+**Decision:** Single ACL-based authentication model with support for multiple passwords per user, explicit `enabled` and `nopass` flags.
 
 **Rationale:**
-- Migration path
-- Both coexist during transition
-- Flexibility
+- Simpler mental model (one mechanism for all auth)
+- Default user configured via ACL like any other user (no separate `requirepass`)
+- Multiple passwords per user via `keys` list enables zero-downtime password rotation
+- `enabled` field maps to Valkey ACL `on`/`off` for user state control
+- `nopass` must be explicitly set (prevents accidental passwordless users)
+- Validation requires either `passwordSecret` or `nopass: true` (catches missing config)
 
 ### Custom Configuration - Inline Only
 

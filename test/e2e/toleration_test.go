@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -84,7 +83,7 @@ spec:
     effect: "NoSchedule"
 `, valkeyName)
 
-			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.yaml", valkeyName, time.Now().UnixNano()))
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
@@ -165,7 +164,7 @@ spec:
       effect: "NoExecute"
 `, valkeyName)
 
-			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.yaml", valkeyName, time.Now().UnixNano()))
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
@@ -241,7 +240,7 @@ spec:
   tolerations: []
 `, valkeyName)
 
-			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d.yaml", valkeyName, time.Now().UnixNano()))
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {

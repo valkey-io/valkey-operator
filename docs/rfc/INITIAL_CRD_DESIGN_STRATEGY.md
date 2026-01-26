@@ -180,8 +180,15 @@ metadata:
 
   # Persistent volume configuration
   persistence:
-    enabled: true
+    # +kubebuilder:validation:Enum=disabled;enabled;external
+    # +kubebuilder:default=disabled
+    # disabled: No PVC, ephemeral storage (default)
+    # enabled: Operator creates and manages PVC
+    # external: User provides existing PVC via existingClaim
+    mode: enabled
+    # Required when mode=enabled
     size: 10Gi
+    # +optional
     storageClassName: gp3
 
   # Service configuration
@@ -285,9 +292,18 @@ spec:
 
   # Persistent storage configuration
   persistence:
-    enabled: true
+    # +kubebuilder:validation:Enum=disabled;enabled;external
+    # +kubebuilder:default=disabled
+    # disabled: No PVC, ephemeral storage (default)
+    # enabled: Operator creates and manages PVC
+    # external: User provides existing PVC via existingClaim
+    mode: enabled
+    # Required when mode=enabled
     size: 10Gi
+    # +optional
     storageClassName: gp3
+    # Required when mode=external
+    # existingClaim: my-existing-pvc
 
     # Valkey RDB snapshots
     rdb:
@@ -370,9 +386,14 @@ spec:
   podManagementType: statefulset
 
   # Metrics exporter sidecar
+  # Enabled by default with operator-managed image/resources
+  # Only specify to opt-out or customize
   exporter:
+    # +kubebuilder:default=true
     enabled: true
+    # +optional (operator provides default)
     image: oliver006/redis_exporter:latest
+    # +optional (operator provides default)
     resources: {}
 
   # Custom Valkey configuration
@@ -514,7 +535,7 @@ spec:
         downAfterMilliseconds: "30000"
 
     persistence:
-      enabled: true
+      mode: enabled
       size: 10Gi
       storageClassName: gp3
       rdb:
@@ -537,7 +558,7 @@ spec:
     podManagementType: statefulset
 
     exporter:
-      enabled: true
+      enabled: true  # Default, can omit or set false to opt-out
 
     tls:
       enabled: false
@@ -703,7 +724,7 @@ spec:
 
   # Persistent storage
   persistence:
-    enabled: true
+    mode: enabled  # Explicitly enabled for production
     size: 20Gi
     storageClassName: gp3
     rdb:
@@ -734,9 +755,9 @@ spec:
 
   podManagementType: statefulset
 
-  # Metrics exporter
+  # Metrics exporter (enabled by default)
   exporter:
-    enabled: true
+    enabled: true  # Default, can omit or set false to opt-out
 
   # TLS configuration
   tls:
@@ -1026,10 +1047,22 @@ All user-facing CRDs share similar configuration patterns for consistency.
 
 ```yaml
 spec:
+  # Persistent storage configuration
   persistence:
-    enabled: true
+    # +kubebuilder:validation:Enum=disabled;enabled;external
+    # +kubebuilder:default=disabled
+    # disabled: No PVC, ephemeral storage (default)
+    # enabled: Operator creates and manages PVC
+    # external: User provides existing PVC via existingClaim
+    mode: enabled
+
+    # Required when mode=enabled
     size: 10Gi
+    # +optional (uses cluster default if omitted)
     storageClassName: gp3
+
+    # Required when mode=external
+    # existingClaim: my-existing-pvc
 
     # Valkey RDB snapshots
     rdb:
@@ -1077,6 +1110,14 @@ spec:
       rewriteMinSize: 64mb
 ```
 
+**Persistence mode semantics:**
+
+| `mode` | PVC Created By | Required Fields | Use Case |
+|--------|---------------|-----------------|----------|
+| `disabled` (default) | None | - | Dev/test, pure cache |
+| `enabled` | Operator | `size` | Standard production |
+| `external` | User | `existingClaim` | Migration, shared storage |
+
 **RDB mode semantics:**
 
 | `mode` | Generated Config | Use Case |
@@ -1094,11 +1135,13 @@ spec:
 | `custom` | `appendonly yes` + fsync/rewrite settings | Fine-tuned AOF |
 
 **Design decisions:**
+- Persistence defaults to `disabled` for easy getting-started experience
+- Production deployments should explicitly set `mode: enabled`
 - Nested structure for clarity
-- Both Valkey and Kubernetes volume config
-- Operator validates: warns if RDB/AOF in custom/enabled mode but volume disabled
+- Separates Kubernetes storage (PVC) from Valkey persistence (RDB/AOF)
+- Operator validates: warns if RDB/AOF in custom/enabled mode but persistence.mode=disabled
 - PVCs created separately (not StatefulSet volumeClaimTemplate)
-- `mode` enum avoids boolean ambiguity and is extensible for future modes
+- `mode` enum avoids boolean ambiguity and is extensible (e.g., `external` for existing PVCs)
 
 ### TLS Configuration
 
@@ -1255,11 +1298,16 @@ spec:
   # Pod management
   podManagementType: statefulset  # or deployment
 
-  # Metrics exporter
+  # Metrics exporter (enabled by default)
+  # Omit entirely to use defaults, or specify to opt-out/customize
   exporter:
-    enabled: true
+    # +kubebuilder:default=true
+    enabled: true  # Set to false to opt-out
+    # +optional (operator provides default)
     image: oliver006/redis_exporter:latest
+    # +optional (operator provides default)
     resources: {}
+    # +optional
     port: 9121
 
   # TLS

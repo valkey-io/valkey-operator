@@ -198,10 +198,11 @@ metadata:
 
   # Valkey-specific configuration (only when type=valkey)
   valkeyConfig:
-    # Cluster configuration
-    cluster:
-      enabled: false
-      slots: []  # e.g., ["0-5460"]    
+    # Cluster configuration (presence-based)
+    # If set, node runs in cluster mode with assigned slots
+    # Omit entirely for standalone/replicated mode
+    # cluster:
+    #   slots: ["0-5460", "5461-10922"]  # Required when cluster is configured
     # ... other configurations
 
 status:

@@ -306,7 +306,12 @@ spec:
 
     # Valkey AOF (append-only file)
     aof:
-      enabled: true
+      # +kubebuilder:validation:Enum=disabled;enabled;custom
+      # +kubebuilder:default=disabled
+      # disabled: AOF off (Valkey default)
+      # enabled: AOF on with Valkey defaults (everysec, 100%, 64mb)
+      # custom: AOF on with settings from spec
+      mode: custom
       fsync: "everysec"  # always | everysec | no
 
   # TLS configuration
@@ -515,8 +520,7 @@ spec:
       rdb:
         mode: default  # Uses Valkey built-in defaults
       aof:
-        enabled: true
-        fsync: "everysec"
+        mode: enabled  # AOF on with Valkey defaults
 
     resources:
       requests:
@@ -705,7 +709,7 @@ spec:
     rdb:
       mode: default  # Uses Valkey built-in defaults
     aof:
-      enabled: false
+      mode: disabled  # AOF off (Valkey default)
 
   # Cluster-specific configuration
   cluster:
@@ -1054,9 +1058,22 @@ spec:
 
     # Valkey AOF (append-only file)
     aof:
-      enabled: false
-      fsync: everysec  # always | everysec | no
+      # +kubebuilder:validation:Enum=disabled;enabled;custom
+      # +kubebuilder:default=disabled
+      # disabled: AOF off (Valkey default, generates `appendonly no`)
+      # enabled: AOF on with Valkey defaults (everysec, 100%, 64mb)
+      # custom: AOF on with settings from spec
+      mode: custom
+
+      # Only used when mode=custom
+      # +kubebuilder:validation:Enum=always;everysec;no
+      # +optional
+      fsync: everysec
+
+      # +optional
       rewritePercentage: 100
+
+      # +optional
       rewriteMinSize: 64mb
 ```
 
@@ -1068,10 +1085,18 @@ spec:
 | `custom` | `save 900 1 300 10 ...` | Custom snapshot policy |
 | `disabled` | `save ""` | Explicitly disable RDB |
 
+**AOF mode semantics:**
+
+| `mode` | Generated Config | Use Case |
+|--------|-----------------|----------|
+| `disabled` | `appendonly no` | No AOF (Valkey default) |
+| `enabled` | `appendonly yes` | AOF with Valkey defaults |
+| `custom` | `appendonly yes` + fsync/rewrite settings | Fine-tuned AOF |
+
 **Design decisions:**
 - Nested structure for clarity
 - Both Valkey and Kubernetes volume config
-- Operator validates: warns if RDB/AOF in custom mode but volume disabled
+- Operator validates: warns if RDB/AOF in custom/enabled mode but volume disabled
 - PVCs created separately (not StatefulSet volumeClaimTemplate)
 - `mode` enum avoids boolean ambiguity and is extensible for future modes
 

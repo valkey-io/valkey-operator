@@ -330,15 +330,12 @@ spec:
       mode: custom
       fsync: "everysec"  # always | everysec | no
 
-  # TLS configuration
-  tls:
-    enabled: false
-    certificateRef:
-      name: valkey-tls
-    certKey: tls.crt
-    keyKey: tls.key
-    caKey: ca.crt
-    clientAuth: require  # none | request | require
+  # TLS configuration (presence-based - if set, TLS is enabled)
+  # Omit entirely to disable TLS
+  # tls:
+  #   certificateRef:
+  #     name: valkey-tls
+  #   clientAuth: require  # none | optional | require
 
   # Authentication via ACL
   # +optional
@@ -560,8 +557,7 @@ spec:
     exporter:
       enabled: true  # Default, can omit or set false to opt-out
 
-    tls:
-      enabled: false
+    # tls: (omit to disable TLS)
 
     config:
       maxmemory: "1gb"
@@ -759,11 +755,11 @@ spec:
   exporter:
     enabled: true  # Default, can omit or set false to opt-out
 
-  # TLS configuration
-  tls:
-    enabled: false
-    certificateRef:
-      name: valkey-cluster-tls
+  # TLS configuration (presence-based - omit to disable)
+  # tls:
+  #   certificateRef:
+  #     name: valkey-cluster-tls
+  #   clientAuth: require
 
   # Custom configuration
   config:
@@ -904,11 +900,11 @@ spec:
     failoverTimeout: "180000"
     parallelSyncs: "1"
 
-  # TLS configuration
-  tls:
-    enabled: false
-    certificateRef:
-      name: sentinel-tls
+  # TLS configuration (presence-based - omit to disable)
+  # tls:
+  #   certificateRef:
+  #     name: sentinel-tls
+  #   clientAuth: require
 
 status:
   state: Ready  # Initializing | Ready | Degraded | Failed
@@ -1147,37 +1143,42 @@ spec:
 
 ```yaml
 spec:
+  # TLS configuration (presence-based)
+  # If this field is set, TLS is enabled for all traffic
+  # Omit entirely to disable TLS
   tls:
-    enabled: true
-
     # Secret reference (no cert-manager dependency)
+    # +kubebuilder:validation:Required
     certificateRef:
       name: valkey-tls
 
-    # Keys within the secret
+    # Keys within the secret (defaults shown)
+    # +optional
     certKey: tls.crt
+    # +optional
     keyKey: tls.key
+    # +optional
     caKey: ca.crt
 
-    # mTLS configuration
-    clientAuth: require  # none | request | require
-
-    # Protocol settings
-    minVersion: TLS12
-    protocols:
-      - TLSv1.2
-      - TLSv1.3
-
-    # Valkey-specific
-    replication: true      # TLS for primary-replica traffic
-    clusterBus: true       # TLS for cluster bus (ValkeyCluster only)
+    # Client authentication mode
+    # +kubebuilder:validation:Enum=none;optional;require
+    # +kubebuilder:default=require
+    clientAuth: require
 ```
 
+**TLS presence semantics:**
+
+| `tls` field | Behavior |
+|-------------|----------|
+| Omitted | TLS disabled |
+| Present | TLS enabled for clients, replication, and cluster bus |
+
 **Design decisions:**
+- Presence-based: if `tls` is set, TLS is enabled for everything
 - Follows prometheus-operator pattern
-- Works with any Secret source
-- No external dependencies
-- Granular control over internal traffic encryption
+- Works with any Secret source (no cert-manager dependency)
+- Simple model: TLS on or off, no partial encryption scenarios
+- Advanced users can use `spec.config` for granular control if needed
 
 ### Authentication Configuration
 
@@ -1310,9 +1311,10 @@ spec:
     # +optional
     port: 9121
 
-  # TLS
-  tls:
-    enabled: false
+  # TLS (presence-based - omit to disable)
+  # tls:
+  #   certificateRef:
+  #     name: valkey-tls
 
   # Auth (ACL-based)
   auth:
@@ -1402,8 +1404,8 @@ status:
 
 **Examples:**
 - `persistence.rdb.mode`, `persistence.aof.fsync`
-- `tls.clusterBus.enabled`, `tls.clientAuth`
-- `cluster.enabled`, `cluster.slots`
+- `tls.certificateRef`, `tls.clientAuth`
+- `cluster.nodeTimeout`, `cluster.slots`
 
 **Rationale:**
 - Kubernetes CRD best practices

@@ -299,6 +299,10 @@ func parseSlotsRanges(s []string) ([]SlotsRange, error) {
 	ranges := []SlotsRange{}
 
 	for _, part := range s {
+		// Skip migrating/importing entries like "[12345->-nodeid]".
+		if strings.HasPrefix(part, "[") {
+			continue
+		}
 		r, err := parseSlotsRange(part)
 		if err != nil {
 			return nil, err

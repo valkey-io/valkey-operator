@@ -213,7 +213,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	replicaAttached, err := r.attachReplicaFromEmptyShard(ctx, cluster, state)
+	replicaAttached, err := r.attachReplica(ctx, cluster, state)
 	if err != nil {
 		log.Error(err, "unable to add cluster replica")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "CreateReplica", "Failed to create replica: %v", err)

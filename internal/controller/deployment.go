@@ -118,6 +118,10 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 
 func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+	nodeSelector := cluster.Spec.NodeSelector
+	if cluster.Spec.Affinity != nil {
+		nodeSelector = nil
+	}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
@@ -134,8 +138,9 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 					Labels: labels(cluster),
 				},
 				Spec: corev1.PodSpec{
-					Containers:  containers,
-					Affinity:    cluster.Spec.Affinity,
+					Containers:   containers,
+					Affinity:     cluster.Spec.Affinity,
+					NodeSelector: nodeSelector,
 					Tolerations: cluster.Spec.Tolerations,
 					Volumes: []corev1.Volume{
 						{

@@ -13,6 +13,7 @@ linters:
     - govet
     - ineffassign
     - lll
+    - modernize
     - misspell
     - nakedret
     - prealloc
@@ -26,6 +27,9 @@ linters:
       rules:
         - name: comment-spacings
         - name: import-shadowing
+    modernize:
+      disable:
+        - omitzero
   exclusions:
     generated: lax
     rules:
@@ -36,6 +40,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # See https://github.com/valkey-io/valkey-operator/issues/70
+      - linters:
+          - staticcheck
+        text: "mgr.GetEventRecorderFor is deprecated: this uses the old events API and will be removed in a future release. Please use GetEventRecorder instead."
       - path: _test\.go
         # Allow repeated strings in tests.
         linters:

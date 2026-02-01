@@ -119,19 +119,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(state.PendingNodes) > 0 {
 		node := state.PendingNodes[0]
 		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdding", "adding node", "Adding node %v to cluster", node.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdding", "AddNode", "Adding node %v to cluster", node.Address)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Adding nodes to cluster", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonSlotsUnassigned, "Assigning slots to nodes", metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, state)
 		if err := r.addValkeyNode(ctx, cluster, state, node); err != nil {
 			log.Error(err, "unable to add cluster node")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeAddFailed", "adding node", "Failed to add node %v: %v", node.Address, err)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeAddFailed", "AddNode", "Failed to add node: %v", err)
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdded", "adding node", "Node %v joined cluster", node.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdded", "AddNode", "Node %v joined cluster", node.Address)
 		// Let the added node stabilize, and refetch the cluster state.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -139,7 +139,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check cluster status
 	if len(state.Shards) < int(cluster.Spec.Shards) {
 		log.V(1).Info("missing shards, requeue..")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForShards", "checking shards", "%d of %d shards exist", len(state.Shards), cluster.Spec.Shards)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForShards", "CheckShards", "%d of %d shards exist", len(state.Shards), cluster.Spec.Shards)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingShards, "Waiting for all shards to be created", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating shards", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingShards, "Waiting for shards", metav1.ConditionFalse)
@@ -149,7 +149,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	for _, shard := range state.Shards {
 		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
 			log.V(1).Info("missing replicas, requeue..")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "checking replicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
 			setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
@@ -172,7 +172,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Cluster is healthy - set all positive conditions
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "reconciling cluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
@@ -335,10 +335,10 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 					log.V(1).Info("meet other node", "this node", node.Address, "other node", primary.Address)
 					if err = node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(primary.Address).Port(int64(primary.Port)).Build()).Error(); err != nil {
 						log.Error(err, "command failed: CLUSTER MEET", "from", node.Address, "to", primary.Address)
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "cluster meet", "CLUSTER MEET failed for node %v: %v", node.Address, err)
+						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET failed: %v", err)
 						return err
 					}
-					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterMeet", "cluster meet", "Node %v met node %v", node.Address, primary.Address)
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterMeet", "ClusterMeet", "Node %v met node %v", node.Address, primary.Address)
 				}
 				return nil
 			}
@@ -369,10 +369,10 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 
 		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
 			log.Error(err, "command failed: CLUSTER ADDSLOTSRANGE", "slotStart", slotStart, "slotEnd", slotEnd)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "assigning slots", "Failed to assign slots to node %v: %v", node.Address, err)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots: %v", err)
 			return err
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "creating primary", "Created primary with slots %d-%d", slotStart, slotEnd)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary with slots %d-%d", slotStart, slotEnd)
 		return nil
 	}
 
@@ -382,7 +382,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 			primary := shard.GetPrimaryNode()
 			if primary == nil {
 				log.Error(nil, "primary lost in shard", "Shard Id", shard.Id)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PrimaryLost", "checking primary", "Primary lost in shard %v", shard.Id)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PrimaryLost", "CheckPrimary", "Primary lost in shard %v", shard.Id)
 				setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPrimaryLost, "Primary lost in one or more shards", metav1.ConditionTrue)
 				// Cannot add replica without a primary - return error to trigger degraded state.
 				return errors.New("primary lost in shard, cannot add replica")
@@ -392,10 +392,10 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 
 			if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primary.Id).Build()).Error(); err != nil {
 				log.Error(err, "command failed: CLUSTER REPLICATE", "nodeId", primary.Id)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "creating replica", "Failed to create replica for primary %v: %v", primary.Id, err)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "CreateReplica", "Failed to create replica: %v", err)
 				return err
 			}
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicaCreated", "creating replica", "Created replica for primary %v", primary.Id)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicaCreated", "CreateReplica", "Created replica for primary %v", primary.Id)
 			return nil
 		}
 	}
@@ -415,9 +415,9 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
 						log.Error(err, "command failed: CLUSTER FORGET")
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "forgetting node", "Failed to forget node %v: %v", failing.Address, err)
+						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
 					} else {
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "forgetting node", "Forgot stale node %v", failing.Address)
+						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
 					}
 				}
 

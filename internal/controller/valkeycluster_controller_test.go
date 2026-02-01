@@ -381,13 +381,13 @@ var _ = Describe("EventRecorder", func() {
 
 // Helper function to collect events from the fake recorder
 func collectEvents(recorder *events.FakeRecorder) []string {
-	events := []string{}
+	eventsList := []string{}
 	for {
 		select {
 		case event := <-recorder.Events:
-			events = append(events, event)
+			eventsList = append(eventsList, event)
 		default:
-			return events
+			return eventsList
 		}
 	}
 }

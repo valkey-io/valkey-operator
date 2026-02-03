@@ -108,7 +108,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(events).ToNot(BeEmpty())
 			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
-			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("StatefulSetCreated")))
 
 		})
 	})
@@ -279,7 +279,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(events).To(ContainElement(ContainSubstring("Created ConfigMap with configuration")))
 		})
 
-		It("should emit DeploymentCreated event on successful deployment creation", func() {
+		It("should emit StatefulSetCreated event on successful StatefulSet creation", func() {
 			cluster := &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "event-test-cluster",
@@ -293,15 +293,15 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			err := r.upsertDeployments(ctx, cluster)
+			err := r.upsertStatefulSet(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)
-			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("StatefulSetCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("Normal")))
-			deploymentEvents := filterEventsByType(events, "DeploymentCreated")
-			Expect(len(deploymentEvents)).To(BeNumerically(">", 1))
-			Expect(deploymentEvents[0]).To(ContainSubstring("Normal"))
+			statefulSetEvents := filterEventsByType(events, "StatefulSetCreated")
+			Expect(len(statefulSetEvents)).To(BeNumerically(">", 0))
+			Expect(statefulSetEvents[0]).To(ContainSubstring("Normal"))
 		})
 	})
 
@@ -364,16 +364,16 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			// Trigger deployment creation to verify formatted message
-			err := r.upsertDeployments(ctx, cluster)
+			// Trigger StatefulSet creation to verify formatted message
+			err := r.upsertStatefulSet(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)
-			deploymentEvents := filterEvents(events, "DeploymentCreated")
-			Expect(deploymentEvents).ToNot(BeEmpty())
+			statefulSetEvents := filterEvents(events, "StatefulSetCreated")
+			Expect(statefulSetEvents).ToNot(BeEmpty())
 
-			for _, event := range deploymentEvents {
-				Expect(event).To(MatchRegexp(`Created deployment \d+ of \d+`))
+			for _, event := range statefulSetEvents {
+				Expect(event).To(MatchRegexp(`Created StatefulSet with \d+ replicas`))
 			}
 		})
 	})

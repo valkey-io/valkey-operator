@@ -31,7 +31,7 @@ import (
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func TestCreateClusterDeployment(t *testing.T) {
+func TestCreateClusterStatefulSet(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "mycluster",
@@ -40,25 +40,25 @@ func TestCreateClusterDeployment(t *testing.T) {
 			Image: "container:version",
 		},
 	}
-	d := createClusterDeployment(cluster)
-	if d.Name != "" {
-		t.Errorf("Expected empty name field, got %v", d.Name)
+	s := createClusterStatefulSet(cluster, 3)
+	if s.Name != "mycluster" {
+		t.Errorf("Expected %v, got %v", "mycluster", s.Name)
 	}
-	if d.GenerateName != "mycluster-" {
-		t.Errorf("Expected %v, got %v", "mycluster-", d.GenerateName)
+	if s.Spec.ServiceName != "mycluster" {
+		t.Errorf("Expected %v, got %v", "mycluster", s.Spec.ServiceName)
 	}
-	if *d.Spec.Replicas != 1 {
-		t.Errorf("Expected %v, got %v", 1, d.Spec.Replicas)
+	if *s.Spec.Replicas != 3 {
+		t.Errorf("Expected %v, got %v", 3, s.Spec.Replicas)
 	}
-	if len(d.Spec.Template.Spec.Containers) != 1 {
-		t.Errorf("Expected %v, got %v", 1, len(d.Spec.Template.Spec.Containers))
+	if len(s.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("Expected %v, got %v", 1, len(s.Spec.Template.Spec.Containers))
 	}
-	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
-		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
+	if s.Spec.Template.Spec.Containers[0].Image != "container:version" {
+		t.Errorf("Expected %v, got %v", "container:version", s.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 
-func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
+func TestCreateClusterStatefulSet_SetsPodAntiAffinity(t *testing.T) {
 	antiAffinity := &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -81,9 +81,9 @@ func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster)
+	s := createClusterStatefulSet(cluster, 1)
 
-	got := d.Spec.Template.Spec.Affinity
+	got := s.Spec.Template.Spec.Affinity
 	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Fatalf("affinity mismatch (-want +got):\n%s", diff)
 	}

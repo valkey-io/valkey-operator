@@ -973,6 +973,10 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              allowExternalAccess:
+                description: Allow external access to each Valkey pod via a NodePort
+                  Service
+                type: boolean
               exporter:
                 default:
                   enabled: true

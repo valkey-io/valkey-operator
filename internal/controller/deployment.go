@@ -34,8 +34,29 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 			Image:     image,
 			Resources: cluster.Spec.Resources,
 			Command: []string{
-				"valkey-server",
-				"/config/valkey.conf",
+				"/scripts/start-valkey.sh",
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name: "VALKEY_NODE_IP",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "status.hostIP",
+						},
+					},
+				},
+				{
+					Name: "POD_NAME",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.name",
+						},
+					},
+				},
+				{
+					Name: "VALKEY_BASE_NODE_PORT",
+					Value: "30000",
+				},
 			},
 			Ports: []corev1.ContainerPort{
 				{
@@ -105,6 +126,10 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 					MountPath: "/config",
 					ReadOnly:  true,
 				},
+				{
+					Name:      "data",
+					MountPath: "/data",
+				},
 			},
 		},
 	}
@@ -116,16 +141,18 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	return containers
 }
 
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+func createClusterStatefulSet(cluster *valkeyiov1alpha1.ValkeyCluster, replicas int32) *appsv1.StatefulSet {
 	containers := generateContainersDef(cluster)
-	deployment := &appsv1.Deployment{
+
+	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: cluster.Name + "-",
-			Namespace:    cluster.Namespace,
-			Labels:       labels(cluster),
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+			Labels:    labels(cluster),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: func(i int32) *int32 { return &i }(1),
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: cluster.Name,
+			Replicas:    func(i int32) *int32 { return &i }(replicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels(cluster),
 			},
@@ -165,5 +192,4 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 			},
 		},
 	}
-	return deployment
 }

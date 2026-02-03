@@ -69,6 +69,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Allow external access to each Valkey pod via a NodePort Service
+	// +optional
+	AllowExternalAccess bool `json:"allowExternalAccess,omitempty"`
+
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
 	// +optional

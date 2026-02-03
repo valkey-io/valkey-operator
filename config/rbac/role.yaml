@@ -24,11 +24,14 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - apps
   resources:
   - deployments
+  - statefulsets
   verbs:
   - create
   - delete

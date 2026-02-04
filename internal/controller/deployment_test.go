@@ -106,27 +106,6 @@ func TestCreateClusterDeployment_SetsNodeSelector(t *testing.T) {
 	assert.Equal(t, nodeSelector, d.Spec.Template.Spec.NodeSelector, "node selector should match spec")
 }
 
-func TestCreateClusterDeployment_NodeSelectorIgnoredWhenAffinitySet(t *testing.T) {
-	nodeSelector := map[string]string{
-		"disktype": "ssd",
-	}
-	affinity := &corev1.Affinity{
-		NodeAffinity: &corev1.NodeAffinity{},
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:        "container:version",
-			NodeSelector: nodeSelector,
-			Affinity:     affinity,
-		},
-	}
-
-	d := createClusterDeployment(cluster)
-
-	assert.Nil(t, d.Spec.Template.Spec.NodeSelector, "node selector should be nil when affinity set")
-}
-
 func TestGenerateContainersDef(t *testing.T) {
 	t.Run("should return only valkey-server when exporter is disabled", func(t *testing.T) {
 		cluster := &valkeyv1.ValkeyCluster{

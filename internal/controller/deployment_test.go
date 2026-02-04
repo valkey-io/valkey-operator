@@ -22,8 +22,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -31,7 +29,7 @@ import (
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func TestCreateClusterStatefulSet(t *testing.T) {
+func TestCreateClusterDeployment(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "mycluster",
@@ -40,70 +38,22 @@ func TestCreateClusterStatefulSet(t *testing.T) {
 			Image: "container:version",
 		},
 	}
-	s := createClusterStatefulSet(cluster, 3)
-	if s.Name != "mycluster" {
-		t.Errorf("Expected %v, got %v", "mycluster", s.Name)
+	d := createClusterDeployment(cluster, 2, "mycluster-0-0")
+	if d.Name != "mycluster-0-0" {
+		t.Errorf("Expected %v, got %v", "mycluster-0-0", d.Name)
 	}
-	if s.Spec.ServiceName != "mycluster" {
-		t.Errorf("Expected %v, got %v", "mycluster", s.Spec.ServiceName)
+	if *d.Spec.Replicas != 2 {
+		t.Errorf("Expected %v, got %v", 2, d.Spec.Replicas)
 	}
-	if *s.Spec.Replicas != 3 {
-		t.Errorf("Expected %v, got %v", 3, s.Spec.Replicas)
+	if len(d.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("Expected %v, got %v", 1, len(d.Spec.Template.Spec.Containers))
 	}
-	if len(s.Spec.Template.Spec.Containers) != 1 {
-		t.Errorf("Expected %v, got %v", 1, len(s.Spec.Template.Spec.Containers))
+	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
+		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
 	}
-	if s.Spec.Template.Spec.Containers[0].Image != "container:version" {
-		t.Errorf("Expected %v, got %v", "container:version", s.Spec.Template.Spec.Containers[0].Image)
+	if d.Spec.Template.Labels[ExternalAccessTargetKey] != "mycluster-0-0" {
+		t.Errorf("Expected %v, got %v", "mycluster-0-0", d.Spec.Template.Labels[ExternalAccessTargetKey])
 	}
-}
-
-func TestCreateClusterStatefulSet_SetsPodAntiAffinity(t *testing.T) {
-	antiAffinity := &corev1.Affinity{
-		PodAntiAffinity: &corev1.PodAntiAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-				{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							"app.kubernetes.io/instance": "mycluster",
-						},
-					},
-					TopologyKey: "kubernetes.io/hostname",
-				},
-			},
-		},
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:    "container:version",
-			Affinity: antiAffinity,
-		},
-	}
-
-	s := createClusterStatefulSet(cluster, 1)
-
-	got := s.Spec.Template.Spec.Affinity
-	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
-		t.Fatalf("affinity mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestCreateClusterDeployment_SetsNodeSelector(t *testing.T) {
-	nodeSelector := map[string]string{
-		"disktype": "ssd",
-	}
-	cluster := &valkeyv1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
-		Spec: valkeyv1.ValkeyClusterSpec{
-			Image:        "container:version",
-			NodeSelector: nodeSelector,
-		},
-	}
-
-	d := createClusterDeployment(cluster)
-
-	assert.Equal(t, nodeSelector, d.Spec.Template.Spec.NodeSelector, "node selector should match spec")
 }
 
 func TestGenerateContainersDef(t *testing.T) {

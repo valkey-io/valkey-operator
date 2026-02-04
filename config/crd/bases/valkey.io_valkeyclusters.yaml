@@ -1168,6 +1168,9 @@ spec:
                       type: string
                   type: object
                 type: array
+              useStatefulSetPerPod:
+                description: Use a one-statefulset-per-pod model instead of one-deployment-per-pod.
+                type: boolean
             type: object
           status:
             default:

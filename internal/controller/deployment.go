@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +48,26 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 					},
 				},
 				{
+					Name:  "VALKEY_ENABLE_EXTERNAL_ANNOUNCE",
+					Value: strconv.FormatBool(cluster.Spec.AllowExternalAccess),
+				},
+				{
+					Name: "VALKEY_NODE_PORT",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + ExternalAccessNodePortAnnotationKey + "']",
+						},
+					},
+				},
+				{
+					Name: "VALKEY_NODE_BUS_PORT",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + ExternalAccessBusPortAnnotationKey + "']",
+						},
+					},
+				},
+				{
 					Name: "POD_NAME",
 					ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{
@@ -56,6 +78,10 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 				{
 					Name: "VALKEY_BASE_NODE_PORT",
 					Value: "30000",
+				},
+				{
+					Name:  "VALKEY_REPLICA_COUNT",
+					Value: strconv.Itoa(int(cluster.Spec.Replicas)),
 				},
 			},
 			Ports: []corev1.ContainerPort{
@@ -141,24 +167,25 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	return containers
 }
 
-func createClusterStatefulSet(cluster *valkeyiov1alpha1.ValkeyCluster, replicas int32) *appsv1.StatefulSet {
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, replicas int32, name string) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+	labelsWithTarget := copyMap(labels(cluster))
+	labelsWithTarget[ExternalAccessTargetKey] = name
 
-	return &appsv1.StatefulSet{
+	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
+			Name:      name,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: cluster.Name,
-			Replicas:    func(i int32) *int32 { return &i }(replicas),
+		Spec: appsv1.DeploymentSpec{
+			Replicas: func(i int32) *int32 { return &i }(replicas),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels(cluster),
+				MatchLabels: labelsWithTarget,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels(cluster),
+					Labels: labelsWithTarget,
 				},
 				Spec: corev1.PodSpec{
 					Containers:   containers,
@@ -185,6 +212,12 @@ func createClusterStatefulSet(cluster *valkeyiov1alpha1.ValkeyCluster, replicas 
 										Name: cluster.Name,
 									},
 								},
+							},
+						},
+						{
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
 					},

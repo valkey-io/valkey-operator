@@ -73,6 +73,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	AllowExternalAccess bool `json:"allowExternalAccess,omitempty"`
 
+	// Use a one-statefulset-per-pod model instead of one-deployment-per-pod.
+	// +optional
+	UseStatefulSetPerPod bool `json:"useStatefulSetPerPod,omitempty"`
+
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
 	// +optional

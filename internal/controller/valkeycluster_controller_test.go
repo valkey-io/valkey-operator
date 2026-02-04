@@ -293,7 +293,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			err := r.upsertStatefulSet(ctx, cluster)
+			err := r.upsertStatefulSets(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)
@@ -365,7 +365,7 @@ var _ = Describe("EventRecorder", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			// Trigger StatefulSet creation to verify formatted message
-			err := r.upsertStatefulSet(ctx, cluster)
+			err := r.upsertStatefulSets(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)

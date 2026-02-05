@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,7 +75,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			fakeRecorder := record.NewFakeRecorder(100)
+			fakeRecorder := events.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
@@ -137,7 +137,7 @@ var _ = Describe("updateStatus", func() {
 		r = &ValkeyClusterReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
-			Recorder: record.NewFakeRecorder(100),
+			Recorder: events.NewFakeRecorder(100),
 		}
 
 		// Create the cluster object in the fake client
@@ -219,12 +219,12 @@ var _ = Describe("EventRecorder", func() {
 	var (
 		r            *ValkeyClusterReconciler
 		ctx          context.Context
-		fakeRecorder *record.FakeRecorder
+		fakeRecorder *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		fakeRecorder = record.NewFakeRecorder(100)
+		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
@@ -380,22 +380,22 @@ var _ = Describe("EventRecorder", func() {
 })
 
 // Helper function to collect events from the fake recorder
-func collectEvents(recorder *record.FakeRecorder) []string {
-	events := []string{}
+func collectEvents(recorder *events.FakeRecorder) []string {
+	eventsList := []string{}
 	for {
 		select {
 		case event := <-recorder.Events:
-			events = append(events, event)
+			eventsList = append(eventsList, event)
 		default:
-			return events
+			return eventsList
 		}
 	}
 }
 
 // Helper function to filter events by reason
-func filterEvents(events []string, reason string) []string {
+func filterEvents(eventsList []string, reason string) []string {
 	filtered := []string{}
-	for _, event := range events {
+	for _, event := range eventsList {
 		if strings.Contains(event, reason) {
 			filtered = append(filtered, event)
 		}
@@ -404,9 +404,9 @@ func filterEvents(events []string, reason string) []string {
 }
 
 // Helper function to filter events by type (normal or warning)
-func filterEventsByType(events []string, eventType string) []string {
+func filterEventsByType(eventsList []string, eventType string) []string {
 	filtered := []string{}
-	for _, event := range events {
+	for _, event := range eventsList {
 		if strings.Contains(event, eventType) {
 			filtered = append(filtered, event)
 		}

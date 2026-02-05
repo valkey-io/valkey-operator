@@ -137,6 +137,7 @@ is manually re-applied afterwards.
 
 - 📖 **[Documentation](./docs/)** - Developer guides and architecture docs
 - 🙏 **[Ask Questions](https://github.com/valkey-io/valkey-operator/discussions/categories/q-a)** - GitHub Discussions Q&A
+- 💬 **[Slack Channel](https://valkey.io/slack)** - Join `#valkey-k8s-operator` to discuss and connect with the community
 - 📝 **[Support Guide](./SUPPORT.md)** - How to get help
 
 ### Contributing

@@ -183,7 +183,7 @@ func main() {
 	if err := (&controller.ValkeyClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("valkeycluster-controller"),
+		Recorder: mgr.GetEventRecorder("valkeycluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ValkeyCluster")
 		os.Exit(1)

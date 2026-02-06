@@ -196,7 +196,7 @@ metadata:
     type: ClusterIP
     annotations: {}
 
-  # Valkey-specific configuration (only when type=valkey)
+  # Valkey-specific configuration
   valkeyConfig:
     # Cluster configuration (presence-based)
     # If set, node runs in cluster mode with assigned slots

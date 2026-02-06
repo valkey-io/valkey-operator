@@ -69,6 +69,14 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Allow external access to each Valkey pod via a NodePort Service
+	// +optional
+	AllowExternalAccess bool `json:"allowExternalAccess,omitempty"`
+
+	// Use a one-statefulset-per-pod model instead of one-deployment-per-pod.
+	// +optional
+	UseStatefulSetPerPod bool `json:"useStatefulSetPerPod,omitempty"`
+
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
 	// +optional

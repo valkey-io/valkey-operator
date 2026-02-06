@@ -20,8 +20,12 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,11 +45,20 @@ import (
 )
 
 const (
-	DefaultPort           = 6379
-	DefaultClusterBusPort = 16379
-	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
-	DefaultExporterPort   = 9121
+	DefaultPort              = 6379
+	DefaultClusterBusPort    = 16379
+	DefaultImage             = "valkey/valkey:9.0.0"
+	DefaultExporterImage     = "oliver006/redis_exporter:v1.80.0"
+	DefaultExporterPort      = 9121
+	ExternalAccessLabelKey   = "valkey.io/external-access"
+	ExternalAccessLabelValue = "nodeport"
+	ExternalAccessTargetKey  = "valkey.io/external-access-target"
+	ExternalAccessNodePortAnnotationKey = "valkey.io/external-node-port"
+	ExternalAccessBusPortAnnotationKey  = "valkey.io/external-bus-port"
+
+	ShardIndexLabelKey   = "valkey.io/shard-index"
+	ReplicaIndexLabelKey = "valkey.io/replica-index"
+	RoleLabelKey         = "valkey.io/role"
 
 	// Error messages
 	statusUpdateFailedMsg = "failed to update status"
@@ -65,9 +79,10 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -95,10 +110,42 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertDeployments(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+	if cluster.Spec.UseStatefulSetPerPod {
+		if err := r.upsertStatefulSets(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+		if err := r.deleteDeployments(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+	} else {
+		if err := r.upsertDeployments(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+		if err := r.deleteStatefulSets(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+	}
+
+	if cluster.Spec.AllowExternalAccess {
+		if err := r.upsertNodePortServices(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+	} else {
+		if err := r.deleteNodePortServices(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Get all pods and their current Valkey Cluster state
@@ -111,6 +158,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	state := r.getValkeyClusterState(ctx, pods)
 	defer state.CloseClients()
+
+	r.syncPodRoleLabels(ctx, cluster, state, pods)
 
 	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, cluster, state, pods)
@@ -236,6 +285,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	if err != nil {
 		return err
 	}
+	startValkey, err := scripts.ReadFile("scripts/start-valkey.sh")
+	if err != nil {
+		return err
+	}
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -246,10 +299,12 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		Data: map[string]string{
 			"readiness-check.sh": string(readiness),
 			"liveness-check.sh":  string(liveness),
+			"start-valkey.sh":    string(startValkey),
 			"valkey.conf": `
 cluster-enabled yes
 protected-mode no
-cluster-node-timeout 2000`,
+cluster-node-timeout 2000
+include /data/announce.conf`,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
@@ -271,7 +326,7 @@ cluster-node-timeout 2000`,
 	return nil
 }
 
-// Create Valkey instances, one Deployment and Pod each
+// Create Valkey instances with one Deployment per pod.
 func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	log := logf.FromContext(ctx)
 
@@ -281,24 +336,562 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 		return err
 	}
 
-	expected := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
+	replicaSpan := int(cluster.Spec.Replicas) + 1
+	expectedNames := map[string]struct{}{}
 
-	// Create missing deployments
-	for i := len(existing.Items); i < expected; i++ {
-		deployment := createClusterDeployment(cluster)
+	for shard := int32(0); shard < cluster.Spec.Shards; shard++ {
+		for replica := 0; replica < replicaSpan; replica++ {
+			name := fmt.Sprintf("%s-%d-%d", cluster.Name, shard, replica)
+			expectedNames[name] = struct{}{}
+		}
+	}
+
+	existingByName := map[string]*appsv1.Deployment{}
+	for i := range existing.Items {
+		deploy := &existing.Items[i]
+		existingByName[deploy.Name] = deploy
+	}
+
+	for name := range expectedNames {
+		if deploy, ok := existingByName[name]; ok {
+			updated := false
+			if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != 1 {
+				deploy.Spec.Replicas = func(i int32) *int32 { return &i }(1)
+				updated = true
+			}
+			desired := createClusterDeployment(cluster, 1, name)
+			if deploy.Spec.Selector == nil || !reflect.DeepEqual(deploy.Spec.Selector.MatchLabels, desired.Spec.Selector.MatchLabels) {
+				if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
+					r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentDeletionFailed", "DeleteDeployment", "Failed to delete Deployment: %v", err)
+					return err
+				}
+				r.Recorder.Eventf(cluster, deploy, corev1.EventTypeNormal, "DeploymentRecreated", "DeleteDeployment", "Recreating Deployment %s with updated selector", deploy.Name)
+				continue
+			}
+			if !reflect.DeepEqual(deploy.Spec.Template.Labels, desired.Spec.Template.Labels) {
+				deploy.Spec.Template.Labels = desired.Spec.Template.Labels
+				updated = true
+			}
+			if updated {
+				if err := r.Update(ctx, deploy); err != nil {
+					r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentUpdateFailed", "UpdateDeployment", "Failed to update Deployment: %v", err)
+					return err
+				}
+			}
+			continue
+		}
+
+		deployment := createClusterDeployment(cluster, 1, name)
 		if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
 			return err
 		}
 		if err := r.Create(ctx, deployment); err != nil {
-			r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
+			r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create Deployment: %v", err)
 			return err
 		}
-		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created deployment %d of %d", i+1, expected)
+		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created Deployment %s", deployment.Name)
 	}
 
-	// TODO: update existing
+	for i := range existing.Items {
+		deploy := &existing.Items[i]
+		if _, ok := expectedNames[deploy.Name]; ok {
+			continue
+		}
+		if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentDeletionFailed", "DeleteDeployment", "Failed to delete Deployment: %v", err)
+			return err
+		}
+	}
 
 	return nil
+}
+
+func (r *ValkeyClusterReconciler) deleteDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+	existing := &appsv1.DeploymentList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list Deployments")
+		return err
+	}
+	for i := range existing.Items {
+		deploy := &existing.Items[i]
+		if err := r.Delete(ctx, deploy); err != nil && !apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentDeletionFailed", "DeleteDeployment", "Failed to delete Deployment: %v", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ValkeyClusterReconciler) deleteStatefulSets(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+	existing := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list StatefulSets")
+		return err
+	}
+	for i := range existing.Items {
+		sts := &existing.Items[i]
+		if err := r.Delete(ctx, sts); err != nil && !apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(cluster, sts, corev1.EventTypeWarning, "StatefulSetDeletionFailed", "DeleteStatefulSet", "Failed to delete StatefulSet: %v", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// Create Valkey instances with one StatefulSet per pod.
+func (r *ValkeyClusterReconciler) upsertStatefulSets(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
+	existing := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list StatefulSets")
+		return err
+	}
+
+	replicaSpan := int(cluster.Spec.Replicas) + 1
+	expectedNames := map[string]struct{}{}
+
+	for shard := int32(0); shard < cluster.Spec.Shards; shard++ {
+		for replica := 0; replica < replicaSpan; replica++ {
+			name := fmt.Sprintf("%s-%d-%d", cluster.Name, shard, replica)
+			expectedNames[name] = struct{}{}
+		}
+	}
+
+	existingByName := map[string]*appsv1.StatefulSet{}
+	for i := range existing.Items {
+		sts := &existing.Items[i]
+		existingByName[sts.Name] = sts
+	}
+
+	for name := range expectedNames {
+		if sts, ok := existingByName[name]; ok {
+			updated := false
+			if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 1 {
+				sts.Spec.Replicas = func(i int32) *int32 { return &i }(1)
+				updated = true
+			}
+			desired := createClusterStatefulSet(cluster, 1, name)
+			if !reflect.DeepEqual(sts.Spec.Template.Labels, desired.Spec.Template.Labels) {
+				sts.Spec.Template.Labels = desired.Spec.Template.Labels
+				updated = true
+			}
+			if updated {
+				if err := r.Update(ctx, sts); err != nil {
+					r.Recorder.Eventf(cluster, sts, corev1.EventTypeWarning, "StatefulSetUpdateFailed", "UpdateStatefulSet", "Failed to update StatefulSet: %v", err)
+					return err
+				}
+			}
+			continue
+		}
+
+		statefulSet := createClusterStatefulSet(cluster, 1, name)
+		if err := controllerutil.SetControllerReference(cluster, statefulSet, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, statefulSet); err != nil {
+			r.Recorder.Eventf(cluster, statefulSet, corev1.EventTypeWarning, "StatefulSetCreationFailed", "CreateStatefulSet", "Failed to create StatefulSet: %v", err)
+			return err
+		}
+		r.Recorder.Eventf(cluster, statefulSet, corev1.EventTypeNormal, "StatefulSetCreated", "CreateStatefulSet", "Created StatefulSet %s", statefulSet.Name)
+	}
+
+	for i := range existing.Items {
+		sts := &existing.Items[i]
+		if _, ok := expectedNames[sts.Name]; ok {
+			continue
+		}
+		if err := r.Delete(ctx, sts); err != nil && !apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(cluster, sts, corev1.EventTypeWarning, "StatefulSetDeletionFailed", "DeleteStatefulSet", "Failed to delete StatefulSet: %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Create or update a NodePort service for each pod.
+func (r *ValkeyClusterReconciler) upsertNodePortServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services); err != nil {
+		log.Error(err, "failed to list Services")
+		return err
+	}
+
+	externalServices := map[string]*corev1.Service{}
+	for i := range services.Items {
+		service := &services.Items[i]
+		if service.Namespace == cluster.Namespace {
+			externalServices[service.Name] = service
+		}
+	}
+
+	if cluster.Spec.UseStatefulSetPerPod {
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+			log.Error(err, "failed to list Pods")
+			return err
+		}
+
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			svcName := pod.Name + "-nodeport"
+			var nodePort int32
+			var busNodePort int32
+			existingSvc, hasExistingService := externalServices[svcName]
+
+			shardIndex, replicaIndex, err := parsePodShardReplica(pod.Name)
+			if err != nil {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ServiceCreationFailed", "ParsePodName", "Failed to parse pod shard/replica: %v", err)
+				return err
+			}
+			ordinal := shardIndex*(int(cluster.Spec.Replicas)+1) + replicaIndex
+			base := int32(30000)
+			nodePort = base + int32(ordinal*2)
+			busNodePort = base + int32(ordinal*2+1)
+
+			desiredPorts := []corev1.ServicePort{
+				{
+					Name:       "valkey",
+					Port:       DefaultPort,
+					TargetPort: intstr.FromInt(DefaultPort),
+					NodePort:   nodePort,
+				},
+				{
+					Name:       "cluster-bus",
+					Port:       DefaultClusterBusPort,
+					TargetPort: intstr.FromInt(DefaultClusterBusPort),
+					NodePort:   busNodePort,
+				},
+			}
+
+			if hasExistingService {
+				existingSvc.Spec.Type = corev1.ServiceTypeNodePort
+				existingSvc.Spec.Selector = map[string]string{"statefulset.kubernetes.io/pod-name": pod.Name}
+				existingSvc.Spec.Ports = desiredPorts
+				if existingSvc.Labels == nil {
+					existingSvc.Labels = map[string]string{}
+				}
+				for key, value := range labels(cluster) {
+					existingSvc.Labels[key] = value
+				}
+				existingSvc.Labels[ExternalAccessLabelKey] = ExternalAccessLabelValue
+				if err := controllerutil.SetControllerReference(cluster, existingSvc, r.Scheme); err != nil {
+					return err
+				}
+				if err := r.Update(ctx, existingSvc); err != nil {
+					r.Recorder.Eventf(cluster, existingSvc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to update external Service: %v", err)
+					return err
+				}
+			} else {
+				svc := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      svcName,
+						Namespace: cluster.Namespace,
+						Labels:    labels(cluster),
+					},
+					Spec: corev1.ServiceSpec{
+						Type:     corev1.ServiceTypeNodePort,
+						Selector: map[string]string{"statefulset.kubernetes.io/pod-name": pod.Name},
+						Ports:    desiredPorts,
+					},
+				}
+				svc.Labels[ExternalAccessLabelKey] = ExternalAccessLabelValue
+				if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
+					return err
+				}
+				if err := r.Create(ctx, svc); err != nil {
+					if !apierrors.IsAlreadyExists(err) {
+						r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceCreationFailed", "CreateService", "Failed to create external Service: %v", err)
+						return err
+					}
+				} else {
+					r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created NodePort Service %s", svcName)
+				}
+			}
+		}
+
+		return nil
+	}
+
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(ctx, deployments, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list Deployments")
+		return err
+	}
+
+	for i := range deployments.Items {
+		deploy := &deployments.Items[i]
+		svcName := deploy.Name + "-nodeport"
+		existingSvc, hasExistingService := externalServices[svcName]
+
+		desiredPorts := []corev1.ServicePort{
+			{
+				Name:       "valkey",
+				Port:       DefaultPort,
+				TargetPort: intstr.FromInt(DefaultPort),
+			},
+			{
+				Name:       "cluster-bus",
+				Port:       DefaultClusterBusPort,
+				TargetPort: intstr.FromInt(DefaultClusterBusPort),
+			},
+		}
+
+		if hasExistingService {
+			for i := range desiredPorts {
+				for _, port := range existingSvc.Spec.Ports {
+					if desiredPorts[i].Name == port.Name && port.NodePort != 0 {
+						desiredPorts[i].NodePort = port.NodePort
+					}
+				}
+			}
+			existingSvc.Spec.Type = corev1.ServiceTypeNodePort
+			existingSvc.Spec.Selector = map[string]string{ExternalAccessTargetKey: deploy.Name}
+			existingSvc.Spec.Ports = desiredPorts
+			if existingSvc.Labels == nil {
+				existingSvc.Labels = map[string]string{}
+			}
+			for key, value := range labels(cluster) {
+				existingSvc.Labels[key] = value
+			}
+			existingSvc.Labels[ExternalAccessLabelKey] = ExternalAccessLabelValue
+			if err := controllerutil.SetControllerReference(cluster, existingSvc, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Update(ctx, existingSvc); err != nil {
+				r.Recorder.Eventf(cluster, existingSvc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to update external Service: %v", err)
+				return err
+			}
+		} else {
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      svcName,
+					Namespace: cluster.Namespace,
+					Labels:    labels(cluster),
+				},
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeNodePort,
+					Selector: map[string]string{ExternalAccessTargetKey: deploy.Name},
+					Ports:    desiredPorts,
+				},
+			}
+			svc.Labels[ExternalAccessLabelKey] = ExternalAccessLabelValue
+			if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, svc); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceCreationFailed", "CreateService", "Failed to create external Service: %v", err)
+					return err
+				}
+			} else {
+				r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created NodePort Service %s", svcName)
+			}
+		}
+
+		if !hasExistingService {
+			continue
+		}
+
+		var nodePort int32
+		var busNodePort int32
+		for _, port := range existingSvc.Spec.Ports {
+			switch port.Name {
+			case "valkey":
+				nodePort = port.NodePort
+			case "cluster-bus":
+				busNodePort = port.NodePort
+			}
+		}
+		if nodePort == 0 || busNodePort == 0 {
+			continue
+		}
+
+		if deploy.Spec.Template.Annotations == nil {
+			deploy.Spec.Template.Annotations = map[string]string{}
+		}
+		updated := false
+		if deploy.Spec.Template.Annotations[ExternalAccessNodePortAnnotationKey] != strconv.Itoa(int(nodePort)) {
+			deploy.Spec.Template.Annotations[ExternalAccessNodePortAnnotationKey] = strconv.Itoa(int(nodePort))
+			updated = true
+		}
+		if deploy.Spec.Template.Annotations[ExternalAccessBusPortAnnotationKey] != strconv.Itoa(int(busNodePort)) {
+			deploy.Spec.Template.Annotations[ExternalAccessBusPortAnnotationKey] = strconv.Itoa(int(busNodePort))
+			updated = true
+		}
+		if updated {
+			if err := r.Update(ctx, deploy); err != nil {
+				r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentUpdateFailed", "UpdateDeployment", "Failed to update Deployment annotations: %v", err)
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (r *ValkeyClusterReconciler) deleteNodePortServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list Services")
+		return err
+	}
+	for i := range services.Items {
+		service := &services.Items[i]
+		if service.Labels[ExternalAccessLabelKey] != ExternalAccessLabelValue {
+			continue
+		}
+		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(cluster, service, corev1.EventTypeWarning, "ServiceDeletionFailed", "DeleteService", "Failed to delete external Service: %v", err)
+			return err
+		}
+	}
+	if !cluster.Spec.UseStatefulSetPerPod {
+		deployments := &appsv1.DeploymentList{}
+		if err := r.List(ctx, deployments, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+			log.Error(err, "failed to list Deployments")
+			return err
+		}
+		for i := range deployments.Items {
+			deploy := &deployments.Items[i]
+			if deploy.Spec.Template.Annotations == nil {
+				continue
+			}
+			updated := false
+			if _, ok := deploy.Spec.Template.Annotations[ExternalAccessNodePortAnnotationKey]; ok {
+				delete(deploy.Spec.Template.Annotations, ExternalAccessNodePortAnnotationKey)
+				updated = true
+			}
+			if _, ok := deploy.Spec.Template.Annotations[ExternalAccessBusPortAnnotationKey]; ok {
+				delete(deploy.Spec.Template.Annotations, ExternalAccessBusPortAnnotationKey)
+				updated = true
+			}
+			if updated {
+				if err := r.Update(ctx, deploy); err != nil {
+					r.Recorder.Eventf(cluster, deploy, corev1.EventTypeWarning, "DeploymentUpdateFailed", "UpdateDeployment", "Failed to clear Deployment annotations: %v", err)
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func parsePodShardReplica(podName string) (int, int, error) {
+	trimmed := strings.TrimSuffix(podName, "-0")
+	if trimmed == podName {
+		return 0, 0, errors.New("pod name missing statefulset ordinal suffix")
+	}
+	lastDash := strings.LastIndex(trimmed, "-")
+	if lastDash == -1 || lastDash == len(trimmed)-1 {
+		return 0, 0, errors.New("pod name missing replica suffix")
+	}
+	replica, err := strconv.Atoi(trimmed[lastDash+1:])
+	if err != nil {
+		return 0, 0, err
+	}
+	rest := trimmed[:lastDash]
+	secondDash := strings.LastIndex(rest, "-")
+	if secondDash == -1 || secondDash == len(rest)-1 {
+		return 0, 0, errors.New("pod name missing shard suffix")
+	}
+	shard, err := strconv.Atoi(rest[secondDash+1:])
+	if err != nil {
+		return 0, 0, err
+	}
+	return shard, replica, nil
+}
+
+func (r *ValkeyClusterReconciler) syncPodRoleLabels(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) {
+	if state == nil {
+		return
+	}
+
+	podsByIP := map[string]*corev1.Pod{}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		podsByIP[pod.Status.PodIP] = pod
+	}
+
+	type shardEntry struct {
+		shard *valkey.ShardState
+		key   int
+		id    string
+	}
+	shardEntries := make([]shardEntry, 0, len(state.Shards))
+	for _, shard := range state.Shards {
+		key := 1<<31 - 1
+		if len(shard.Slots) > 0 {
+			key = shard.Slots[0].Start
+		}
+		shardEntries = append(shardEntries, shardEntry{shard: shard, key: key, id: shard.Id})
+	}
+	sort.Slice(shardEntries, func(i, j int) bool {
+		if shardEntries[i].key != shardEntries[j].key {
+			return shardEntries[i].key < shardEntries[j].key
+		}
+		return shardEntries[i].id < shardEntries[j].id
+	})
+
+	shardIndexByID := map[string]int{}
+	for i, entry := range shardEntries {
+		shardIndexByID[entry.id] = i
+	}
+
+	for _, entry := range shardEntries {
+		shard := entry.shard
+		nodes := make([]*valkey.NodeState, 0, len(shard.Nodes))
+		nodes = append(nodes, shard.Nodes...)
+		sort.Slice(nodes, func(i, j int) bool {
+			if nodes[i].IsPrimary() != nodes[j].IsPrimary() {
+				return nodes[i].IsPrimary()
+			}
+			return nodes[i].Id < nodes[j].Id
+		})
+		for idx, node := range nodes {
+			pod, ok := podsByIP[node.Address]
+			if !ok {
+				continue
+			}
+			labelsUpdated := false
+			if pod.Labels == nil {
+				pod.Labels = map[string]string{}
+				labelsUpdated = true
+			}
+			shardIndex := shardIndexByID[shard.Id]
+			role := "replica"
+			if node.IsPrimary() {
+				role = "primary"
+			}
+			if pod.Labels[ShardIndexLabelKey] != strconv.Itoa(shardIndex) {
+				pod.Labels[ShardIndexLabelKey] = strconv.Itoa(shardIndex)
+				labelsUpdated = true
+			}
+			if pod.Labels[ReplicaIndexLabelKey] != strconv.Itoa(idx) {
+				pod.Labels[ReplicaIndexLabelKey] = strconv.Itoa(idx)
+				labelsUpdated = true
+			}
+			if pod.Labels[RoleLabelKey] != role {
+				pod.Labels[RoleLabelKey] = role
+				labelsUpdated = true
+			}
+			if labelsUpdated {
+				if err := r.Update(ctx, pod); err != nil {
+					r.Recorder.Eventf(cluster, pod, corev1.EventTypeWarning, "PodUpdateFailed", "UpdatePodLabels", "Failed to update pod labels: %v", err)
+					return
+				}
+			}
+		}
+	}
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pods *corev1.PodList) *valkey.ClusterState {

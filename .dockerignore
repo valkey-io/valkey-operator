@@ -13,3 +13,4 @@
 # Re-include scripts
 !internal/controller/scripts/readiness-check.sh
 !internal/controller/scripts/liveness-check.sh
+!internal/controller/scripts/start-valkey.sh

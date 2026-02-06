@@ -34,6 +34,11 @@ import (
 var _ = Describe("Valkey Tolerations", Label("toleration"), func() {
 	var taintedNode string
 	AfterEach(func() {
+		specReport := CurrentSpecReport()
+		if specReport.Failed() {
+			utils.CollectDebugInfo(namespace)
+		}
+
 		By("getting node's taints")
 		cmd := exec.Command("kubectl", "get", "nodes", taintedNode,
 			"-o", "go-template="+

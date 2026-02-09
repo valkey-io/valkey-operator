@@ -54,6 +54,9 @@ type ClusterState struct {
 	PendingNodes []*NodeState
 }
 
+// TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
+const TotalSlots = 16384
+
 // SlotsRange is an interval or a single slot when Start and End are equal.
 type SlotsRange struct {
 	Start int
@@ -67,37 +70,62 @@ func GetClusterState(ctx context.Context, addresses []string, port int) *Cluster
 		PendingNodes: make([]*NodeState, 0),
 	}
 
+	nodes := make([]*NodeState, 0, len(addresses))
 	for _, address := range addresses {
-		// Attempt to connect to the Valkey node and extract information.
 		node := getNodeState(ctx, address, port)
 		if node != nil {
-			// Check if node is pending to be added.
-			if node.IsPrimary() && len(node.GetSlots()) == 0 {
-				// Node not part of any shard yet.
+			nodes = append(nodes, node)
+		}
+	}
+
+	totalSlotsAssigned := 0
+	for _, node := range nodes {
+		if !node.IsPrimary() {
+			continue
+		}
+		ranges, err := parseSlotsRanges(node.GetSlots())
+		if err != nil {
+			continue
+		}
+		for _, slotRange := range ranges {
+			totalSlotsAssigned += slotRange.End - slotRange.Start + 1
+		}
+	}
+	allSlotsAssigned := totalSlotsAssigned == TotalSlots
+
+	for _, node := range nodes {
+		// Primary nodes with no slots are pending until all slots are assigned and they know other nodes.
+		if node.IsPrimary() && len(node.GetSlots()) == 0 {
+			knownNodes := 0
+			if sval, ok := node.ClusterInfo["cluster_known_nodes"]; ok {
+				if val, err := strconv.Atoi(sval); err == nil {
+					knownNodes = val
+				}
+			}
+			if !allSlotsAssigned || knownNodes <= 1 {
 				state.PendingNodes = append(state.PendingNodes, node)
 				continue
 			}
+		}
 
-			// Find a ShardState with the same ShardId as this node.
-			var shard *ShardState
-			idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
-			if idx >= 0 {
-				shard = state.Shards[idx]
-			} else {
-				// Not know yet, adding it.
-				shard = &ShardState{
-					Id:    node.ShardId,
-					Nodes: make([]*NodeState, 0),
-				}
-				state.Shards = append(state.Shards, shard)
+		// Find a ShardState with the same ShardId as this node.
+		var shard *ShardState
+		idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
+		if idx >= 0 {
+			shard = state.Shards[idx]
+		} else {
+			shard = &ShardState{
+				Id:    node.ShardId,
+				Nodes: make([]*NodeState, 0),
 			}
-			// Add node and update shard information.
-			shard.Nodes = append(shard.Nodes, node)
-			if node.IsPrimary() {
-				ranges, _ := parseSlotsRanges(node.GetSlots())
-				shard.Slots = ranges
-				shard.PrimaryId = node.Id
-			}
+			state.Shards = append(state.Shards, shard)
+		}
+		// Add node and update shard information.
+		shard.Nodes = append(shard.Nodes, node)
+		if node.IsPrimary() {
+			ranges, _ := parseSlotsRanges(node.GetSlots())
+			shard.Slots = ranges
+			shard.PrimaryId = node.Id
 		}
 	}
 	return &state
@@ -126,7 +154,7 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 		for _, slot := range shard.Slots {
 			var next []SlotsRange
 			for _, base := range remaining {
-				parts := subtractSlotsRange(base, slot)
+				parts := SubtractSlotsRange(base, slot)
 				next = append(next, parts...)
 			}
 			remaining = next
@@ -274,6 +302,10 @@ func parseSlotsRanges(s []string) ([]SlotsRange, error) {
 	ranges := []SlotsRange{}
 
 	for _, part := range s {
+		// Skip migrating/importing entries like "[12345->-nodeid]".
+		if strings.HasPrefix(part, "[") {
+			continue
+		}
 		r, err := parseSlotsRange(part)
 		if err != nil {
 			return nil, err
@@ -312,8 +344,8 @@ func parseSlotsRange(s string) (SlotsRange, error) {
 	return SlotsRange{n, n}, nil
 }
 
-// subtractSlotsRange subtract a SlotsRange from another SlotsRange.
-func subtractSlotsRange(base, remove SlotsRange) []SlotsRange {
+// SubtractSlotsRange subtracts a SlotsRange from another SlotsRange.
+func SubtractSlotsRange(base, remove SlotsRange) []SlotsRange {
 	var result []SlotsRange
 
 	// No overlap

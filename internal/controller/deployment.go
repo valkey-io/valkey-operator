@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,22 +118,53 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	return containers
 }
 
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+// createClusterDeployment builds a single-pod Deployment for a Valkey node.
+//
+// Each Deployment manages exactly one Pod (Replicas=1) and represents one
+// logical node in the Valkey cluster. The shardIndex and role parameters are
+// stamped as Kubernetes labels on both the Deployment and the Pod template:
+//
+//	valkey.io/shard-index = "<shardIndex>"
+//	valkey.io/role        = "primary" | "replica"
+//
+// These labels serve two purposes:
+//  1. The reconciler reads them at runtime (via podRoleAndShard) to decide what
+//     Valkey command to issue for a pending node—CLUSTER ADDSLOTSRANGE for
+//     primaries, CLUSTER REPLICATE for replicas—without relying on potentially
+//     stale cluster topology.
+//  2. The labels make each Deployment's Selector unique to its (shard, role)
+//     pair, ensuring no two Deployments fight over the same Pod.
+//
+// Both deployLabels and podLabels are built from fresh copies of labels()
+// (which clones the user-defined labels map) so mutations here don't leak.
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, role string) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+
+	// Deployment-level labels carry shard/role for easy listing/filtering.
+	deployLabels := labels(cluster)
+	deployLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
+	deployLabels[LabelRole] = role
+
+	// Pod labels include shard/role so the controller can look up a pod's
+	// intended role via pod.Labels without touching Valkey.
+	podLabels := labels(cluster)
+	podLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
+	podLabels[LabelRole] = role
+
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
 			Namespace:    cluster.Namespace,
-			Labels:       labels(cluster),
+			Labels:       deployLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: func(i int32) *int32 { return &i }(1),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels(cluster),
+				MatchLabels: podLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels(cluster),
+					Labels: podLabels,
 				},
 				Spec: corev1.PodSpec{
 					Containers:   containers,

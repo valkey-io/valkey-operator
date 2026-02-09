@@ -54,6 +54,9 @@ type ClusterState struct {
 	PendingNodes []*NodeState
 }
 
+// TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
+const TotalSlots = 16384
+
 // SlotsRange is an interval or a single slot when Start and End are equal.
 type SlotsRange struct {
 	Start int

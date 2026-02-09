@@ -24,6 +24,36 @@ import (
 
 const appName = "valkey"
 
+// Shard-label scheme
+//
+// Every Deployment (and therefore every Pod) is stamped at creation time with
+// two labels that encode the node's intended position in the Valkey cluster:
+//
+//	valkey.io/shard-index  – which shard the node belongs to ("0", "1", …)
+//	valkey.io/role         – "primary" or "replica"
+//
+// This makes the reconciler's job deterministic: when a pending node appears,
+// addValkeyNode reads the pod labels to decide whether to assign slots
+// (primary) or issue CLUSTER REPLICATE (replica), and for which shard. Without
+// these labels the controller would have to infer the role by counting shards
+// and comparing to the spec, which is fragile when cluster state is stale due
+// to gossip delays.
+//
+// The labels are set by upsertDeployments → createClusterDeployment and
+// consumed by addValkeyNode → podRoleAndShard.
+const (
+	// LabelShardIndex identifies which shard a pod belongs to (e.g. "0", "1", "2").
+	LabelShardIndex = "valkey.io/shard-index"
+	// LabelRole identifies the intended role of a pod: "primary" or "replica".
+	LabelRole = "valkey.io/role"
+)
+
+// Role label values.
+const (
+	RolePrimary = "primary"
+	RoleReplica = "replica"
+)
+
 // Labels returns a copy of user defined labels including recommended:
 // https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
 func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {

@@ -129,7 +129,7 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 		for _, slot := range shard.Slots {
 			var next []SlotsRange
 			for _, base := range remaining {
-				parts := subtractSlotsRange(base, slot)
+				parts := SubtractSlotsRange(base, slot)
 				next = append(next, parts...)
 			}
 			remaining = next
@@ -325,8 +325,8 @@ func parseSlotsRange(s string) (SlotsRange, error) {
 	return SlotsRange{n, n}, nil
 }
 
-// subtractSlotsRange subtract a SlotsRange from another SlotsRange.
-func subtractSlotsRange(base, remove SlotsRange) []SlotsRange {
+// SubtractSlotsRange subtracts a SlotsRange from another SlotsRange.
+func SubtractSlotsRange(base, remove SlotsRange) []SlotsRange {
 	var result []SlotsRange
 
 	// No overlap

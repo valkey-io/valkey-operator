@@ -47,7 +47,7 @@ func TestSubtractSlotsRange(t *testing.T) {
 	base := SlotsRange{0, 16383}
 	remove := SlotsRange{10, 16380}
 	expect := []SlotsRange{{0, 9}, {16381, 16383}}
-	result := subtractSlotsRange(base, remove)
+	result := SubtractSlotsRange(base, remove)
 	if !reflect.DeepEqual(result, expect) {
 		t.Errorf("Expected %v, got %v", expect, result)
 	}
@@ -55,7 +55,7 @@ func TestSubtractSlotsRange(t *testing.T) {
 	base = SlotsRange{0, 10}
 	remove = SlotsRange{5, 10}
 	expect = []SlotsRange{{0, 4}}
-	result = subtractSlotsRange(base, remove)
+	result = SubtractSlotsRange(base, remove)
 	if !reflect.DeepEqual(result, expect) {
 		t.Errorf("Expected %v, got %v", expect, result)
 	}
@@ -63,14 +63,14 @@ func TestSubtractSlotsRange(t *testing.T) {
 	base = SlotsRange{0, 10}
 	remove = SlotsRange{0, 9}
 	expect = []SlotsRange{{10, 10}}
-	result = subtractSlotsRange(base, remove)
+	result = SubtractSlotsRange(base, remove)
 	if !reflect.DeepEqual(result, expect) {
 		t.Errorf("Expected %v, got %v", expect, result)
 	}
 
 	base = SlotsRange{0, 10}
 	remove = SlotsRange{0, 10}
-	result = subtractSlotsRange(base, remove)
+	result = SubtractSlotsRange(base, remove)
 	if result != nil {
 		t.Errorf("Expected nil, got %v", result)
 	}

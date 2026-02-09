@@ -20,8 +20,10 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -182,6 +184,33 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// --- Reclassify replica-intended nodes ---
+	// When all 16384 slots are assigned, GetClusterState categorizes
+	// slot-less masters with cluster_known_nodes > 1 into state.Shards
+	// (each as its own single-node empty shard) rather than PendingNodes.
+	// This is correct for new primaries awaiting rebalance during
+	// scale-out. However, nodes labeled as replicas (valkey.io/role=
+	// replica) still need CLUSTER REPLICATE. Move them back to
+	// PendingNodes so Phase 3 can process them, and drop their
+	// placeholder shards.
+	{
+		var keptShards []*valkey.ShardState
+		for _, shard := range state.Shards {
+			if countSlots(shard.Slots) > 0 || len(shard.Nodes) != 1 {
+				keptShards = append(keptShards, shard)
+				continue
+			}
+			node := shard.Nodes[0]
+			role, _ := r.podRoleAndShard(node.Address, pods)
+			if node.IsPrimary() && role == RoleReplica {
+				state.PendingNodes = append(state.PendingNodes, node)
+			} else {
+				keptShards = append(keptShards, shard)
+			}
+		}
+		state.Shards = keptShards
+	}
+
 	// --- Phase 3: REPLICATE all replica-labeled pending nodes ---
 	// By this point all primaries have slots and appear in state.Shards.
 	// CLUSTER REPLICATE for different replicas targets different primaries,
@@ -213,21 +242,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	replicaAttached, err := r.attachReplica(ctx, cluster, state)
-	if err != nil {
-		log.Error(err, "unable to add cluster replica")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "CreateReplica", "Failed to create replica: %v", err)
-		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, state)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
-	if replicaAttached {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
-		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, state)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
+	// NOTE: Replica attachment is handled entirely by Phase 3
+	// (replicatePendingReplicas) which uses pod labels to ensure each
+	// replica attaches to the correct shard primary. The old
+	// label-unaware attachReplica function was removed because it could
+	// race with Phase 3 and re-attach replicas to wrong primaries.
 
 	for _, shard := range state.Shards {
 		if countSlots(shard.Slots) == 0 {
@@ -269,6 +288,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	if rebalanced {
+		// Clear any stale Degraded condition from earlier phases (e.g.
+		// NodeAddFailed set when replicas couldn't attach to primaries
+		// that hadn't received slots yet during scale-out).
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
@@ -622,9 +645,17 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	return assigned, nil
 }
 
+// errPrimaryNotReady is returned by replicateToShardPrimary when the
+// primary for a shard hasn't received slots yet (e.g. during scale-out,
+// while the rebalancer is still migrating slots). This is not a fatal
+// error — the replica will be retried on a future reconcile.
+var errPrimaryNotReady = errors.New("primary not yet in cluster state (awaiting rebalance)")
+
 // replicatePendingReplicas issues CLUSTER REPLICATE for all pending nodes
-// labeled as replicas. By the time this runs, all primaries should already
-// have slots and appear in state.Shards.
+// labeled as replicas. During initial creation all primaries should already
+// have slots, but during scale-out new primaries may still be empty while the
+// rebalancer migrates slots to them. Replicas whose primary isn't ready yet
+// are silently skipped and retried on the next reconcile.
 // Returns the number of replicas that were attached.
 func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
 	log := logf.FromContext(ctx)
@@ -637,6 +668,10 @@ func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, 
 		}
 
 		if err := r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods); err != nil {
+			if errors.Is(err, errPrimaryNotReady) {
+				log.V(1).Info("skipping replica; primary not ready yet", "node", node.Address, "shard", shardIndex)
+				continue
+			}
 			log.Error(err, "failed to replicate pending node", "node", node.Address, "shard", shardIndex)
 			return replicated, err
 		}
@@ -702,11 +737,18 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 		}
 	}
 	if primaryNodeId == "" {
-		return errors.New("primary Valkey node not found in cluster state for shard " + strconv.Itoa(shardIndex))
+		return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
 	}
 
 	log.V(1).Info("add a new replica", "primary IP", primaryIP, "primary Id", primaryNodeId, "replica address", node.Address, "shardIndex", shardIndex)
 	if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primaryNodeId).Build()).Error(); err != nil {
+		// "Unknown node" means gossip hasn't propagated the primary's ID to
+		// this replica yet. This is transient and will resolve on the next
+		// reconcile once gossip catches up — treat it as retriable.
+		if strings.Contains(err.Error(), "Unknown node") {
+			log.V(1).Info("replica does not yet know primary (gossip pending); will retry", "replica", node.Address, "primaryId", primaryNodeId)
+			return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
+		}
 		log.Error(err, "command failed: CLUSTER REPLICATE", "nodeId", primaryNodeId)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "CreateReplica", "Failed to create replica: %v", err)
 		return err

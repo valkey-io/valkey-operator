@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	rebalanceSlotBatchSize    = 20
+	rebalanceSlotBatchSize    = 200
 	rebalanceKeysBatchSize    = 100
 	rebalanceMigrateTimeoutMs = 5000
 )

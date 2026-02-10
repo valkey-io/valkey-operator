@@ -124,7 +124,7 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	remaining := []SlotsRange{{0, 16383}}
 	for _, shard := range s.Shards {
 		for _, slot := range shard.Slots {
-			var next []SlotsRange
+			var next []SlotsRange //nolint:prealloc
 			for _, base := range remaining {
 				parts := subtractSlotsRange(base, slot)
 				next = append(next, parts...)

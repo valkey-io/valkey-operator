@@ -1164,6 +1164,97 @@ spec:
                       type: string
                   type: object
                 type: array
+              users:
+                description: Users, and ACL-related configuration; see valkeyacls_types.go
+                items:
+                  description: An UserAclSpec contains user, authorization, and permissions-related
+                    configurations
+                  properties:
+                    channels:
+                      description: Channel restrictions
+                      properties:
+                        patterns:
+                          description: 'Pub/Sub channel patterns - maps to Valkey:
+                            &pattern'
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    commands:
+                      description: Valkey command categories, commands, and subcommands
+                        restrictions for this user
+                      properties:
+                        allow:
+                          description: Allowed commands for this user
+                          items:
+                            type: string
+                          type: array
+                        deny:
+                          description: Denied commands for this user
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    enabled:
+                      default: true
+                      description: If the user is enabled or not
+                      type: boolean
+                    keys:
+                      description: Key restrictions
+                      properties:
+                        readOnly:
+                          description: 'Keys restricted to read-only; maps to Valkey:
+                            %R~pattern'
+                          items:
+                            type: string
+                          type: array
+                        readWrite:
+                          description: 'Keys on which this user can read, and write;
+                            maps to Valkey: ~pattern'
+                          items:
+                            type: string
+                          type: array
+                        writeOnly:
+                          description: 'Keys restricted to write-only; maps to Valkey:
+                            %W~pattern'
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    name:
+                      description: Username
+                      type: string
+                    nopass:
+                      default: false
+                      description: Do not apply a password to this user
+                      type: boolean
+                    passwordSecret:
+                      description: Reference information to a Secret containing user
+                        passwords
+                      properties:
+                        keys:
+                          description: |-
+                            An array of keys inside the referencing Secret to find passwords; defaults to username
+                            Valkey supports multiple passwords per user for rotation
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          description: Name of the referencing Secret; Defaults to
+                            clustername-users
+                          type: string
+                      type: object
+                    permissions:
+                      description: Raw ACL for (additional) permissions. Appended
+                        to anything generated.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             type: object
           status:
             default:

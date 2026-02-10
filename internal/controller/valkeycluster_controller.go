@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
@@ -65,6 +66,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -86,6 +88,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileUsersAcl(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, err.Error(), metav1.ConditionFalse)
 		return ctrl.Result{}, err
 	}
 
@@ -249,7 +256,8 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			"valkey.conf": `
 cluster-enabled yes
 protected-mode no
-cluster-node-timeout 2000`,
+cluster-node-timeout 2000
+aclfile /config/users/users.acl`,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
@@ -506,6 +514,10 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),
+		).
 		Named("valkeycluster").
 		Complete(r)
 }

@@ -354,40 +354,30 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 	created := 0
 	expected := int(cluster.Spec.Shards) * (1 + int(cluster.Spec.Replicas))
 	for shard := 0; shard < int(cluster.Spec.Shards); shard++ {
-		// One primary per shard.
+		roles := []string{}
 		if !primaryExists[shard] {
-			if err := r.createLabeledDeployment(ctx, cluster, shard, RolePrimary, created, expected); err != nil {
-				return err
-			}
-			created++
+			roles = append(roles, RolePrimary)
 		}
-		// N replicas per shard (Spec.Replicas). Create only the missing ones.
 		for replicaCount[shard] < int(cluster.Spec.Replicas) {
-			if err := r.createLabeledDeployment(ctx, cluster, shard, RoleReplica, created, expected); err != nil {
+			roles = append(roles, RoleReplica)
+			replicaCount[shard]++
+		}
+		for _, role := range roles {
+			deployment := createClusterDeployment(cluster, shard, role)
+			if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, deployment); err != nil {
+				r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
 				return err
 			}
 			created++
-			replicaCount[shard]++
+			r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created %s deployment for shard %d (%d of %d)", role, shard, created, expected)
 		}
 	}
 
 	// TODO: update existing Deployments when the spec changes (e.g. image upgrade).
 
-	return nil
-}
-
-// createLabeledDeployment creates a single Deployment for the given (shard, role)
-// pair, sets the ValkeyCluster as its owner, and emits a Kubernetes event.
-func (r *ValkeyClusterReconciler) createLabeledDeployment(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shard int, role string, created, expected int) error {
-	deployment := createClusterDeployment(cluster, shard, role)
-	if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, deployment); err != nil {
-		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
-		return err
-	}
-	r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created %s deployment for shard %d (%d of %d)", role, shard, created+1, expected)
 	return nil
 }
 
@@ -466,7 +456,6 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 
 	return errors.New("pod has no valkey.io/role label; cannot determine node role")
 }
-
 
 // assignSlotsToNewPrimary assigns the next available hash-slot range to a
 // node, promoting it to a slot-bearing primary.

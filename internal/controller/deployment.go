@@ -134,37 +134,27 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 //     stale cluster topology.
 //  2. The labels make each Deployment's Selector unique to its (shard, role)
 //     pair, ensuring no two Deployments fight over the same Pod.
-//
-// Both deployLabels and podLabels are built from fresh copies of labels()
-// (which clones the user-defined labels map) so mutations here don't leak.
 func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, role string) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
 
-	// Deployment-level labels carry shard/role for easy listing/filtering.
-	deployLabels := labels(cluster)
-	deployLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
-	deployLabels[LabelRole] = role
-
-	// Pod labels include shard/role so the controller can look up a pod's
-	// intended role via pod.Labels without touching Valkey.
-	podLabels := labels(cluster)
-	podLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
-	podLabels[LabelRole] = role
+	nodeLabels := labels(cluster)
+	nodeLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
+	nodeLabels[LabelRole] = role
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
 			Namespace:    cluster.Namespace,
-			Labels:       deployLabels,
+			Labels:       nodeLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: func(i int32) *int32 { return &i }(1),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: podLabels,
+				MatchLabels: nodeLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: podLabels,
+					Labels: nodeLabels,
 				},
 				Spec: corev1.PodSpec{
 					Containers:   containers,

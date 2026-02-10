@@ -17,8 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -51,6 +56,54 @@ func TestCreateClusterDeployment(t *testing.T) {
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
 	}
+}
+
+func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
+	antiAffinity := &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app.kubernetes.io/instance": "mycluster",
+						},
+					},
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			},
+		},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:    "container:version",
+			Affinity: antiAffinity,
+		},
+	}
+
+	d := createClusterDeployment(cluster)
+
+	got := d.Spec.Template.Spec.Affinity
+	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Fatalf("affinity mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestCreateClusterDeployment_SetsNodeSelector(t *testing.T) {
+	nodeSelector := map[string]string{
+		"disktype": "ssd",
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Image:        "container:version",
+			NodeSelector: nodeSelector,
+		},
+	}
+
+	d := createClusterDeployment(cluster)
+
+	assert.Equal(t, nodeSelector, d.Spec.Template.Spec.NodeSelector, "node selector should match spec")
 }
 
 func TestGenerateContainersDef(t *testing.T) {
@@ -203,4 +256,70 @@ func findContainer(containers []corev1.Container, name string) *corev1.Container
 		}
 	}
 	return nil
+}
+
+func TestLivenessCheckScript(t *testing.T) {
+	scriptPath := filepath.Join("scripts", "liveness-check.sh")
+
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "pong", response: "PONG", wantErr: false},
+		{name: "loading", response: "LOADING 123", wantErr: false},
+		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: false},
+		{name: "error", response: "ERR something bad", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadinessCheckScript(t *testing.T) {
+	scriptPath := filepath.Join("scripts", "readiness-check.sh")
+
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "pong", response: "PONG", wantErr: false},
+		{name: "loading", response: "LOADING 123", wantErr: true},
+		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: true},
+		{name: "error", response: "ERR something bad", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func runProbeScript(t *testing.T, scriptPath, response string) error {
+	t.Helper()
+
+	// Stub valkey-cli so the script uses the response we provide.
+	binDir := t.TempDir()
+	valkeyCli := filepath.Join(binDir, "valkey-cli")
+	script := []byte("#!/bin/sh\n" +
+		"echo \"${VALKEY_RESPONSE:-PONG}\"\n")
+	if err := os.WriteFile(valkeyCli, script, 0o755); err != nil {
+		t.Fatalf("write valkey-cli stub: %v", err)
+	}
+
+	cmd := exec.Command(scriptPath)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"VALKEY_RESPONSE="+response,
+	)
+	return cmd.Run()
 }

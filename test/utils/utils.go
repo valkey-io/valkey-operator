@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	certmanagerVersion = "v1.19.1"
+	certmanagerVersion = "v1.19.2"
 	certmanagerURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
 
 	defaultKindBinary  = "kind"
@@ -158,8 +158,8 @@ func LoadImageToKindClusterWithName(name string) error {
 // according to line breakers, and ignores the empty elements in it.
 func GetNonEmptyLines(output string) []string {
 	var res []string
-	elements := strings.Split(output, "\n")
-	for _, element := range elements {
+	elements := strings.SplitSeq(output, "\n")
+	for element := range elements {
 		if element != "" {
 			res = append(res, element)
 		}
@@ -346,4 +346,54 @@ func GetReplicaDeployment(selector string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no replica deployment found with selector %q", selector)
+}
+
+// CollectDebugInfo collects debugging information including controller logs,
+// Kubernetes events, and pod descriptions. This is useful for troubleshooting failed tests.
+func CollectDebugInfo(namespace string) {
+	var controllerPodName string
+	cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+		"-o", "go-template={{ range .items }}"+
+			"{{ if not .metadata.deletionTimestamp }}"+
+			"{{ .metadata.name }}"+
+			"{{ \"\\n\" }}{{ end }}{{ end }}",
+		"-n", namespace)
+	podOutput, err := Run(cmd)
+	if err == nil {
+		podNames := GetNonEmptyLines(podOutput)
+		if len(podNames) > 0 {
+			controllerPodName = podNames[0]
+		}
+	}
+
+	if controllerPodName != "" {
+		By("Fetching controller manager pod logs")
+		cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+		controllerLogs, err := Run(cmd)
+		if err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n%s", controllerLogs)
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Controller logs: %s", err)
+		}
+
+		By("Fetching controller manager pod description")
+		cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
+		podDescription, err := Run(cmd)
+		if err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Pod description:\n%s", podDescription)
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to describe controller pod\n")
+		}
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Warning: Could not fetch controller pod name\n")
+	}
+
+	By("Fetching Kubernetes events")
+	cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+	eventsOutput, err := Run(cmd)
+	if err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get Kubernetes events: %s", err)
+	}
 }

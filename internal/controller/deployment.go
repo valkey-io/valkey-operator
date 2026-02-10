@@ -47,6 +47,22 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 					ContainerPort: DefaultClusterBusPort,
 				},
 			},
+			StartupProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				FailureThreshold:    20,
+				TimeoutSeconds:      5,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/bash",
+							"-c",
+							"/scripts/liveness-check.sh",
+						},
+					},
+				},
+			},
 			LivenessProbe: &corev1.Probe{
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
@@ -120,7 +136,10 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 					Labels: labels(cluster),
 				},
 				Spec: corev1.PodSpec{
-					Containers: containers,
+					Containers:   containers,
+					Affinity:     cluster.Spec.Affinity,
+					NodeSelector: cluster.Spec.NodeSelector,
+					Tolerations:  cluster.Spec.Tolerations,
 					Volumes: []corev1.Volume{
 						{
 							Name: "scripts",

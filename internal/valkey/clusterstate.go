@@ -148,7 +148,7 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 func (n *NodeState) GetSlots() []string {
 	// Parse CLUSTER NODES output.
 	// <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv> <config-epoch> <link-state> <slot> <slot> ... <slot>
-	for _, line := range strings.Split(n.ClusterNodes, "\n") {
+	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 8 {
 			continue
@@ -172,7 +172,7 @@ func (n *NodeState) IsPrimary() bool {
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}
-	for _, line := range strings.Split(n.ClusterNodes, "\n") {
+	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 8 {
 			continue
@@ -241,7 +241,7 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 	node.ClusterNodes = strings.TrimPrefix(cnodes, "txt:")
 
 	// Extract flags
-	for _, line := range strings.Split(node.ClusterNodes, "\n") {
+	for line := range strings.SplitSeq(node.ClusterNodes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 8 {
 			continue
@@ -258,7 +258,7 @@ func getNodeState(ctx context.Context, address string, port int) *NodeState {
 func infoStringToMap(s string) map[string]string {
 	m := map[string]string{}
 	// Remove the encoding string included in a verbatim string.
-	for _, line := range strings.Split(strings.TrimPrefix(s, "txt:"), "\r\n") {
+	for line := range strings.SplitSeq(strings.TrimPrefix(s, "txt:"), "\r\n") {
 		if line == "" || line[0] == '#' {
 			continue
 		}

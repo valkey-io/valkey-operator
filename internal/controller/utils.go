@@ -18,7 +18,10 @@ package controller
 
 import (
 	"maps"
+	"slices"
+	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -72,4 +75,22 @@ func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 // Annotations returns a copy of user defined annotations.
 func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
+}
+
+// podRoleAndShard looks up the pod matching the given IP address and returns
+// its valkey.io/role and valkey.io/shard-index labels. Returns ("", -1) if
+// the pod is not found or has no labels.
+func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
+	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == address })
+	if idx == -1 {
+		return "", -1
+	}
+	pod := &pods.Items[idx]
+	role := pod.Labels[LabelRole]
+	shardStr := pod.Labels[LabelShardIndex]
+	shardIndex, err := strconv.Atoi(shardStr)
+	if err != nil {
+		return "", -1
+	}
+	return role, shardIndex
 }

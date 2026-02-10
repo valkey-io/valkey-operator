@@ -146,7 +146,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(state.PendingNodes) > 0 {
 		node := state.PendingNodes[0]
 		for _, n := range state.PendingNodes {
-			role, _ := r.podRoleAndShard(n.Address, pods)
+			role, _ := podRoleAndShard(n.Address, pods)
 			if role == RolePrimary {
 				node = n
 				break
@@ -452,7 +452,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 	}
 
 	// --- Resolve pod labels for this node ---
-	role, shardIndex := r.podRoleAndShard(node.Address, pods)
+	role, shardIndex := podRoleAndShard(node.Address, pods)
 
 	// --- Step 2: PRIMARY – assign slots ---
 	if role == RolePrimary {
@@ -467,23 +467,6 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 	return errors.New("pod has no valkey.io/role label; cannot determine node role")
 }
 
-// podRoleAndShard looks up the pod matching the given IP address and returns
-// its valkey.io/role and valkey.io/shard-index labels. Returns ("", -1) if
-// the pod is not found or has no labels.
-func (r *ValkeyClusterReconciler) podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
-	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == address })
-	if idx == -1 {
-		return "", -1
-	}
-	pod := &pods.Items[idx]
-	role := pod.Labels[LabelRole]
-	shardStr := pod.Labels[LabelShardIndex]
-	shardIndex, err := strconv.Atoi(shardStr)
-	if err != nil {
-		return "", -1
-	}
-	return role, shardIndex
-}
 
 // assignSlotsToNewPrimary assigns the next available hash-slot range to a
 // node, promoting it to a slot-bearing primary.

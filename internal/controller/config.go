@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"fmt"
+	"maps"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,50 +41,56 @@ const (
 //go:embed scripts/*
 var scripts embed.FS
 
+func getConfigMapName(clusterName string) string {
+	return clusterName + "-config"
+}
+
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
+	// Hash writer for embedded scripts, and configuration parameters
+	hashConfigContents := sha256.New()
+
 	// Embed readiness check script
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return err
 	}
+	hashConfigContents.Write(readiness)
 
 	// Embed liveness check script
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
 	if err != nil {
 		return err
 	}
+	hashConfigContents.Write(liveness)
 
+	// Base config
 	serverConfig := `# Base operator config
 cluster-enabled yes
 protected-mode no
 cluster-node-timeout 2000
 `
 
-	// Shortcut
+	// Local copy
 	specConfig := cluster.Spec.ValkeySpec.Configuration
 
 	// If there are any user-defined config parameters
 	if len(specConfig) > 0 {
 
 		// Sort the config keys to keep consistent processing order
-		sortedConfig := make([]string, 0, len(specConfig))
-		for k := range specConfig {
-			sortedConfig = append(sortedConfig, k)
-		}
-		slices.Sort(sortedConfig)
+		sortedKeys := slices.Sorted(maps.Keys(specConfig))
 
 		// Build the config
 		serverConfig += "\n# Extra config\n"
-		for _, k := range sortedConfig {
+		for _, k := range sortedKeys {
 
 			if slices.Contains(valkeyiov1alpha1.NonUserOverrideConfigParameters, k) {
 				log.Error(nil, "Prohibited valkey server config", "parameter", k)
-				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "Prohibited config: %v", k)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpsertConfigMap", "Prohibited config: %v", k)
 				continue
 			}
 
@@ -124,7 +131,7 @@ cluster-node-timeout 2000
 	// Register ownership of the configMap
 	if err := controllerutil.SetControllerReference(cluster, serverConfigMap, r.Scheme); err != nil {
 		log.Error(err, "Failed to grab ownership of server configMap")
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapCreationFailed", "Failed to grab ownership of server configMap: %v", err)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapCreationFailed", "UpsertConfigMap", "Failed to grab ownership of server configMap: %v", err)
 		return err
 	}
 
@@ -132,7 +139,8 @@ cluster-node-timeout 2000
 	origServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(serverConfigMap.Data[configFileKey])))
 
 	// Calculate hash of new config parameters
-	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(serverConfig)))
+	hashConfigContents.Write([]byte(serverConfig))
+	newServerConfigHash := fmt.Sprintf("%x", hashConfigContents.Sum(nil))
 
 	// Was the configMap changed? This is an invalid action, as users should modify
 	// the ValkeyCluster CR to change parameters, not the configMap itself.
@@ -143,22 +151,25 @@ cluster-node-timeout 2000
 
 	// Original config is not modified, and new config doesn't change anything
 	if !origConfigModified && !needsUpdate {
-		log.V(1).Info("Server configMap unchanged")
+		log.V(1).Info("server config unchanged")
 		return nil
 	}
 
 	// In all other cases (ie: user modified configMap, or modified CR),
-	// update the config with the newly changed config
+	// update the config with the newly changed config. Also sync the
+	// check scripts in case they are updated in a later operator version.
+	serverConfigMap.Data["readiness-check.sh"] = string(readiness)
+	serverConfigMap.Data["liveness-check.sh"] = string(liveness)
 	serverConfigMap.Data[configFileKey] = serverConfig
 
 	// Need to create new configMap
 	if needCreateConfigMap {
 		if err := r.Create(ctx, serverConfigMap); err != nil {
 			log.Error(err, "Failed to create server configMap")
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapCreationFailed", "Failed to create server configMap: %v", err)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapCreationFailed", "UpsertConfigMap", "Failed to create server configMap: %v", err)
 			return err
 		} else {
-			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ConfigMapCreated", "Created server configMap")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ConfigMapCreated", "UpsertConfigMap", "Created server configMap")
 			return nil
 		}
 	}
@@ -166,11 +177,11 @@ cluster-node-timeout 2000
 	// Otherwise, update it
 	if err := r.Update(ctx, serverConfigMap); err != nil {
 		log.Error(err, "Failed to update server configMap")
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "Failed to update server configMap: %v", err)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpsertConfigMap", "Failed to update server configMap: %v", err)
 		return err
 	}
 
-	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ConfigMapUpdated", "Synchronized server configMap")
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ConfigMapUpdated", "UpsertConfigMap", "Synchronized server configMap")
 
 	// All is good. Server configMap will be auto-mounted in the deployment
 	return nil

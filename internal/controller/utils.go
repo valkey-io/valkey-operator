@@ -45,10 +45,6 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
 
-func getConfigMapName(cn string) string {
-	return cn + "-config"
-}
-
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
 // and a key, and value to compare to an existing annotation within the object.
 // Returns true if the annotation is present, and matches the value.

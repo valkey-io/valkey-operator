@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -118,34 +119,38 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	return containers
 }
 
+// deploymentName returns a deterministic, human-readable name for a Valkey
+// node Deployment. The name encodes the shard index and a node index within
+// the shard:
+//
+//	<cluster>-shard<N>-<M>    e.g. "mycluster-shard0-0", "mycluster-shard1-2"
+//
+// By convention, node 0 is the initial primary and nodes 1, 2, … are replicas.
+// The name deliberately avoids "primary"/"replica" because failover can swap
+// roles at any time. The authoritative role lives in the pod labels.
+func deploymentName(clusterName string, shardIndex int, nodeIndex int) string {
+	return fmt.Sprintf("%s-shard%d-%d", clusterName, shardIndex, nodeIndex)
+}
+
 // createClusterDeployment builds a single-pod Deployment for a Valkey node.
 //
 // Each Deployment manages exactly one Pod (Replicas=1) and represents one
-// logical node in the Valkey cluster. The shardIndex and role parameters are
-// stamped as Kubernetes labels on both the Deployment and the Pod template:
-//
-//	valkey.io/shard-index = "<shardIndex>"
-//	valkey.io/role        = "primary" | "replica"
-//
-// These labels serve two purposes:
-//  1. The reconciler reads them at runtime (via podRoleAndShard) to decide what
-//     Valkey command to issue for a pending node—CLUSTER ADDSLOTSRANGE for
-//     primaries, CLUSTER REPLICATE for replicas—without relying on potentially
-//     stale cluster topology.
-//  2. The labels make each Deployment's Selector unique to its (shard, role)
-//     pair, ensuring no two Deployments fight over the same Pod.
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, role string) *appsv1.Deployment {
+// logical node in the Valkey cluster. The Deployment name encodes the shard
+// and node index (e.g. "mycluster-shard0-0", "mycluster-shard1-2"). Two
+// labels (valkey.io/shard-index and valkey.io/node-index) provide selector
+// uniqueness so no two Deployments fight over the same Pod.
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
 
 	nodeLabels := labels(cluster)
 	nodeLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
-	nodeLabels[LabelRole] = role
+	nodeLabels[LabelNodeIndex] = strconv.Itoa(nodeIndex)
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: cluster.Name + "-",
-			Namespace:    cluster.Namespace,
-			Labels:       nodeLabels,
+			Name:      deploymentName(cluster.Name, shardIndex, nodeIndex),
+			Namespace: cluster.Namespace,
+			Labels:    nodeLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: func(i int32) *int32 { return &i }(1),

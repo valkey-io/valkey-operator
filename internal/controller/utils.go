@@ -17,38 +17,49 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const appName = "valkey"
 
-// Shard-label scheme
+// Naming and labelling scheme
 //
-// Every Deployment (and therefore every Pod) is stamped at creation time with
-// two labels that encode the node's intended position in the Valkey cluster:
+// Every Deployment (and therefore every Pod) encodes the node's position in
+// the Valkey cluster in its *name*:
 //
-//	valkey.io/shard-index  – which shard the node belongs to ("0", "1", …)
-//	valkey.io/role         – "primary" or "replica"
+//	<cluster>-shard<N>-<M>    e.g. "mycluster-shard0-0", "mycluster-shard1-2"
 //
-// This makes the reconciler's job deterministic: when a pending node appears,
-// addValkeyNode reads the pod labels to decide whether to assign slots
-// (primary) or issue CLUSTER REPLICATE (replica), and for which shard. Without
-// these labels the controller would have to infer the role by counting shards
-// and comparing to the spec, which is fragile when cluster state is stale due
-// to gossip delays.
+// where N is the shard index and M is the node index within the shard. By
+// convention, node 0 is the initial primary and nodes 1, 2, … are replicas.
+// The name deliberately avoids "primary"/"replica" because failover can swap
+// roles at any time.
 //
-// The labels are set by upsertDeployments → createClusterDeployment and
-// consumed by addValkeyNode → podRoleAndShard.
+// Two labels are set for selector uniqueness and kubectl convenience:
+//
+//	valkey.io/shard-index  – which shard ("0", "1", …)
+//	valkey.io/node-index   – node within shard ("0", "1", …)
+//
+// The reconciler parses the pod *name* (via podRoleAndShard) to decide
+// whether to assign slots (node 0 = primary) or issue CLUSTER REPLICATE
+// (node 1+ = replica), and for which shard.
+//
+// Names are set by deploymentName, labels by createClusterDeployment.
+// Both are consumed by addValkeyNode → podRoleAndShard.
 const (
 	// LabelShardIndex identifies which shard a pod belongs to (e.g. "0", "1", "2").
 	LabelShardIndex = "valkey.io/shard-index"
-	// LabelRole identifies the intended role of a pod: "primary" or "replica".
-	LabelRole = "valkey.io/role"
+	// LabelNodeIndex identifies the node within a shard (e.g. "0", "1", "2").
+	// Node 0 is the initial primary; nodes 1+ are replicas. Together with
+	// LabelShardIndex this forms a unique selector per Deployment.
+	LabelNodeIndex = "valkey.io/node-index"
 )
 
 // Role label values.
@@ -77,20 +88,75 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
 
-// podRoleAndShard looks up the pod matching the given IP address and returns
-// its valkey.io/role and valkey.io/shard-index labels. Returns ("", -1) if
-// the pod is not found or has no labels.
+// podRoleAndShard finds the pod matching the given IP address and parses its
+// Deployment-generated name to extract the role and shard index.
+//
+// Pod names follow the pattern:
+//
+//	<cluster>-shard<N>-<M>-<replicaset>-<hash>
+//
+// where N is the shard index and M is the node index within the shard. By
+// convention, node 0 is the initial primary and nodes 1+ are replicas. Returns
+// ("", -1) if the pod is not found or the name doesn't match.
 func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
 	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == address })
 	if idx == -1 {
 		return "", -1
 	}
-	pod := &pods.Items[idx]
-	role := pod.Labels[LabelRole]
-	shardStr := pod.Labels[LabelShardIndex]
-	shardIndex, err := strconv.Atoi(shardStr)
+	return parseRoleAndShard(pods.Items[idx].Name)
+}
+
+// parseRoleAndShard extracts the role and shard index from a pod name like
+// "mycluster-shard2-0-abc12-xyz". Node index 0 → primary, 1+ → replica.
+func parseRoleAndShard(podName string) (string, int) {
+	shardPos := strings.Index(podName, "-shard")
+	if shardPos == -1 {
+		return "", -1
+	}
+	// After "-shard": "2-0-abc12-xyz"
+	rest := podName[shardPos+len("-shard"):]
+	// Split: ["2", "0", "abc12", "xyz"]
+	parts := strings.SplitN(rest, "-", 3)
+	if len(parts) < 2 {
+		return "", -1
+	}
+	shardIndex, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return "", -1
 	}
-	return role, shardIndex
+	nodeIndex, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return "", -1
+	}
+	if nodeIndex == 0 {
+		return RolePrimary, shardIndex
+	}
+	return RoleReplica, shardIndex
+}
+
+// primaryPodIP finds the IP of the primary pod (node 0) for a given shard by
+// parsing pod names. Returns "" if not found.
+func primaryPodIP(pods *corev1.PodList, shardIndex int) string {
+	target := fmt.Sprintf("-shard%d-0-", shardIndex)
+	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool {
+		return strings.Contains(p.Name, target)
+	})
+	if idx == -1 {
+		return ""
+	}
+	return pods.Items[idx].Status.PodIP
+}
+
+// pickPendingNode selects the next pending node to process, prioritizing
+// primaries (node index 0) over replicas. This ensures primaries get slots
+// before replicas try to attach, since CLUSTER REPLICATE needs the primary
+// to already be in state.Shards.
+func pickPendingNode(nodes []*valkey.NodeState, pods *corev1.PodList) *valkey.NodeState {
+	for _, n := range nodes {
+		role, _ := podRoleAndShard(n.Address, pods)
+		if role == RolePrimary {
+			return n
+		}
+	}
+	return nodes[0]
 }

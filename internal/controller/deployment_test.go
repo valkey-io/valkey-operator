@@ -40,12 +40,12 @@ func TestCreateClusterDeployment(t *testing.T) {
 			Image: "container:version",
 		},
 	}
-	d := createClusterDeployment(cluster, 0, RolePrimary)
-	if d.Name != "" {
-		t.Errorf("Expected empty name field, got %v", d.Name)
+	d := createClusterDeployment(cluster, 0, 0)
+	if d.Name != "mycluster-shard0-0" {
+		t.Errorf("Expected %v, got %v", "mycluster-shard0-0", d.Name)
 	}
-	if d.GenerateName != "mycluster-" {
-		t.Errorf("Expected %v, got %v", "mycluster-", d.GenerateName)
+	if d.GenerateName != "" {
+		t.Errorf("Expected empty GenerateName field, got %v", d.GenerateName)
 	}
 	if *d.Spec.Replicas != 1 {
 		t.Errorf("Expected %v, got %v", 1, d.Spec.Replicas)
@@ -56,18 +56,19 @@ func TestCreateClusterDeployment(t *testing.T) {
 	if d.Spec.Template.Spec.Containers[0].Image != "container:version" {
 		t.Errorf("Expected %v, got %v", "container:version", d.Spec.Template.Spec.Containers[0].Image)
 	}
-	// Verify shard/role labels on deployment and pod template
+	// Verify shard/node-index labels on deployment and pod template
 	assert.Equal(t, "0", d.Labels[LabelShardIndex], "deployment should have shard-index label")
-	assert.Equal(t, RolePrimary, d.Labels[LabelRole], "deployment should have role label")
+	assert.Equal(t, "0", d.Labels[LabelNodeIndex], "deployment should have node-index label")
 	assert.Equal(t, "0", d.Spec.Template.Labels[LabelShardIndex], "pod template should have shard-index label")
-	assert.Equal(t, RolePrimary, d.Spec.Template.Labels[LabelRole], "pod template should have role label")
+	assert.Equal(t, "0", d.Spec.Template.Labels[LabelNodeIndex], "pod template should have node-index label")
 
-	// Verify replica role
-	dr := createClusterDeployment(cluster, 2, RoleReplica)
-	assert.Equal(t, "2", dr.Labels[LabelShardIndex], "replica deployment shard-index")
-	assert.Equal(t, RoleReplica, dr.Labels[LabelRole], "replica deployment role")
-	assert.Equal(t, "2", dr.Spec.Template.Labels[LabelShardIndex], "replica pod shard-index")
-	assert.Equal(t, RoleReplica, dr.Spec.Template.Labels[LabelRole], "replica pod role")
+	// Verify second node in shard 2 (node index 2)
+	dr := createClusterDeployment(cluster, 2, 2)
+	assert.Equal(t, "mycluster-shard2-2", dr.Name, "deployment name")
+	assert.Equal(t, "2", dr.Labels[LabelShardIndex], "deployment shard-index")
+	assert.Equal(t, "2", dr.Labels[LabelNodeIndex], "deployment node-index")
+	assert.Equal(t, "2", dr.Spec.Template.Labels[LabelShardIndex], "pod shard-index")
+	assert.Equal(t, "2", dr.Spec.Template.Labels[LabelNodeIndex], "pod node-index")
 }
 
 func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
@@ -93,7 +94,7 @@ func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster, 0, RolePrimary)
+	d := createClusterDeployment(cluster, 0, 0)
 
 	got := d.Spec.Template.Spec.Affinity
 	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
@@ -113,7 +114,7 @@ func TestCreateClusterDeployment_SetsNodeSelector(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster, 0, RolePrimary)
+	d := createClusterDeployment(cluster, 0, 0)
 
 	assert.Equal(t, nodeSelector, d.Spec.Template.Spec.NodeSelector, "node selector should match spec")
 }

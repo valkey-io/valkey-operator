@@ -76,7 +76,8 @@ var scripts embed.FS
 //  1. Ensure the headless Service exists (upsertService).
 //  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one Deployment per (shard, role) pair exists, each labelled with
+//  3. Ensure one Deployment per (shard, role) pair exists, each named
+//     deterministically (e.g. mycluster-shard0-primary) and labelled with
 //     valkey.io/shard-index and valkey.io/role (upsertDeployments).
 //  4. List all pods and build the Valkey cluster state by connecting to each
 //     node and scraping CLUSTER INFO / CLUSTER NODES.
@@ -144,14 +145,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// a replica first, its primary might still be in PendingNodes and the
 	// lookup would fail.
 	if len(state.PendingNodes) > 0 {
-		node := state.PendingNodes[0]
-		for _, n := range state.PendingNodes {
-			role, _ := podRoleAndShard(n.Address, pods)
-			if role == RolePrimary {
-				node = n
-				break
-			}
-		}
+		node := pickPendingNode(state.PendingNodes, pods)
 		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdding", "AddNode", "Adding node %v to cluster", node.Address)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Adding nodes to cluster", metav1.ConditionTrue)
@@ -305,79 +299,59 @@ cluster-node-timeout 2000`,
 	return nil
 }
 
-// upsertDeployments ensures every (shard-index, role) pair has a Deployment.
-// Each Deployment manages exactly one Pod (Replicas=1). The Deployment and Pod
-// are labelled with valkey.io/shard-index and valkey.io/role so that the
-// controller can deterministically assign slots and replicate without guessing.
+// upsertDeployments ensures every (shard, nodeIndex) pair has a Deployment.
+// Each Deployment manages exactly one Pod (Replicas=1) and is named
+// deterministically:
 //
-// The approach is count-based and idempotent:
-//  1. List all existing Deployments owned by this cluster.
-//  2. Count how many primary and replica Deployments exist per shard.
-//  3. For each shard, create the primary if missing, then create replicas
-//     until the count matches Spec.Replicas.
+//	<cluster>-shard<N>-<M>
+//
+// where N is the shard index and M is the node index (0 = initial primary,
+// 1+ = replicas). Because the names are deterministic, the function is
+// idempotent: it tries to create each Deployment and silently ignores
+// AlreadyExists errors.
 //
 // For a 3-shard cluster with 2 replicas per shard, this produces 9 Deployments:
 //
-//	shard-0/primary, shard-0/replica, shard-0/replica,
-//	shard-1/primary, shard-1/replica, shard-1/replica,
-//	shard-2/primary, shard-2/replica, shard-2/replica.
-//
-// On subsequent reconciles the set will be full and no Deployments are created.
+//	mycluster-shard0-0, mycluster-shard0-1, mycluster-shard0-2,
+//	mycluster-shard1-0, mycluster-shard1-1, mycluster-shard1-2,
+//	mycluster-shard2-0, mycluster-shard2-1, mycluster-shard2-2.
 func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	log := logf.FromContext(ctx)
 
-	existing := &appsv1.DeploymentList{}
-	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
-		log.Error(err, "failed to list Deployments")
-		return err
-	}
-
-	// Count existing primaries and replicas per shard. A boolean set is
-	// sufficient for primaries (at most one per shard), but replicas need a
-	// count because Spec.Replicas can be > 1.
-	primaryExists := map[int]bool{} // shard index -> has a primary Deployment
-	replicaCount := map[int]int{}   // shard index -> number of replica Deployments
-	for _, d := range existing.Items {
-		si, err := strconv.Atoi(d.Labels[LabelShardIndex])
-		if err != nil {
-			continue
-		}
-		switch d.Labels[LabelRole] {
-		case RolePrimary:
-			primaryExists[si] = true
-		case RoleReplica:
-			replicaCount[si]++
-		}
-	}
-
-	// Walk every (shard, role) the spec demands and create any that are missing.
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	created := 0
-	expected := int(cluster.Spec.Shards) * (1 + int(cluster.Spec.Replicas))
-	for shard := 0; shard < int(cluster.Spec.Shards); shard++ {
-		roles := []string{}
-		if !primaryExists[shard] {
-			roles = append(roles, RolePrimary)
-		}
-		for replicaCount[shard] < int(cluster.Spec.Replicas) {
-			roles = append(roles, RoleReplica)
-			replicaCount[shard]++
-		}
-		for _, role := range roles {
-			deployment := createClusterDeployment(cluster, shard, role)
-			if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
+	expected := int(cluster.Spec.Shards) * nodesPerShard
+	for shard := range int(cluster.Spec.Shards) {
+		for ni := range nodesPerShard {
+			if err := r.ensureDeployment(ctx, cluster, shard, ni, expected, &created); err != nil {
 				return err
 			}
-			if err := r.Create(ctx, deployment); err != nil {
-				r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
-				return err
-			}
-			created++
-			r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created %s deployment for shard %d (%d of %d)", role, shard, created, expected)
 		}
+	}
+	if created > 0 {
+		log.V(1).Info("created deployments", "count", created)
 	}
 
 	// TODO: update existing Deployments when the spec changes (e.g. image upgrade).
 
+	return nil
+}
+
+// ensureDeployment creates a single Deployment if it doesn't already exist.
+func (r *ValkeyClusterReconciler) ensureDeployment(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shard int, nodeIndex int, expected int, created *int) error {
+	deployment := createClusterDeployment(cluster, shard, nodeIndex)
+	if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, deployment); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
+		return err
+	}
+	*created++
+	r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created deployment for shard %d node %d (%d of %d)", shard, nodeIndex, *created, expected)
 	return nil
 }
 
@@ -396,9 +370,9 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 }
 
 // addValkeyNode introduces a pending Valkey node into the cluster. The node's
-// intended role is read from its pod labels (valkey.io/role and
-// valkey.io/shard-index), which were set at Deployment-creation time by
-// upsertDeployments. This removes all guesswork from the reconciler:
+// intended role is parsed from its pod name (e.g. "mycluster-shard0-primary-..."
+// or "mycluster-shard1-replica-0-..."), which was set at Deployment-creation
+// time by upsertDeployments. This removes all guesswork from the reconciler:
 //
 //  1. MEET: if the node is isolated (cluster_known_nodes <= 1), introduce it
 //     to existing cluster members via CLUSTER MEET and return. The next
@@ -504,13 +478,13 @@ func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, c
 }
 
 // replicateToShardPrimary issues CLUSTER REPLICATE to attach this node as a
-// replica of the primary that shares its shard-index label.
+// replica of the primary in the same shard.
 //
 // The lookup happens in two stages because Kubernetes and Valkey have
 // independent identity systems:
 //
-//  1. Kubernetes side: find the primary *pod* by matching valkey.io/role=primary
-//     and valkey.io/shard-index=<N> in the pod list. This gives us the pod's IP.
+//  1. Kubernetes side: find the primary *pod* by its name pattern
+//     (<cluster>-shard<N>-primary-...) in the pod list. This gives us the IP.
 //
 //  2. Valkey side: scan the cluster state for a primary node whose address
 //     matches that IP. This gives us the Valkey node ID required by
@@ -522,15 +496,11 @@ func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, c
 func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, shardIndex int, pods *corev1.PodList) error {
 	log := logf.FromContext(ctx)
 
-	// Stage 1: Kubernetes lookup — find the primary pod by its labels.
-	primaryIdx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool {
-		return p.Labels[LabelRole] == RolePrimary &&
-			p.Labels[LabelShardIndex] == strconv.Itoa(shardIndex)
-	})
-	if primaryIdx == -1 {
+	// Stage 1: Kubernetes lookup — find the primary pod by its name.
+	primaryIP := primaryPodIP(pods, shardIndex)
+	if primaryIP == "" {
 		return errors.New("primary pod not found for shard " + strconv.Itoa(shardIndex))
 	}
-	primaryIP := pods.Items[primaryIdx].Status.PodIP
 
 	// Stage 2: Valkey lookup — translate pod IP to Valkey node ID.
 	var primaryNodeId string

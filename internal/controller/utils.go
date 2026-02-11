@@ -27,8 +27,7 @@ const appName = "valkey"
 
 // Labels returns a copy of user defined labels including recommended:
 // https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
-// nolint:unparam
-func labels(cluster *valkeyv1.ValkeyCluster, extraLabels ...map[string]string) map[string]string {
+func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	if cluster.Labels == nil {
 		cluster.Labels = make(map[string]string)
 	}
@@ -38,12 +37,6 @@ func labels(cluster *valkeyv1.ValkeyCluster, extraLabels ...map[string]string) m
 	l["app.kubernetes.io/component"] = "valkey-cluster"
 	l["app.kubernetes.io/part-of"] = appName
 	l["app.kubernetes.io/managed-by"] = "valkey-operator"
-
-	// Copy extra labels into main map, overriding duplicates
-	for _, e := range extraLabels {
-		maps.Copy(l, e)
-	}
-
 	return l
 }
 

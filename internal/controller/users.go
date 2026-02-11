@@ -190,18 +190,18 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	return nil
 }
 
+// Helper for repeated actions
+func appendAcl(acl *strings.Builder, permissions []string, prefix string) {
+	for _, permission := range permissions {
+		fmt.Fprintf(acl, " %s%s", prefix, permission)
+	}
+}
+
 // Builds a user ACL string
 func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string {
 
 	// Holds the ACL as we build it
 	var acl strings.Builder
-
-	// Helper for repeated actions
-	appendAcl := func(acl *strings.Builder, permissions []string, prefix string) {
-		for _, permission := range permissions {
-			fmt.Fprintf(acl, " %s%s", prefix, permission)
-		}
-	}
 
 	// Initial acl
 	fmt.Fprintf(&acl, "user %s ", user.Name)
@@ -269,10 +269,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 		}
 		log.V(1).Info("Users secret not found", "userSecretName", userSecretName)
 
-		// The Secret was not found; Also, if NoPassword is false, then we cannot add this user
-		if !user.NoPassword {
-			return []string{}, fmt.Errorf("no password or reference found")
-		}
+		// The Secret was not found; And since NoPassword is false, then we cannot add this user
+		return []string{}, fmt.Errorf("no password or reference found")
 	}
 
 	// Sort the password keys; default to username if no keys present
@@ -295,9 +293,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 			return []string{}, fmt.Errorf("missing password key in secret")
 		}
 
-		// If the Secret begins with # (byte 35) and is 65 total characters long,
-		// we assume this is a pre-hashed password
-		if password[0] == 35 && len(password) == 65 {
+		// Test if the string in the Secret is a pre-hashed sha256 password
+		if isPreHashedPassword(password) {
 			passwords = append(passwords, string(password[1:]))
 			continue
 		}
@@ -308,4 +305,10 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 	}
 
 	return passwords, nil
+}
+
+// Check if byte-string begins with # (byte 35) and is 65 total characters long.
+// If so, we assume this is a pre-hashed sha256 password.
+func isPreHashedPassword(password []byte) bool {
+	return password[0] == 35 && len(password) == 65
 }

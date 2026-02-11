@@ -1164,6 +1164,17 @@ spec:
                       type: string
                   type: object
                 type: array
+              valkey:
+                description: Options, or config which are specific to Valkey server
+                properties:
+                  config:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Additional Valkey configuration parameters
+                      https://github.com/valkey-io/valkey-operator/issues/50
+                    type: object
+                type: object
             type: object
           status:
             default:

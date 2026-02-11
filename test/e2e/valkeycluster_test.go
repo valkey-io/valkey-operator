@@ -72,7 +72,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating the ConfigMap")
 			verifyConfigMapExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName + "-config")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -239,14 +239,15 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyDescribeEvents).Should(Succeed())
 
-			By("validating cluster access")
-			verifyClusterAccess := func(g Gomega) {
-				// Start a Valkey client pod to access the cluster and get its status.
+			By("validating client commands")
+			verifyClusterAccess := func(g Gomega, expected string, command ...string) {
+				// Start a Valkey client pod to access the cluster and execute commands
 				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
 
-				cmd := exec.Command("kubectl", "run", "client",
+				// Append the client command to the overall kubectl run command
+				cmd := exec.Command("kubectl", append([]string{"run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
-					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
+					"valkey-cli", "-c", "-h", clusterFqdn}, command...)...)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
@@ -265,9 +266,14 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				// The cluster should be ok.
-				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
+				g.Expect(output).To(ContainSubstring(expected))
 			}
-			Eventually(verifyClusterAccess).Should(Succeed())
+			Eventually(verifyClusterAccess).
+				WithArguments("cluster_state:ok", "CLUSTER", "INFO").
+				Should(Succeed(), "Failed CLUSTER INFO")
+			Eventually(verifyClusterAccess).
+				WithArguments("52428800", "CONFIG", "GET", "maxmemory").
+				Should(Succeed(), "Failed CONFIG GET maxmemory")
 		})
 	})
 

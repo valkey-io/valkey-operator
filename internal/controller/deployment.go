@@ -118,6 +118,8 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 
 func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+	baseConfigMapName := getConfigMapName(cluster.Name)
+
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
@@ -144,7 +146,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
+										Name: baseConfigMapName,
 									},
 									DefaultMode: func(i int32) *int32 { return &i }(0755),
 								},
@@ -155,7 +157,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cluster.Name,
+										Name: baseConfigMapName,
 									},
 								},
 							},

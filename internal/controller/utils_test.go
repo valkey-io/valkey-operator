@@ -70,3 +70,11 @@ func TestAnnotations(t *testing.T) {
 		t.Errorf("Expected %v, got %v", testAnnotations["app"], result["app"])
 	}
 }
+
+func TestConfigMapName(t *testing.T) {
+	cmn := "test-resource-config"
+	result := getConfigMapName("test-resource")
+	if result != cmn {
+		t.Errorf("Expected '%v', got '%v'", cmn, result)
+	}
+}

@@ -36,6 +36,9 @@ import (
 const (
 	configHashKey = "valkey.io/config-hash"
 	configFileKey = "valkey.conf"
+
+	readinessScriptKey = "readiness-check.sh"
+	livenessScriptKey  = "liveness-check.sh"
 )
 
 //go:embed scripts/*
@@ -97,6 +100,7 @@ cluster-node-timeout 2000
 			serverConfig += k + " " + specConfig[k] + "\n"
 		}
 	}
+	hashConfigContents.Write([]byte(serverConfig))
 
 	// Look for, and fetch existing configMap for this cluster
 	serverConfigMapName := getConfigMapName(cluster.Name)
@@ -112,7 +116,8 @@ cluster-node-timeout 2000
 			return err
 		}
 
-		// ConfigMap not found. Create configMap object with contents
+		// ConfigMap not found; This happens on cluster init.
+		// Create configMap object with contents.
 		needCreateConfigMap = true
 		log.V(2).Info("creating server configMap", "name", serverConfigMapName)
 
@@ -122,9 +127,9 @@ cluster-node-timeout 2000
 			Labels:    labels(cluster),
 		}
 		serverConfigMap.Data = map[string]string{
-			"readiness-check.sh": string(readiness),
-			"liveness-check.sh":  string(liveness),
-			configFileKey:        serverConfig,
+			readinessScriptKey: string(readiness),
+			livenessScriptKey:  string(liveness),
+			configFileKey:      serverConfig,
 		}
 	}
 
@@ -135,11 +140,14 @@ cluster-node-timeout 2000
 		return err
 	}
 
-	// Calculate hash of existing config parameters
-	origServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(serverConfigMap.Data[configFileKey])))
+	// Calculate hash of existing check scripts, and config parameters in configMap
+	origConfigContentsHash := sha256.New()
+	origConfigContentsHash.Write([]byte(serverConfigMap.Data[readinessScriptKey]))
+	origConfigContentsHash.Write([]byte(serverConfigMap.Data[livenessScriptKey]))
+	origConfigContentsHash.Write([]byte(serverConfigMap.Data[configFileKey]))
+	origServerConfigHash := fmt.Sprintf("%x", origConfigContentsHash.Sum(nil))
 
-	// Calculate hash of new config parameters
-	hashConfigContents.Write([]byte(serverConfig))
+	// Calculate hash of new configMap contents (ie: updated scripts, changed/added parameters)
 	newServerConfigHash := fmt.Sprintf("%x", hashConfigContents.Sum(nil))
 
 	// Was the configMap changed? This is an invalid action, as users should modify
@@ -158,8 +166,8 @@ cluster-node-timeout 2000
 	// In all other cases (ie: user modified configMap, or modified CR),
 	// update the config with the newly changed config. Also sync the
 	// check scripts in case they are updated in a later operator version.
-	serverConfigMap.Data["readiness-check.sh"] = string(readiness)
-	serverConfigMap.Data["liveness-check.sh"] = string(liveness)
+	serverConfigMap.Data[readinessScriptKey] = string(readiness)
+	serverConfigMap.Data[livenessScriptKey] = string(liveness)
 	serverConfigMap.Data[configFileKey] = serverConfig
 
 	// Need to create new configMap

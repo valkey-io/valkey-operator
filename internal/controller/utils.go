@@ -61,23 +61,19 @@ func hasAnnotation(obj metav1.Object, key string, value string) bool {
 // Returns true if the annotation was added, or updated
 func upsertAnnotation(o metav1.Object, key string, val string) bool {
 
-	updated := false
-
 	// Get current annotations
 	annotations := o.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
 
-	// If not found, insert, or update
-	if orig := annotations[key]; orig != val {
-
-		updated = true
-		annotations[key] = val
-
-		// Set annotations
-		o.SetAnnotations(annotations)
+	// If found, and equal, then no update
+	if annotations[key] == val {
+		return false
 	}
 
-	return updated
+	annotations[key] = val
+	o.SetAnnotations(annotations)
+
+	return true
 }

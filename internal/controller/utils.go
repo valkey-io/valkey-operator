@@ -17,11 +17,9 @@ limitations under the License.
 package controller
 
 import (
-	"fmt"
 	"maps"
 	"slices"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -35,7 +33,7 @@ const appName = "valkey"
 // Every Deployment (and therefore every Pod) encodes the node's position in
 // the Valkey cluster in its *name*:
 //
-//	<cluster>-shard<N>-<M>    e.g. "mycluster-shard0-0", "mycluster-shard1-2"
+//	<cluster>-<N>-<M>    e.g. "mycluster-0-0", "mycluster-1-2"
 //
 // where N is the shard index and M is the node index within the shard. By
 // convention, node 0 is the initial primary and nodes 1, 2, … are replicas.
@@ -47,12 +45,15 @@ const appName = "valkey"
 //	valkey.io/shard-index  – which shard ("0", "1", …)
 //	valkey.io/node-index   – node within shard ("0", "1", …)
 //
-// The reconciler parses the pod *name* (via podRoleAndShard) to decide
-// whether to assign slots (node 0 = primary) or issue CLUSTER REPLICATE
-// (node 1+ = replica), and for which shard.
+// The reconciler reads pod labels (via podRoleAndShard) to decide whether
+// to assign slots (node 0 = initial primary) or issue CLUSTER REPLICATE
+// (node 1+ = initial replica), and for which shard. This convention only
+// applies during initial cluster creation; after a failover, Valkey may
+// promote a replica to primary, making node 0 a replica. The labels are
+// not updated to reflect this — the live role is always read from
+// CLUSTER NODES, not from the labels.
 //
 // Names are set by deploymentName, labels by createClusterDeployment.
-// Both are consumed by addValkeyNode → podRoleAndShard.
 const (
 	// LabelShardIndex identifies which shard a pod belongs to (e.g. "0", "1", "2").
 	LabelShardIndex = "valkey.io/shard-index"
@@ -88,43 +89,23 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
 
-// podRoleAndShard finds the pod matching the given IP address and parses its
-// Deployment-generated name to extract the role and shard index.
+// podRoleAndShard finds the pod matching the given IP address and reads its
+// labels to determine the intended role and shard index.
 //
-// Pod names follow the pattern:
-//
-//	<cluster>-shard<N>-<M>-<replicaset>-<hash>
-//
-// where N is the shard index and M is the node index within the shard. By
-// convention, node 0 is the initial primary and nodes 1+ are replicas. Returns
-// ("", -1) if the pod is not found or the name doesn't match.
+// The role is derived from valkey.io/node-index: node 0 is the initial
+// primary, nodes 1+ are replicas. Returns ("", -1) if the pod is not
+// found or the labels are missing.
 func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
 	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == address })
 	if idx == -1 {
 		return "", -1
 	}
-	return parseRoleAndShard(pods.Items[idx].Name)
-}
-
-// parseRoleAndShard extracts the role and shard index from a pod name like
-// "mycluster-shard2-0-abc12-xyz". Node index 0 → primary, 1+ → replica.
-func parseRoleAndShard(podName string) (string, int) {
-	shardPos := strings.Index(podName, "-shard")
-	if shardPos == -1 {
-		return "", -1
-	}
-	// After "-shard": "2-0-abc12-xyz"
-	rest := podName[shardPos+len("-shard"):]
-	// Split: ["2", "0", "abc12", "xyz"]
-	parts := strings.SplitN(rest, "-", 3)
-	if len(parts) < 2 {
-		return "", -1
-	}
-	shardIndex, err := strconv.Atoi(parts[0])
+	pod := &pods.Items[idx]
+	shardIndex, err := strconv.Atoi(pod.Labels[LabelShardIndex])
 	if err != nil {
 		return "", -1
 	}
-	nodeIndex, err := strconv.Atoi(parts[1])
+	nodeIndex, err := strconv.Atoi(pod.Labels[LabelNodeIndex])
 	if err != nil {
 		return "", -1
 	}
@@ -134,12 +115,12 @@ func parseRoleAndShard(podName string) (string, int) {
 	return RoleReplica, shardIndex
 }
 
-// primaryPodIP finds the IP of the primary pod (node 0) for a given shard by
-// parsing pod names. Returns "" if not found.
+// primaryPodIP finds the IP of the node-0 (primary) pod for a given shard by
+// reading pod labels. Returns "" if not found.
 func primaryPodIP(pods *corev1.PodList, shardIndex int) string {
-	target := fmt.Sprintf("-shard%d-0-", shardIndex)
+	si := strconv.Itoa(shardIndex)
 	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool {
-		return strings.Contains(p.Name, target)
+		return p.Labels[LabelShardIndex] == si && p.Labels[LabelNodeIndex] == "0"
 	})
 	if idx == -1 {
 		return ""

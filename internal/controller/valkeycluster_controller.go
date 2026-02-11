@@ -76,9 +76,8 @@ var scripts embed.FS
 //  1. Ensure the headless Service exists (upsertService).
 //  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one Deployment per (shard, role) pair exists, each named
-//     deterministically (e.g. mycluster-shard0-primary) and labelled with
-//     valkey.io/shard-index and valkey.io/role (upsertDeployments).
+//  3. Ensure one Deployment per (shard, node) pair exists, each named
+//     deterministically (e.g. mycluster-0-0) (upsertDeployments).
 //  4. List all pods and build the Valkey cluster state by connecting to each
 //     node and scraping CLUSTER INFO / CLUSTER NODES.
 //  5. Forget stale nodes that no longer have a backing pod.
@@ -139,11 +138,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// all members before the next node is introduced. After addValkeyNode
 	// returns, we requeue after 2 seconds.
 	//
-	// We prioritize primary-labeled nodes over replica-labeled nodes. This
-	// is important because replicateToShardPrimary needs the primary to
-	// already be in state.Shards (i.e. have slots assigned). If we processed
-	// a replica first, its primary might still be in PendingNodes and the
-	// lookup would fail.
+	// We prioritize node-index 0 (primary) over higher indices (replicas).
+	// This is important because replicateToShardPrimary needs the primary
+	// to already be in state.Shards (i.e. have slots assigned). If we
+	// processed a replica first, its primary might still be in PendingNodes
+	// and the lookup would fail.
 	if len(state.PendingNodes) > 0 {
 		node := pickPendingNode(state.PendingNodes, pods)
 		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
@@ -303,7 +302,7 @@ cluster-node-timeout 2000`,
 // Each Deployment manages exactly one Pod (Replicas=1) and is named
 // deterministically:
 //
-//	<cluster>-shard<N>-<M>
+//	<cluster>-<N>-<M>
 //
 // where N is the shard index and M is the node index (0 = initial primary,
 // 1+ = replicas). Because the names are deterministic, the function is
@@ -312,9 +311,9 @@ cluster-node-timeout 2000`,
 //
 // For a 3-shard cluster with 2 replicas per shard, this produces 9 Deployments:
 //
-//	mycluster-shard0-0, mycluster-shard0-1, mycluster-shard0-2,
-//	mycluster-shard1-0, mycluster-shard1-1, mycluster-shard1-2,
-//	mycluster-shard2-0, mycluster-shard2-1, mycluster-shard2-2.
+//	mycluster-0-0, mycluster-0-1, mycluster-0-2,
+//	mycluster-1-0, mycluster-1-1, mycluster-1-2,
+//	mycluster-2-0, mycluster-2-1, mycluster-2-2.
 func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	log := logf.FromContext(ctx)
 
@@ -370,19 +369,20 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 }
 
 // addValkeyNode introduces a pending Valkey node into the cluster. The node's
-// intended role is parsed from its pod name (e.g. "mycluster-shard0-primary-..."
-// or "mycluster-shard1-replica-0-..."), which was set at Deployment-creation
-// time by upsertDeployments. This removes all guesswork from the reconciler:
+// intended role is derived from its pod labels (e.g. shard-index=0, node-index=0
+// for the initial primary, shard-index=1, node-index=1 for a replica), which
+// was set at Deployment-creation time by upsertDeployments. This removes all
+// guesswork from the reconciler:
 //
 //  1. MEET: if the node is isolated (cluster_known_nodes <= 1), introduce it
 //     to existing cluster members via CLUSTER MEET and return. The next
 //     reconcile will proceed once gossip propagates.
 //
-//  2. PRIMARY: if role=primary, assign the next available slot range via
+//  2. PRIMARY: if node index is 0, assign the next available slot range via
 //     CLUSTER ADDSLOTSRANGE.
 //
-//  3. REPLICA: if role=replica, find the primary pod with the same
-//     shard-index, look up its Valkey node ID, and issue CLUSTER REPLICATE.
+//  3. REPLICA: if node index is >= 1, find the node-0 (primary) pod for the
+//     same shard, look up its Valkey node ID, and issue CLUSTER REPLICATE.
 func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, pods *corev1.PodList) error {
 	log := logf.FromContext(ctx)
 
@@ -428,7 +428,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 		return r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods)
 	}
 
-	return errors.New("pod has no valkey.io/role label; cannot determine node role")
+	return errors.New("cannot determine node role from pod name")
 }
 
 // assignSlotsToNewPrimary assigns the next available hash-slot range to a
@@ -483,8 +483,9 @@ func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, c
 // The lookup happens in two stages because Kubernetes and Valkey have
 // independent identity systems:
 //
-//  1. Kubernetes side: find the primary *pod* by its name pattern
-//     (<cluster>-shard<N>-primary-...) in the pod list. This gives us the IP.
+//  1. Kubernetes side: find the node-0 (primary) pod for the same shard by
+//     matching pod labels (shard-index=N, node-index=0). This
+//     gives us the IP.
 //
 //  2. Valkey side: scan the cluster state for a primary node whose address
 //     matches that IP. This gives us the Valkey node ID required by
@@ -496,7 +497,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, c
 func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, shardIndex int, pods *corev1.PodList) error {
 	log := logf.FromContext(ctx)
 
-	// Stage 1: Kubernetes lookup — find the primary pod by its name.
+	// Stage 1: Kubernetes lookup — find the node-0 (primary) pod by name prefix.
 	primaryIP := primaryPodIP(pods, shardIndex)
 	if primaryIP == "" {
 		return errors.New("primary pod not found for shard " + strconv.Itoa(shardIndex))

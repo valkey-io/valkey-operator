@@ -41,8 +41,8 @@ func TestCreateClusterDeployment(t *testing.T) {
 		},
 	}
 	d := createClusterDeployment(cluster, 0, 0)
-	if d.Name != "mycluster-shard0-0" {
-		t.Errorf("Expected %v, got %v", "mycluster-shard0-0", d.Name)
+	if d.Name != "mycluster-0-0" {
+		t.Errorf("Expected %v, got %v", "mycluster-0-0", d.Name)
 	}
 	if d.GenerateName != "" {
 		t.Errorf("Expected empty GenerateName field, got %v", d.GenerateName)
@@ -64,7 +64,7 @@ func TestCreateClusterDeployment(t *testing.T) {
 
 	// Verify second node in shard 2 (node index 2)
 	dr := createClusterDeployment(cluster, 2, 2)
-	assert.Equal(t, "mycluster-shard2-2", dr.Name, "deployment name")
+	assert.Equal(t, "mycluster-2-2", dr.Name, "deployment name")
 	assert.Equal(t, "2", dr.Labels[LabelShardIndex], "deployment shard-index")
 	assert.Equal(t, "2", dr.Labels[LabelNodeIndex], "deployment node-index")
 	assert.Equal(t, "2", dr.Spec.Template.Labels[LabelShardIndex], "pod shard-index")

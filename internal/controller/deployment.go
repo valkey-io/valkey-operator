@@ -123,20 +123,20 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 // node Deployment. The name encodes the shard index and a node index within
 // the shard:
 //
-//	<cluster>-shard<N>-<M>    e.g. "mycluster-shard0-0", "mycluster-shard1-2"
+//	<cluster>-<N>-<M>    e.g. "mycluster-0-0", "mycluster-1-2"
 //
 // By convention, node 0 is the initial primary and nodes 1, 2, … are replicas.
 // The name deliberately avoids "primary"/"replica" because failover can swap
 // roles at any time. The authoritative role lives in the pod labels.
 func deploymentName(clusterName string, shardIndex int, nodeIndex int) string {
-	return fmt.Sprintf("%s-shard%d-%d", clusterName, shardIndex, nodeIndex)
+	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }
 
 // createClusterDeployment builds a single-pod Deployment for a Valkey node.
 //
 // Each Deployment manages exactly one Pod (Replicas=1) and represents one
 // logical node in the Valkey cluster. The Deployment name encodes the shard
-// and node index (e.g. "mycluster-shard0-0", "mycluster-shard1-2"). Two
+// and node index (e.g. "mycluster-0-0", "mycluster-1-2"). Two
 // labels (valkey.io/shard-index and valkey.io/node-index) provide selector
 // uniqueness so no two Deployments fight over the same Pod.
 func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *appsv1.Deployment {

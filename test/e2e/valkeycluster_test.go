@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -318,7 +319,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 	Context("when a ValkeyCluster experiences degraded state", func() {
 		var degradedClusterName string
 
-		It("should detect and recover when a deployment is deleted", func() {
+		It("should detect and recover when a replica deployment is deleted", func() {
 			By("creating a ValkeyCluster")
 			degradedClusterManifest := `apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -349,12 +350,9 @@ spec:
 			}
 			Eventually(verifyClusterReady).Should(Succeed())
 
-			By("getting a deployment to delete")
+			By("getting a replica deployment to delete")
 			var deploymentToDelete string
 			getDeployment := func(g Gomega) {
-				// selecting replica deployment to delete as we have intermittent issue
-				// with master deployment deletion resulting in cluster not being able to recover
-				// https://github.com/valkey-io/valkey-operator/issues/43
 				var err error
 				deploymentToDelete, err = utils.GetReplicaDeployment(fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName))
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a replica deployment")
@@ -362,7 +360,7 @@ spec:
 			}
 			Eventually(getDeployment).Should(Succeed())
 
-			By(fmt.Sprintf("deleting deployment %s to simulate shard loss", deploymentToDelete))
+			By(fmt.Sprintf("deleting deployment %s to simulate replica loss", deploymentToDelete))
 			cmd = exec.Command("kubectl", "delete", "deployment", deploymentToDelete, "--wait=false")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to delete deployment")
@@ -372,15 +370,13 @@ spec:
 				cr, err := utils.GetValkeyClusterStatus(degradedClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// The Cluster should detect the deployment loss and not be in Ready state
-				// Note: The operator immediately recreates missing deployments, so the cluster
+				// The Cluster should detect the deployment loss and not be in Ready state.
+				// The operator immediately recreates missing deployments, so the cluster
 				// transitions through Reconciling/AddingNodes states, and may briefly enter
-				// Degraded state (with NodeAddFailed reason), if adding the node fails temporarily).
-				// However, this is not guaranteed, so we only check for Recovery here.
+				// Degraded state (with NodeAddFailed reason) if adding the node fails temporarily.
 				g.Expect(cr.Status.State).To(Or(Equal(valkeyiov1alpha1.ClusterStateReconciling), Equal(valkeyiov1alpha1.ClusterStateDegraded)),
 					fmt.Sprintf("Expected cluster to be reconciling or degraded after deployment deletion, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
 
-				// Ready condition should be False during recovery
 				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 				if readyCond != nil {
 					g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready condition should be False when deployment is being recreated")
@@ -419,13 +415,11 @@ spec:
 					fmt.Sprintf("Expected ClusterHealthy reason after recovery but got: %s", cr.Status.Reason))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)), "All shards should be ready after recovery")
 
-				// Verify Ready condition is True
 				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 				g.Expect(readyCond).NotTo(BeNil(), "Ready condition should be present")
 				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready condition should be True after recovery")
 				g.Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ReasonClusterHealthy))
 
-				// Verify Degraded condition is no longer present or is False
 				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 				if degradedCond != nil {
 					g.Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse), "Degraded condition should be False after recovery")
@@ -440,6 +434,138 @@ spec:
 			By("waiting for cluster to be deleted")
 			verifyClusterDeleted := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
+			}
+			Eventually(verifyClusterDeleted).Should(Succeed())
+		})
+
+		// This test was temporarily disabled in PR #54 because the operator
+		// could not recover from a primary deletion (issue #43). The failover
+		// fix (shardHasLivePrimary + findShardPrimary) now handles this: when
+		// Valkey promotes the replica, the replacement node-index=0 pod joins
+		// as a replica of the promoted primary instead of trying to claim slots.
+		It("should detect and recover when a primary deployment is deleted", func() {
+			By("creating a ValkeyCluster")
+			failoverClusterManifest := `apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-failover-test
+spec:
+  shards: 3
+  replicas: 1
+`
+
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-failover.yaml")
+			err := os.WriteFile(manifestFile, []byte(failoverClusterManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer os.Remove(manifestFile)
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+			failoverClusterName := "valkeycluster-failover-test"
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", failoverClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for cluster to become ready")
+			verifyClusterReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(failoverClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}
+			Eventually(verifyClusterReady).Should(Succeed())
+
+			By("verifying all replicas are fully synced before triggering failover")
+			verifyReplicationHealthy := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				pods := utils.GetNonEmptyLines(output)
+				for _, pod := range pods {
+					cmd = exec.Command("kubectl", "exec", pod, "-c", "valkey-server", "--",
+						"valkey-cli", "INFO", "REPLICATION")
+					replInfo, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred(), "Failed to get replication info from %s", pod)
+					// Replicas must have master_link_status:up. Primaries don't
+					// have this field, so only check pods that report it.
+					if strings.Contains(replInfo, "master_link_status") {
+						g.Expect(replInfo).To(ContainSubstring("master_link_status:up"),
+							"Replica %s has master_link_status:down — replication not ready", pod)
+					}
+				}
+			}
+			Eventually(verifyReplicationHealthy).Should(Succeed())
+
+			By("finding a primary (node-index=0) deployment to delete")
+			var primaryDeployment string
+			getPrimaryDeployment := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s,valkey.io/node-index=0", failoverClusterName),
+					"-o", "go-template={{ (index .items 0).metadata.name }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a primary deployment")
+				g.Expect(output).NotTo(BeEmpty())
+				primaryDeployment = output
+			}
+			Eventually(getPrimaryDeployment).Should(Succeed())
+
+			By(fmt.Sprintf("deleting primary deployment %s to trigger Valkey failover", primaryDeployment))
+			cmd = exec.Command("kubectl", "delete", "deployment", primaryDeployment, "--wait=false")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete primary deployment")
+
+			By("waiting for the operator to recreate the deployment and the cluster to recover")
+			verifyClusterRecovery := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				deployments := utils.GetNonEmptyLines(output)
+				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments after operator recreates the deleted one")
+
+				cmd = exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
+					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
+						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
+						"{{ $.metadata.name}} {{ \"\\n\" }}"+
+						"{{ end }}{{ end }}{{ end }}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podStatuses := utils.GetNonEmptyLines(output)
+				g.Expect(podStatuses).To(HaveLen(6), "Expected 6 Pods to be ready after failover recovery")
+
+				cr, err := utils.GetValkeyClusterStatus(failoverClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
+					fmt.Sprintf("Expected cluster to recover to Ready after failover, but got: %s (reason: %s)", cr.Status.State, cr.Status.Reason))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)), "All shards should be ready after failover recovery")
+
+				readyCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+				g.Expect(readyCond).NotTo(BeNil(), "Ready condition should be present")
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready condition should be True after failover recovery")
+
+				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+				if degradedCond != nil {
+					g.Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse), "Degraded condition should be False after failover recovery")
+				}
+			}
+			Eventually(verifyClusterRecovery).Should(Succeed())
+
+			By("cleaning up the failover cluster")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", failoverClusterName, "--wait=false")
+			_, _ = utils.Run(cmd)
+
+			By("waiting for cluster to be deleted")
+			verifyClusterDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", failoverClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
 			}

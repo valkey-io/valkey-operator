@@ -1124,6 +1124,31 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              storage:
+                description: PersistentVolume configuration for data persistence
+                properties:
+                  accessModes:
+                    default:
+                    - ReadWriteOnce
+                    description: AccessModes contains the desired access modes for
+                      the volume
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    default: false
+                    description: Enable persistent storage for Valkey data
+                    type: boolean
+                  size:
+                    default: 1Gi
+                    description: Size of the persistent volume claim
+                    type: string
+                  storageClassName:
+                    description: |-
+                      StorageClassName is the name of the StorageClass to use for PersistentVolumeClaims
+                      If not specified, the default StorageClass will be used
+                    type: string
+                type: object
               tolerations:
                 description: Tolerations to apply to the pods
                 items:
@@ -1164,6 +1189,12 @@ spec:
                       type: string
                   type: object
                 type: array
+              volumePermissions:
+                default: false
+                description: |-
+                  VolumePermissions enables an init container to set proper ownership on the data volume
+                  Required when using persistent storage with non-root security contexts
+                type: boolean
             type: object
           status:
             default:

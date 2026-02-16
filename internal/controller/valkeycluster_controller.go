@@ -67,6 +67,8 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -95,10 +97,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertDeployments(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+	// Use StatefulSets if persistent storage is enabled, otherwise use Deployments
+	if cluster.Spec.Storage.Enabled {
+		if err := r.upsertStatefulSets(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+	} else {
+		if err := r.upsertDeployments(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Get all pods and their current Valkey Cluster state
@@ -249,7 +260,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			"valkey.conf": `
 cluster-enabled yes
 protected-mode no
-cluster-node-timeout 2000`,
+cluster-node-timeout 2000
+dir /data
+appendonly yes
+appendfilename "appendonly.aof"
+appendfsync everysec`,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
@@ -294,6 +309,36 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 			return err
 		}
 		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created deployment %d of %d", i+1, expected)
+	}
+
+	// TODO: update existing
+
+	return nil
+}
+
+// Create Valkey instances using StatefulSets with persistent volumes
+func (r *ValkeyClusterReconciler) upsertStatefulSets(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
+	existing := &appsv1.StatefulSetList{}
+	if err := r.List(ctx, existing, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		log.Error(err, "failed to list StatefulSets")
+		return err
+	}
+
+	expected := int(cluster.Spec.Shards * (1 + cluster.Spec.Replicas))
+
+	// Create missing statefulsets
+	for i := len(existing.Items); i < expected; i++ {
+		statefulSet := createClusterStatefulSet(cluster)
+		if err := controllerutil.SetControllerReference(cluster, statefulSet, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, statefulSet); err != nil {
+			r.Recorder.Eventf(cluster, statefulSet, corev1.EventTypeWarning, "StatefulSetCreationFailed", "CreateStatefulSet", "Failed to create statefulset: %v", err)
+			return err
+		}
+		r.Recorder.Eventf(cluster, statefulSet, corev1.EventTypeNormal, "StatefulSetCreated", "CreateStatefulSet", "Created statefulset %d of %d", i+1, expected)
 	}
 
 	// TODO: update existing

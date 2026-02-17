@@ -373,7 +373,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(deploymentEvents).ToNot(BeEmpty())
 
 			for _, event := range deploymentEvents {
-				Expect(event).To(MatchRegexp(`Created deployment \d+ of \d+`))
+				Expect(event).To(MatchRegexp(`Created deployment for shard \d+ node \d+ \(\d+ of \d+\)`))
 			}
 		})
 	})

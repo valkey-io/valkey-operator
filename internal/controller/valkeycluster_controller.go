@@ -69,6 +69,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="storage.k8s.io",resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is the main reconciliation loop. On each invocation it drives the
@@ -120,6 +121,26 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
 			_ = r.updateStatus(ctx, cluster, nil)
 			return ctrl.Result{}, err
+		}
+
+		// Handle volume expansion if storage size has changed
+		if err := r.handleVolumeExpansion(ctx, cluster); err != nil {
+			log.Error(err, "volume expansion failed")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "VolumeExpansionFailed", "VolumeExpansion", "Volume expansion failed: %v", err)
+			// Don't return error - allow reconciliation to continue
+			// The expansion will be retried on the next reconciliation
+		}
+
+		// Check if volume expansion is in progress
+		expansionComplete, err := r.checkVolumeExpansionStatus(ctx, cluster)
+		if err != nil {
+			log.Error(err, "failed to check volume expansion status")
+		} else if !expansionComplete {
+			log.V(1).Info("volume expansion in progress, will recheck")
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonVolumeExpanding, "Volume expansion in progress", metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, nil)
+			// Requeue more frequently to monitor expansion progress
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	} else {
 		if err := r.upsertDeployments(ctx, cluster); err != nil {

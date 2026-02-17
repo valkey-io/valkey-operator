@@ -47,6 +47,14 @@ rules:
   - create
   - patch
 - apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - valkey.io
   resources:
   - valkeyclusters

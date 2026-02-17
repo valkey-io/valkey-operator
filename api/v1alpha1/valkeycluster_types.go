@@ -186,6 +186,8 @@ const (
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
 	ReasonNoSlots           = "NoSlotsAvailable"
+	ReasonVolumeExpanding   = "VolumeExpanding"
+	ReasonVolumeExpanded    = "VolumeExpanded"
 )
 
 // +kubebuilder:object:root=true

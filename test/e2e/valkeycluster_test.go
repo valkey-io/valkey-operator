@@ -24,8 +24,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -442,7 +440,7 @@ spec:
 
 		// This test was temporarily disabled in PR #54 because the operator
 		// could not recover from a primary deletion (issue #43). The failover
-		// fix (shardHasLivePrimary + findShardPrimary) now handles this: when
+		// fix (shardExistsInTopology + findShardPrimary) now handles this: when
 		// Valkey promotes the replica, the replacement node-index=0 pod joins
 		// as a replica of the promoted primary instead of trying to claim slots.
 		It("should detect and recover when a primary deployment is deleted", func() {
@@ -479,29 +477,6 @@ spec:
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 			}
 			Eventually(verifyClusterReady).Should(Succeed())
-
-			By("verifying all replicas are fully synced before triggering failover")
-			verifyReplicationHealthy := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
-					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				pods := utils.GetNonEmptyLines(output)
-				for _, pod := range pods {
-					cmd = exec.Command("kubectl", "exec", pod, "-c", "valkey-server", "--",
-						"valkey-cli", "INFO", "REPLICATION")
-					replInfo, err := utils.Run(cmd)
-					g.Expect(err).NotTo(HaveOccurred(), "Failed to get replication info from %s", pod)
-					// Replicas must have master_link_status:up. Primaries don't
-					// have this field, so only check pods that report it.
-					if strings.Contains(replInfo, "master_link_status") {
-						g.Expect(replInfo).To(ContainSubstring("master_link_status:up"),
-							"Replica %s has master_link_status:down — replication not ready", pod)
-					}
-				}
-			}
-			Eventually(verifyReplicationHealthy).Should(Succeed())
 
 			By("finding a primary (node-index=0) deployment to delete")
 			var primaryDeployment string

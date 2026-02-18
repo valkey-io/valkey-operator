@@ -128,11 +128,11 @@ func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
 // assignSlotsToNewPrimary. Instead it should fall through to
 // replicateToShardPrimary, which will either succeed (case 1) or return an
 // error and retry on the next reconcile (case 2).
-func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, selfAddress string, pods *corev1.PodList) bool {
+func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) bool {
 	si := strconv.Itoa(shardIndex)
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == selfAddress || p.Status.PodIP == "" {
+		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
 			continue
 		}
 		for _, shard := range state.Shards {
@@ -151,11 +151,11 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, selfAddre
 // primary, regardless of its node-index label. This handles the post-failover
 // case where node-index=1 (or higher) was promoted by Valkey.
 // Returns ("", "") if no primary is found.
-func findShardPrimary(state *valkey.ClusterState, shardIndex int, selfAddress string, pods *corev1.PodList) (nodeID, ip string) {
+func findShardPrimary(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) (nodeID, ip string) {
 	si := strconv.Itoa(shardIndex)
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == selfAddress || p.Status.PodIP == "" {
+		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
 			continue
 		}
 		for _, shard := range state.Shards {

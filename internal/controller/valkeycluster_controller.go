@@ -442,7 +442,7 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 		// new slots. Instead it joins as a replica. If the failover hasn't
 		// completed yet, replicateToShardPrimary will return an error and
 		// the reconciler retries on the next cycle.
-		if shardExistsInTopology(state, shardIndex, node.Address, pods) {
+		if shardExistsInTopology(state, shardIndex, pods) {
 			log.V(1).Info("shard already exists in topology (post-failover); attaching as replica",
 				"shardIndex", shardIndex, "node", node.Address)
 			return r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods)
@@ -520,7 +520,7 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	// against the live Valkey topology. This handles both the normal case
 	// (node-index=0 is the primary) and the post-failover case (a promoted
 	// replica is the primary).
-	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, node.Address, pods)
+	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, pods)
 	if primaryNodeId == "" {
 		return errors.New("primary Valkey node not found in cluster state for shard " + strconv.Itoa(shardIndex))
 	}

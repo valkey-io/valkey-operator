@@ -198,6 +198,20 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
+	// Check that all replicas have their replication link up (master_link_status:up).
+	// before marking the cluster Ready, we need to make sure all replicas are in sync with their primary.
+	for _, shard := range state.Shards {
+		for _, node := range shard.Nodes {
+			if !node.IsReplicationInSync() {
+				log.V(1).Info("replica not yet in sync, requeue..", "address", node.Address)
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for replicas to sync with primary", metav1.ConditionFalse)
+				setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for replica sync", metav1.ConditionTrue)
+				_ = r.updateStatus(ctx, cluster, state)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		}
+	}
+
 	// Cluster is healthy - set all positive conditions
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
@@ -600,7 +614,8 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	return nil
 }
 
-// countReadyShards counts shards that have all required nodes and are healthy
+// countReadyShards counts shards that have all required nodes, are healthy,
+// and have all replicas in sync with their primary.
 func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, cluster *valkeyiov1alpha1.ValkeyCluster) int32 {
 	var readyCount int32 = 0
 	requiredNodes := 1 + int(cluster.Spec.Replicas)
@@ -608,10 +623,14 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
 			continue
 		}
-		// Check if all nodes in this shard are healthy
+		// Check if all nodes in this shard are healthy and in sync
 		allHealthy := true
 		for _, node := range shard.Nodes {
 			if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+				allHealthy = false
+				break
+			}
+			if !node.IsReplicationInSync() {
 				allHealthy = false
 				break
 			}

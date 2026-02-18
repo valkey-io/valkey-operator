@@ -172,6 +172,16 @@ func (n *NodeState) IsPrimary() bool {
 	return slices.Contains(n.Flags, "master")
 }
 
+// IsReplicationInSync returns true if this replica node has its replication
+// link up (master_link_status:up in INFO REPLICATION). Primary nodes always
+// return true since they don't have a replication link to check.
+func (n *NodeState) IsReplicationInSync() bool {
+	if n.IsPrimary() {
+		return true
+	}
+	return n.Info["master_link_status"] == "up"
+}
+
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}

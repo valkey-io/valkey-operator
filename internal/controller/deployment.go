@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strconv"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -121,22 +124,47 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	return containers
 }
 
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.Deployment {
+// deploymentName returns a deterministic, human-readable name for a Valkey
+// node Deployment. The name encodes the shard index and a node index within
+// the shard:
+//
+//	<cluster>-<N>-<M>    e.g. "mycluster-0-0", "mycluster-1-2"
+//
+// By convention, node 0 is the initial primary and nodes 1, 2, … are replicas.
+// The name deliberately avoids "primary"/"replica" because failover can swap
+// roles at any time. The authoritative role lives in the pod labels.
+func deploymentName(clusterName string, shardIndex int, nodeIndex int) string {
+	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
+}
+
+// createClusterDeployment builds a single-pod Deployment for a Valkey node.
+//
+// Each Deployment manages exactly one Pod (Replicas=1) and represents one
+// logical node in the Valkey cluster. The Deployment name encodes the shard
+// and node index (e.g. "mycluster-0-0", "mycluster-1-2"). Two
+// labels (valkey.io/shard-index and valkey.io/node-index) provide selector
+// uniqueness so no two Deployments fight over the same Pod.
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *appsv1.Deployment {
 	containers := generateContainersDef(cluster)
+
+	nodeLabels := labels(cluster)
+	nodeLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
+	nodeLabels[LabelNodeIndex] = strconv.Itoa(nodeIndex)
+
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: cluster.Name + "-",
-			Namespace:    cluster.Namespace,
-			Labels:       labels(cluster),
+			Name:      deploymentName(cluster.Name, shardIndex, nodeIndex),
+			Namespace: cluster.Namespace,
+			Labels:    nodeLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: func(i int32) *int32 { return &i }(1),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels(cluster),
+				MatchLabels: nodeLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels(cluster),
+					Labels: nodeLabels,
 				},
 				Spec: corev1.PodSpec{
 					Containers:   containers,

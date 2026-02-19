@@ -393,10 +393,12 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 //     reconcile will proceed once gossip propagates.
 //
 //  2. PRIMARY: if node index is 0, assign the next available slot range via
-//     CLUSTER ADDSLOTSRANGE.
+//     CLUSTER ADDSLOTSRANGE — unless the shard already has members in the
+//     cluster topology (post-failover or mid-failover), in which case fall
+//     through to step 3.
 //
-//  3. REPLICA: if node index is >= 1, find the node-0 (primary) pod for the
-//     same shard, look up its Valkey node ID, and issue CLUSTER REPLICATE.
+//  3. REPLICA: if node index is >= 1 (or a post-failover replacement), find
+//     the actual primary for the same shard and issue CLUSTER REPLICATE.
 func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, pods *corev1.PodList) error {
 	log := logf.FromContext(ctx)
 
@@ -434,6 +436,17 @@ func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *va
 
 	// --- Step 2: PRIMARY – assign slots ---
 	if role == RolePrimary {
+		// Post-failover detection: if the shard already has members in the
+		// cluster topology (either a promoted primary or a replica mid-
+		// failover), the replacement node-index=0 pod must NOT try to claim
+		// new slots. Instead it joins as a replica. If the failover hasn't
+		// completed yet, replicateToShardPrimary will return an error and
+		// the reconciler retries on the next cycle.
+		if shardExistsInTopology(state, shardIndex, pods) {
+			log.V(1).Info("shard already exists in topology (post-failover); attaching as replica",
+				"shardIndex", shardIndex, "node", node.Address)
+			return r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods)
+		}
 		return r.assignSlotsToNewPrimary(ctx, cluster, state, node)
 	}
 
@@ -494,38 +507,20 @@ func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, c
 // replicateToShardPrimary issues CLUSTER REPLICATE to attach this node as a
 // replica of the primary in the same shard.
 //
-// The lookup happens in two stages because Kubernetes and Valkey have
-// independent identity systems:
-//
-//  1. Kubernetes side: find the node-0 (primary) pod for the same shard by
-//     matching pod labels (shard-index=N, node-index=0). This
-//     gives us the IP.
-//
-//  2. Valkey side: scan the cluster state for a primary node whose address
-//     matches that IP. This gives us the Valkey node ID required by
-//     CLUSTER REPLICATE.
-//
-// If either lookup fails (e.g. the primary pod hasn't started yet, or its
-// Valkey process hasn't joined the cluster), we return an error and the
-// reconciler retries on the next cycle.
+// The primary is found by scanning all pods in the shard against the live
+// Valkey topology (via findShardPrimary). This handles both the normal case
+// (node-index=0 is the primary) and the post-failover case (a promoted
+// replica is the primary). If no primary is found (e.g. the primary pod
+// hasn't started yet or hasn't joined the cluster), we return an error and
+// the reconciler retries on the next cycle.
 func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, shardIndex int, pods *corev1.PodList) error {
 	log := logf.FromContext(ctx)
 
-	// Stage 1: Kubernetes lookup — find the node-0 (primary) pod by name prefix.
-	primaryIP := primaryPodIP(pods, shardIndex)
-	if primaryIP == "" {
-		return errors.New("primary pod not found for shard " + strconv.Itoa(shardIndex))
-	}
-
-	// Stage 2: Valkey lookup — translate pod IP to Valkey node ID.
-	var primaryNodeId string
-	for _, shard := range state.Shards {
-		primary := shard.GetPrimaryNode()
-		if primary != nil && primary.Address == primaryIP {
-			primaryNodeId = primary.Id
-			break
-		}
-	}
+	// Find the actual primary for this shard by scanning all shard pods
+	// against the live Valkey topology. This handles both the normal case
+	// (node-index=0 is the primary) and the post-failover case (a promoted
+	// replica is the primary).
+	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, pods)
 	if primaryNodeId == "" {
 		return errors.New("primary Valkey node not found in cluster state for shard " + strconv.Itoa(shardIndex))
 	}

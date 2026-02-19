@@ -47,11 +47,12 @@ const appName = "valkey"
 //
 // The reconciler reads pod labels (via podRoleAndShard) to decide whether
 // to assign slots (node 0 = initial primary) or issue CLUSTER REPLICATE
-// (node 1+ = initial replica), and for which shard. This convention only
-// applies during initial cluster creation; after a failover, Valkey may
-// promote a replica to primary, making node 0 a replica. The labels are
-// not updated to reflect this — the live role is always read from
-// CLUSTER NODES, not from the labels.
+// (node 1+ = initial replica), and for which shard. After a failover,
+// Valkey may promote a replica to primary, making node 0 a replica. The
+// reconciler detects this via shardExistsInTopology: if the shard already
+// has members in the cluster topology, the replacement node-index=0 pod
+// joins as a replica instead of trying to claim slots. The labels themselves are not
+// updated — the live role is always read from CLUSTER NODES.
 //
 // Names are set by deploymentName, labels by createClusterDeployment.
 const (
@@ -115,17 +116,56 @@ func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
 	return RoleReplica, shardIndex
 }
 
-// primaryPodIP finds the IP of the node-0 (primary) pod for a given shard by
-// reading pod labels. Returns "" if not found.
-func primaryPodIP(pods *corev1.PodList, shardIndex int) string {
+// shardExistsInTopology reports whether another pod in the same shard (same
+// shard-index label) already exists as a member of any shard in the Valkey
+// cluster topology. This covers two cases:
+//
+//  1. Post-failover (completed): a promoted replica is the primary.
+//  2. Mid-failover (in progress): the replica exists but hasn't been promoted
+//     yet — the operator must wait rather than trying to assign new slots.
+//
+// In both cases the replacement node-index=0 pod must NOT call
+// assignSlotsToNewPrimary. Instead it should fall through to
+// replicateToShardPrimary, which will either succeed (case 1) or return an
+// error and retry on the next reconcile (case 2).
+func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) bool {
 	si := strconv.Itoa(shardIndex)
-	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool {
-		return p.Labels[LabelShardIndex] == si && p.Labels[LabelNodeIndex] == "0"
-	})
-	if idx == -1 {
-		return ""
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
+			continue
+		}
+		for _, shard := range state.Shards {
+			for _, node := range shard.Nodes {
+				if node.Address == p.Status.PodIP {
+					return true
+				}
+			}
+		}
 	}
-	return pods.Items[idx].Status.PodIP
+	return false
+}
+
+// findShardPrimary scans all pods with the given shard-index label and returns
+// the Valkey node ID + IP of whichever pod is currently the slot-bearing
+// primary, regardless of its node-index label. This handles the post-failover
+// case where node-index=1 (or higher) was promoted by Valkey.
+// Returns ("", "") if no primary is found.
+func findShardPrimary(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) (nodeID, ip string) {
+	si := strconv.Itoa(shardIndex)
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
+			continue
+		}
+		for _, shard := range state.Shards {
+			primary := shard.GetPrimaryNode()
+			if primary != nil && primary.Address == p.Status.PodIP {
+				return primary.Id, p.Status.PodIP
+			}
+		}
+	}
+	return "", ""
 }
 
 // pickPendingNode selects the next pending node to process, prioritizing

@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -88,6 +89,28 @@ func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 // Annotations returns a copy of user defined annotations.
 func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
+}
+
+// This function takes a K8S object reference (eg: pod, secret, configmap, etc),
+// and a map of annotations to add to, or replace existing, within the object.
+// Returns true if the annotation was added, or updated
+func upsertAnnotation(o metav1.Object, key string, val string) bool {
+
+	// Get current annotations
+	annotations := o.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	// If found, and equal, then no update
+	if annotations[key] == val {
+		return false
+	}
+
+	annotations[key] = val
+	o.SetAnnotations(annotations)
+
+	return true
 }
 
 // podRoleAndShard finds the pod matching the given IP address and reads its

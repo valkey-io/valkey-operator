@@ -1,3 +1,13 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: valkeycluster-sample-users
+data:
+  alicepw: M21wdHlQQHNzdzByZA==
+  davidold: OVYqTHQlYXU4Mk5tdTlyeQ==
+  davidnew: VmFsa2V5I1J1bHojMjIzMw==
+---
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
@@ -5,6 +15,42 @@ metadata:
 spec:
   shards: 3
   replicas: 1
+  users:
+    - name: alice
+      enabled: true
+      passwordSecret:
+        name: valkeycluster-sample-users
+        keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+        deny: ["@admin", "@dangerous"]
+      keys:
+        readWrite: ["app:*", "cache:*"]
+        readOnly: ["shared:*", "config:*"]
+        writeOnly: ["logs:*", "metrics:*"]
+      channels:
+        patterns: ["notifications:*", "events:*"]
+      permissions: "+client|setname +debug"
+    - name: bob
+      nopass: true
+      enabled: true
+      permissions: "+@all -@admin ~* &*"
+    - name: charlie
+      enabled: false
+      commands:
+        allow: ["@read"]
+      keys:
+        readOnly: ["*"]
+    - name: david
+      enabled: true
+      passwordSecret:
+        name: valkeycluster-sample-users
+        keys:
+          - davidold
+          - davidnew
+      commands:
+        allow: ["@admin"]
+
   resources:
     requests:
       memory: "256Mi"

@@ -73,6 +73,11 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// Users, and ACL-related configuration; see valkeyacls_types.go
+	// +listType=map
+	// +listMapKey=name
+	Users []UserAclSpec `json:"users,omitempty"`
 }
 
 type ExporterSpec struct {
@@ -154,6 +159,7 @@ const (
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
 	ReasonNoSlots           = "NoSlotsAvailable"
+	ReasonUsersAclError     = "UsersACLError"
 )
 
 // +kubebuilder:object:root=true

@@ -113,6 +113,14 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
 			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
 
+			By("validating internal secret was created")
+			verifyInternalSecretsExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secrets", "internal-" + valkeyClusterName + "-acl")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyInternalSecretsExists).Should(Succeed())
+
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
@@ -267,6 +275,40 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+
+			By("verifying created users")
+			verifyCreatedUsers := func(g Gomega) {
+				// Start a Valkey client pod to access the cluster and get its status.
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// There should be 3 defined users
+				g.Expect(output).To(SatisfyAll(
+					ContainSubstring("user alice on"),
+					ContainSubstring("user bob on nopass"),
+					ContainSubstring("user david on"),
+				))
+			}
+			Eventually(verifyCreatedUsers).Should(Succeed())
 		})
 	})
 

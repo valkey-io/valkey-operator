@@ -1,0 +1,45 @@
+---
+# Initial cluster with 5Gi storage
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-volume-expansion-demo
+  namespace: default
+spec:
+  shards: 2
+  replicas: 1
+  storage:
+    enabled: true
+    size: "5Gi"
+    # Adjust this to your storage class that supports expansion
+    # Run: kubectl get sc
+    storageClassName: "standard"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+---
+# To expand the storage, apply this updated manifest
+# Change the size from 5Gi to 10Gi
+# apiVersion: valkey.io/v1alpha1
+# kind: ValkeyCluster
+# metadata:
+#   name: valkey-volume-expansion-demo
+#   namespace: default
+# spec:
+#   shards: 2
+#   replicas: 1
+#   storage:
+#     enabled: true
+#     size: "10Gi"  # <-- Changed from 5Gi to 10Gi
+#     storageClassName: "standard"
+#   resources:
+#     requests:
+#       memory: "256Mi"
+#       cpu: "100m"
+#     limits:
+#       memory: "512Mi"
+#       cpu: "200m"

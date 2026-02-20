@@ -12,3 +12,11 @@ spec:
     limits:
       memory: "512Mi"
       cpu: "500m"
+  storage:
+    enabled: true
+    size: "2Gi"
+    # storageClassName: standard  # Uncomment to specify a StorageClass
+    accessModes:
+      - ReadWriteOnce
+  # Enable init container to fix volume permissions (recommended for persistent storage)
+  volumePermissions: true

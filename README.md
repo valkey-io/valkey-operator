@@ -6,7 +6,23 @@ A Kubernetes operator for deploying Valkey, Valkey Clusters and managing its lif
 
 ## Description
 
-Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey, a secure and scalable key management solution. The operator simplifies the process of deploying Valkey on Kubernetes clusters, ensuring that it is configured correctly and operates efficiently. It provides features such as automated installation, configuration management, and lifecycle management of Valkey instances.
+Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey clusters with optional persistent storage support. The operator simplifies the process of deploying Valkey on Kubernetes clusters, ensuring that it is configured correctly and operates efficiently.
+
+### Key Features
+
+- 🚀 **Automated Cluster Management** - Deploy and manage Valkey clusters with configurable shards and replicas
+- 💾 **Persistent Storage Support** - Optional PersistentVolume support for data durability
+- 🔒 **Security Hardened** - Non-root containers, security contexts, and volume permissions
+- 📊 **Metrics Export** - Built-in Prometheus metrics exporter
+- 🔄 **High Availability** - Multi-shard clusters with replica support
+- ⚙️ **Flexible Configuration** - Resource limits, tolerations, node selectors, and affinity rules
+
+### Storage Modes
+
+The operator supports two storage modes:
+
+- **Ephemeral Storage (Default)** - Uses emptyDir for temporary storage, suitable for caching workloads
+- **Persistent Storage** - Uses PersistentVolumeClaims with configurable size and storage class for production workloads
 
 > **⚠️ EARLY DEVELOPMENT NOTICE**
 >
@@ -62,7 +78,115 @@ make deploy IMG=<some-registry>/valkey-operator:tag
 You can apply the samples (examples) from the config/sample:
 
 ```sh
-kubectl apply -k config/samples/
+# Deploy with persistent storage (production)
+kubectl apply -f config/samples/v1alpha1_valkeycluster.yaml
+
+# OR deploy with ephemeral storage (dev/test)
+kubectl apply -f config/samples/v1alpha1_valkeycluster_ephemeral.yaml
+```
+
+### Example Configurations
+
+#### Persistent Storage (Production)
+
+```yaml
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-prod
+spec:
+  shards: 3
+  replicas: 2
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  storage:
+    enabled: true
+    size: "10Gi"
+    storageClassName: "gp3"  # AWS EBS gp3
+    accessModes:
+      - ReadWriteOnce
+  volumePermissions: true  # Recommended for persistent storage
+```
+
+#### Ephemeral Storage (Dev/Test)
+
+```yaml
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-dev
+spec:
+  shards: 3
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+  # storage section omitted - uses emptyDir
+```
+
+### Deploying to AWS EKS
+
+1. **Configure AWS credentials and kubectl context:**
+
+```sh
+aws eks update-kubeconfig --region us-east-1 --name your-cluster-name
+```
+
+2. **Build and push the operator image:**
+
+```sh
+# Set your Docker registry
+export IMG=<your-dockerhub-username>/valkey-operator:latest
+
+# Build for AMD64 (EKS)
+make docker-buildx PLATFORMS=linux/amd64
+
+# Or build and push separately
+docker buildx build --platform linux/amd64 -t ${IMG} --push .
+```
+
+3. **Install CRDs and deploy the operator:**
+
+```sh
+make install
+make deploy IMG=${IMG}
+```
+
+4. **Create a ValkeyCluster with EBS storage:**
+
+```yaml
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-eks
+spec:
+  shards: 3
+  replicas: 2
+  storage:
+    enabled: true
+    size: "20Gi"
+    storageClassName: "gp3"  # EBS gp3 storage class
+  volumePermissions: true
+```
+
+5. **Verify deployment:**
+
+```sh
+# Check operator pod
+kubectl get pods -n valkey-operator-system
+
+# Check ValkeyCluster status
+kubectl get valkeycluster
+kubectl describe valkeycluster valkey-eks
+
+# Check pods and PVCs
+kubectl get pods,pvc -l app.kubernetes.io/name=valkey
 ```
 
 > **NOTE**: Ensure that the samples has default values to test it out.

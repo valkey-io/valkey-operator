@@ -63,7 +63,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: controller:latest
+        image: umarriswan/valkey-operator:latest
         name: manager
         ports: []
         securityContext:

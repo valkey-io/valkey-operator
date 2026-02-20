@@ -146,7 +146,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// to let gossip propagate before proceeding to slot assignment or
 	// replication.
 	{
-		met, err := r.meetIsolatedNodes(ctx, cluster, state, pods)
+		met, err := r.meetIsolatedNodes(ctx, cluster, state)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
@@ -434,34 +434,30 @@ func isNodeIsolated(node *valkey.NodeState) bool {
 	return err == nil && val <= 1
 }
 
-// meetIsolatedNodes issues CLUSTER MEET for every isolated node in the
-// cluster — both pending nodes (no slots) AND shard primaries that were
-// assigned slots while still isolated.
+// meetIsolatedNodes issues CLUSTER MEET for every isolated pending node
+// (cluster_known_nodes <= 1). Phase 2 (assignSlotsToPendingPrimaries)
+// refuses to assign slots to isolated nodes, so every node is guaranteed
+// to pass through this function before receiving slots or replicating.
 //
 // MEET is idempotent and has no ordering dependencies, so all isolated nodes
 // can be introduced in a single pass. We pick a single "meet target" node
 // and MEET all others against it:
 //
 //   - If any non-isolated node exists (shard primary with cluster_known_nodes
-//     > 1), use it as the target so new nodes join the existing cluster.
+//     > 1, or a pending node from a previous MEET batch), use it as the
+//     target so new nodes join the existing cluster.
 //   - If all nodes are isolated (fresh bootstrap), use the first isolated
 //     node as a bootstrap seed. All others MEET this seed, and gossip
 //     propagates the full topology from there.
 //
 // Returns the number of nodes that were MEET'd.
-func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *corev1.PodList) (int, error) {
+func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (int, error) {
 	log := logf.FromContext(ctx)
 
-	// Collect ALL isolated nodes: pending nodes + isolated shard primaries.
 	var isolated []*valkey.NodeState
 	for _, node := range state.PendingNodes {
 		if isNodeIsolated(node) {
 			isolated = append(isolated, node)
-		}
-	}
-	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil && isNodeIsolated(p) {
-			isolated = append(isolated, p)
 		}
 	}
 	if len(isolated) == 0 {
@@ -524,19 +520,27 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	return met, nil
 }
 
-// assignSlotsToPendingPrimaries assigns hash-slot ranges to all pending nodes
-// whose pod labels indicate they are primaries (node index 0 within their
-// shard). Slot ranges are pre-computed upfront so that
-// all assignments can happen in a single reconcile pass.
+// assignSlotsToPendingPrimaries assigns hash-slot ranges to all non-isolated
+// pending nodes whose pod labels indicate they are primaries (node index 0
+// within their shard). Isolated nodes (cluster_known_nodes <= 1) are skipped
+// — they must be MEET'd first in Phase 1. Slot ranges are pre-computed
+// upfront so that all assignments can happen in a single reconcile pass.
 // Returns the number of primaries that received slots.
 func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
 	log := logf.FromContext(ctx)
 	shardsRequired := int(cluster.Spec.Shards)
 
-	// Collect primary pending nodes (node index 0 = primary), skipping
-	// post-failover replacements whose shard already has a live primary.
+	// Collect primary pending nodes (node index 0 = primary), skipping:
+	//  - isolated nodes (cluster_known_nodes <= 1): they haven't been
+	//    MEET'd yet and must go through Phase 1 first. Without this guard
+	//    a single pod that starts before its peers would get slots while
+	//    isolated, creating a disconnected shard primary.
+	//  - post-failover replacements whose shard already has a live primary.
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
+		if isNodeIsolated(node) {
+			continue
+		}
 		role, shardIndex := podRoleAndShard(node.Address, pods)
 		if role != RolePrimary {
 			continue

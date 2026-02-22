@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -423,17 +422,6 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 	return valkey.GetClusterState(ctx, ips, DefaultPort)
 }
 
-// isNodeIsolated returns true if the node's cluster_known_nodes is <= 1,
-// meaning it hasn't been introduced to any other cluster member yet.
-func isNodeIsolated(node *valkey.NodeState) bool {
-	sval, ok := node.ClusterInfo["cluster_known_nodes"]
-	if !ok {
-		return false
-	}
-	val, err := strconv.Atoi(sval)
-	return err == nil && val <= 1
-}
-
 // meetIsolatedNodes issues CLUSTER MEET for every isolated pending node
 // (cluster_known_nodes <= 1). Phase 2 (assignSlotsToPendingPrimaries)
 // refuses to assign slots to isolated nodes, so every node is guaranteed
@@ -456,7 +444,7 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 
 	var isolated []*valkey.NodeState
 	for _, node := range state.PendingNodes {
-		if isNodeIsolated(node) {
+		if node.IsIsolated() {
 			isolated = append(isolated, node)
 		}
 	}
@@ -474,14 +462,14 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	var meetTarget *valkey.NodeState
 	for _, shard := range state.Shards {
 		p := shard.GetPrimaryNode()
-		if p != nil && !isNodeIsolated(p) {
+		if p != nil && !p.IsIsolated() {
 			meetTarget = p
 			break
 		}
 	}
 	if meetTarget == nil {
 		for _, node := range state.PendingNodes {
-			if !isNodeIsolated(node) {
+			if !node.IsIsolated() {
 				meetTarget = node
 				break
 			}
@@ -538,7 +526,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	//  - post-failover replacements whose shard already has a live primary.
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
-		if isNodeIsolated(node) {
+		if node.IsIsolated() {
 			continue
 		}
 		role, shardIndex := podRoleAndShard(node.Address, pods)

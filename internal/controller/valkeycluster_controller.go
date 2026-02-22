@@ -20,8 +20,9 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"slices"
-	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -81,12 +82,15 @@ var scripts embed.FS
 //  4. List all pods and build the Valkey cluster state by connecting to each
 //     node and scraping CLUSTER INFO / CLUSTER NODES.
 //  5. Forget stale nodes that no longer have a backing pod.
-//  6. For every pending node (primary with no slots and cluster_known_nodes
-//     <= 1), introduce it to the cluster. Only one pending node is processed
-//     per reconcile to allow gossip to propagate before the next step.
-//  7. Verify that the expected number of shards and replicas exist.
-//  8. Verify that all 16384 hash slots are assigned.
-//  9. If everything is healthy, mark the cluster Ready and requeue after 30s
+//  6. Phase 1 – MEET: batch-introduce all isolated pending nodes to the
+//     cluster via CLUSTER MEET. Requeue to let gossip propagate.
+//  7. Phase 2 – Assign slots: batch-assign hash-slot ranges to all
+//     primary-labeled pending nodes via CLUSTER ADDSLOTSRANGE.
+//  8. Phase 3 – Replicate: batch-attach all replica-labeled pending nodes
+//     to their matching primaries via CLUSTER REPLICATE.
+//  9. Verify that the expected number of shards and replicas exist.
+//  10. Verify that all 16384 hash slots are assigned.
+//  11. If everything is healthy, mark the cluster Ready and requeue after 30s
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
@@ -132,35 +136,71 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check if we need to forget stale non-existing nodes
 	r.forgetStaleNodes(ctx, cluster, state, pods)
 
-	// Process one pending node per reconcile. A "pending" node is a Valkey
-	// node with no slots assigned (see clusterstate.go). We handle only one at
-	// a time so that gossip has a chance to propagate the topology change to
-	// all members before the next node is introduced. After addValkeyNode
-	// returns, we requeue after 2 seconds.
-	//
-	// We prioritize node-index 0 (primary) over higher indices (replicas).
-	// This is important because replicateToShardPrimary needs the primary
-	// to already be in state.Shards (i.e. have slots assigned). If we
-	// processed a replica first, its primary might still be in PendingNodes
-	// and the lookup would fail.
-	if len(state.PendingNodes) > 0 {
-		node := pickPendingNode(state.PendingNodes, pods)
-		log.V(1).Info("adding node", "address", node.Address, "Id", node.Id)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdding", "AddNode", "Adding node %v to cluster", node.Address)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Adding nodes to cluster", metav1.ConditionTrue)
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonSlotsUnassigned, "Assigning slots to nodes", metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, state)
-		if err := r.addValkeyNode(ctx, cluster, state, node, pods); err != nil {
-			log.Error(err, "unable to add cluster node")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeAddFailed", "AddNode", "Failed to add node: %v", err)
+	// --- Phase 1: MEET all isolated nodes in one batch ---
+	// A node with cluster_known_nodes <= 1 hasn't been introduced to the
+	// cluster yet. CLUSTER MEET is idempotent and has no ordering
+	// dependencies, so we issue it for every isolated node in a single
+	// reconcile pass — this includes both pending nodes AND shard primaries
+	// that were assigned slots while still isolated. After MEET, we requeue
+	// to let gossip propagate before proceeding to slot assignment or
+	// replication.
+	{
+		met, err := r.meetIsolatedNodes(ctx, cluster, state)
+		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "NodeAdded", "AddNode", "Node %v joined cluster", node.Address)
-		// Let the added node stabilize, and refetch the cluster state.
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		if met > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterMeetBatch", "ClusterMeet", "Introduced %d isolated node(s) to the cluster", met)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Introducing nodes to cluster", metav1.ConditionTrue)
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+
+	// --- Phase 2: Assign slots to all primary-labeled pending nodes ---
+	// Slot assignment (CLUSTER ADDSLOTSRANGE) makes a pending node a
+	// slot-owning primary. We pre-compute all slot ranges upfront and
+	// assign them in one pass. Primaries must be set up before replicas
+	// because replicateToShardPrimary looks up the primary in state.Shards.
+	if len(state.PendingNodes) > 0 {
+		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, pods)
+		if err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		if assigned > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimariesCreated", "AssignSlots", "Assigned slots to %d new primary node(s)", assigned)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Assigning slots to primaries", metav1.ConditionTrue)
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, state)
+			// Requeue so that the next reconcile sees the newly-created shards
+			// in state.Shards, which replicas need for their lookup.
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+
+	// --- Phase 3: REPLICATE all replica-labeled pending nodes ---
+	// By this point all primaries have slots and appear in state.Shards.
+	// CLUSTER REPLICATE for different replicas targets different primaries,
+	// so they can all be issued in one pass.
+	if len(state.PendingNodes) > 0 {
+		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, pods)
+		if err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		if replicated > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasAttached", "CreateReplica", "Attached %d replica node(s)", replicated)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Attaching replicas", metav1.ConditionTrue)
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 	}
 
 	// Check cluster status
@@ -382,126 +422,218 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pod
 	return valkey.GetClusterState(ctx, ips, DefaultPort)
 }
 
-// addValkeyNode introduces a pending Valkey node into the cluster. The node's
-// intended role is derived from its pod labels (e.g. shard-index=0, node-index=0
-// for the initial primary, shard-index=1, node-index=1 for a replica), which
-// was set at Deployment-creation time by upsertDeployments. This removes all
-// guesswork from the reconciler:
+// meetIsolatedNodes issues CLUSTER MEET for every isolated pending node
+// (cluster_known_nodes <= 1). Phase 2 (assignSlotsToPendingPrimaries)
+// refuses to assign slots to isolated nodes, so every node is guaranteed
+// to pass through this function before receiving slots or replicating.
 //
-//  1. MEET: if the node is isolated (cluster_known_nodes <= 1), introduce it
-//     to existing cluster members via CLUSTER MEET and return. The next
-//     reconcile will proceed once gossip propagates.
+// MEET is idempotent and has no ordering dependencies, so all isolated nodes
+// can be introduced in a single pass. We pick a single "meet target" node
+// and MEET all others against it:
 //
-//  2. PRIMARY: if node index is 0, assign the next available slot range via
-//     CLUSTER ADDSLOTSRANGE — unless the shard already has members in the
-//     cluster topology (post-failover or mid-failover), in which case fall
-//     through to step 3.
+//   - If any non-isolated node exists (shard primary with cluster_known_nodes
+//     > 1, or a pending node from a previous MEET batch), use it as the
+//     target so new nodes join the existing cluster.
+//   - If all nodes are isolated (fresh bootstrap), use the first isolated
+//     node as a bootstrap seed. All others MEET this seed, and gossip
+//     propagates the full topology from there.
 //
-//  3. REPLICA: if node index is >= 1 (or a post-failover replacement), find
-//     the actual primary for the same shard and issue CLUSTER REPLICATE.
-func (r *ValkeyClusterReconciler) addValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, pods *corev1.PodList) error {
+// Returns the number of nodes that were MEET'd.
+func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (int, error) {
 	log := logf.FromContext(ctx)
 
-	// --- Step 1: MEET if this node is isolated ---
-	// A freshly-started Valkey node only knows itself (cluster_known_nodes=1).
-	// Before we can assign slots or replicate, the node must be introduced to
-	// at least one existing cluster member via CLUSTER MEET. We MEET every
-	// known primary so that the new node learns the full topology through
-	// gossip rather than depending on a single point of contact. After the
-	// MEET we return immediately; the next reconcile will see
-	// cluster_known_nodes > 1 and proceed to Step 2 or 3.
-	if sval, ok := node.ClusterInfo["cluster_known_nodes"]; ok {
-		if val, err := strconv.Atoi(sval); err == nil {
-			if val <= 1 && len(state.Shards) > 0 {
-				for _, shard := range state.Shards {
-					primary := shard.GetPrimaryNode()
-					if primary == nil {
-						continue
-					}
-					log.V(1).Info("meet other node", "this node", node.Address, "other node", primary.Address)
-					if err = node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(primary.Address).Port(int64(primary.Port)).Build()).Error(); err != nil {
-						log.Error(err, "command failed: CLUSTER MEET", "from", node.Address, "to", primary.Address)
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET failed: %v", err)
-						return err
-					}
-					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterMeet", "ClusterMeet", "Node %v met node %v", node.Address, primary.Address)
-				}
-				return nil
+	var isolated []*valkey.NodeState
+	for _, node := range state.PendingNodes {
+		if node.IsIsolated() {
+			isolated = append(isolated, node)
+		}
+	}
+	if len(isolated) == 0 {
+		return 0, nil
+	}
+
+	// Find a well-connected node (cluster_known_nodes > 1) to use as the
+	// MEET target. We check shard primaries first (they already have slots,
+	// so gossip will propagate slot info), then fall back to any
+	// non-isolated pending node (from a previous MEET batch that hasn't
+	// received slots yet). Only if every single node is isolated (true
+	// fresh bootstrap, first reconcile) do we pick an isolated node as a
+	// bootstrap seed.
+	var meetTarget *valkey.NodeState
+	for _, shard := range state.Shards {
+		p := shard.GetPrimaryNode()
+		if p != nil && !p.IsIsolated() {
+			meetTarget = p
+			break
+		}
+	}
+	if meetTarget == nil {
+		for _, node := range state.PendingNodes {
+			if !node.IsIsolated() {
+				meetTarget = node
+				break
 			}
 		}
 	}
 
-	// --- Resolve pod labels for this node ---
-	role, shardIndex := podRoleAndShard(node.Address, pods)
+	if meetTarget == nil {
+		// Every node is isolated (true fresh bootstrap). Use the first
+		// isolated node as a bootstrap seed: every other node MEETs it,
+		// and gossip takes care of full propagation.
+		meetTarget = isolated[0]
+		isolated = isolated[1:]
+	}
 
-	// --- Step 2: PRIMARY – assign slots ---
-	if role == RolePrimary {
-		// Post-failover detection: if the shard already has members in the
-		// cluster topology (either a promoted primary or a replica mid-
-		// failover), the replacement node-index=0 pod must NOT try to claim
-		// new slots. Instead it joins as a replica. If the failover hasn't
-		// completed yet, replicateToShardPrimary will return an error and
-		// the reconciler retries on the next cycle.
-		if shardExistsInTopology(state, shardIndex, pods) {
-			log.V(1).Info("shard already exists in topology (post-failover); attaching as replica",
-				"shardIndex", shardIndex, "node", node.Address)
-			return r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods)
+	met := 0
+	for _, node := range isolated {
+		// Bidirectional MEET: the isolated node MEETs the target, AND the
+		// target MEETs the isolated node. Bidirectional MEET avoids the
+		// fragmentation problem where one-way MEET + slow gossip creates
+		// subclusters: by having the target actively reach out, the new
+		// node is guaranteed to appear in the target's node table
+		// immediately, not after gossip propagation.
+		log.V(1).Info("meet node", "node", node.Address, "target", meetTarget.Address)
+		if err := node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(meetTarget.Address).Port(int64(meetTarget.Port)).Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER MEET failed", "from", node.Address, "to", meetTarget.Address)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", node.Address, meetTarget.Address, err)
+			return met, err
 		}
-		return r.assignSlotsToNewPrimary(ctx, cluster, state, node)
+		if err := meetTarget.Client.Do(ctx, meetTarget.Client.B().ClusterMeet().Ip(node.Address).Port(int64(node.Port)).Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER MEET failed", "from", meetTarget.Address, "to", node.Address)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", meetTarget.Address, node.Address, err)
+			return met, err
+		}
+		met++
 	}
-
-	// --- Step 3: REPLICA – replicate to the matching primary ---
-	if role == RoleReplica {
-		return r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods)
-	}
-
-	return errors.New("cannot determine node role from pod name")
+	return met, nil
 }
 
-// assignSlotsToNewPrimary assigns the next available hash-slot range to a
-// node, promoting it to a slot-bearing primary.
-//
-// Slot range calculation:
-//
-//	Each shard gets TotalSlots/shardsRequired slots (integer division).
-//	The last shard absorbs any remainder so that exactly 16384 slots are
-//	covered. For example, with 3 shards: shard 0 gets 0-5460, shard 1 gets
-//	5461-10921, and shard 2 gets 10922-16383.
-//
-// We only assign a contiguous range from the first unassigned gap. The last
-// shard is special-cased: if it is the final shard to create, it takes
-// everything that remains (slots[0].End) to avoid rounding issues.
-func (r *ValkeyClusterReconciler) assignSlotsToNewPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState) error {
+// assignSlotsToPendingPrimaries assigns hash-slot ranges to all non-isolated
+// pending nodes whose pod labels indicate they are primaries (node index 0
+// within their shard). Isolated nodes (cluster_known_nodes <= 1) are skipped
+// — they must be MEET'd first in Phase 1. Slot ranges are pre-computed
+// upfront so that all assignments can happen in a single reconcile pass.
+// Returns the number of primaries that received slots.
+func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
 	log := logf.FromContext(ctx)
 	shardsRequired := int(cluster.Spec.Shards)
-	shardsExists := len(state.Shards)
 
+	// Collect primary pending nodes (node index 0 = primary), skipping:
+	//  - isolated nodes (cluster_known_nodes <= 1): they haven't been
+	//    MEET'd yet and must go through Phase 1 first. Without this guard
+	//    a single pod that starts before its peers would get slots while
+	//    isolated, creating a disconnected shard primary.
+	//  - post-failover replacements whose shard already has a live primary.
+	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
+	for _, node := range state.PendingNodes {
+		if node.IsIsolated() {
+			continue
+		}
+		role, shardIndex := podRoleAndShard(node.Address, pods)
+		if role != RolePrimary {
+			continue
+		}
+		if shardExistsInTopology(state, shardIndex, pods) {
+			log.V(1).Info("skipping slot assignment; shard already exists in topology (post-failover)",
+				"shardIndex", shardIndex, "node", node.Address)
+			continue
+		}
+		primaries = append(primaries, node)
+	}
+	if len(primaries) == 0 {
+		return 0, nil
+	}
+
+	// Pre-compute slot ranges for all primaries at once.
 	slots := state.GetUnassignedSlots()
 	if len(slots) == 0 {
-		log.Error(nil, "no unassigned slots available for new shard")
-		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNoSlots, "No unassigned slots available for new shard", metav1.ConditionTrue)
-		return errors.New("no slots range to assign")
+		return 0, errors.New("no unassigned slots available")
 	}
 
-	// Compute the slot range for this shard.
-	slotStart := slots[0].Start
-	slotEnd := slotStart + (valkey.TotalSlots / shardsRequired) - 1
-	if shardsRequired-shardsExists == 1 {
-		// Last shard: absorb remaining slots to cover all 16384.
-		if len(slots) != 1 {
-			return errors.New("assigning multiple ranges to shard not yet supported")
+	assigned := 0
+	shardsExists := len(state.Shards)
+	for _, node := range primaries {
+		if len(slots) == 0 {
+			break
 		}
-		slotEnd = slots[0].End
-	}
 
-	log.V(1).Info("add a new primary", "slotStart", slotStart, "slotEnd", slotEnd)
-	if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
-		log.Error(err, "command failed: CLUSTER ADDSLOTSRANGE", "slotStart", slotStart, "slotEnd", slotEnd)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots: %v", err)
-		return err
+		slotStart := slots[0].Start
+		slotEnd := slotStart + (valkey.TotalSlots / shardsRequired) - 1
+		shardsLeft := shardsRequired - (shardsExists + assigned)
+		if shardsLeft == 1 {
+			// Last shard: absorb everything that remains.
+			if len(slots) != 1 {
+				return assigned, errors.New("assigning multiple ranges to shard not yet supported")
+			}
+			slotEnd = slots[0].End
+		}
+
+		log.V(1).Info("assign slots to primary", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
+		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER ADDSLOTSRANGE failed", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %d-%d to %v: %v", slotStart, slotEnd, node.Address, err)
+			return assigned, err
+		}
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %d-%d", node.Address, slotStart, slotEnd)
+		assigned++
+
+		// Update the unassigned slots for the next iteration by removing
+		// the range we just assigned.
+		var remainingSlots []valkey.SlotsRange
+		for _, s := range slots {
+			remainingSlots = append(remainingSlots, valkey.SubtractSlotsRange(s, valkey.SlotsRange{Start: slotStart, End: slotEnd})...)
+		}
+		slots = remainingSlots
 	}
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary with slots %d-%d", slotStart, slotEnd)
-	return nil
+	return assigned, nil
+}
+
+// errPrimaryNotReady is returned by replicateToShardPrimary when the
+// primary for a shard hasn't received slots yet (e.g. during scale-out,
+// while the rebalancer is still migrating slots), or when gossip hasn't
+// propagated the primary's node ID to the replica yet. This is not a
+// fatal error — the replica will be retried on a future reconcile.
+var errPrimaryNotReady = errors.New("primary not yet in cluster state (awaiting rebalance)")
+
+// replicatePendingReplicas issues CLUSTER REPLICATE for all pending nodes
+// whose pod labels indicate they are replicas (node index 1+), as well as
+// post-failover replacement primaries (node index 0 whose shard already has
+// a live primary). During initial creation all primaries should already
+// have slots, but during scale-out new primaries may still be empty while the
+// rebalancer migrates slots to them. Replicas whose primary isn't ready yet
+// are silently skipped and retried on the next reconcile.
+// Returns the number of replicas that were attached.
+func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
+	log := logf.FromContext(ctx)
+	replicated := 0
+
+	for _, node := range state.PendingNodes {
+		role, shardIndex := podRoleAndShard(node.Address, pods)
+		// Normal replicas (node-index >= 1) always need replication.
+		// Post-failover replacements (node-index=0 but shard already has
+		// a live primary) also need replication — they were skipped by
+		// assignSlotsToPendingPrimaries.
+		if role == RolePrimary {
+			if !shardExistsInTopology(state, shardIndex, pods) {
+				continue // genuine new primary, handled by assignSlotsToPendingPrimaries
+			}
+			log.V(1).Info("post-failover: attaching replacement node as replica",
+				"shardIndex", shardIndex, "node", node.Address)
+		} else if role != RoleReplica {
+			continue
+		}
+
+		if err := r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods); err != nil {
+			if errors.Is(err, errPrimaryNotReady) {
+				log.V(1).Info("skipping replica; primary not ready yet", "node", node.Address, "shard", shardIndex)
+				continue
+			}
+			log.Error(err, "failed to replicate pending node", "node", node.Address, "shard", shardIndex)
+			return replicated, err
+		}
+		replicated++
+	}
+	return replicated, nil
 }
 
 // replicateToShardPrimary issues CLUSTER REPLICATE to attach this node as a
@@ -522,11 +654,21 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	// replica is the primary).
 	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, pods)
 	if primaryNodeId == "" {
-		return errors.New("primary Valkey node not found in cluster state for shard " + strconv.Itoa(shardIndex))
+		// The primary exists as a pod but hasn't appeared in state.Shards yet.
+		// During scale-out, the rebalancer may still be migrating slots to
+		// this primary, so it won't be in state.Shards until a future reconcile.
+		return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
 	}
 
 	log.V(1).Info("add a new replica", "primary IP", primaryIP, "primary Id", primaryNodeId, "replica address", node.Address, "shardIndex", shardIndex)
 	if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primaryNodeId).Build()).Error(); err != nil {
+		// "Unknown node" means gossip hasn't propagated the primary's ID to
+		// this replica yet. This is transient and will resolve on the next
+		// reconcile once gossip catches up — treat it as retriable.
+		if strings.Contains(err.Error(), "Unknown node") {
+			log.V(1).Info("replica does not yet know primary (gossip pending); will retry", "replica", node.Address, "primaryId", primaryNodeId)
+			return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
+		}
 		log.Error(err, "command failed: CLUSTER REPLICATE", "nodeId", primaryNodeId)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ReplicaCreationFailed", "CreateReplica", "Failed to create replica: %v", err)
 		return err

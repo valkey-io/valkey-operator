@@ -24,6 +24,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -309,6 +312,98 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
+		})
+
+		It("rebalances slots on scale out", func() {
+			const baseShards = 2
+			const scaleOutShards = 3
+			valkeyClusterName = "valkeycluster-scaleout"
+
+			By("creating a smaller ValkeyCluster for scale-out")
+			scaleOutManifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: %d
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+`, valkeyClusterName, baseShards)
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
+			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write scale-out manifest file")
+			defer os.Remove(manifestFile)
+
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "apply", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply scale-out ValkeyCluster CR")
+
+			By("waiting for the cluster to be ready before scaling")
+			verifyReadyForScaleOut := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(baseShards)))
+			}
+			Eventually(verifyReadyForScaleOut, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+			By(fmt.Sprintf("scaling the cluster to %d shards", scaleOutShards))
+			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleOutShards))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster shards")
+
+			By("verifying all primaries receive slots after scale out")
+			verifySlotRebalance := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+					"valkey-cli", "-c", "-h", "127.0.0.1", "CLUSTER", "NODES")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				lines := utils.GetNonEmptyLines(output)
+				masterWithSlots := 0
+				for _, line := range lines {
+					fields := strings.Fields(line)
+					if len(fields) < 9 {
+						continue
+					}
+					if !strings.Contains(fields[2], "master") {
+						continue
+					}
+					masterWithSlots++
+				}
+				g.Expect(masterWithSlots).To(Equal(scaleOutShards), "Expected all primaries to own slots after rebalance")
+			}
+			Eventually(verifySlotRebalance, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleOutShards))
+			verifyScaledOut := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.Shards).To(Equal(int32(scaleOutShards)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleOutShards)))
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}
+			Eventually(verifyScaledOut, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("cleaning up the scale-out cluster")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--wait=false")
+			_, _ = utils.Run(cmd)
 		})
 	})
 

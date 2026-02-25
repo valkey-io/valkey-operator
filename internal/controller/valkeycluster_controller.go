@@ -169,9 +169,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// --- Phase 2: Assign slots to all primary-labeled pending nodes ---
 	// Slot assignment (CLUSTER ADDSLOTSRANGE) makes a pending node a
-	// slot-owning primary. We pre-compute all slot ranges upfront and
-	// assign them in one pass. Primaries must be set up before replicas
-	// because replicateToShardPrimary looks up the primary in state.Shards.
+	// slot-owning primary. During scale-out (no unassigned slots), this
+	// is a no-op; new primaries stay in PendingNodes until the rebalancer
+	// migrates slots to them.
 	if len(state.PendingNodes) > 0 {
 		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, pods)
 		if err != nil {
@@ -210,17 +210,27 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// Build the effective shard list: state.Shards plus any pending primaries
+	// that are scale-out leaders. During scale-out, GetClusterState places
+	// new slot-less primaries in PendingNodes because it can't distinguish
+	// them from unreplicated replicas. We use pod labels to identify them
+	// and include them as empty shards for health checks and rebalancing.
+	allShards := effectiveShards(state, pods)
+
 	// Check cluster status
-	if len(state.Shards) < int(cluster.Spec.Shards) {
+	if len(allShards) < int(cluster.Spec.Shards) {
 		log.V(1).Info("missing shards, requeue..")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForShards", "CheckShards", "%d of %d shards exist", len(state.Shards), cluster.Spec.Shards)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForShards", "CheckShards", "%d of %d shards exist", len(allShards), cluster.Spec.Shards)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingShards, "Waiting for all shards to be created", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating shards", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingShards, "Waiting for shards", metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	for _, shard := range state.Shards {
+	for _, shard := range allShards {
+		if countSlots(shard.Slots) == 0 {
+			continue
+		}
 		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
 			log.V(1).Info("missing replicas, requeue..")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
@@ -247,7 +257,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Check that all replicas have their replication link up (master_link_status:up).
 	// before marking the cluster Ready, we need to make sure all replicas are in sync with their primary.
-	for _, shard := range state.Shards {
+	for _, shard := range allShards {
 		for _, node := range shard.Nodes {
 			if !node.IsReplicationInSync() {
 				log.V(1).Info("replica not yet in sync, requeue..", "address", node.Address)
@@ -257,6 +267,28 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		}
+	}
+
+	// Rebalance slots across primaries if needed (scale-out).
+	rebalanced, err := r.rebalanceSlots(ctx, cluster, allShards)
+	if err != nil {
+		log.Error(err, "slot rebalancing failed")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "RebalanceSlots", "Slot rebalancing failed: %v", err)
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed, err.Error(), metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if rebalanced {
+		// Clear any stale Degraded condition from earlier phases (e.g.
+		// NodeAddFailed set when replicas couldn't attach to primaries
+		// that hadn't received slots yet during scale-out).
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	// Cluster is healthy - set all positive conditions
@@ -511,12 +543,12 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	return met, nil
 }
 
-// assignSlotsToPendingPrimaries assigns hash-slot ranges to all non-isolated
+// assignSlotsToPendingPrimaries assigns hash-slot ranges to non-isolated
 // pending nodes whose pod labels indicate they are primaries (node index 0
-// within their shard). Isolated nodes (cluster_known_nodes <= 1) are skipped
-// — they must be MEET'd first in Phase 1. Slot ranges are pre-computed
-// upfront so that all assignments can happen in a single reconcile pass.
-// Returns the number of primaries that received slots.
+// within their shard). During scale-out (no unassigned slots available) it
+// returns 0 — new primaries stay in PendingNodes for the rebalancer to handle.
+// Isolated nodes (cluster_known_nodes <= 1) are skipped; they must be MEET'd
+// first in Phase 1.
 func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
 	log := logf.FromContext(ctx)
 	shardsRequired := int(cluster.Spec.Shards)
@@ -547,10 +579,13 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
-	// Pre-compute slot ranges for all primaries at once.
 	slots := state.GetUnassignedSlots()
 	if len(slots) == 0 {
-		return 0, errors.New("no unassigned slots available")
+		// Scale-out: all slots already assigned to existing primaries.
+		// New primaries stay in PendingNodes; the rebalancer will find
+		// them and migrate slots to them.
+		log.V(1).Info("no unassigned slots; new primaries will receive slots via rebalance", "count", len(primaries))
+		return 0, nil
 	}
 
 	assigned := 0
@@ -654,9 +689,6 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	// replica is the primary).
 	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, pods)
 	if primaryNodeId == "" {
-		// The primary exists as a pod but hasn't appeared in state.Shards yet.
-		// During scale-out, the rebalancer may still be migrating slots to
-		// this primary, so it won't be in state.Shards until a future reconcile.
 		return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
 	}
 
@@ -777,6 +809,23 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 		}
 	}
 	return readyCount
+}
+
+// effectiveShards returns state.Shards plus any pending primaries that are
+// scale-out leaders (slot-less Valkey masters labeled as RolePrimary).
+func effectiveShards(state *valkey.ClusterState, pods *corev1.PodList) []*valkey.ShardState {
+	shards := append([]*valkey.ShardState(nil), state.Shards...)
+	for _, node := range state.PendingNodes {
+		role, _ := podRoleAndShard(node.Address, pods)
+		if role == RolePrimary {
+			shards = append(shards, &valkey.ShardState{
+				Id:        node.ShardId,
+				Nodes:     []*valkey.NodeState{node},
+				PrimaryId: node.Id,
+			})
+		}
+	}
+	return shards
 }
 
 // SetupWithManager sets up the controller with the Manager.

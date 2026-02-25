@@ -78,23 +78,6 @@ func TestPlanRebalanceMove_MismatchShards(t *testing.T) {
 	}
 }
 
-func TestPlanRebalanceMove_ShardCountMismatch(t *testing.T) {
-	shards := []*ShardState{
-		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 0, End: 8191}}),
-		newPrimaryShard("10.0.0.2", "node-2", []SlotsRange{{Start: 8192, End: 16383}}),
-		newPrimaryShard("10.0.0.3", "node-3", nil),
-		newPrimaryShard("10.0.0.4", "node-4", nil),
-	}
-
-	move, err := PlanRebalanceMove(shards, 3, 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if move != nil {
-		t.Fatalf("expected nil when shard count != expectedShards, got %+v", move)
-	}
-}
-
 func TestPlanRebalanceMove_ZeroMaxSlots(t *testing.T) {
 	shards := []*ShardState{
 		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 0, End: 8191}}),

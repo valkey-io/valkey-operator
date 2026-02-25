@@ -72,6 +72,7 @@ Common reasons:
 - `Initializing` – initial cluster creation
 - `Reconciling` – general reconciliation in progress
 - `AddingNodes` – adding nodes to the cluster
+- `RebalancingSlots` – rebalancing hash slots across primaries
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -86,6 +87,7 @@ Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `PrimaryLost` – primary lost in one or more shards
 - `NoSlotsAvailable` – no unassigned slots available for new shard
+- `RebalanceFailed` – slot rebalancing failed
 
 ---
 

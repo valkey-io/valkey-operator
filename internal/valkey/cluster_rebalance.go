@@ -87,9 +87,6 @@ func PlanRebalanceMove(shards []*ShardState, expectedShards int, maxSlots int) (
 
 	numSlotsToMove := min(src.numSlots-src.targetNumSlots, dst.targetNumSlots-dst.numSlots, maxSlots)
 	slots := takeSlotsFromRanges(src.ranges, numSlotsToMove)
-	if len(slots) == 0 {
-		return nil, nil
-	}
 	return &SlotMove{Src: src.node, Dst: dst.node, Slots: slots}, nil
 }
 

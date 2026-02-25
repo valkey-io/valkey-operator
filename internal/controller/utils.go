@@ -182,6 +182,9 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, pods *corev1.P
 			continue
 		}
 		for _, shard := range state.Shards {
+			if len(shard.Slots) == 0 {
+				continue
+			}
 			primary := shard.GetPrimaryNode()
 			if primary != nil && primary.Address == p.Status.PodIP {
 				return primary.Id, p.Status.PodIP
@@ -189,4 +192,12 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, pods *corev1.P
 		}
 	}
 	return "", ""
+}
+
+func countSlots(ranges []valkey.SlotsRange) int {
+	count := 0
+	for _, slot := range ranges {
+		count += slot.End - slot.Start + 1
+	}
+	return count
 }

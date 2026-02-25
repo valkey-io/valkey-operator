@@ -1,0 +1,21 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-ephemeral
+spec:
+  shards: 3
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # Storage section omitted - uses ephemeral storage (emptyDir)
+  # This is suitable for:
+  # - Development/testing environments
+  # - Cache-only workloads where data loss is acceptable
+  # - Temporary clusters
+  #
+  # Note: Data will be lost when pods are deleted or restarted

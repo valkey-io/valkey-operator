@@ -73,6 +73,38 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default:={enabled:true}
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
+
+	// PersistentVolume configuration for data persistence
+	// +optional
+	Storage StorageSpec `json:"storage,omitempty"`
+
+	// VolumePermissions enables an init container to set proper ownership on the data volume
+	// Required when using persistent storage with non-root security contexts
+	// +kubebuilder:default=false
+	// +optional
+	VolumePermissions bool `json:"volumePermissions,omitempty"`
+}
+
+type StorageSpec struct {
+	// Enable persistent storage for Valkey data
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// StorageClassName is the name of the StorageClass to use for PersistentVolumeClaims
+	// If not specified, the default StorageClass will be used
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// Size of the persistent volume claim
+	// +kubebuilder:default="1Gi"
+	// +optional
+	Size string `json:"size,omitempty"`
+
+	// AccessModes contains the desired access modes for the volume
+	// +kubebuilder:default={"ReadWriteOnce"}
+	// +optional
+	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
 }
 
 type ExporterSpec struct {
@@ -154,6 +186,8 @@ const (
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
 	ReasonNoSlots           = "NoSlotsAvailable"
+	ReasonVolumeExpanding   = "VolumeExpanding"
+	ReasonVolumeExpanded    = "VolumeExpanded"
 )
 
 // +kubebuilder:object:root=true

@@ -1,4 +1,5 @@
 ## Append samples of your project ##
 resources:
 - v1alpha1_valkeycluster.yaml
+- v1alpha1_valkeycluster_ephemeral.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

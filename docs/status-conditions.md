@@ -73,6 +73,7 @@ Common reasons:
 - `Reconciling` – general reconciliation in progress
 - `AddingNodes` – adding nodes to the cluster
 - `RebalancingSlots` – rebalancing hash slots across primaries
+- `DrainingSlots` – draining hash slots from excess shards during scale-down
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -88,6 +89,7 @@ Common reasons:
 - `PrimaryLost` – primary lost in one or more shards
 - `NoSlotsAvailable` – no unassigned slots available for new shard
 - `RebalanceFailed` – slot rebalancing failed
+- `DrainFailed` – slot draining failed during scale-down
 
 ---
 
@@ -185,6 +187,16 @@ These events track the formation and changes to the Valkey cluster topology.
 | `ReplicaCreated` | Normal | Replica is created for a primary |
 | `ReplicaCreationFailed` | Warning | Replica creation fails |
 | `PrimaryLost` | Warning | Primary is lost in a shard (requires failover) |
+
+### Scale-down events
+
+These events are emitted during scale-down operations.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
+| `DeploymentDeleted` | Normal | Deployment for a drained shard is deleted |
+| `DrainFailed` | Warning | Failed to drain slots from excess shards |
 
 ### Maintenance events
 

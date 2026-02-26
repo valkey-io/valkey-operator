@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,9 +91,12 @@ var scripts embed.FS
 //     primary-labeled pending nodes via CLUSTER ADDSLOTSRANGE.
 //  8. Phase 3 – Replicate: batch-attach all replica-labeled pending nodes
 //     to their matching primaries via CLUSTER REPLICATE.
-//  9. Verify that the expected number of shards and replicas exist.
-//  10. Verify that all 16384 hash slots are assigned.
-//  11. If everything is healthy, mark the cluster Ready and requeue after 30s
+//  9. Scale-down: if the cluster has more shards than desired, drain slots
+//     from excess shards via CLUSTER MIGRATESLOTS and delete their
+//     Deployments once fully drained.
+//  10. Verify that the expected number of shards and replicas exist.
+//  11. Verify that all 16384 hash slots are assigned.
+//  12. If everything is healthy, mark the cluster Ready and requeue after 30s
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
@@ -216,6 +220,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// them from unreplicated replicas. We use pod labels to identify them
 	// and include them as empty shards for health checks and rebalancing.
 	allShards := effectiveShards(state, pods)
+
+	// Handle scale-down: drain excess shards and clean up leftover deployments.
+	if result, done := r.handleScaleDown(ctx, cluster, state, pods); done {
+		return result, nil
+	}
 
 	// Check cluster status
 	if len(allShards) < int(cluster.Spec.Shards) {
@@ -874,6 +883,178 @@ func effectiveShards(state *valkey.ClusterState, pods *corev1.PodList) []*valkey
 		}
 	}
 	return shards
+}
+
+// handleScaleDown drains excess shards and cleans up leftover deployments.
+// Returns (result, true) when the caller should return early.
+func (r *ValkeyClusterReconciler) handleScaleDown(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (ctrl.Result, bool) {
+	log := logf.FromContext(ctx)
+
+	if len(state.Shards) > int(cluster.Spec.Shards) {
+		drained, err := r.drainExcessShards(ctx, cluster, state, pods)
+		if err != nil {
+			log.Error(err, "scale-down draining failed")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleDown", "Failed to drain excess shards: %v", err)
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonDrainFailed, err.Error(), metav1.ConditionTrue)
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling down cluster", metav1.ConditionFalse)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonDrainingSlots, "Draining slots from excess shards", metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+		}
+		if drained {
+			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling down cluster", metav1.ConditionFalse)
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonDrainingSlots, "Draining slots from excess shards", metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, state)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+		}
+	}
+
+	// Clean up leftover deployments from a previous scale-down where drained
+	// primaries became replicas before their deployments could be deleted.
+	if cleaned, err := r.deleteExcessDeployments(ctx, cluster); err != nil {
+		log.Error(err, "failed to delete excess deployments")
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	} else if cleaned {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+
+	return ctrl.Result{}, false
+}
+
+// drainExcessShards handles scale-down by migrating slots away from shards
+// whose pod shard-index >= spec.Shards. Once a shard is fully drained (0
+// slots), its deployments are deleted; forgetStaleNodes on the next reconcile
+// cleans up the Valkey topology.
+// Returns true if any work was done (caller should requeue).
+func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (bool, error) {
+	log := logf.FromContext(ctx)
+	expectedShards := int(cluster.Spec.Shards)
+
+	var remaining, draining []*valkey.ShardState
+	for _, shard := range state.Shards {
+		si := shardIndexFromState(shard, pods)
+		if si >= 0 && si < expectedShards {
+			remaining = append(remaining, shard)
+		} else {
+			draining = append(draining, shard)
+		}
+	}
+	if len(draining) == 0 {
+		return false, nil
+	}
+
+	for _, shard := range draining {
+		move, err := valkey.PlanDrainMove(shard, remaining, rebalanceSlotBatchSize)
+		if err != nil {
+			return false, err
+		}
+		if move == nil {
+			continue
+		}
+
+		inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+		if err != nil {
+			return false, err
+		}
+		if inProgress {
+			log.V(1).Info("drain migration in progress", "src", move.Src.Address)
+			return true, nil
+		}
+
+		if !strings.Contains(move.Src.ClusterNodes, move.Dst.Id) {
+			log.V(1).Info("drain destination not yet known to source", "src", move.Src.Address, "dst", move.Dst.Address)
+			return true, nil
+		}
+
+		log.V(1).Info("draining slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsDraining", "ScaleDown", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
+
+		ranges := valkey.SlotsToRanges(move.Slots)
+		if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
+			if valkey.IsSlotsNotServedByNode(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+
+	// All draining shards have 0 slots — delete their deployments.
+	for _, shard := range draining {
+		si := shardIndexFromState(shard, pods)
+		if si < 0 {
+			continue
+		}
+		nodesPerShard := 1 + int(cluster.Spec.Replicas)
+		for ni := range nodesPerShard {
+			name := deploymentName(cluster.Name, si, ni)
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: cluster.Namespace,
+				},
+			}
+			if err := r.Delete(ctx, dep); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("delete deployment %s: %w", name, err)
+				}
+			} else {
+				log.V(1).Info("deleted deployment for drained shard", "deployment", name, "shard", si)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "DeploymentDeleted", "ScaleDown", "Deleted deployment %s (shard %d)", name, si)
+			}
+		}
+	}
+	return true, nil
+}
+
+// deleteExcessDeployments removes deployments that are outside the desired
+// spec: shard-index >= spec.Shards OR node-index >= 1 + spec.Replicas.
+// This catches leftover deployments from shard scale-down (where drained
+// primaries became replicas) and from replica scale-down.
+func (r *ValkeyClusterReconciler) deleteExcessDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
+	log := logf.FromContext(ctx)
+	allDeps := &appsv1.DeploymentList{}
+	if err := r.List(ctx, allDeps, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+		return false, err
+	}
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	deleted := false
+	for i := range allDeps.Items {
+		dep := &allDeps.Items[i]
+		si, err := strconv.Atoi(dep.Labels[LabelShardIndex])
+		if err != nil {
+			continue
+		}
+		ni, err := strconv.Atoi(dep.Labels[LabelNodeIndex])
+		if err != nil {
+			continue
+		}
+		if si >= int(cluster.Spec.Shards) || ni >= nodesPerShard {
+			if err := r.Delete(ctx, dep); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, fmt.Errorf("delete excess deployment %s: %w", dep.Name, err)
+				}
+			} else {
+				log.V(1).Info("deleted excess deployment", "name", dep.Name, "shard", si, "node", ni)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "DeploymentDeleted", "ScaleDown", "Deleted excess deployment %s (shard %d, node %d)", dep.Name, si, ni)
+				deleted = true
+			}
+		}
+	}
+	return deleted, nil
+}
+
+// shardIndexFromState determines the pod shard-index for a given Valkey shard
+// by matching any of its nodes' addresses to pod labels.
+func shardIndexFromState(shard *valkey.ShardState, pods *corev1.PodList) int {
+	for _, node := range shard.Nodes {
+		_, si := podRoleAndShard(node.Address, pods)
+		if si >= 0 {
+			return si
+		}
+	}
+	return -1
 }
 
 // SetupWithManager sets up the controller with the Manager.

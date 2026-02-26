@@ -400,6 +400,112 @@ spec:
 			}
 			Eventually(verifyScaledOut).Should(Succeed())
 		})
+
+		It("drains slots on scale down", func() {
+			const initialShards = 3
+			const scaleDownShards = 2
+			valkeyClusterName = "valkeycluster-scaledown"
+
+			By("creating a ValkeyCluster with 3 shards")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: %d
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+`, valkeyClusterName, initialShards)
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaledown.yaml")
+			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(manifestFile)
+
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+			cmd = exec.Command("kubectl", "apply", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply ValkeyCluster CR")
+
+			By("waiting for the cluster to be ready")
+			verifyReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(initialShards)))
+			}
+			Eventually(verifyReady, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+			By(fmt.Sprintf("scaling the cluster down to %d shards", scaleDownShards))
+			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleDownShards))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster shards")
+
+			By("verifying that only 2 primaries own slots after scale down")
+			verifySlotDrain := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty())
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+					"valkey-cli", "-c", "-h", "127.0.0.1", "CLUSTER", "NODES")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				primariesWithSlots := 0
+				for _, line := range utils.GetNonEmptyLines(output) {
+					fields := strings.Fields(line)
+					if len(fields) < 8 || !strings.Contains(fields[2], "master") {
+						continue
+					}
+					// Slot ranges appear after the 8 fixed fields (id, addr, flags,
+					// master, ping, pong, epoch, state). A master owns slots only
+					// when additional fields are present.
+					if len(fields) > 8 {
+						primariesWithSlots++
+					}
+				}
+				g.Expect(primariesWithSlots).To(Equal(scaleDownShards), "Expected only %d primaries to own slots after scale down", scaleDownShards)
+			}
+			Eventually(verifySlotDrain, 10*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying deployments for excess shard are deleted")
+			verifyDeployments := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployments",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				deployments := utils.GetNonEmptyLines(output)
+				expectedCount := scaleDownShards * (1 + 1) // shards * (1 primary + 1 replica)
+				g.Expect(deployments).To(HaveLen(expectedCount),
+					"Expected %d deployments after scale down, got %d: %v", expectedCount, len(deployments), deployments)
+			}
+			Eventually(verifyDeployments, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleDownShards))
+			verifyScaledDown := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleDownShards)))
+			}
+			Eventually(verifyScaledDown, 10*time.Minute, 2*time.Second).Should(Succeed())
+		})
 	})
 
 	Context("when a ValkeyCluster CR is deleted", func() {

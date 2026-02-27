@@ -1167,8 +1167,6 @@ spec:
                 x-kubernetes-validations:
                 - message: workloadType is immutable
                   rule: self == oldSelf
-            required:
-            - image
             type: object
           status:
             description: ValkeyNodeStatus defines the observed state of ValkeyNode.

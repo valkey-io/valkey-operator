@@ -35,8 +35,8 @@ const (
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
-	// +kubebuilder:validation:Required
-	Image string `json:"image"`
+	// +optional
+	Image string `json:"image,omitempty"`
 
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.

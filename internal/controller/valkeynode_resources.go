@@ -41,10 +41,15 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 
 // buildContainersDef builds the containers definition for the ValkeyNode.
 func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) []corev1.Container {
+	image := DefaultImage
+	if node.Spec.Image != "" {
+		image = node.Spec.Image
+	}
+
 	containers := []corev1.Container{
 		{
 			Name:      "server",
-			Image:     node.Spec.Image,
+			Image:     image,
 			Resources: node.Spec.Resources,
 			Command: []string{
 				"valkey-server",

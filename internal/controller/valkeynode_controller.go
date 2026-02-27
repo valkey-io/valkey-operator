@@ -80,12 +80,14 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	if node.Spec.WorkloadType == valkeyiov1alpha1.WorkloadTypeStatefulSet {
+	switch node.Spec.WorkloadType {
+	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
 		return r.ensureStatefulSet(ctx, node)
-	} else if node.Spec.WorkloadType == valkeyiov1alpha1.WorkloadTypeDeployment {
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		return r.ensureDeployment(ctx, node)
+	default:
+		return fmt.Errorf("unsupported workload type: %q", node.Spec.WorkloadType)
 	}
-	return fmt.Errorf("invalid workload type: %s", node.Spec.WorkloadType)
 }
 
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.

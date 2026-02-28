@@ -307,6 +307,41 @@ func TestBuildContainersDef_DefaultImage(t *testing.T) {
 	assert.Equal(t, DefaultImage, containers[0].Image)
 }
 
+func TestParseValkeyRole(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     string
+		expected string
+	}{
+		{
+			name:     "master maps to primary",
+			info:     "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n",
+			expected: ValkeyNodeRolePrimary,
+		},
+		{
+			name:     "slave maps to replica",
+			info:     "# Replication\r\nrole:slave\r\nmaster_host:10.0.0.1\r\n",
+			expected: ValkeyNodeRoleReplica,
+		},
+		{
+			name:     "unknown role returns empty",
+			info:     "# Replication\r\nrole:sentinel\r\n",
+			expected: "",
+		},
+		{
+			name:     "missing role returns empty",
+			info:     "# Replication\r\nconnected_slaves:0\r\n",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseValkeyRole(tt.info))
+		})
+	}
+}
+
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}

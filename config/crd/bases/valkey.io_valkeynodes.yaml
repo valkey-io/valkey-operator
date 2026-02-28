@@ -21,6 +21,10 @@ spec:
       jsonPath: .status.ready
       name: Ready
       type: boolean
+    - description: Valkey replication role
+      jsonPath: .status.role
+      name: Role
+      type: string
     - description: Pod name
       jsonPath: .status.podName
       name: Pod
@@ -1241,6 +1245,10 @@ spec:
                 description: Ready indicates whether the ValkeyNode is ready to serve
                   traffic.
                 type: boolean
+              role:
+                description: Role is the Valkey replication role of this node (primary
+                  or replica).
+                type: string
             type: object
         required:
         - metadata

@@ -84,6 +84,10 @@ type ValkeyNodeStatus struct {
 	// +optional
 	PodIP string `json:"podIP,omitempty"`
 
+	// Role is the Valkey replication role of this node (primary or replica).
+	// +optional
+	Role string `json:"role,omitempty"`
+
 	// Conditions represent the current state of the ValkeyNode.
 	// +listType=map
 	// +listMapKey=type
@@ -110,6 +114,7 @@ const (
 // ValkeyNode is the Schema for the valkeynodes API.
 // ValkeyNode is an internal CRD. Users should not create ValkeyNodes directly.
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready",description="Whether the node is ready"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role",description="Valkey replication role"
 // +kubebuilder:printcolumn:name="Pod",type="string",JSONPath=".status.podName",description="Pod name"
 // +kubebuilder:printcolumn:name="IP",type="string",JSONPath=".status.podIP",description="Pod IP",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"

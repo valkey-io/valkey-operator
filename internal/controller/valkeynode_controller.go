@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,6 +36,21 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+)
+
+const (
+	// valkeyInfoRolePrefix is the key prefix in the INFO replication output.
+	valkeyInfoRolePrefix = "role:"
+
+	// valkeyRoleMaster and valkeyRoleSlave are the raw role values returned by
+	// Valkey's INFO replication command.
+	valkeyRoleMaster = "master"
+	valkeyRoleSlave  = "slave"
+
+	// ValkeyNodeRolePrimary and ValkeyNodeRoleReplica are the user-facing role names
+	// surfaced in ValkeyNode status.
+	ValkeyNodeRolePrimary = "primary"
+	ValkeyNodeRoleReplica = "replica"
 )
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -182,6 +199,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 
 		node.Status.Ready = podReady
 		if podReady {
+			node.Status.Role = getValkeyRole(ctx, pod.Status.PodIP, DefaultPort)
 			meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionTrue,
@@ -220,6 +238,43 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 		return &podList.Items[0]
 	}
 	return nil
+}
+
+// getValkeyRole connects to a Valkey pod and returns its replication role
+// ("primary" or "replica"). Returns an empty string if the role cannot be determined.
+func getValkeyRole(ctx context.Context, podIP string, port int) string {
+	c, err := vclient.NewClient(vclient.ClientOption{
+		InitAddress:       []string{fmt.Sprintf("%s:%d", podIP, port)},
+		ForceSingleClient: true,
+	})
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+
+	info, err := c.Do(ctx, c.B().Info().Section("replication").Build()).ToString()
+	if err != nil {
+		return ""
+	}
+
+	return parseValkeyRole(info)
+}
+
+// parseValkeyRole extracts the replication role from the output of INFO replication,
+// mapping Valkey's internal terms ("master"/"slave") to user-friendly ones ("primary"/"replica").
+func parseValkeyRole(info string) string {
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, valkeyInfoRolePrefix) {
+			switch strings.TrimPrefix(line, valkeyInfoRolePrefix) {
+			case valkeyRoleMaster:
+				return ValkeyNodeRolePrimary
+			case valkeyRoleSlave:
+				return ValkeyNodeRoleReplica
+			}
+		}
+	}
+	return ""
 }
 
 // SetupWithManager sets up the controller with the Manager.

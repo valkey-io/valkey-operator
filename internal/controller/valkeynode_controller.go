@@ -62,6 +62,10 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	if err := r.ensureConfigMap(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.ensureWorkload(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -108,6 +112,30 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.
 func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	desired := buildValkeyNodeDeployment(node)
+	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, desired); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return r.Update(ctx, desired)
+		}
+		return err
+	}
+	return nil
+}
+
+// ensureConfigMap creates or updates the ConfigMap for the ValkeyNode, containing
+// the valkey.conf and probe scripts. If ScriptsConfigMapName is set, the ConfigMap
+// is assumed to be managed externally and this step is skipped.
+func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	if node.Spec.ScriptsConfigMapName != "" {
+		// ConfigMap is provided externally (e.g. by ValkeyCluster), skip creation.
+		return nil
+	}
+	desired, err := buildValkeyNodeConfigMap(node)
+	if err != nil {
+		return err
+	}
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}

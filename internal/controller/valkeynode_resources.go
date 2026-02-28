@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +39,33 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 		"app.kubernetes.io/instance":   node.Name,
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	}
+}
+
+// buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
+// and readiness probe scripts, plus an empty valkey.conf.
+// The ConfigMap is named after valkeyNodeResourceName(node).
+func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
+	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded liveness-check.sh: %w", err)
+	}
+	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+	}
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      valkeyNodeResourceName(node),
+			Namespace: node.Namespace,
+			Labels:    valkeyNodeLabels(node),
+		},
+		Data: map[string]string{
+			"valkey.conf":        "",
+			"liveness-check.sh":  string(liveness),
+			"readiness-check.sh": string(readiness),
+		},
+	}, nil
 }
 
 // buildContainersDef builds the containers definition for the ValkeyNode.
@@ -140,6 +169,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) []corev1.Container {
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) corev1.PodTemplateSpec {
 	containers := buildContainersDef(node)
 
+	// Use the explicitly provided ConfigMap name, or fall back to the default
+	// resource name (which the controller creates automatically).
+	configMapName := node.Spec.ScriptsConfigMapName
+	if configMapName == "" {
+		configMapName = valkeyNodeResourceName(node)
+	}
+
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: labels,
@@ -155,7 +191,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 					VolumeSource: corev1.VolumeSource{
 						ConfigMap: &corev1.ConfigMapVolumeSource{
 							LocalObjectReference: corev1.LocalObjectReference{
-								Name: node.Spec.ScriptsConfigMapName,
+								Name: configMapName,
 							},
 							DefaultMode: func(i int32) *int32 { return &i }(0755),
 						},
@@ -166,7 +202,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 					VolumeSource: corev1.VolumeSource{
 						ConfigMap: &corev1.ConfigMapVolumeSource{
 							LocalObjectReference: corev1.LocalObjectReference{
-								Name: node.Spec.ScriptsConfigMapName,
+								Name: configMapName,
 							},
 						},
 					},

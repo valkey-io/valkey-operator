@@ -267,6 +267,46 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
 }
 
+func TestBuildValkeyNodeConfigMap(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	cm, err := buildValkeyNodeConfigMap(node)
+
+	require.NoError(t, err)
+	assert.Equal(t, "valkey-mynode", cm.Name)
+	assert.Equal(t, "test-ns", cm.Namespace)
+	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
+
+	// Must contain both script keys and valkey.conf
+	assert.Contains(t, cm.Data, "valkey.conf")
+	assert.Contains(t, cm.Data, "liveness-check.sh")
+	assert.Contains(t, cm.Data, "readiness-check.sh")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
+	t.Run("uses ScriptsConfigMapName when set", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns") // ScriptsConfigMapName = "valkey-scripts"
+		pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+	})
+
+	t.Run("falls back to resource name when ScriptsConfigMapName is empty", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns")
+		node.Spec.ScriptsConfigMapName = ""
+		pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[1].ConfigMap.Name)
+	})
+}
+
+func TestBuildContainersDef_DefaultImage(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Image = ""
+	containers := buildContainersDef(node)
+	require.Len(t, containers, 1)
+	assert.Equal(t, DefaultImage, containers[0].Image)
+}
+
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}

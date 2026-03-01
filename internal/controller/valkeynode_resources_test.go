@@ -316,12 +316,12 @@ func TestParseValkeyRole(t *testing.T) {
 		{
 			name:     "master maps to primary",
 			info:     "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n",
-			expected: ValkeyNodeRolePrimary,
+			expected: RolePrimary,
 		},
 		{
 			name:     "slave maps to replica",
 			info:     "# Replication\r\nrole:slave\r\nmaster_host:10.0.0.1\r\n",
-			expected: ValkeyNodeRoleReplica,
+			expected: RoleReplica,
 		},
 		{
 			name:     "unknown role returns empty",

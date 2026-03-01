@@ -41,16 +41,6 @@ import (
 const (
 	// valkeyInfoRolePrefix is the key prefix in the INFO replication output.
 	valkeyInfoRolePrefix = "role:"
-
-	// valkeyRoleMaster and valkeyRoleSlave are the raw role values returned by
-	// Valkey's INFO replication command.
-	valkeyRoleMaster = "master"
-	valkeyRoleSlave  = "slave"
-
-	// ValkeyNodeRolePrimary and ValkeyNodeRoleReplica are the user-facing role names
-	// surfaced in ValkeyNode status.
-	ValkeyNodeRolePrimary = "primary"
-	ValkeyNodeRoleReplica = "replica"
 )
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -267,10 +257,10 @@ func parseValkeyRole(info string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, valkeyInfoRolePrefix) {
 			switch strings.TrimPrefix(line, valkeyInfoRolePrefix) {
-			case valkeyRoleMaster:
-				return ValkeyNodeRolePrimary
-			case valkeyRoleSlave:
-				return ValkeyNodeRoleReplica
+			case RoleMaster:
+				return RolePrimary
+			case RoleSlave:
+				return RoleReplica
 			}
 		}
 	}

@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +39,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -50,6 +54,30 @@ const (
 
 	// Error messages
 	statusUpdateFailedMsg = "failed to update status"
+)
+
+var (
+	reconcileDuration = promauto.With(metrics.Registry).NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:                            "valkey_operator_reconcile_duration_seconds",
+			Help:                            "Valkey Operator reconcile duration",
+			Buckets:                         prometheus.DefBuckets,
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: 1 * time.Hour,
+		},
+		[]string{"controller"},
+	)
+	reconcileErrors = promauto.With(metrics.Registry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "valkey_operator_reconcile_errors_total",
+			Help: "Number of errors when performing reconcile",
+		},
+		[]string{"controller"},
+	)
+
+	valkeyControllerReconcileDuration = reconcileDuration.WithLabelValues("ValkeyCluster")
+	valkeyControllerReconcileErrors   = reconcileErrors.WithLabelValues("ValkeyCluster")
 )
 
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
@@ -98,6 +126,17 @@ var scripts embed.FS
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.1/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	reconcileStart := time.Now()
+	res, err := r.reconcile(ctx, req)
+
+	valkeyControllerReconcileDuration.Observe(time.Since(reconcileStart).Seconds())
+	if err != nil {
+		valkeyControllerReconcileErrors.Inc()
+	}
+	return res, err
+}
+
+func (r *ValkeyClusterReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
 

@@ -161,7 +161,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	log := logf.FromContext(ctx)
 
 	// Get pod by label selector (works for both StatefulSet and Deployment)
-	pod := r.getPod(ctx, node)
+	pod, err := r.getPod(ctx, node)
+	if err != nil {
+		return err
+	}
 
 	// Update pod info and ready condition
 	if pod == nil {
@@ -218,17 +221,17 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 }
 
 // getPod returns the pod for a ValkeyNode by listing with label selector.
-func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) *corev1.Pod {
+func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (*corev1.Pod, error) {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(node.Namespace),
 		client.MatchingLabels(valkeyNodeLabels(node))); err != nil {
-		return nil
+		return nil, fmt.Errorf("listing pods for ValkeyNode %s: %w", node.Name, err)
 	}
 	if len(podList.Items) > 0 {
-		return &podList.Items[0]
+		return &podList.Items[0], nil
 	}
-	return nil
+	return nil, nil
 }
 
 // getValkeyRole connects to a Valkey pod and returns its replication role

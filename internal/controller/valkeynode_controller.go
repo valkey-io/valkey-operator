@@ -165,6 +165,9 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		return err
 	}
 
+	// Snapshot status before mutations so we can skip the write if nothing changed.
+	previous := current.Status.DeepCopy()
+
 	pod, err := r.getPod(ctx, node)
 	if err != nil {
 		return err
@@ -214,9 +217,14 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		}
 	}
 
-	if err := r.Status().Update(ctx, current); err != nil {
-		log.Error(err, "failed to update ValkeyNode status")
-		return err
+	if nodeStatusChanged(*previous, current.Status) {
+		if err := r.Status().Update(ctx, current); err != nil {
+			log.Error(err, "failed to update ValkeyNode status")
+			return err
+		}
+		log.V(1).Info("status updated", "ready", current.Status.Ready, "role", current.Status.Role)
+	} else {
+		log.V(2).Info("status unchanged, skipping update")
 	}
 
 	// Sync Ready back to the caller's object so the requeue check in Reconcile

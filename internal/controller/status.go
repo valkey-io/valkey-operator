@@ -32,6 +32,27 @@ func setCondition(cluster *valkeyiov1alpha1.ValkeyCluster, condType, reason, mes
 	})
 }
 
+// nodeStatusChanged compares two ValkeyNodeStatus values and returns true if
+// they differ (ignoring LastTransitionTime on conditions).
+func nodeStatusChanged(old, new valkeyiov1alpha1.ValkeyNodeStatus) bool {
+	if old.Ready != new.Ready || old.PodName != new.PodName || old.PodIP != new.PodIP || old.Role != new.Role {
+		return true
+	}
+	if len(old.Conditions) != len(new.Conditions) {
+		return true
+	}
+	for _, newCond := range new.Conditions {
+		oldCond := meta.FindStatusCondition(old.Conditions, newCond.Type)
+		if oldCond == nil {
+			return true
+		}
+		if oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason || oldCond.Message != newCond.Message || oldCond.ObservedGeneration != newCond.ObservedGeneration {
+			return true
+		}
+	}
+	return false
+}
+
 // statusChanged compares two statuses and returns true if they differ (ignoring LastTransitionTime)
 func statusChanged(old, new valkeyiov1alpha1.ValkeyClusterStatus) bool {
 	// Compare summary fields

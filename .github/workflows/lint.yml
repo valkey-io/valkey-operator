@@ -2,6 +2,8 @@ name: Lint
 
 on:
   push:
+    branches:
+      - 'main'
   pull_request:
 
 jobs:
@@ -17,7 +19,8 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check linter configuration
+        run: make lint-config
+
       - name: Run linter
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
-        with:
-          version: v2.7.2
+        run: make lint

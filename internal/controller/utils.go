@@ -69,8 +69,8 @@ const (
 const (
 	RolePrimary = "primary"
 	RoleReplica = "replica"
-	RoleMaster = "master"
-	RoleSlave  = "slave"
+	RoleMaster  = "master"
+	RoleSlave   = "slave"
 )
 
 // Labels returns a copy of user defined labels including recommended:

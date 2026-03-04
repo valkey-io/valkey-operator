@@ -87,7 +87,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
-	return ctrl.Result{}, nil
+	// Requeue after 60 seconds to check on the ValkeyNode role.
+	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -253,10 +254,10 @@ func getValkeyRole(ctx context.Context, podIP string, port int) string {
 // parseValkeyRole extracts the replication role from the output of INFO replication,
 // mapping Valkey's internal terms ("master"/"slave") to user-friendly ones ("primary"/"replica").
 func parseValkeyRole(info string) string {
-	for _, line := range strings.Split(info, "\n") {
+	for line := range strings.SplitSeq(info, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, valkeyInfoRolePrefix) {
-			switch strings.TrimPrefix(line, valkeyInfoRolePrefix) {
+		if value, ok := strings.CutPrefix(line, valkeyInfoRolePrefix); ok {
+			switch value {
 			case RoleMaster:
 				return RolePrimary
 			case RoleSlave:

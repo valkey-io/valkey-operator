@@ -160,29 +160,31 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
 
-	// Get pod by label selector (works for both StatefulSet and Deployment)
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return err
+	}
+
 	pod, err := r.getPod(ctx, node)
 	if err != nil {
 		return err
 	}
 
-	// Update pod info and ready condition
 	if pod == nil {
-		node.Status.Ready = false
-		node.Status.PodName = ""
-		node.Status.PodIP = ""
-		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+		current.Status.Ready = false
+		current.Status.PodName = ""
+		current.Status.PodIP = ""
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
 			Message:            "Pod does not exist yet",
-			ObservedGeneration: node.Generation,
+			ObservedGeneration: current.Generation,
 		})
 	} else {
-		node.Status.PodName = pod.Name
-		node.Status.PodIP = pod.Status.PodIP
+		current.Status.PodName = pod.Name
+		current.Status.PodIP = pod.Status.PodIP
 
-		// Check pod readiness from its conditions
 		podReady := false
 		for _, cond := range pod.Status.Conditions {
 			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
@@ -191,31 +193,35 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			}
 		}
 
-		node.Status.Ready = podReady
+		current.Status.Ready = podReady
 		if podReady {
-			node.Status.Role = getValkeyRole(ctx, pod.Status.PodIP, DefaultPort)
-			meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+			current.Status.Role = getValkeyRole(ctx, pod.Status.PodIP, DefaultPort)
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodRunning,
 				Message:            "Pod is running and ready",
-				ObservedGeneration: node.Generation,
+				ObservedGeneration: current.Generation,
 			})
 		} else {
-			meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
 				Message:            "Pod is not ready",
-				ObservedGeneration: node.Generation,
+				ObservedGeneration: current.Generation,
 			})
 		}
 	}
 
-	if err := r.Status().Update(ctx, node); err != nil {
+	if err := r.Status().Update(ctx, current); err != nil {
 		log.Error(err, "failed to update ValkeyNode status")
 		return err
 	}
+
+	// Sync Ready back to the caller's object so the requeue check in Reconcile
+	// reflects the status we just wrote.
+	node.Status.Ready = current.Status.Ready
 
 	return nil
 }

@@ -37,6 +37,8 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "valkey",
 		"app.kubernetes.io/instance":   node.Name,
+		"app.kubernetes.io/component":  "valkey-node",
+		"app.kubernetes.io/part-of":    "valkey",
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	}
 }

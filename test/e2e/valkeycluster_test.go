@@ -24,6 +24,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -46,12 +49,14 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 	Context("when a ValkeyCluster CR is applied", func() {
 		It("creates a Valkey Cluster deployment", func() {
+			valkeyClusterName = "valkeycluster-sample"
+
 			By("creating the CR")
-			cmd := exec.Command("kubectl", "create", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
+			cmd := exec.Command("kubectl", "delete", "-f", "config/samples/v1alpha1_valkeycluster.yaml", "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "create", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
-
-			valkeyClusterName = "valkeycluster-sample"
 			By("validating the CR")
 			verifyCrExists := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName, "-o", "jsonpath={.metadata.name}")
@@ -310,6 +315,91 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
 		})
+
+		It("rebalances slots on scale out", func() {
+			const baseShards = 2
+			const scaleOutShards = 3
+			valkeyClusterName = "valkeycluster-scaleout"
+
+			By("creating a smaller ValkeyCluster for scale-out")
+			scaleOutManifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: %d
+  replicas: 1
+`, valkeyClusterName, baseShards)
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
+			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write scale-out manifest file")
+			defer os.Remove(manifestFile)
+
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "apply", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply scale-out ValkeyCluster CR")
+
+			By("waiting for the cluster to be ready before scaling")
+			verifyReadyForScaleOut := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(baseShards)))
+			}
+			Eventually(verifyReadyForScaleOut, 10*time.Minute).Should(Succeed())
+
+			By(fmt.Sprintf("scaling the cluster to %d shards", scaleOutShards))
+			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleOutShards))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster shards")
+
+			By("verifying all primaries receive slots after scale out")
+			verifySlotRebalance := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+					"valkey-cli", "-c", "-h", "127.0.0.1", "CLUSTER", "NODES")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				lines := utils.GetNonEmptyLines(output)
+				masterWithSlots := 0
+				for _, line := range lines {
+					fields := strings.Fields(line)
+					if len(fields) < 9 {
+						continue
+					}
+					if !strings.Contains(fields[2], "master") {
+						continue
+					}
+					masterWithSlots++
+				}
+				g.Expect(masterWithSlots).To(Equal(scaleOutShards), "Expected all primaries to own slots after rebalance")
+			}
+			Eventually(verifySlotRebalance, 10*time.Minute).Should(Succeed())
+
+			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleOutShards))
+			verifyScaledOut := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.Shards).To(Equal(int32(scaleOutShards)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleOutShards)))
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}
+			Eventually(verifyScaledOut).Should(Succeed())
+		})
 	})
 
 	Context("when a ValkeyCluster CR is deleted", func() {
@@ -360,6 +450,12 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 		var degradedClusterName string
 
 		It("should detect and recover when a replica deployment is deleted", func() {
+			degradedClusterName = "valkeycluster-degraded-status-test"
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", degradedClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
 			By("creating a ValkeyCluster")
 			degradedClusterManifest := `apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -376,10 +472,11 @@ spec:
 			defer os.Remove(manifestFile)
 
 			By("applying the CR")
-			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", degradedClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "create", "-f", manifestFile)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
-			degradedClusterName = "valkeycluster-degraded-status-test"
 
 			By("waiting for cluster to become ready first")
 			verifyClusterReady := func(g Gomega) {
@@ -466,18 +563,6 @@ spec:
 				}
 			}
 			Eventually(verifyClusterRecovery).Should(Succeed())
-
-			By("cleaning up the degraded cluster")
-			cmd = exec.Command("kubectl", "delete", "valkeycluster", degradedClusterName, "--wait=false")
-			_, _ = utils.Run(cmd)
-
-			By("waiting for cluster to be deleted")
-			verifyClusterDeleted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "valkeycluster", degradedClusterName)
-				_, err := utils.Run(cmd)
-				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
-			}
-			Eventually(verifyClusterDeleted).Should(Succeed())
 		})
 
 		// This test was temporarily disabled in PR #54 because the operator
@@ -501,15 +586,18 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer os.Remove(manifestFile)
 
-			By("applying the CR")
-			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 			failoverClusterName := "valkeycluster-failover-test"
 			defer func() {
 				cmd := exec.Command("kubectl", "delete", "valkeycluster", failoverClusterName, "--ignore-not-found=true", "--wait=false")
 				_, _ = utils.Run(cmd)
 			}()
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", failoverClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
 			By("waiting for cluster to become ready")
 			verifyClusterReady := func(g Gomega) {
@@ -575,18 +663,6 @@ spec:
 				}
 			}
 			Eventually(verifyClusterRecovery).Should(Succeed())
-
-			By("cleaning up the failover cluster")
-			cmd = exec.Command("kubectl", "delete", "valkeycluster", failoverClusterName, "--wait=false")
-			_, _ = utils.Run(cmd)
-
-			By("waiting for cluster to be deleted")
-			verifyClusterDeleted := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "valkeycluster", failoverClusterName)
-				_, err := utils.Run(cmd)
-				g.Expect(err).To(HaveOccurred(), "Cluster should be deleted")
-			}
-			Eventually(verifyClusterDeleted).Should(Succeed())
 		})
 	})
 })

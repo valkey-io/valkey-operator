@@ -159,6 +159,8 @@ const (
 	ReasonSlotsUnassigned   = "SlotsUnassigned"
 	ReasonPrimaryLost       = "PrimaryLost"
 	ReasonNoSlots           = "NoSlotsAvailable"
+	ReasonRebalancingSlots  = "RebalancingSlots"
+	ReasonRebalanceFailed   = "RebalanceFailed"
 	ReasonUsersAclError     = "UsersACLError"
 )
 

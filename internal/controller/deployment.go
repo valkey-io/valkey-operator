@@ -119,7 +119,7 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 
 	// Add exporter sidecar if enabled
 	if cluster.Spec.Exporter.Enabled {
-		containers = append(containers, generateMetricsExporterContainerDef(cluster))
+		containers = append(containers, generateMetricsExporterContainerDef(cluster.Spec.Exporter))
 	}
 	return containers
 }

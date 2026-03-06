@@ -19,6 +19,17 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+VERSION   ?= 0.0.1
+BRANCH    ?= $(shell git rev-parse --abbrev-ref HEAD)
+BUILDDATE ?= $(shell date -Iseconds)
+REVISION  ?= $(shell git rev-parse HEAD)
+
+VERSION_LDFLAGS := \
+  -X github.com/prometheus/common/version.Version=$(VERSION) \
+  -X github.com/prometheus/common/version.Revision=$(REVISION) \
+  -X github.com/prometheus/common/version.Branch=$(BRANCH) \
+  -X github.com/prometheus/common/version.BuildDate=$(BUILDDATE)
+
 .PHONY: all
 all: build
 
@@ -106,7 +117,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet lint ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -ldflags "$(VERSION_LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -117,7 +128,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg "LDFLAGS=$(VERSION_LDFLAGS)" -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -136,7 +147,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name valkey-operator-builder
 	$(CONTAINER_TOOL) buildx use valkey-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg "LDFLAGS=$(VERSION_LDFLAGS)" --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm valkey-operator-builder
 	rm Dockerfile.cross
 

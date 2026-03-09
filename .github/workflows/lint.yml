@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    name: Run on Ubuntu
+    name: Run linters
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

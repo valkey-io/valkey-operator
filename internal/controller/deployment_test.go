@@ -40,7 +40,7 @@ func TestCreateClusterDeployment(t *testing.T) {
 			Image: "container:version",
 		},
 	}
-	d := createClusterDeployment(cluster, 0, 0)
+	d, _ := createClusterDeployment(cluster, 0, 0)
 	if d.Name != "mycluster-0-0" {
 		t.Errorf("Expected %v, got %v", "mycluster-0-0", d.Name)
 	}
@@ -63,7 +63,7 @@ func TestCreateClusterDeployment(t *testing.T) {
 	assert.Equal(t, "0", d.Spec.Template.Labels[LabelNodeIndex], "pod template should have node-index label")
 
 	// Verify second node in shard 2 (node index 2)
-	dr := createClusterDeployment(cluster, 2, 2)
+	dr, _ := createClusterDeployment(cluster, 2, 2)
 	assert.Equal(t, "mycluster-2-2", dr.Name, "deployment name")
 	assert.Equal(t, "2", dr.Labels[LabelShardIndex], "deployment shard-index")
 	assert.Equal(t, "2", dr.Labels[LabelNodeIndex], "deployment node-index")
@@ -94,7 +94,7 @@ func TestCreateClusterDeployment_SetsPodAntiAffinity(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster, 0, 0)
+	d, _ := createClusterDeployment(cluster, 0, 0)
 
 	got := d.Spec.Template.Spec.Affinity
 	if diff := cmp.Diff(antiAffinity, got, cmpopts.EquateEmpty()); diff != "" {
@@ -114,7 +114,7 @@ func TestCreateClusterDeployment_SetsNodeSelector(t *testing.T) {
 		},
 	}
 
-	d := createClusterDeployment(cluster, 0, 0)
+	d, _ := createClusterDeployment(cluster, 0, 0)
 
 	assert.Equal(t, nodeSelector, d.Spec.Template.Spec.NodeSelector, "node selector should match spec")
 }
@@ -128,7 +128,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				},
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		assert.Len(t, containers, 1, "should have only one container")
 		assert.Equal(t, "valkey-server", containers[0].Name, "container should be valkey-server")
 	})
@@ -141,7 +141,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				},
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		assert.Len(t, containers, 2, "should have two containers")
 		assert.True(t, containerExists(containers, "valkey-server"), "valkey-server container should exist")
 		assert.True(t, containerExists(containers, "metrics-exporter"), "metrics-exporter container should exist")
@@ -155,7 +155,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				},
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		exporter := findContainer(containers, "metrics-exporter")
 		assert.NotNil(t, exporter, "exporter container should not be nil")
 		assert.Equal(t, DefaultExporterImage, exporter.Image, "should use default exporter image")
@@ -171,7 +171,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				},
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		exporter := findContainer(containers, "metrics-exporter")
 		assert.NotNil(t, exporter, "exporter container should not be nil")
 		assert.Equal(t, customImage, exporter.Image, "should use custom exporter image")
@@ -196,7 +196,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				},
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		exporter := findContainer(containers, "metrics-exporter")
 		assert.NotNil(t, exporter, "exporter container should not be nil")
 		assert.Equal(t, resources, exporter.Resources, "should set custom resources on exporter")
@@ -214,7 +214,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				Resources: resourceReqs,
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		valkeyContainer := findContainer(containers, "valkey-server")
 		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources requests on valkey-server")
 	})
@@ -231,7 +231,7 @@ func TestGenerateContainersDef(t *testing.T) {
 				Resources: resourceReqs,
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		valkeyContainer := findContainer(containers, "valkey-server")
 		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources limits on valkey-server")
 	})
@@ -252,9 +252,47 @@ func TestGenerateContainersDef(t *testing.T) {
 				Resources: resourceReqs,
 			},
 		}
-		containers := generateContainersDef(cluster)
+		containers, _ := generateContainersDef(cluster)
 		valkeyContainer := findContainer(containers, "valkey-server")
 		assert.Equal(t, resourceReqs, valkeyContainer.Resources, "should set custom resources on valkey-server")
+	})
+
+	t.Run("should modify existing containers using config from spec.containers when specified", func(t *testing.T) {
+		customImage := "my-custom-image:latest"
+		patchContainers := []corev1.Container{
+			{
+				Name:  "metrics-exporter",
+				Image: customImage,
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Containers: patchContainers,
+			},
+		}
+		containers, _ := generateContainersDef(cluster)
+		metricsContainer := findContainer(containers, "metrics-exporter")
+		assert.Equal(t, customImage, metricsContainer.Image, "should use value from spec.containers")
+	})
+
+	t.Run("should add containers from spec.containers when spec.containers is specified", func(t *testing.T) {
+		patchContainers := []corev1.Container{
+			{
+				Name:    "curl",
+				Image:   "curlimages/curl:latest",
+				Command: []string{"/bin/sh", "-c"},
+				Args:    []string{"sleep 3600"},
+			},
+		}
+		cluster := &valkeyv1.ValkeyCluster{
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Containers: patchContainers,
+			},
+		}
+		containers, _ := generateContainersDef(cluster)
+		curlContainer := findContainer(containers, "curl")
+		assert.Equal(t, patchContainers[0], *curlContainer, "additional container should exists ")
+
 	})
 }
 

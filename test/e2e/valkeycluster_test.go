@@ -120,7 +120,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating internal secret was created")
 			verifyInternalSecretsExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "internal-" + valkeyClusterName + "-acl")
+				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+valkeyClusterName+"-acl")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -663,6 +663,111 @@ spec:
 				}
 			}
 			Eventually(verifyClusterRecovery).Should(Succeed())
+		})
+	})
+
+	Context("when spec.containers is specified", Label("spec-containers-specified"), func() {
+		It("creates a Valkey Cluster deployment", func() {
+			valkeyClusterName = "valkeycluster-extra-containers"
+			metricsExporterImage := "oliver006/redis_exporter:v1.81.0"
+			additionalContainerName := "additional-container"
+			By("creating the CR")
+			valkeyYaml := fmt.Sprintf(`
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  exporter:
+    enabled: true
+  containers:
+    - name: metrics-exporter
+      image: %s
+    - name: %s
+      image: curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args: ["sleep 3600"]
+`, valkeyClusterName, metricsExporterImage, additionalContainerName)
+
+			// Create temporary YAML file
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyClusterName))
+			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer func() {
+				Expect(os.Remove(manifestFile)).To(Succeed())
+			}()
+
+			By("applying the ValkeyCluster CR")
+			cmd := exec.Command("kubectl", "apply", "-f", manifestFile)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to apply ValkeyCluster: %s", output))
+
+			By("waiting for deployment to be created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "-l", "app.kubernetes.io/instance="+valkeyClusterName)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
+				g.Expect(out).To(ContainSubstring(valkeyClusterName))
+			}).Should(Succeed())
+
+			By("verifying pod has 3 containers")
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyClusterName,
+					"-o", "jsonpath={.items[0].spec.containers[*].name}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod containers")
+				containers := strings.Fields(out)
+				g.Expect(containers).To(HaveLen(3), "Expected 3 containers in pod")
+				g.Expect(containers).To(ContainElement("valkey-server"), "Should have valkey-server container")
+				g.Expect(containers).To(ContainElement("metrics-exporter"), "Should have metrics-exporter container")
+				g.Expect(containers).To(ContainElement(additionalContainerName), "Should have extra container container")
+			}).Should(Succeed())
+
+			By("verifying metrics-exporter container has correct image")
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyClusterName,
+					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].image}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get exporter image")
+				g.Expect(out).To(Equal(metricsExporterImage), "Exporter should use the image from spec.containers")
+			}).Should(Succeed())
+
+			By("Waiting for pod to be running")
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyClusterName,
+					"-o", "jsonpath={.items[0].status.phase}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod status")
+				g.Expect(out).To(Equal("Running"), "Pod should be running")
+			}).Should(Succeed())
+
+			By("Verifying all containers are ready")
+			Eventually(func(g Gomega) {
+				args := []string{
+					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyClusterName,
+					"-o", "jsonpath={.items[0].status.containerStatuses[*].ready}",
+				}
+				cmd := exec.Command("kubectl", args...)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get container ready statuses")
+				readyStatuses := strings.Fields(out)
+				g.Expect(readyStatuses).To(HaveLen(3), "Should have 3 container statuses")
+				for _, status := range readyStatuses {
+					g.Expect(status).To(Equal("true"), "All containers should be ready")
+				}
+			}).Should(Succeed())
+
 		})
 	})
 })

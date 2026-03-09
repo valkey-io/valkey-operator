@@ -439,8 +439,11 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 
 // ensureDeployment creates a single Deployment if it doesn't already exist.
 func (r *ValkeyClusterReconciler) ensureDeployment(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shard int, nodeIndex int, expected int, created *int) error {
-	deployment := createClusterDeployment(cluster, shard, nodeIndex)
-	if err := controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
+	deployment, err := createClusterDeployment(cluster, shard, nodeIndex)
+	if err != nil {
+		return err
+	}
+	if err = controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
 		return err
 	}
 	if err := r.Create(ctx, deployment); err != nil {

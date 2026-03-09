@@ -17,16 +17,18 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Container {
+func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) ([]corev1.Container, error) {
 	image := DefaultImage
 	if cluster.Spec.Image != "" {
 		image = cluster.Spec.Image
@@ -121,7 +123,13 @@ func generateContainersDef(cluster *valkeyiov1alpha1.ValkeyCluster) []corev1.Con
 	if cluster.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(cluster))
 	}
-	return containers
+
+	// apply patch from the spec.Containers field
+	containers, err := mergePatchContainers(containers, cluster.Spec.Containers)
+	if err != nil {
+		return nil, err
+	}
+	return containers, nil
 }
 
 // deploymentName returns a deterministic, human-readable name for a Valkey
@@ -144,9 +152,11 @@ func deploymentName(clusterName string, shardIndex int, nodeIndex int) string {
 // and node index (e.g. "mycluster-0-0", "mycluster-1-2"). Two
 // labels (valkey.io/shard-index and valkey.io/node-index) provide selector
 // uniqueness so no two Deployments fight over the same Pod.
-func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *appsv1.Deployment {
-	containers := generateContainersDef(cluster)
-
+func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) (*appsv1.Deployment, error) {
+	containers, err := generateContainersDef(cluster)
+	if err != nil {
+		return nil, err
+	}
 	nodeLabels := labels(cluster)
 	nodeLabels[LabelShardIndex] = strconv.Itoa(shardIndex)
 	nodeLabels[LabelNodeIndex] = strconv.Itoa(nodeIndex)
@@ -206,5 +216,54 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex
 			},
 		},
 	}
-	return deployment
+	return deployment, nil
+}
+
+func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container, error) {
+	var output []corev1.Container
+
+	containersByName := make(map[string]corev1.Container)
+	for _, c := range patches {
+		containersByName[c.Name] = c
+	}
+	for _, c := range base {
+		patchContainer, ok := containersByName[c.Name]
+		if !ok {
+			output = append(output, c)
+			continue
+		}
+		containerBytes, err := json.Marshal(c)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for container %s: %w", c.Name, err)
+		}
+
+		patchBytes, err := json.Marshal(patchContainer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for patch container %s: %w", c.Name, err)
+		}
+
+		// Calculate the patch result.
+		jsonResult, err := strategicpatch.StrategicMergePatch(containerBytes, patchBytes, corev1.Container{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate merge patch for container %s: %w", c.Name, err)
+		}
+
+		var patchResult corev1.Container
+		if err := json.Unmarshal(jsonResult, &patchResult); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal merged container %s: %w", c.Name, err)
+		}
+
+		// Add the patch result and remove the corresponding key from the to do list.
+		output = append(output, patchResult)
+		delete(containersByName, c.Name)
+
+	}
+	for _, c := range patches {
+		if container, found := containersByName[c.Name]; found {
+			output = append(output, container)
+		}
+	}
+
+	return output, nil
+
 }

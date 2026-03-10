@@ -74,6 +74,11 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
+	// WorkloadType specifies whether ValkeyNodes create StatefulSets or Deployments.
+	// +kubebuilder:default=StatefulSet
+	// +optional
+	WorkloadType WorkloadType `json:"workloadType,omitempty"`
+
 	// Users, and ACL-related configuration; see valkeyacls_types.go
 	// +listType=map
 	// +listMapKey=name

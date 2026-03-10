@@ -401,10 +401,10 @@ spec:
 			Eventually(verifyScaledOut).Should(Succeed())
 		})
 
-		It("drains slots on scale down", func() {
+		It("drains slots on scale in", func() {
 			const initialShards = 3
-			const scaleDownShards = 2
-			valkeyClusterName = "valkeycluster-scaledown"
+			const scaleInShards = 2
+			valkeyClusterName = "valkeycluster-scalein"
 
 			By("creating a ValkeyCluster with 3 shards")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
@@ -414,15 +414,8 @@ metadata:
 spec:
   shards: %d
   replicas: 1
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
 `, valkeyClusterName, initialShards)
-			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaledown.yaml")
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scalein.yaml")
 			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
 			Expect(err).NotTo(HaveOccurred())
 			defer os.Remove(manifestFile)
@@ -446,13 +439,13 @@ spec:
 			}
 			Eventually(verifyReady, 10*time.Minute, 2*time.Second).Should(Succeed())
 
-			By(fmt.Sprintf("scaling the cluster down to %d shards", scaleDownShards))
+			By(fmt.Sprintf("scaling the cluster in to %d shards", scaleInShards))
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
-				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleDownShards))
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleInShards))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster shards")
 
-			By("verifying that only 2 primaries own slots after scale down")
+			By("verifying that only 2 primaries own slots after scale in")
 			verifySlotDrain := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
 					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
@@ -479,9 +472,9 @@ spec:
 						primariesWithSlots++
 					}
 				}
-				g.Expect(primariesWithSlots).To(Equal(scaleDownShards), "Expected only %d primaries to own slots after scale down", scaleDownShards)
+				g.Expect(primariesWithSlots).To(Equal(scaleInShards), "Expected only %d primaries to own slots after scale in", scaleInShards)
 			}
-			Eventually(verifySlotDrain, 10*time.Minute, 2*time.Second).Should(Succeed())
+			Eventually(verifySlotDrain).Should(Succeed())
 
 			By("verifying deployments for excess shard are deleted")
 			verifyDeployments := func(g Gomega) {
@@ -491,20 +484,20 @@ spec:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				deployments := utils.GetNonEmptyLines(output)
-				expectedCount := scaleDownShards * (1 + 1) // shards * (1 primary + 1 replica)
+				expectedCount := scaleInShards * (1 + 1) // shards * (1 primary + 1 replica)
 				g.Expect(deployments).To(HaveLen(expectedCount),
-					"Expected %d deployments after scale down, got %d: %v", expectedCount, len(deployments), deployments)
+					"Expected %d deployments after scale in, got %d: %v", expectedCount, len(deployments), deployments)
 			}
-			Eventually(verifyDeployments, 5*time.Minute, 2*time.Second).Should(Succeed())
+			Eventually(verifyDeployments).Should(Succeed())
 
-			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleDownShards))
-			verifyScaledDown := func(g Gomega) {
+			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleInShards))
+			verifyScaledIn := func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
-				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleDownShards)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleInShards)))
 			}
-			Eventually(verifyScaledDown, 10*time.Minute, 2*time.Second).Should(Succeed())
+			Eventually(verifyScaledIn).Should(Succeed())
 		})
 	})
 

@@ -112,8 +112,7 @@ func PlanDrainMove(src *ShardState, dsts []*ShardState, maxSlots int) (*SlotMove
 
 	var dstPrimary *NodeState
 	for _, shard := range dsts {
-		if p := shard.GetPrimaryNode(); p != nil {
-			dstPrimary = p
+		if dstPrimary = shard.GetPrimaryNode(); dstPrimary != nil {
 			break
 		}
 	}

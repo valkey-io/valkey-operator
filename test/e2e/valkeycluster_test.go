@@ -120,7 +120,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating internal secret was created")
 			verifyInternalSecretsExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "internal-" + valkeyClusterName + "-acl")
+				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+valkeyClusterName+"-acl")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}

@@ -768,6 +768,10 @@ spec:
 				}
 			}).Should(Succeed())
 
+			By("Cleaning up the test resources")
+			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
 		})
 	})
 })

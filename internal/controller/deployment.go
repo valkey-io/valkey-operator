@@ -258,6 +258,7 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 		delete(containersByName, c.Name)
 
 	}
+	// append containers left in containersByName in order
 	for _, c := range patches {
 		if container, found := containersByName[c.Name]; found {
 			output = append(output, container)

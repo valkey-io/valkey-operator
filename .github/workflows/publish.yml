@@ -1,0 +1,56 @@
+---
+name: publish
+on:
+  push:
+    branches:
+      - 'main'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish container images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Reclaim disk space
+        run: |
+          docker image prune --force --all
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+      - name: Install Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version: '${{ env.golang-version }}'
+          check-latest: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      # TODO: Decide where to publish images.
+      # - name: Login to ghcr.io
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.repository_owner }}
+      # - name: Extract metadata (tags, labels) for Docker
+      #   id: meta
+      #   uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+      #   with:
+      #     images: valkey/valkey-operator
+      - name: Publish
+        id: publish
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64
+          # TODO: Publish first image.
+          # tags: ${{ steps.meta.outputs.tags }}
+          # labels: ${{ steps.meta.outputs.labels }}
+      - name: Show docker images
+        run: docker images

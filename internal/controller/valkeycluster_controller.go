@@ -721,20 +721,28 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 	log := logf.FromContext(ctx)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
-			// Get known nodes that are failing.
 			for _, failing := range node.GetFailingNodes() {
 				idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == failing.Address })
-				if idx == -1 {
-					// Could not find a pod with the address of a failing node. Lets forget this node.
-					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
-					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
-						log.Error(err, "command failed: CLUSTER FORGET")
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
-					} else {
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
-					}
+				if idx != -1 {
+					continue
 				}
-
+				// A live replica still considers this failing node its
+				// master. Forgetting it from the other masters now would
+				// remove it from their node tables and prevent them from
+				// voting in the auto-failover election, permanently
+				// blocking the replica's promotion.
+				if state.HasReplicaOf(failing.Id) {
+					log.V(1).Info("skipping forget; failover pending for node",
+						"address", failing.Address, "Id", failing.Id)
+					continue
+				}
+				log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
+				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
+					log.Error(err, "command failed: CLUSTER FORGET")
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
+				} else {
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
+				}
 			}
 		}
 	}

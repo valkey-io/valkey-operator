@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -373,4 +376,124 @@ func TestBuildExporterContainer(t *testing.T) {
 		require.Len(t, c.Args, 1)
 		assert.Contains(t, c.Args[0], "--redis.addr=localhost:6379")
 	})
+}
+
+func TestValkeyNodeLabels_WithClusterLabels(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "default")
+	node.Labels = map[string]string{
+		"valkey.io/cluster":     "mycluster",
+		"valkey.io/shard-index": "0",
+		"valkey.io/node-index":  "0",
+	}
+	got := valkeyNodeLabels(node)
+	assert.Equal(t, "mycluster", got["valkey.io/cluster"])
+	assert.Equal(t, "0", got["valkey.io/shard-index"])
+	assert.Equal(t, "0", got["valkey.io/node-index"])
+}
+
+func TestValkeyNodeLabels_WithoutClusterLabels(t *testing.T) {
+	node := newTestValkeyNode("standalone", "default")
+	got := valkeyNodeLabels(node)
+	_, hasCluster := got["valkey.io/cluster"]
+	_, hasShard := got["valkey.io/shard-index"]
+	_, hasNode := got["valkey.io/node-index"]
+	assert.False(t, hasCluster, "should not have cluster label when not set on CR")
+	assert.False(t, hasShard, "should not have shard-index label when not set on CR")
+	assert.False(t, hasNode, "should not have node-index label when not set on CR")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.UsersACLSecretName = "mynode-internal"
+	pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+
+	// Volumes: scripts, valkey-conf, users-acl
+	require.Len(t, pts.Spec.Volumes, 3)
+	aclVol := pts.Spec.Volumes[2]
+	assert.Equal(t, "users-acl", aclVol.Name)
+	require.NotNil(t, aclVol.Secret)
+	assert.Equal(t, "mynode-internal", aclVol.Secret.SecretName)
+
+	// VolumeMounts on the server container (always Containers[0])
+	c := pts.Spec.Containers[0]
+	require.Len(t, c.VolumeMounts, 3)
+	aclMount := c.VolumeMounts[2]
+	assert.Equal(t, "users-acl", aclMount.Name)
+	assert.Equal(t, "/config/users", aclMount.MountPath)
+	assert.True(t, aclMount.ReadOnly)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	// UsersACLSecretName is intentionally empty
+	pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+
+	require.Len(t, pts.Spec.Volumes, 2, "should only have scripts and valkey-conf volumes")
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 2, "should only have scripts and valkey-conf mounts")
+}
+
+func TestLivenessCheckScript(t *testing.T) {
+	scriptPath := filepath.Join("scripts", "liveness-check.sh")
+
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "pong", response: "PONG", wantErr: false},
+		{name: "loading", response: "LOADING 123", wantErr: false},
+		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: false},
+		{name: "error", response: "ERR something bad", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadinessCheckScript(t *testing.T) {
+	scriptPath := filepath.Join("scripts", "readiness-check.sh")
+
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "pong", response: "PONG", wantErr: false},
+		{name: "loading", response: "LOADING 123", wantErr: true},
+		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: true},
+		{name: "error", response: "ERR something bad", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func runProbeScript(t *testing.T, scriptPath, response string) error {
+	t.Helper()
+
+	// Stub valkey-cli so the script uses the response we provide.
+	binDir := t.TempDir()
+	valkeyCli := filepath.Join(binDir, "valkey-cli")
+	script := []byte("#!/bin/sh\n" +
+		"echo \"${VALKEY_RESPONSE:-PONG}\"\n")
+	if err := os.WriteFile(valkeyCli, script, 0o755); err != nil {
+		t.Fatalf("write valkey-cli stub: %v", err)
+	}
+
+	cmd := exec.Command(scriptPath)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"VALKEY_RESPONSE="+response,
+	)
+	return cmd.Run()
 }

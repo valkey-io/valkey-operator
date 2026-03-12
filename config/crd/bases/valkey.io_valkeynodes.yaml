@@ -11,8 +11,6 @@ spec:
     kind: ValkeyNode
     listKind: ValkeyNodeList
     plural: valkeynodes
-    shortNames:
-    - vkn
     singular: valkeynode
   scope: Namespaced
   versions:
@@ -1159,6 +1157,12 @@ spec:
                       type: string
                   type: object
                 type: array
+              usersACLSecretName:
+                description: |-
+                  UsersACLSecretName is the name of the Secret containing the ACL user
+                  file. When set, mounts a users-acl volume from this Secret so the
+                  container can load aclfile /config/users/users.acl.
+                type: string
               workloadType:
                 default: StatefulSet
                 description: |-

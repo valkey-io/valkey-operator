@@ -49,7 +49,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 	Context("when a ValkeyCluster CR is applied", func() {
 		It("creates a Valkey Cluster deployment", func() {
-			valkeyClusterName = "valkeycluster-sample"
+			valkeyClusterName = "cluster-sample"
 
 			By("creating the CR")
 			cmd := exec.Command("kubectl", "delete", "-f", "config/samples/v1alpha1_valkeycluster.yaml", "--ignore-not-found=true")
@@ -82,22 +82,22 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyConfigMapExists).Should(Succeed())
 
-			By("validating Deployments")
-			verifyDeploymentsExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+			By("validating ValkeyNodes")
+			verifyValkeyNodesExist := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				deployments := utils.GetNonEmptyLines(output)
-				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments")
+				nodes := utils.GetNonEmptyLines(output)
+				g.Expect(nodes).To(HaveLen(6), "Expected 6 ValkeyNodes")
 			}
-			Eventually(verifyDeploymentsExists).Should(Succeed())
+			Eventually(verifyValkeyNodesExist).Should(Succeed())
 
 			By("validating Pods")
 			verifyPodStatuses := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
 						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
 						"{{ $.metadata.name}} {{ \"\\n\" }}"+
@@ -109,22 +109,14 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
-			By("validating valkey-server containers have resources configuration")
+			By("validating server containers have resources configuration")
 			cmd = exec.Command("kubectl", "get", "pods",
-				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
-				"-o", "jsonpath={.items[0].spec.containers[?(@.name=='valkey-server')].resources}",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+				"-o", "jsonpath={.items[0].spec.containers[?(@.name=='server')].resources}",
 			)
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve pod's information")
 			Expect(output).To(MatchJSON(`{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}`), "Incorrect pod resources configuration")
-
-			By("validating internal secret was created")
-			verifyInternalSecretsExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+valkeyClusterName+"-acl")
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-			}
-			Eventually(verifyInternalSecretsExists).Should(Succeed())
 
 			By("validating the ValkeyCluster CR status")
 			verifyCrStatus := func(g Gomega) {
@@ -174,7 +166,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Infrastructure Events (Normal)
 				g.Expect(normalEvents["ServiceCreated"]).To(BeTrue(), "ServiceCreated event should be emitted")
 				g.Expect(normalEvents["ConfigMapCreated"]).To(BeTrue(), "ConfigMapCreated event should be emitted")
-				g.Expect(normalEvents["DeploymentCreated"]).To(BeTrue(), "DeploymentCreated event should be emitted")
+				g.Expect(normalEvents["ValkeyNodeCreated"]).To(BeTrue(), "ValkeyNodeCreated event should be emitted")
 
 				// ReplicaCreated should be emitted for clusters with replicas > 0
 				// Note: This event may not always be captured due to rate-limiting issues
@@ -212,7 +204,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(warningEvents["ServiceUpdateFailed"]).To(BeFalse(), "ServiceUpdateFailed event should not be emitted")
 				g.Expect(warningEvents["ConfigMapUpdateFailed"]).To(BeFalse(), "ConfigMapUpdateFailed event should not be emitted")
 				g.Expect(warningEvents["ConfigMapCreationFailed"]).To(BeFalse(), "ConfigMapCreationFailed event should not be emitted")
-				g.Expect(warningEvents["DeploymentCreationFailed"]).To(BeFalse(), "DeploymentCreationFailed event should not be emitted")
+				g.Expect(warningEvents["ValkeyNodeCreationFailed"]).To(BeFalse(), "ValkeyNodeCreationFailed event should not be emitted")
 				g.Expect(warningEvents["ClusterMeetFailed"]).To(BeFalse(), "ClusterMeetFailed event should not be emitted")
 				g.Expect(warningEvents["SlotAssignmentFailed"]).To(BeFalse(), "SlotAssignmentFailed event should not be emitted")
 				g.Expect(warningEvents["NodeForgetFailed"]).To(BeFalse(), "NodeForgetFailed event should not be emitted")
@@ -242,7 +234,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Verify key events appear in describe output
 				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
-				g.Expect(output).To(ContainSubstring("DeploymentCreated"), "DeploymentCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("ValkeyNodeCreated"), "ValkeyNodeCreated event should appear in describe")
 				// TODO PrimaryCreated, ClusterMeet events are not always captured due to rate-limiting issues
 				// fix this removing events which are not important
 				// ReplicaCreated and ClusterReady may not always appear in describe output due to:
@@ -281,10 +273,43 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
 
+		})
+
+		It("creates a cluster with custom users", func() {
+			const withUserClusterName = "cluster-sample-with-users"
+			const withUserSampleFile = "config/samples/v1alpha1_valkeycluster-with-user.yaml"
+
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "-f", withUserSampleFile, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating the CR with users")
+			cmd := exec.Command("kubectl", "delete", "-f", withUserSampleFile, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "apply", "-f", withUserSampleFile)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster with users")
+
+			By("waiting for the cluster to be ready")
+			verifyReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(withUserClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}
+			Eventually(verifyReady).Should(Succeed())
+
+			By("validating internal secret was created")
+			verifyInternalSecretExists := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyInternalSecretExists).Should(Succeed())
+
 			By("verifying created users")
 			verifyCreatedUsers := func(g Gomega) {
-				// Start a Valkey client pod to access the cluster and get its status.
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", withUserClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -306,7 +331,6 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// There should be 3 defined users
 				g.Expect(output).To(SatisfyAll(
 					ContainSubstring("user alice on"),
 					ContainSubstring("user bob on nopass"),
@@ -363,7 +387,7 @@ spec:
 			By("verifying all primaries receive slots after scale out")
 			verifySlotRebalance := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "jsonpath={.items[0].metadata.name}")
 				podName, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -448,7 +472,7 @@ spec:
 			By("verifying that only 2 primaries own slots after scale in")
 			verifySlotDrain := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "jsonpath={.items[0].metadata.name}")
 				podName, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -474,21 +498,21 @@ spec:
 				}
 				g.Expect(primariesWithSlots).To(Equal(scaleInShards), "Expected only %d primaries to own slots after scale in", scaleInShards)
 			}
-			Eventually(verifySlotDrain).Should(Succeed())
+			Eventually(verifySlotDrain, 10*time.Minute, 2*time.Second).Should(Succeed())
 
-			By("verifying deployments for excess shard are deleted")
-			verifyDeployments := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+			By("verifying ValkeyNodes for excess shard are deleted")
+			verifyValkeyNodes := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				deployments := utils.GetNonEmptyLines(output)
+				nodes := utils.GetNonEmptyLines(output)
 				expectedCount := scaleInShards * (1 + 1) // shards * (1 primary + 1 replica)
-				g.Expect(deployments).To(HaveLen(expectedCount),
-					"Expected %d deployments after scale in, got %d: %v", expectedCount, len(deployments), deployments)
+				g.Expect(nodes).To(HaveLen(expectedCount),
+					"Expected %d ValkeyNodes after scale in, got %d: %v", expectedCount, len(nodes), nodes)
 			}
-			Eventually(verifyDeployments).Should(Succeed())
+			Eventually(verifyValkeyNodes, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 			By(fmt.Sprintf("waiting for the cluster to report %d ready shards", scaleInShards))
 			verifyScaledIn := func(g Gomega) {
@@ -497,7 +521,7 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(scaleInShards)))
 			}
-			Eventually(verifyScaledIn).Should(Succeed())
+			Eventually(verifyScaledIn, 10*time.Minute, 2*time.Second).Should(Succeed())
 		})
 	})
 
@@ -533,15 +557,15 @@ spec:
 			}
 			Eventually(verifyConfigMapRemoved).Should(Succeed())
 
-			By("validating that no Deployment exist")
-			verifyDeploymentsRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName))
+			By("validating that no ValkeyNode exists")
+			verifyValkeyNodesRemoved := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName))
 				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve Deployments")
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyNodes")
 				g.Expect(output).To(ContainSubstring("No resources found"))
 			}
-			Eventually(verifyDeploymentsRemoved).Should(Succeed())
+			Eventually(verifyValkeyNodesRemoved).Should(Succeed())
 		})
 	})
 
@@ -586,20 +610,23 @@ spec:
 			}
 			Eventually(verifyClusterReady).Should(Succeed())
 
-			By("getting a replica deployment to delete")
-			var deploymentToDelete string
-			getDeployment := func(g Gomega) {
-				var err error
-				deploymentToDelete, err = utils.GetReplicaDeployment(fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName))
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a replica deployment")
-				g.Expect(deploymentToDelete).NotTo(BeEmpty())
+			By("getting a replica statefulset to delete")
+			var statefulsetToDelete string
+			getStatefulset := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulsets",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s,valkey.io/node-index=1", degradedClusterName),
+					"-o", "go-template={{ (index .items 0).metadata.name }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a replica statefulset")
+				g.Expect(output).NotTo(BeEmpty())
+				statefulsetToDelete = output
 			}
-			Eventually(getDeployment).Should(Succeed())
+			Eventually(getStatefulset).Should(Succeed())
 
-			By(fmt.Sprintf("deleting deployment %s to simulate replica loss", deploymentToDelete))
-			cmd = exec.Command("kubectl", "delete", "deployment", deploymentToDelete, "--wait=false")
+			By(fmt.Sprintf("deleting statefulset %s to simulate replica loss", statefulsetToDelete))
+			cmd = exec.Command("kubectl", "delete", "statefulset", statefulsetToDelete, "--wait=false")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to delete deployment")
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete statefulset")
 
 			By("waiting for the cluster to detect the deployment loss and start recovery")
 			verifyDegradedState := func(g Gomega) {
@@ -621,18 +648,18 @@ spec:
 			Eventually(verifyDegradedState).Should(Succeed())
 			By("waiting for the operator to recreate the deployment and recover the cluster")
 			verifyClusterRecovery := func(g Gomega) {
-				// First, verify all deployments are present (should be 6 total for 3 shards with 1 replica each)
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
+				// First, verify all ValkeyNodes are present (should be 6 total for 3 shards with 1 replica each)
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", degradedClusterName),
 					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				deployments := utils.GetNonEmptyLines(output)
-				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments after operator recreates the deleted one")
+				nodes := utils.GetNonEmptyLines(output)
+				g.Expect(nodes).To(HaveLen(6), "Expected 6 ValkeyNodes after operator recreates the deleted one")
 
 				// Verify all pods are ready
 				cmd = exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", degradedClusterName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", degradedClusterName),
 					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
 						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
 						"{{ $.metadata.name}} {{ \"\\n\" }}"+
@@ -707,36 +734,36 @@ spec:
 			}
 			Eventually(verifyClusterReady).Should(Succeed())
 
-			By("finding a primary (node-index=0) deployment to delete")
-			var primaryDeployment string
-			getPrimaryDeployment := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s,valkey.io/node-index=0", failoverClusterName),
+			By("finding a primary (node-index=0) statefulset to delete")
+			var primaryStatefulset string
+			getPrimaryStatefulset := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulsets",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s,valkey.io/node-index=0", failoverClusterName),
 					"-o", "go-template={{ (index .items 0).metadata.name }}")
 				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a primary deployment")
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to find a primary statefulset")
 				g.Expect(output).NotTo(BeEmpty())
-				primaryDeployment = output
+				primaryStatefulset = output
 			}
-			Eventually(getPrimaryDeployment).Should(Succeed())
+			Eventually(getPrimaryStatefulset).Should(Succeed())
 
-			By(fmt.Sprintf("deleting primary deployment %s to trigger Valkey failover", primaryDeployment))
-			cmd = exec.Command("kubectl", "delete", "deployment", primaryDeployment, "--wait=false")
+			By(fmt.Sprintf("deleting primary statefulset %s to trigger Valkey failover", primaryStatefulset))
+			cmd = exec.Command("kubectl", "delete", "statefulset", primaryStatefulset, "--wait=false")
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to delete primary deployment")
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete primary statefulset")
 
 			By("waiting for the operator to recreate the deployment and the cluster to recover")
 			verifyClusterRecovery := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployments",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", failoverClusterName),
 					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				deployments := utils.GetNonEmptyLines(output)
-				g.Expect(deployments).To(HaveLen(6), "Expected 6 Deployments after operator recreates the deleted one")
+				nodes := utils.GetNonEmptyLines(output)
+				g.Expect(nodes).To(HaveLen(6), "Expected 6 ValkeyNodes after operator recreates the deleted one")
 
 				cmd = exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", failoverClusterName),
 					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
 						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
 						"{{ $.metadata.name}} {{ \"\\n\" }}"+
@@ -762,6 +789,96 @@ spec:
 				}
 			}
 			Eventually(verifyClusterRecovery).Should(Succeed())
+		})
+	})
+
+	Context("when a ValkeyCluster uses Deployment workload type", func() {
+		const deploymentClusterName = "cluster-sample-deployment"
+		const deploymentSampleFile = "config/samples/v1alpha1_valkeycluster-deployment.yaml"
+
+		AfterEach(func() {
+			specReport := CurrentSpecReport()
+			if specReport.Failed() {
+				utils.CollectDebugInfo(namespace)
+			}
+		})
+
+		It("creates a functioning cluster backed by Deployments", func() {
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "-f", deploymentSampleFile, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating the CR")
+			cmd := exec.Command("kubectl", "delete", "-f", deploymentSampleFile, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "apply", "-f", deploymentSampleFile)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create Deployment-backed ValkeyCluster CR")
+
+			By("validating ValkeyNodes are created")
+			verifyValkeyNodesExist := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", deploymentClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				nodes := utils.GetNonEmptyLines(output)
+				g.Expect(nodes).To(HaveLen(6), "Expected 6 ValkeyNodes")
+			}
+			Eventually(verifyValkeyNodesExist).Should(Succeed())
+
+			By("validating Pods become ready")
+			verifyPodStatuses := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", deploymentClusterName),
+					"-o", "go-template={{ range .items }}{{ range .status.conditions }}"+
+						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}"+
+						"{{ $.metadata.name}} {{ \"\\n\" }}"+
+						"{{ end }}{{ end }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podStatuses := utils.GetNonEmptyLines(output)
+				g.Expect(podStatuses).To(HaveLen(6), "Expected 6 Pods to be ready")
+			}
+			Eventually(verifyPodStatuses).Should(Succeed())
+
+			By("validating the ValkeyCluster CR reaches Ready state")
+			verifyCrStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(deploymentClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}
+			Eventually(verifyCrStatus).Should(Succeed())
+
+			By("validating cluster access")
+			verifyClusterAccess := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", deploymentClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
+			}
+			Eventually(verifyClusterAccess).Should(Succeed())
 		})
 	})
 })

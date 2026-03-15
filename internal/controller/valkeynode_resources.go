@@ -34,13 +34,17 @@ func valkeyNodeResourceName(node *valkeyiov1alpha1.ValkeyNode) string {
 // valkeyNodeLabels returns the standard Kubernetes recommended labels for
 // child resources of the given ValkeyNode.
 func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":       "valkey",
-		"app.kubernetes.io/instance":   node.Name,
-		"app.kubernetes.io/component":  "valkey-node",
-		"app.kubernetes.io/part-of":    "valkey",
-		"app.kubernetes.io/managed-by": "valkey-operator",
+	l := baseLabels(node.Name, "valkey-node")
+	for _, key := range []string{
+		LabelCluster,
+		LabelShardIndex,
+		LabelNodeIndex,
+	} {
+		if v, ok := node.Labels[key]; ok {
+			l[key] = v
+		}
 	}
+	return l
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
@@ -178,39 +182,58 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		configMapName = valkeyNodeResourceName(node)
 	}
 
-	return corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: labels,
-		},
-		Spec: corev1.PodSpec{
-			Containers:   containers,
-			NodeSelector: node.Spec.NodeSelector,
-			Affinity:     node.Spec.Affinity,
-			Tolerations:  node.Spec.Tolerations,
-			Volumes: []corev1.Volume{
-				{
-					Name: "scripts",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: configMapName,
-							},
-							DefaultMode: func(i int32) *int32 { return &i }(0755),
+	podSpec := corev1.PodSpec{
+		Containers:   containers,
+		NodeSelector: node.Spec.NodeSelector,
+		Affinity:     node.Spec.Affinity,
+		Tolerations:  node.Spec.Tolerations,
+		Volumes: []corev1.Volume{
+			{
+				Name: "scripts",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMapName,
 						},
+						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
-				{
-					Name: "valkey-conf",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: configMapName,
-							},
+			},
+			{
+				Name: "valkey-conf",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMapName,
 						},
 					},
 				},
 			},
 		},
+	}
+
+	if node.Spec.UsersACLSecretName != "" {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: "users-acl",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: node.Spec.UsersACLSecretName,
+				},
+			},
+		})
+		// Containers[0] is always the server container (exporter is appended after it).
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "users-acl",
+			MountPath: "/config/users",
+			ReadOnly:  true,
+		})
+	}
+
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: labels,
+		},
+		Spec: podSpec,
 	}
 }
 

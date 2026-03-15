@@ -102,39 +102,36 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 	}
 }
 
-// ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
+// ensureStatefulSet creates the StatefulSet for the ValkeyNode if it does not
+// already exist. Spec updates are handled in a separate PR via CreateOrUpdate.
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	desired := buildValkeyNodeStatefulSet(node)
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, desired); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return r.Update(ctx, desired)
-		}
+	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
 }
 
-// ensureDeployment creates or updates the Deployment for the ValkeyNode.
+// ensureDeployment creates the Deployment for the ValkeyNode if it does not
+// already exist. Spec updates are handled in a separate PR via CreateOrUpdate.
 func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	desired := buildValkeyNodeDeployment(node)
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, desired); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return r.Update(ctx, desired)
-		}
+	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
 }
 
-// ensureConfigMap creates or updates the ConfigMap for the ValkeyNode, containing
-// the valkey.conf and probe scripts. If ScriptsConfigMapName is set, the ConfigMap
-// is assumed to be managed externally and this step is skipped.
+// ensureConfigMap creates the ConfigMap for the ValkeyNode if it does not
+// already exist. If ScriptsConfigMapName is set, the ConfigMap is assumed to
+// be managed externally and this step is skipped.
+// Spec updates are handled in a separate PR via CreateOrUpdate.
 func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	if node.Spec.ScriptsConfigMapName != "" {
 		// ConfigMap is provided externally (e.g. by ValkeyCluster), skip creation.
@@ -147,10 +144,7 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, desired); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return r.Update(ctx, desired)
-		}
+	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil

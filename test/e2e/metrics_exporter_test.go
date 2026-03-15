@@ -75,18 +75,18 @@ spec:
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to apply ValkeyCluster: %s", output))
 
-			By("waiting for deployment to be created")
+			By("waiting for ValkeyNodes to be created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "-l", "app.kubernetes.io/instance="+valkeyName)
+				cmd := exec.Command("kubectl", "get", "valkeynodes", "-l", "valkey.io/cluster="+valkeyName)
 				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
+				g.Expect(err).NotTo(HaveOccurred(), "ValkeyNodes not found")
 				g.Expect(out).To(ContainSubstring(valkeyName))
 			}).Should(Succeed())
 
-			By("Verifying pod has 2 containers (valkey-server and metrics-exporter)")
+			By("Verifying pod has 2 containers (server and metrics-exporter)")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[*].name}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -94,14 +94,14 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod containers")
 				containers := strings.Fields(out)
 				g.Expect(containers).To(HaveLen(2), "Expected 2 containers in pod")
-				g.Expect(containers).To(ContainElement("valkey-server"), "Should have valkey-server container")
+				g.Expect(containers).To(ContainElement("server"), "Should have server container")
 				g.Expect(containers).To(ContainElement("metrics-exporter"), "Should have metrics-exporter container")
 			}).Should(Succeed())
 
 			By("Verifying metrics-exporter container uses correct image")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].image}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -113,7 +113,7 @@ spec:
 			By("Verifying metrics-exporter container has correct port")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].ports[0].containerPort}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -125,7 +125,7 @@ spec:
 			By("Verifying resource requests are set correctly")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].resources.requests.memory}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -137,7 +137,7 @@ spec:
 			By("Verifying resource limits are set correctly")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].resources.limits.memory}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -149,7 +149,7 @@ spec:
 			By("Waiting for pod to be running")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].status.phase}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -161,7 +161,7 @@ spec:
 			By("Verifying both containers are ready")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].status.containerStatuses[*].ready}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -178,7 +178,7 @@ spec:
 			var podName string
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].metadata.name}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -314,18 +314,18 @@ spec:
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to apply ValkeyCluster: %s", output))
 
-			By("Waiting for deployment to be created")
+			By("Waiting for ValkeyNodes to be created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", "-l", "app.kubernetes.io/instance="+valkeyName)
+				cmd := exec.Command("kubectl", "get", "valkeynodes", "-l", "valkey.io/cluster="+valkeyName)
 				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Deployment not found")
+				g.Expect(err).NotTo(HaveOccurred(), "ValkeyNodes not found")
 				g.Expect(out).To(ContainSubstring(valkeyName))
 			}).Should(Succeed())
 
-			By("Verifying pod has only 1 container (valkey-server)")
+			By("Verifying pod has only 1 container (server)")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[*].name}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -333,13 +333,13 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod containers")
 				containers := strings.Fields(out)
 				g.Expect(containers).To(HaveLen(1), "Expected only 1 container in pod")
-				g.Expect(containers[0]).To(Equal("valkey-server"), "Should only have valkey-server container")
+				g.Expect(containers[0]).To(Equal("server"), "Should only have server container")
 			}).Should(Succeed())
 
 			By("Verifying metrics-exporter container is NOT present")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].spec.containers[*].name}",
 				}
 				cmd := exec.Command("kubectl", args...)
@@ -351,7 +351,7 @@ spec:
 			By("Waiting for pod to be running")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "app.kubernetes.io/instance=" + valkeyName,
+					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
 					"-o", "jsonpath={.items[0].status.phase}",
 				}
 				cmd := exec.Command("kubectl", args...)

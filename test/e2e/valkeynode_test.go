@@ -50,13 +50,6 @@ metadata:
   name: %s
 spec:
   workloadType: %s
-  resources:
-    requests:
-      memory: "128Mi"
-      cpu: "50m"
-    limits:
-      memory: "256Mi"
-      cpu: "200m"
 `, name, workloadType)
 
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -245,13 +238,6 @@ metadata:
   name: %s
 spec:
   scriptsConfigMapName: %s
-  resources:
-    requests:
-      memory: "128Mi"
-      cpu: "50m"
-    limits:
-      memory: "256Mi"
-      cpu: "200m"
 `, nodeName, cmName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")

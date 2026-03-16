@@ -108,7 +108,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(events).ToNot(BeEmpty())
 			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
-			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("ValkeyNodeCreated")))
 
 		})
 	})
@@ -279,7 +279,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(events).To(ContainElement(ContainSubstring("Created ConfigMap with configuration")))
 		})
 
-		It("should emit DeploymentCreated event on successful deployment creation", func() {
+		It("should emit ValkeyNodeCreated event on successful ValkeyNode creation", func() {
 			cluster := &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "event-test-cluster",
@@ -293,15 +293,14 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			err := r.upsertDeployments(ctx, cluster)
+			err := r.upsertValkeyNodes(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)
-			Expect(events).To(ContainElement(ContainSubstring("DeploymentCreated")))
+			Expect(events).To(ContainElement(ContainSubstring("ValkeyNodeCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("Normal")))
-			deploymentEvents := filterEventsByType(events, "DeploymentCreated")
-			Expect(len(deploymentEvents)).To(BeNumerically(">", 1))
-			Expect(deploymentEvents[0]).To(ContainSubstring("Normal"))
+			nodeEvents := filterEventsByType(events, "ValkeyNodeCreated")
+			Expect(len(nodeEvents)).To(BeNumerically(">", 1))
 		})
 	})
 
@@ -364,16 +363,15 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			// Trigger deployment creation to verify formatted message
-			err := r.upsertDeployments(ctx, cluster)
+			err := r.upsertValkeyNodes(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			events := collectEvents(fakeRecorder)
-			deploymentEvents := filterEvents(events, "DeploymentCreated")
-			Expect(deploymentEvents).ToNot(BeEmpty())
+			nodeEvents := filterEvents(events, "ValkeyNodeCreated")
+			Expect(nodeEvents).ToNot(BeEmpty())
 
-			for _, event := range deploymentEvents {
-				Expect(event).To(MatchRegexp(`Created deployment for shard \d+ node \d+ \(\d+ of \d+\)`))
+			for _, event := range nodeEvents {
+				Expect(event).To(MatchRegexp(`Created ValkeyNode for shard \d+ node \d+ \(\d+ of \d+\)`))
 			}
 		})
 	})

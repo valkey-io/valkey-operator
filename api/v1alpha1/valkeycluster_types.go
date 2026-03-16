@@ -151,31 +151,30 @@ const (
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing      = "Initializing"
-	ReasonReconciling       = "Reconciling"
-	ReasonClusterHealthy    = "ClusterHealthy"
-	ReasonServiceError      = "ServiceError"
-	ReasonConfigMapError    = "ConfigMapError"
-	ReasonDeploymentError   = "DeploymentError"
-	ReasonPodListError      = "PodListError"
-	ReasonAddingNodes       = "AddingNodes"
-	ReasonNodeAddFailed     = "NodeAddFailed"
-	ReasonMissingShards     = "MissingShards"
-	ReasonMissingReplicas   = "MissingReplicas"
-	ReasonReconcileComplete = "ReconcileComplete"
-	ReasonTopologyComplete  = "TopologyComplete"
-	ReasonAllSlotsAssigned  = "AllSlotsAssigned"
-	ReasonSlotsUnassigned   = "SlotsUnassigned"
-	ReasonPrimaryLost       = "PrimaryLost"
-	ReasonNoSlots           = "NoSlotsAvailable"
-	ReasonRebalancingSlots  = "RebalancingSlots"
-	ReasonRebalanceFailed   = "RebalanceFailed"
-	ReasonUsersAclError     = "UsersACLError"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	ReasonMissingShards       = "MissingShards"
+	ReasonMissingReplicas     = "MissingReplicas"
+	ReasonReconcileComplete   = "ReconcileComplete"
+	ReasonTopologyComplete    = "TopologyComplete"
+	ReasonAllSlotsAssigned    = "AllSlotsAssigned"
+	ReasonSlotsUnassigned     = "SlotsUnassigned"
+	ReasonPrimaryLost         = "PrimaryLost"
+	ReasonNoSlots             = "NoSlotsAvailable"
+	ReasonRebalancingSlots    = "RebalancingSlots"
+	ReasonRebalanceFailed     = "RebalanceFailed"
+	ReasonUsersAclError       = "UsersACLError"
 )
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=vkc
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"

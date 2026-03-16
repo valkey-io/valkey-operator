@@ -103,7 +103,7 @@ spec:
 			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 					"-o", "jsonpath={.items[*].status.phase}",
 				)
 				output, err := utils.Run(cmd)
@@ -112,7 +112,7 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
-			output, err = getPodToleration(fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
+			output, err = getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
 			Expect(output).To(MatchJSON(`[
 			{"effect":"NoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
@@ -122,7 +122,7 @@ spec:
 
 			By("verifying the pods' placement")
 			cmd = exec.Command("kubectl", "get", "pods",
-				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 				"-o", "go-template={{ range .items}}{{ .spec.nodeName }} | {{ end }}",
 			)
 			output, err = utils.Run(cmd)
@@ -184,7 +184,7 @@ spec:
 			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 					"-o", "jsonpath={.items[*].status.phase}",
 				)
 				output, err := utils.Run(cmd)
@@ -193,7 +193,7 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
-			output, err = getPodToleration(fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName))
+			output, err = getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
 			Expect(output).To(MatchJSON(`[
 			{"effect":"PreferNoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
@@ -204,7 +204,7 @@ spec:
 
 			By("verifying the pods' placement")
 			cmd = exec.Command("kubectl", "get", "pods",
-				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 				"-o", "go-template={{ range .items}}{{ .spec.nodeName }} | {{ end }}",
 			)
 			output, err = utils.Run(cmd)
@@ -260,7 +260,7 @@ spec:
 			By("validating that the pods are running")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 					"-o", "jsonpath={.items[*].status.phase}",
 				)
 				output, err := utils.Run(cmd)
@@ -271,7 +271,7 @@ spec:
 			By("verifying the pods placement")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "pods",
-					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyName),
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
 					"-o", "go-template={{ range .items}}{{ .spec.nodeName }} | {{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pods' node placement")

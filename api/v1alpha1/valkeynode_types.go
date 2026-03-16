@@ -68,6 +68,18 @@ type ValkeyNodeSpec struct {
 	// ScriptsConfigMapName specifies the name of the ConfigMap that contains the scripts for the ValkeyNode.
 	// +optional
 	ScriptsConfigMapName string `json:"scriptsConfigMapName,omitempty"`
+
+	// UsersACLSecretName is the name of the Secret containing the ACL user
+	// file. When set, mounts a users-acl volume from this Secret so the
+	// container can load aclfile /config/users/users.acl.
+	// +optional
+	UsersACLSecretName string `json:"usersACLSecretName,omitempty"`
+
+	// Containers allows patching the default containers via a strategic merge
+	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
+	// by name; any container name not present in the defaults is appended.
+	// +optional
+	Containers []corev1.Container `json:"containers,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
@@ -109,7 +121,6 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=vkn
 
 // ValkeyNode is the Schema for the valkeynodes API.
 // ValkeyNode is an internal CRD. Users should not create ValkeyNodes directly.

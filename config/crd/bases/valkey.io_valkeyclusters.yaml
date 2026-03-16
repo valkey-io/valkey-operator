@@ -11,8 +11,6 @@ spec:
     kind: ValkeyCluster
     listKind: ValkeyClusterList
     plural: valkeyclusters
-    shortNames:
-    - vkc
     singular: valkeycluster
   scope: Namespaced
   versions:

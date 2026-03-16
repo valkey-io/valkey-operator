@@ -26,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -66,6 +65,7 @@ var scripts embed.FS
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
@@ -80,11 +80,11 @@ var scripts embed.FS
 //  1. Ensure the headless Service exists (upsertService).
 //  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one Deployment per (shard, node) pair exists, each named
-//     deterministically (e.g. mycluster-0-0) (upsertDeployments).
-//  4. List all pods and build the Valkey cluster state by connecting to each
+//  3. Ensure one ValkeyNode per (shard, node) pair exists, each named
+//     deterministically (e.g. mycluster-0-0) (upsertValkeyNodes).
+//  4. List all ValkeyNodes and build the Valkey cluster state by connecting to each
 //     node and scraping CLUSTER INFO / CLUSTER NODES.
-//  5. Forget stale nodes that no longer have a backing pod.
+//  5. Forget stale nodes that no longer have a backing ValkeyNode.
 //  6. Phase 1 – MEET: batch-introduce all isolated pending nodes to the
 //     cluster via CLUSTER MEET. Requeue to let gossip propagate.
 //  7. Phase 2 – Assign slots: batch-assign hash-slot ranges to all
@@ -93,7 +93,7 @@ var scripts embed.FS
 //     to their matching primaries via CLUSTER REPLICATE.
 //  9. Scale-in: if the cluster has more shards than desired, drain slots
 //     from excess shards via CLUSTER MIGRATESLOTS and delete their
-//     Deployments once fully drained.
+//     ValkeyNodes once fully drained.
 //  10. Verify that the expected number of shards and replicas exist.
 //  11. Verify that all 16384 hash slots are assigned.
 //  12. If everything is healthy, mark the cluster Ready and requeue after 30s
@@ -127,25 +127,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertDeployments(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonDeploymentError, err.Error(), metav1.ConditionFalse)
+	if err := r.upsertValkeyNodes(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 
-	// Get all pods and their current Valkey Cluster state
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
-		log.Error(err, "failed to list Pods")
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodListError, err.Error(), metav1.ConditionFalse)
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		log.Error(err, "failed to list ValkeyNodes")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeListError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	state := r.getValkeyClusterState(ctx, pods)
+	state := r.getValkeyClusterState(ctx, nodes)
 	defer state.CloseClients()
 
-	// Check if we need to forget stale non-existing nodes
-	r.forgetStaleNodes(ctx, cluster, state, pods)
+	r.forgetStaleNodes(ctx, cluster, state, nodes)
 
 	// --- Phase 1: MEET all isolated nodes in one batch ---
 	// A node with cluster_known_nodes <= 1 hasn't been introduced to the
@@ -177,7 +175,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// is a no-op; new primaries stay in PendingNodes until the rebalancer
 	// migrates slots to them.
 	if len(state.PendingNodes) > 0 {
-		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, pods)
+		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
@@ -199,7 +197,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// CLUSTER REPLICATE for different replicas targets different primaries,
 	// so they can all be issued in one pass.
 	if len(state.PendingNodes) > 0 {
-		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, pods)
+		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
@@ -219,10 +217,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// new slot-less primaries in PendingNodes because it can't distinguish
 	// them from unreplicated replicas. We use pod labels to identify them
 	// and include them as empty shards for health checks and rebalancing.
-	allShards := effectiveShards(state, pods)
+	allShards := effectiveShards(state, nodes)
 
-	// Handle scale-in: drain excess shards and clean up leftover deployments.
-	if result, requeue := r.handleScaleIn(ctx, cluster, state, pods); requeue {
+	// Handle scale-in: drain excess shards and clean up leftover ValkeyNodes.
+	if result, requeue := r.handleScaleIn(ctx, cluster, state, nodes); requeue {
 		return result, nil
 	}
 
@@ -335,7 +333,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		Spec: corev1.ServiceSpec{
 			Type:      corev1.ServiceTypeClusterIP,
 			ClusterIP: "None",
-			Selector:  labels(cluster),
+			Selector:  map[string]string{LabelCluster: cluster.Name},
 			Ports: []corev1.ServicePort{
 				{
 					Name: "valkey",
@@ -408,23 +406,23 @@ aclfile /config/users/users.acl`,
 	return nil
 }
 
-// upsertDeployments ensures every (shard, nodeIndex) pair has a Deployment.
-// Each Deployment manages exactly one Pod (Replicas=1) and is named
+// upsertValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
+// Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
 //
 //	<cluster>-<N>-<M>
 //
 // where N is the shard index and M is the node index (0 = initial primary,
 // 1+ = replicas). Because the names are deterministic, the function is
-// idempotent: it tries to create each Deployment and silently ignores
+// idempotent: it tries to create each ValkeyNode and silently ignores
 // AlreadyExists errors.
 //
-// For a 3-shard cluster with 2 replicas per shard, this produces 9 Deployments:
+// For a 3-shard cluster with 2 replicas per shard, this produces 9 ValkeyNodes:
 //
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+func (r *ValkeyClusterReconciler) upsertValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -432,52 +430,82 @@ func (r *ValkeyClusterReconciler) upsertDeployments(ctx context.Context, cluster
 	expected := int(cluster.Spec.Shards) * nodesPerShard
 	for shardIndex := range int(cluster.Spec.Shards) {
 		for nodeIndex := range nodesPerShard {
-			if err := r.ensureDeployment(ctx, cluster, shardIndex, nodeIndex, expected, &created); err != nil {
+			if err := r.ensureValkeyNode(ctx, cluster, shardIndex, nodeIndex, expected, &created); err != nil {
 				return err
 			}
 		}
 	}
 	if created > 0 {
-		log.V(1).Info("created deployments", "count", created)
+		log.V(1).Info("created ValkeyNodes", "count", created)
 	}
 
-	// TODO: update existing Deployments when the spec changes (e.g. image upgrade).
+	// TODO: update existing ValkeyNodes when the spec changes (e.g. image upgrade).
 
 	return nil
 }
 
-// ensureDeployment creates a single Deployment if it doesn't already exist.
-func (r *ValkeyClusterReconciler) ensureDeployment(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shard int, nodeIndex int, expected int, created *int) error {
-	deployment, err := createClusterDeployment(cluster, shard, nodeIndex)
-	if err != nil {
+// ensureValkeyNode creates a single ValkeyNode CR if it doesn't already exist.
+func (r *ValkeyClusterReconciler) ensureValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int, expected int, created *int) error {
+	node := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	if err := controllerutil.SetControllerReference(cluster, node, r.Scheme); err != nil {
 		return err
 	}
-	if err = controllerutil.SetControllerReference(cluster, deployment, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, deployment); err != nil {
+	if err := r.Create(ctx, node); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return nil
 		}
-		r.Recorder.Eventf(cluster, deployment, corev1.EventTypeWarning, "DeploymentCreationFailed", "CreateDeployment", "Failed to create deployment: %v", err)
+		r.Recorder.Eventf(cluster, node, corev1.EventTypeWarning, "ValkeyNodeCreationFailed", "CreateValkeyNode", "Failed to create ValkeyNode: %v", err)
 		return err
 	}
 	*created++
-	r.Recorder.Eventf(cluster, deployment, corev1.EventTypeNormal, "DeploymentCreated", "CreateDeployment", "Created deployment for shard %d node %d (%d of %d)", shard, nodeIndex, *created, expected)
+	r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d (%d of %d)", shardIndex, nodeIndex, *created, expected)
 	return nil
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, pods *corev1.PodList) *valkey.ClusterState {
-	// Create a list of addresses to possible Valkey nodes
+// buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.
+func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *valkeyiov1alpha1.ValkeyNode {
+	// Start with recommended k8s labels; instance is the cluster name and component is "valkey-node".
+	l := baseLabels(cluster.Name, "valkey-node")
+	// Inherit user-defined labels from the parent cluster at lower priority.
+	for k, v := range cluster.Labels {
+		if _, exists := l[k]; !exists {
+			l[k] = v
+		}
+	}
+	// Operator-specific labels always take precedence.
+	l[LabelCluster] = cluster.Name
+	l[LabelShardIndex] = strconv.Itoa(shardIndex)
+	l[LabelNodeIndex] = strconv.Itoa(nodeIndex)
+
+	return &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
+			Namespace: cluster.Namespace,
+			Labels:    l,
+		},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image:                cluster.Spec.Image,
+			WorkloadType:         cluster.Spec.WorkloadType,
+			Resources:            cluster.Spec.Resources,
+			NodeSelector:         cluster.Spec.NodeSelector,
+			Affinity:             cluster.Spec.Affinity,
+			Tolerations:          cluster.Spec.Tolerations,
+			Exporter:             cluster.Spec.Exporter,
+			Containers:           cluster.Spec.Containers,
+			ScriptsConfigMapName: cluster.Name,
+			UsersACLSecretName:   getInternalSecretName(cluster.Name),
+		},
+	}
+}
+
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
 	ips := []string{}
-	for _, pod := range pods.Items {
-		if pod.Status.PodIP == "" {
+	for _, node := range nodes.Items {
+		if node.Status.PodIP == "" {
 			continue
 		}
-		ips = append(ips, pod.Status.PodIP)
+		ips = append(ips, node.Status.PodIP)
 	}
-
-	// Get current state of the Valkey cluster
 	return valkey.GetClusterState(ctx, ips, DefaultPort)
 }
 
@@ -568,7 +596,7 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 // returns 0 — new primaries stay in PendingNodes for the rebalancer to handle.
 // Isolated nodes (cluster_known_nodes <= 1) are skipped; they must be MEET'd
 // first in Phase 1.
-func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
+func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (int, error) {
 	log := logf.FromContext(ctx)
 	shardsRequired := int(cluster.Spec.Shards)
 
@@ -583,11 +611,11 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		if node.IsIsolated() {
 			continue
 		}
-		role, shardIndex := podRoleAndShard(node.Address, pods)
+		role, shardIndex := nodeRoleAndShard(node.Address, nodes)
 		if role != RolePrimary {
 			continue
 		}
-		if shardExistsInTopology(state, shardIndex, pods) {
+		if shardExistsInTopology(state, shardIndex, nodes) {
 			log.V(1).Info("skipping slot assignment; shard already exists in topology (post-failover)",
 				"shardIndex", shardIndex, "node", node.Address)
 			continue
@@ -659,25 +687,25 @@ var errPrimaryNotReady = errors.New("primary not yet in cluster state (awaiting 
 // rebalancer migrates slots to them. Replicas whose primary isn't ready yet
 // are silently skipped and retried on the next reconcile.
 // Returns the number of replicas that were attached.
-func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (int, error) {
+func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (int, error) {
 	log := logf.FromContext(ctx)
 	replicated := 0
 
 	for _, node := range state.PendingNodes {
-		role, shardIndex := podRoleAndShard(node.Address, pods)
+		role, shardIndex := nodeRoleAndShard(node.Address, nodes)
 		// Normal replicas (node-index >= 1) always need replication.
 		// Post-failover replacements (node-index=0 but shard already has
 		// a live primary) also need replication — they were skipped by
 		// assignSlotsToPendingPrimaries.
 		if role == RolePrimary {
-			if !shardExistsInTopology(state, shardIndex, pods) {
+			if !shardExistsInTopology(state, shardIndex, nodes) {
 				continue // genuine new primary, handled by assignSlotsToPendingPrimaries
 			}
 			log.V(1).Info("post-failover: attaching replacement node as replica",
 				"shardIndex", shardIndex, "node", node.Address)
 		}
 
-		if err := r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, pods); err != nil {
+		if err := r.replicateToShardPrimary(ctx, cluster, state, node, shardIndex, nodes); err != nil {
 			if errors.Is(err, errPrimaryNotReady) {
 				log.V(1).Info("skipping replica; primary not ready yet", "node", node.Address, "shard", shardIndex)
 				continue
@@ -699,14 +727,14 @@ func (r *ValkeyClusterReconciler) replicatePendingReplicas(ctx context.Context, 
 // replica is the primary). If no primary is found (e.g. the primary pod
 // hasn't started yet or hasn't joined the cluster), we return an error and
 // the reconciler retries on the next cycle.
-func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, shardIndex int, pods *corev1.PodList) error {
+func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, node *valkey.NodeState, shardIndex int, nodes *valkeyiov1alpha1.ValkeyNodeList) error {
 	log := logf.FromContext(ctx)
 
 	// Find the actual primary for this shard by scanning all shard pods
 	// against the live Valkey topology. This handles both the normal case
 	// (node-index=0 is the primary) and the post-failover case (a promoted
 	// replica is the primary).
-	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, pods)
+	primaryNodeId, primaryIP := findShardPrimary(state, shardIndex, nodes)
 	if primaryNodeId == "" {
 		return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
 	}
@@ -729,15 +757,15 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)
-func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) {
+func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
 	log := logf.FromContext(ctx)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
-			// Get known nodes that are failing.
 			for _, failing := range node.GetFailingNodes() {
-				idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == failing.Address })
+				idx := slices.IndexFunc(nodes.Items, func(n valkeyiov1alpha1.ValkeyNode) bool {
+					return n.Status.PodIP == failing.Address
+				})
 				if idx == -1 {
-					// Could not find a pod with the address of a failing node. Lets forget this node.
 					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
 						log.Error(err, "command failed: CLUSTER FORGET")
@@ -746,7 +774,6 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
 					}
 				}
-
 			}
 		}
 	}
@@ -873,10 +900,10 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 
 // effectiveShards returns state.Shards plus any pending primaries that are
 // scale-out leaders (slot-less Valkey primaries labeled as RolePrimary).
-func effectiveShards(state *valkey.ClusterState, pods *corev1.PodList) []*valkey.ShardState {
+func effectiveShards(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) []*valkey.ShardState {
 	shards := append([]*valkey.ShardState(nil), state.Shards...)
 	for _, node := range state.PendingNodes {
-		role, _ := podRoleAndShard(node.Address, pods)
+		role, _ := nodeRoleAndShard(node.Address, nodes)
 		if role == RolePrimary {
 			shards = append(shards, &valkey.ShardState{
 				Id:        node.ShardId,
@@ -888,14 +915,14 @@ func effectiveShards(state *valkey.ClusterState, pods *corev1.PodList) []*valkey
 	return shards
 }
 
-// handleScaleIn drains excess shards and cleans up leftover deployments.
+// handleScaleIn drains excess shards and cleans up leftover ValkeyNodes.
 // Returns (result, true) when work was done or an error occurred and the
 // caller should requeue instead of continuing to health checks.
-func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (ctrl.Result, bool) {
+func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (ctrl.Result, bool) {
 	log := logf.FromContext(ctx)
 
 	if len(state.Shards) > int(cluster.Spec.Shards) {
-		drained, err := r.drainExcessShards(ctx, cluster, state, pods)
+		drained, err := r.drainExcessShards(ctx, cluster, state, nodes)
 		if err != nil {
 			log.Error(err, "scale-in draining failed")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
@@ -914,10 +941,10 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		}
 	}
 
-	// Clean up leftover deployments from a previous scale-in where drained
-	// primaries became replicas before their deployments could be deleted.
-	if deleted, err := r.deleteExcessDeployments(ctx, cluster); err != nil {
-		log.Error(err, "failed to delete excess deployments")
+	// Clean up leftover ValkeyNodes from a previous scale-in where drained
+	// primaries became replicas before their ValkeyNodes could be deleted.
+	if deleted, err := r.deleteExcessValkeyNodes(ctx, cluster); err != nil {
+		log.Error(err, "failed to delete excess ValkeyNodes")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	} else if deleted {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -928,16 +955,16 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 
 // drainExcessShards handles scale-in by migrating slots away from shards
 // whose pod shard-index >= spec.Shards. Once a shard is fully drained (0
-// slots), its deployments are deleted; forgetStaleNodes on the next reconcile
+// slots), its ValkeyNodes are deleted; forgetStaleNodes on the next reconcile
 // cleans up the Valkey topology.
 // Returns true if any work was done (caller should requeue).
-func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, pods *corev1.PodList) (bool, error) {
+func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
 	log := logf.FromContext(ctx)
 	expectedShards := int(cluster.Spec.Shards)
 
 	var remaining, draining []*valkey.ShardState
 	for _, shard := range state.Shards {
-		shardIndex := shardIndexFromState(shard, pods)
+		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex >= 0 && shardIndex < expectedShards {
 			remaining = append(remaining, shard)
 		} else {
@@ -984,64 +1011,62 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return true, nil
 	}
 
-	// All draining shards have 0 slots — delete their deployments.
+	// All draining shards have 0 slots — delete their ValkeyNodes.
 	for _, shard := range draining {
-		shardIndex := shardIndexFromState(shard, pods)
+		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex < 0 {
 			continue
 		}
 		nodesPerShard := 1 + int(cluster.Spec.Replicas)
 		for nodeIndex := range nodesPerShard {
-			name := deploymentName(cluster.Name, shardIndex, nodeIndex)
-			dep := &appsv1.Deployment{
+			name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
+			node := &valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name,
 					Namespace: cluster.Namespace,
 				},
 			}
-			if err := r.Delete(ctx, dep); err != nil {
+			if err := r.Delete(ctx, node); err != nil {
 				if !apierrors.IsNotFound(err) {
-					return false, fmt.Errorf("delete deployment %s: %w", name, err)
+					return false, fmt.Errorf("delete ValkeyNode %s: %w", name, err)
 				}
 			} else {
-				log.V(1).Info("deleted deployment for drained shard", "deployment", name, "shard", shardIndex)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "DeploymentDeleted", "ScaleIn", "Deleted deployment %s (shard %d)", name, shardIndex)
+				log.V(1).Info("deleted ValkeyNode for drained shard", "name", name, "shard", shardIndex)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ValkeyNodeDeleted", "ScaleIn", "Deleted ValkeyNode %s (shard %d)", name, shardIndex)
 			}
 		}
 	}
 	return true, nil
 }
 
-// deleteExcessDeployments removes deployments that are outside the desired
+// deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired
 // spec: shard-index >= spec.Shards OR node-index >= 1 + spec.Replicas.
-// This catches leftover deployments from shard scale-in (where drained
-// primaries became replicas) and from replica scale-in.
-func (r *ValkeyClusterReconciler) deleteExcessDeployments(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
+func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
 	log := logf.FromContext(ctx)
-	allDeps := &appsv1.DeploymentList{}
-	if err := r.List(ctx, allDeps, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels(cluster))); err != nil {
+	allNodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, allNodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		return false, err
 	}
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	deleted := false
-	for i := range allDeps.Items {
-		dep := &allDeps.Items[i]
-		shardIndex, err := strconv.Atoi(dep.Labels[LabelShardIndex])
+	for i := range allNodes.Items {
+		node := &allNodes.Items[i]
+		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
 		if err != nil {
 			continue
 		}
-		nodeIndex, err := strconv.Atoi(dep.Labels[LabelNodeIndex])
+		nodeIndex, err := strconv.Atoi(node.Labels[LabelNodeIndex])
 		if err != nil {
 			continue
 		}
 		if shardIndex >= int(cluster.Spec.Shards) || nodeIndex >= nodesPerShard {
-			if err := r.Delete(ctx, dep); err != nil {
+			if err := r.Delete(ctx, node); err != nil {
 				if !apierrors.IsNotFound(err) {
-					return false, fmt.Errorf("delete excess deployment %s: %w", dep.Name, err)
+					return false, fmt.Errorf("delete excess ValkeyNode %s: %w", node.Name, err)
 				}
 			} else {
-				log.V(1).Info("deleted excess deployment", "name", dep.Name, "shard", shardIndex, "node", nodeIndex)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "DeploymentDeleted", "ScaleIn", "Deleted excess deployment %s (shard %d, node %d)", dep.Name, shardIndex, nodeIndex)
+				log.V(1).Info("deleted excess ValkeyNode", "name", node.Name, "shard", shardIndex, "node", nodeIndex)
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ValkeyNodeDeleted", "ScaleIn", "Deleted excess ValkeyNode %s (shard %d, node %d)", node.Name, shardIndex, nodeIndex)
 				deleted = true
 			}
 		}
@@ -1050,10 +1075,10 @@ func (r *ValkeyClusterReconciler) deleteExcessDeployments(ctx context.Context, c
 }
 
 // shardIndexFromState determines the pod shard-index for a given Valkey shard
-// by matching any of its nodes' addresses to pod labels.
-func shardIndexFromState(shard *valkey.ShardState, pods *corev1.PodList) int {
+// by matching any of its nodes' addresses to ValkeyNode labels.
+func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.ValkeyNodeList) int {
 	for _, node := range shard.Nodes {
-		_, shardIndex := podRoleAndShard(node.Address, pods)
+		_, shardIndex := nodeRoleAndShard(node.Address, nodes)
 		if shardIndex >= 0 {
 			return shardIndex
 		}
@@ -1067,7 +1092,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&valkeyiov1alpha1.ValkeyCluster{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
-		Owns(&appsv1.Deployment{}).
+		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),

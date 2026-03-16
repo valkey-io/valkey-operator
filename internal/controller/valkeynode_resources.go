@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -34,13 +36,17 @@ func valkeyNodeResourceName(node *valkeyiov1alpha1.ValkeyNode) string {
 // valkeyNodeLabels returns the standard Kubernetes recommended labels for
 // child resources of the given ValkeyNode.
 func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":       "valkey",
-		"app.kubernetes.io/instance":   node.Name,
-		"app.kubernetes.io/component":  "valkey-node",
-		"app.kubernetes.io/part-of":    "valkey",
-		"app.kubernetes.io/managed-by": "valkey-operator",
+	l := baseLabels(node.Name, "valkey-node")
+	for _, key := range []string{
+		LabelCluster,
+		LabelShardIndex,
+		LabelNodeIndex,
+	} {
+		if v, ok := node.Labels[key]; ok {
+			l[key] = v
+		}
 	}
+	return l
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
@@ -70,8 +76,58 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	}, nil
 }
 
-// buildContainersDef builds the containers definition for the ValkeyNode.
-func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) []corev1.Container {
+// mergePatchContainers applies a strategic merge patch to base containers using
+// patches as the patch source. Containers are matched by name; any patch
+// container whose name matches a base container is merged into it, while patch
+// containers with new names are appended in patch-list order.
+func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container, error) {
+	var output []corev1.Container
+
+	patchByName := make(map[string]corev1.Container, len(patches))
+	for _, c := range patches {
+		patchByName[c.Name] = c
+	}
+
+	for _, c := range base {
+		patch, ok := patchByName[c.Name]
+		if !ok {
+			output = append(output, c)
+			continue
+		}
+		baseBytes, err := json.Marshal(c)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for container %s: %w", c.Name, err)
+		}
+		patchBytes, err := json.Marshal(patch)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON for patch container %s: %w", c.Name, err)
+		}
+		merged, err := strategicpatch.StrategicMergePatch(baseBytes, patchBytes, corev1.Container{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate merge patch for container %s: %w", c.Name, err)
+		}
+		var result corev1.Container
+		if err := json.Unmarshal(merged, &result); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal merged container %s: %w", c.Name, err)
+		}
+		output = append(output, result)
+		delete(patchByName, c.Name)
+	}
+
+	// Append any patch containers that did not match a base container, in
+	// the original patch-list order.
+	for _, c := range patches {
+		if _, remaining := patchByName[c.Name]; remaining {
+			output = append(output, c)
+		}
+	}
+
+	return output, nil
+}
+
+// buildContainersDef builds the base containers definition for the ValkeyNode
+// and applies any strategic merge patches from node.Spec.Containers.
+func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, error) {
 	image := DefaultImage
 	if node.Spec.Image != "" {
 		image = node.Spec.Image
@@ -163,13 +219,16 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) []corev1.Container {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter))
 	}
 
-	return containers
+	return mergePatchContainers(containers, node.Spec.Containers)
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
-func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) corev1.PodTemplateSpec {
-	containers := buildContainersDef(node)
+func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
+	containers, err := buildContainersDef(node)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, err
+	}
 
 	// Use the explicitly provided ConfigMap name, or fall back to the default
 	// resource name (which the controller creates automatically).
@@ -178,46 +237,69 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		configMapName = valkeyNodeResourceName(node)
 	}
 
-	return corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: labels,
-		},
-		Spec: corev1.PodSpec{
-			Containers:   containers,
-			NodeSelector: node.Spec.NodeSelector,
-			Affinity:     node.Spec.Affinity,
-			Tolerations:  node.Spec.Tolerations,
-			Volumes: []corev1.Volume{
-				{
-					Name: "scripts",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: configMapName,
-							},
-							DefaultMode: func(i int32) *int32 { return &i }(0755),
+	podSpec := corev1.PodSpec{
+		Containers:   containers,
+		NodeSelector: node.Spec.NodeSelector,
+		Affinity:     node.Spec.Affinity,
+		Tolerations:  node.Spec.Tolerations,
+		Volumes: []corev1.Volume{
+			{
+				Name: "scripts",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMapName,
 						},
+						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
-				{
-					Name: "valkey-conf",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: configMapName,
-							},
+			},
+			{
+				Name: "valkey-conf",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMapName,
 						},
 					},
 				},
 			},
 		},
 	}
+
+	if node.Spec.UsersACLSecretName != "" {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: "users-acl",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: node.Spec.UsersACLSecretName,
+				},
+			},
+		})
+		// Containers[0] is always the server container (exporter is appended after it).
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "users-acl",
+			MountPath: "/config/users",
+			ReadOnly:  true,
+		})
+	}
+
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: labels,
+		},
+		Spec: podSpec,
+	}, nil
 }
 
 // buildValkeyNodeDeployment constructs a single-replica Deployment for a
 // ValkeyNode. This is used when node.Spec.WorkloadType is Deployment.
-func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) *appsv1.Deployment {
+func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Deployment, error) {
 	labels := valkeyNodeLabels(node)
+	tmpl, err := buildValkeyNodePodTemplateSpec(node, labels)
+	if err != nil {
+		return nil, err
+	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeResourceName(node),
@@ -229,16 +311,20 @@ func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) *appsv1.Deploy
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-			Template: buildValkeyNodePodTemplateSpec(node, labels),
+			Template: tmpl,
 		},
-	}
+	}, nil
 }
 
 // buildValkeyNodeStatefulSet constructs a single-replica StatefulSet for a
 // ValkeyNode. This is used when node.Spec.WorkloadType is StatefulSet (the
 // default).
-func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) *appsv1.StatefulSet {
+func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.StatefulSet, error) {
 	labels := valkeyNodeLabels(node)
+	tmpl, err := buildValkeyNodePodTemplateSpec(node, labels)
+	if err != nil {
+		return nil, err
+	}
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeResourceName(node),
@@ -251,7 +337,7 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) *appsv1.State
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-			Template: buildValkeyNodePodTemplateSpec(node, labels),
+			Template: tmpl,
 		},
-	}
+	}, nil
 }

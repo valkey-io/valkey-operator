@@ -105,7 +105,10 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 // ensureStatefulSet creates the StatefulSet for the ValkeyNode if it does not
 // already exist. Spec updates are handled in a separate PR via CreateOrUpdate.
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	desired := buildValkeyNodeStatefulSet(node)
+	desired, err := buildValkeyNodeStatefulSet(node)
+	if err != nil {
+		return err
+	}
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}
@@ -118,7 +121,10 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 // ensureDeployment creates the Deployment for the ValkeyNode if it does not
 // already exist. Spec updates are handled in a separate PR via CreateOrUpdate.
 func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	desired := buildValkeyNodeDeployment(node)
+	desired, err := buildValkeyNodeDeployment(node)
+	if err != nil {
+		return err
+	}
 	if err := controllerutil.SetControllerReference(node, desired, r.Scheme); err != nil {
 		return err
 	}

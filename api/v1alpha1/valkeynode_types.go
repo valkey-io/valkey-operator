@@ -74,6 +74,12 @@ type ValkeyNodeSpec struct {
 	// container can load aclfile /config/users/users.acl.
 	// +optional
 	UsersACLSecretName string `json:"usersACLSecretName,omitempty"`
+
+	// Containers allows patching the default containers via a strategic merge
+	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
+	// by name; any container name not present in the defaults is appended.
+	// +optional
+	Containers []corev1.Container `json:"containers,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

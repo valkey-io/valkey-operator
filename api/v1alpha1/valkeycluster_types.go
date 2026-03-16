@@ -83,6 +83,10 @@ type ValkeyClusterSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
+
+	// Additional containers or overrides for existing containers, applied using strategic merge patch
+	// +optional
+	Containers []corev1.Container `json:"containers,omitempty"`
 }
 
 type ExporterSpec struct {

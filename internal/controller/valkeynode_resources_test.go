@@ -57,7 +57,8 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	lbls := valkeyNodeLabels(node)
-	pts := buildValkeyNodePodTemplateSpec(node, lbls)
+	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
+	require.NoError(t, err)
 
 	// Verify labels on pod template
 	assert.Equal(t, lbls, pts.Labels)
@@ -126,7 +127,8 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
-	dep := buildValkeyNodeDeployment(node)
+	dep, err := buildValkeyNodeDeployment(node)
+	require.NoError(t, err)
 
 	assert.Equal(t, "valkey-mynode", dep.Name)
 	assert.Equal(t, "test-ns", dep.Namespace)
@@ -148,7 +150,8 @@ func TestBuildValkeyNodeDeployment(t *testing.T) {
 
 func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
-	ss := buildValkeyNodeStatefulSet(node)
+	ss, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
 
 	assert.Equal(t, "valkey-mynode", ss.Name)
 	assert.Equal(t, "test-ns", ss.Namespace)
@@ -175,7 +178,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithExporter(t *testing.T) {
 		Enabled: true,
 	}
 	lbls := valkeyNodeLabels(node)
-	pts := buildValkeyNodePodTemplateSpec(node, lbls)
+	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
+	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Containers, 2, "should have 2 containers when exporter is enabled")
 	assert.Equal(t, "server", pts.Spec.Containers[0].Name)
@@ -201,7 +205,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithExporterCustomImage(t *testing.T) {
 		Image:   "my-exporter:v2.0.0",
 	}
 	lbls := valkeyNodeLabels(node)
-	pts := buildValkeyNodePodTemplateSpec(node, lbls)
+	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
+	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Containers, 2)
 	assert.Equal(t, "my-exporter:v2.0.0", pts.Spec.Containers[1].Image)
@@ -241,7 +246,8 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	node.Spec.Tolerations = tolerations
 
 	lbls := valkeyNodeLabels(node)
-	pts := buildValkeyNodePodTemplateSpec(node, lbls)
+	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
+	require.NoError(t, err)
 
 	assert.Equal(t, nodeSelector, pts.Spec.NodeSelector, "node selector should pass through")
 	assert.Equal(t, affinity, pts.Spec.Affinity, "affinity should pass through")
@@ -264,7 +270,8 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	node.Spec.Resources = resources
 
 	lbls := valkeyNodeLabels(node)
-	pts := buildValkeyNodePodTemplateSpec(node, lbls)
+	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
+	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Containers, 1)
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
@@ -288,7 +295,8 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 	t.Run("uses ScriptsConfigMapName when set", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns") // ScriptsConfigMapName = "valkey-scripts"
-		pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		require.NoError(t, err)
 		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
 		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
@@ -296,7 +304,8 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 	t.Run("falls back to resource name when ScriptsConfigMapName is empty", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns")
 		node.Spec.ScriptsConfigMapName = ""
-		pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		require.NoError(t, err)
 		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[0].ConfigMap.Name)
 		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
@@ -305,9 +314,74 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Image = ""
-	containers := buildContainersDef(node)
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
 	require.Len(t, containers, 1)
 	assert.Equal(t, DefaultImage, containers[0].Image)
+}
+
+func TestMergePatchContainers(t *testing.T) {
+	t.Run("patch overrides image of existing container", func(t *testing.T) {
+		base := []corev1.Container{{Name: "server", Image: "old:1.0"}}
+		patches := []corev1.Container{{Name: "server", Image: "new:2.0"}}
+		out, err := mergePatchContainers(base, patches)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "new:2.0", out[0].Image)
+	})
+
+	t.Run("unknown patch container is appended", func(t *testing.T) {
+		base := []corev1.Container{{Name: "server", Image: "img:1.0"}}
+		patches := []corev1.Container{{Name: "sidecar", Image: "side:1.0"}}
+		out, err := mergePatchContainers(base, patches)
+		require.NoError(t, err)
+		require.Len(t, out, 2)
+		assert.Equal(t, "server", out[0].Name)
+		assert.Equal(t, "sidecar", out[1].Name)
+	})
+
+	t.Run("nil patches returns base unchanged", func(t *testing.T) {
+		base := []corev1.Container{{Name: "server", Image: "img:1.0"}}
+		out, err := mergePatchContainers(base, nil)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "server", out[0].Name)
+	})
+}
+
+func TestBuildContainersDef_WithContainerPatches(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Containers = []corev1.Container{
+		{Name: "server", Image: "custom-valkey:latest"},
+		{Name: "extra", Image: "busybox:latest"},
+	}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	require.Len(t, containers, 2)
+	assert.Equal(t, "server", containers[0].Name)
+	assert.Equal(t, "custom-valkey:latest", containers[0].Image)
+	assert.Equal(t, "extra", containers[1].Name)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithContainerPatches(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Containers = []corev1.Container{
+		{Name: "metrics-exporter", Image: "custom-exporter:v2.0"},
+	}
+	node.Spec.Exporter = valkeyv1.ExporterSpec{Enabled: true}
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.Containers, 2)
+	var exporterContainer *corev1.Container
+	for i := range pts.Spec.Containers {
+		if pts.Spec.Containers[i].Name == "metrics-exporter" {
+			exporterContainer = &pts.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, exporterContainer, "metrics-exporter container should exist")
+	assert.Equal(t, "custom-exporter:v2.0", exporterContainer.Image)
 }
 
 func TestParseValkeyRole(t *testing.T) {
@@ -405,7 +479,8 @@ func TestValkeyNodeLabels_WithoutClusterLabels(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.UsersACLSecretName = "mynode-internal"
-	pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
 
 	// Volumes: scripts, valkey-conf, users-acl
 	require.Len(t, pts.Spec.Volumes, 3)
@@ -426,7 +501,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	// UsersACLSecretName is intentionally empty
-	pts := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Volumes, 2, "should only have scripts and valkey-conf volumes")
 	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 2, "should only have scripts and valkey-conf mounts")

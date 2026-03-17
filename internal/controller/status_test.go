@@ -132,3 +132,42 @@ func TestStatusChanged(t *testing.T) {
 		g.Expect(statusChanged(oldStatus, newStatus)).To(BeFalse())
 	})
 }
+
+func TestNodeStatusChanged(t *testing.T) {
+	g := NewWithT(t)
+
+	base := func() valkeyiov1alpha1.ValkeyNodeStatus {
+		return valkeyiov1alpha1.ValkeyNodeStatus{
+			Ready:              true,
+			ObservedGeneration: 1,
+			Conditions: []metav1.Condition{
+				{Type: valkeyiov1alpha1.ValkeyNodeConditionReady, Status: metav1.ConditionTrue, Reason: "PodRunning", ObservedGeneration: 1},
+			},
+		}
+	}
+
+	t.Run("returns false for identical statuses", func(t *testing.T) {
+		g.Expect(nodeStatusChanged(base(), base())).To(BeFalse())
+	})
+
+	t.Run("returns true when ObservedGeneration differs", func(t *testing.T) {
+		old := base()
+		new := base()
+		new.ObservedGeneration = 2
+		g.Expect(nodeStatusChanged(old, new)).To(BeTrue())
+	})
+
+	t.Run("returns true when a condition's ObservedGeneration changes", func(t *testing.T) {
+		old := base()
+		new := base()
+		new.Conditions[0].ObservedGeneration = 2
+		g.Expect(nodeStatusChanged(old, new)).To(BeTrue())
+	})
+
+	t.Run("returns false when only condition LastTransitionTime differs", func(t *testing.T) {
+		old := base()
+		new := base()
+		new.Conditions[0].LastTransitionTime = metav1.Now()
+		g.Expect(nodeStatusChanged(old, new)).To(BeFalse())
+	})
+}

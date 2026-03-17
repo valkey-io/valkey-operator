@@ -84,6 +84,12 @@ type ValkeyNodeSpec struct {
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
 type ValkeyNodeStatus struct {
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// It corresponds to the ValkeyNode's generation, which is updated on mutation
+	// of the spec field.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Ready indicates whether the ValkeyNode is ready to serve traffic.
 	// +optional
 	Ready bool `json:"ready,omitempty"`

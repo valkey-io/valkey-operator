@@ -554,6 +554,56 @@ func TestReadinessCheckScript(t *testing.T) {
 	}
 }
 
+func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards:       3,
+			Replicas:     1,
+			Image:        "valkey/valkey:9.1.0",
+			WorkloadType: valkeyv1.WorkloadTypeStatefulSet,
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+					corev1.ResourceCPU:    resource.MustParse("250m"),
+				},
+			},
+			NodeSelector: map[string]string{"zone": "us-east-1a"},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{MatchExpressions: []corev1.NodeSelectorRequirement{
+								{Key: "disktype", Operator: corev1.NodeSelectorOpIn, Values: []string{"ssd"}},
+							}},
+						},
+					},
+				},
+			},
+			Tolerations: []corev1.Toleration{
+				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
+			},
+			Exporter: valkeyv1.ExporterSpec{Enabled: true},
+			Containers: []corev1.Container{
+				{Name: "sidecar", Image: "sidecar:latest"},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+
+	assert.Equal(t, cluster.Spec.Image, node.Spec.Image, "Image must be propagated")
+	assert.Equal(t, cluster.Spec.WorkloadType, node.Spec.WorkloadType, "WorkloadType must be propagated")
+	assert.Equal(t, cluster.Spec.Resources, node.Spec.Resources, "Resources must be propagated")
+	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
+	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")
+	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
+	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
+	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
+	assert.Equal(t, cluster.Name, node.Spec.ScriptsConfigMapName, "ScriptsConfigMapName must be the cluster name")
+	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
+}
+
 func runProbeScript(t *testing.T, scriptPath, response string) error {
 	t.Helper()
 

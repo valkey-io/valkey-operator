@@ -2785,6 +2785,9 @@ spec:
                 - StatefulSet
                 - Deployment
                 type: string
+                x-kubernetes-validations:
+                - message: workloadType is immutable
+                  rule: self == oldSelf
             type: object
           status:
             default:

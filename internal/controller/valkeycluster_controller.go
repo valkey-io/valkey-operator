@@ -80,8 +80,9 @@ var scripts embed.FS
 //  1. Ensure the headless Service exists (upsertService).
 //  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one ValkeyNode per (shard, node) pair exists, each named
-//     deterministically (e.g. mycluster-0-0) (upsertValkeyNodes).
+//  3. Ensure one ValkeyNode per (shard, node) pair exists, creating missing
+//     nodes and propagating spec changes one at a time in shard order with
+//     replicas updated before the primary (reconcileValkeyNodes).
 //  4. List all ValkeyNodes and build the Valkey cluster state by connecting to each
 //     node and scraping CLUSTER INFO / CLUSTER NODES.
 //  5. Forget stale nodes that no longer have a backing ValkeyNode.
@@ -127,10 +128,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertValkeyNodes(ctx, cluster); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
+	} else if requeue {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -328,33 +334,24 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
 			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
-		},
-		Spec: corev1.ServiceSpec{
-			Type:      corev1.ServiceTypeClusterIP,
-			ClusterIP: "None",
-			Selector:  map[string]string{LabelCluster: cluster.Name},
-			Ports: []corev1.ServicePort{
-				{
-					Name: "valkey",
-					Port: DefaultPort,
-				},
-			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labels(cluster)
+		svc.Spec.Type = corev1.ServiceTypeClusterIP
+		// ClusterIP is immutable after creation; preserve the existing value on updates.
+		if svc.Spec.ClusterIP == "" {
+			svc.Spec.ClusterIP = "None"
+		}
+		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
+		svc.Spec.Ports = []corev1.ServicePort{{Name: "valkey", Port: DefaultPort}}
+		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
+	})
+	if err != nil {
+		r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert Service: %v", err)
 		return err
 	}
-	if err := r.Create(ctx, svc); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			if err := r.Update(ctx, svc); err != nil {
-				r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to update Service: %v", err)
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
+	if result == controllerutil.OperationResultCreated {
 		r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
 	}
 	return nil
@@ -375,9 +372,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
 			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
 		},
-		Data: map[string]string{
+	}
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = labels(cluster)
+		cm.Data = map[string]string{
 			"readiness-check.sh": string(readiness),
 			"liveness-check.sh":  string(liveness),
 			"valkey.conf": `
@@ -385,81 +384,117 @@ cluster-enabled yes
 protected-mode no
 cluster-node-timeout 2000
 aclfile /config/users/users.acl`,
-		},
-	}
-	if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
+		}
+		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
+	})
+	if err != nil {
+		r.Recorder.Eventf(cluster, cm, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpdateConfigMap", "Failed to upsert ConfigMap: %v", err)
 		return err
 	}
-	if err := r.Create(ctx, cm); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			if err := r.Update(ctx, cm); err != nil {
-				r.Recorder.Eventf(cluster, cm, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpdateConfigMap", "Failed to update ConfigMap: %v", err)
-				return err
-			}
-		} else {
-			r.Recorder.Eventf(cluster, cm, corev1.EventTypeWarning, "ConfigMapCreationFailed", "CreateConfigMap", "Failed to create ConfigMap: %v", err)
-			return err
-		}
-	} else {
+	if result == controllerutil.OperationResultCreated {
 		r.Recorder.Eventf(cluster, cm, corev1.EventTypeNormal, "ConfigMapCreated", "CreateConfigMap", "Created ConfigMap with configuration")
 	}
 	return nil
 }
 
-// upsertValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
+// reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
 //
 //	<cluster>-<N>-<M>
 //
 // where N is the shard index and M is the node index (0 = initial primary,
-// 1+ = replicas). Because the names are deterministic, the function is
-// idempotent: it tries to create each ValkeyNode and silently ignores
-// AlreadyExists errors.
+// 1+ = replicas). It iterates shards in ascending order and nodes in descending order within each
+// shard (replicas before primary). At most one spec update is issued per reconcile.
+// Once a node is updated or found not-ready after a prior update,
+// the function returns (true, nil) so the caller requeues before advancing to the next node.
 //
 // For a 3-shard cluster with 2 replicas per shard, this produces 9 ValkeyNodes:
 //
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) upsertValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
-	created := 0
-	expected := int(cluster.Spec.Shards) * nodesPerShard
+	totalCreated := 0
+
 	for shardIndex := range int(cluster.Spec.Shards) {
-		for nodeIndex := range nodesPerShard {
-			if err := r.ensureValkeyNode(ctx, cluster, shardIndex, nodeIndex, expected, &created); err != nil {
-				return err
+		// Iterate nodeIndex in reverse order (replicas before primary)
+		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex)
+			if err != nil {
+				return false, err
+			}
+			if nodeCreated {
+				totalCreated++
+			}
+			if requeue {
+				return true, nil
 			}
 		}
 	}
-	if created > 0 {
-		log.V(1).Info("created ValkeyNodes", "count", created)
+
+	if totalCreated > 0 {
+		log.V(1).Info("created ValkeyNodes", "count", totalCreated)
 	}
-
-	// TODO: update existing ValkeyNodes when the spec changes (e.g. image upgrade).
-
-	return nil
+	return false, nil
 }
 
-// ensureValkeyNode creates a single ValkeyNode CR if it doesn't already exist.
-func (r *ValkeyClusterReconciler) ensureValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int, expected int, created *int) error {
-	node := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-	if err := controllerutil.SetControllerReference(cluster, node, r.Scheme); err != nil {
-		return err
+// reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
+// Returns (requeue, nodeCreated, err). requeue signals the caller should stop
+// iterating and wait before processing the next node.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int) (bool, bool, error) {
+	log := logf.FromContext(ctx)
+
+	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      desired.Name,
+			Namespace: desired.Namespace,
+		},
 	}
-	if err := r.Create(ctx, node); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
+		node.Labels = desired.Labels
+		node.Spec = desired.Spec
+		return controllerutil.SetControllerReference(cluster, node, r.Scheme)
+	})
+	if err != nil {
+		r.Recorder.Eventf(cluster, node, corev1.EventTypeWarning, "ValkeyNodeFailed", "ReconcileValkeyNode", "Failed to reconcile ValkeyNode: %v", err)
+		return false, false, err
+	}
+	switch result {
+	case controllerutil.OperationResultCreated:
+		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d", shardIndex, nodeIndex)
+		return false, true, nil
+	case controllerutil.OperationResultUpdated:
+		// A spec change was applied. Requeue unconditionally so the node has
+		// time to settle before we advance to the next one (one-at-a-time
+		// rolling update).
+		log.V(1).Info("updated ValkeyNode, waiting for it to become ready", "name", node.Name)
+		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
+		return true, false, nil
+	case controllerutil.OperationResultNone:
+		if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
+			log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
+				"name", node.Name,
+				"generation", node.Generation,
+				"observedGeneration", node.Status.ObservedGeneration)
+			return true, false, nil
 		}
-		r.Recorder.Eventf(cluster, node, corev1.EventTypeWarning, "ValkeyNodeCreationFailed", "CreateValkeyNode", "Failed to create ValkeyNode: %v", err)
-		return err
+		if !node.Status.Ready {
+			// No spec change, but the node hasn't reached Ready yet (e.g.
+			// still starting after a prior update). Unlike Updated above, we
+			// only wait when not-ready; a ready unchanged node is safe to
+			// advance past.
+			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
+			return true, false, nil
+		}
+	default:
+		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
-	*created++
-	r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d (%d of %d)", shardIndex, nodeIndex, *created, expected)
-	return nil
+	return false, false, nil
 }
 
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.

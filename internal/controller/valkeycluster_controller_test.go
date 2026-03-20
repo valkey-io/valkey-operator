@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -110,6 +111,53 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("ValkeyNodeCreated")))
 
+		})
+	})
+})
+
+var _ = Describe("reconcileUsersAcl", func() {
+	Context("When reconciling ACL secrets", func() {
+		It("should create the internal ACL secret with the ACL secret type", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-type-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Users: []valkeyiov1alpha1.UserAclSpec{
+						{
+							Name:       "testuser",
+							Enabled:    true,
+							NoPassword: true,
+							RawAcl:     "+@all",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			internalSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      getInternalSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, internalSecret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, internalSecret) }()
+
+			Expect(internalSecret.Type).To(Equal(AclSecretType))
 		})
 	})
 })

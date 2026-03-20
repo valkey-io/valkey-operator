@@ -33,10 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -47,6 +49,9 @@ const (
 	DefaultImage          = "valkey/valkey:9.0.0"
 	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
 	DefaultExporterPort   = 9121
+
+	// AclSecretType is used to filter ACL Secret watch events.
+	AclSecretType = corev1.SecretType("valkey.io/acl")
 
 	// Error messages
 	statusUpdateFailedMsg = "failed to update status"
@@ -1096,6 +1101,10 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				secret, ok := obj.(*corev1.Secret)
+				return ok && secret.Type == AclSecretType
+			})),
 		).
 		Named("valkeycluster").
 		Complete(r)

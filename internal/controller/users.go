@@ -146,6 +146,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		internalAclSecret.Data = map[string][]byte{
 			aclFilename: usersAclsBytes,
 		}
+		internalAclSecret.Type = AclSecretType
 
 		// Register ownership of the new internal Secret
 		if err := controllerutil.SetControllerReference(cluster, internalAclSecret, r.Scheme); err != nil {

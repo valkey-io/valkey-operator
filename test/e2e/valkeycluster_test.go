@@ -203,13 +203,13 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Critical infrastructure failures that should NEVER occur
 				g.Expect(warningEvents["ServiceUpdateFailed"]).To(BeFalse(), "ServiceUpdateFailed event should not be emitted")
 				g.Expect(warningEvents["ConfigMapUpdateFailed"]).To(BeFalse(), "ConfigMapUpdateFailed event should not be emitted")
-				g.Expect(warningEvents["ValkeyNodeCreationFailed"]).To(BeFalse(), "ValkeyNodeCreationFailed event should not be emitted")
+				g.Expect(warningEvents["ValkeyNodeFailed"]).To(BeFalse(), "ValkeyNodeFailed event should not be emitted")
 				g.Expect(warningEvents["ClusterMeetFailed"]).To(BeFalse(), "ClusterMeetFailed event should not be emitted")
 				g.Expect(warningEvents["SlotAssignmentFailed"]).To(BeFalse(), "SlotAssignmentFailed event should not be emitted")
 				g.Expect(warningEvents["NodeForgetFailed"]).To(BeFalse(), "NodeForgetFailed event should not be emitted")
 
 				// Transient errors that may occur during formation but should be resolved
-				hasTransientErrors := warningEvents["NodeAddFailed"] || warningEvents["ReplicaCreationFailed"] || warningEvents["PrimaryLost"]
+				hasTransientErrors := warningEvents["ReplicaCreationFailed"]
 				if hasTransientErrors {
 					// Verify cluster recovered and reached healthy state despite transient errors
 					cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
@@ -234,11 +234,9 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ValkeyNodeCreated"), "ValkeyNodeCreated event should appear in describe")
-				// TODO PrimaryCreated, ClusterMeet events are not always captured due to rate-limiting issues
-				// fix this removing events which are not important
-				// ReplicaCreated and ClusterReady may not always appear in describe output due to:
-				// - Rate limiting as described above
-				// We verify these through cluster status instead of strictly requiring the events
+				// PrimaryCreated, ClusterMeetBatch, ReplicaCreated and ClusterReady may not always
+				// appear in describe output due to rate-limiting (see kubernetes/kubernetes#136061).
+				// We verify these through cluster status instead of strictly requiring the events.
 			}
 			Eventually(verifyDescribeEvents).Should(Succeed())
 

@@ -164,8 +164,7 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ServiceCreated` | Normal | Headless Service is created |
 | `ServiceUpdateFailed` | Warning | Service update fails |
 | `ConfigMapCreated` | Normal | ConfigMap with Valkey configuration is created |
-| `ConfigMapUpdateFailed` | Warning | ConfigMap update fails |
-| `ConfigMapCreationFailed` | Warning | ConfigMap creation fails |
+| `ConfigMapUpdateFailed` | Warning | ConfigMap creation/update fails |
 | `DeploymentCreated` | Normal | Each Deployment (shard/replica) is created |
 | `DeploymentCreationFailed` | Warning | Deployment creation fails |
 

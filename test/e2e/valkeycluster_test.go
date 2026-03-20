@@ -203,7 +203,6 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Critical infrastructure failures that should NEVER occur
 				g.Expect(warningEvents["ServiceUpdateFailed"]).To(BeFalse(), "ServiceUpdateFailed event should not be emitted")
 				g.Expect(warningEvents["ConfigMapUpdateFailed"]).To(BeFalse(), "ConfigMapUpdateFailed event should not be emitted")
-				g.Expect(warningEvents["ConfigMapCreationFailed"]).To(BeFalse(), "ConfigMapCreationFailed event should not be emitted")
 				g.Expect(warningEvents["ValkeyNodeCreationFailed"]).To(BeFalse(), "ValkeyNodeCreationFailed event should not be emitted")
 				g.Expect(warningEvents["ClusterMeetFailed"]).To(BeFalse(), "ClusterMeetFailed event should not be emitted")
 				g.Expect(warningEvents["SlotAssignmentFailed"]).To(BeFalse(), "SlotAssignmentFailed event should not be emitted")

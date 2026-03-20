@@ -136,7 +136,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -427,11 +427,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			if err != nil {
 				return false, err
 			}
-			if nodeCreated {
-				totalCreated++
-			}
 			if requeue {
 				return true, nil
+			}
+			if nodeCreated {
+				totalCreated++
 			}
 		}
 	}

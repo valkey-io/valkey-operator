@@ -76,6 +76,7 @@ type ValkeyClusterSpec struct {
 
 	// WorkloadType specifies whether ValkeyNodes create StatefulSets or Deployments.
 	// +kubebuilder:default=StatefulSet
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -171,6 +172,7 @@ const (
 	ReasonRebalancingSlots    = "RebalancingSlots"
 	ReasonRebalanceFailed     = "RebalanceFailed"
 	ReasonUsersAclError       = "UsersACLError"
+	ReasonUpdatingNodes       = "UpdatingNodes"
 )
 
 // +kubebuilder:object:root=true

@@ -2765,6 +2765,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the controller.
+                  It corresponds to the ValkeyNode's generation, which is updated on mutation
+                  of the spec field.
+                format: int64
+                type: integer
               podIP:
                 description: PodIP is the IP address of the pod.
                 type: string

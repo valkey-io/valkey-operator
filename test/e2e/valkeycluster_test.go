@@ -203,14 +203,13 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Critical infrastructure failures that should NEVER occur
 				g.Expect(warningEvents["ServiceUpdateFailed"]).To(BeFalse(), "ServiceUpdateFailed event should not be emitted")
 				g.Expect(warningEvents["ConfigMapUpdateFailed"]).To(BeFalse(), "ConfigMapUpdateFailed event should not be emitted")
-				g.Expect(warningEvents["ConfigMapCreationFailed"]).To(BeFalse(), "ConfigMapCreationFailed event should not be emitted")
-				g.Expect(warningEvents["ValkeyNodeCreationFailed"]).To(BeFalse(), "ValkeyNodeCreationFailed event should not be emitted")
+				g.Expect(warningEvents["ValkeyNodeFailed"]).To(BeFalse(), "ValkeyNodeFailed event should not be emitted")
 				g.Expect(warningEvents["ClusterMeetFailed"]).To(BeFalse(), "ClusterMeetFailed event should not be emitted")
 				g.Expect(warningEvents["SlotAssignmentFailed"]).To(BeFalse(), "SlotAssignmentFailed event should not be emitted")
 				g.Expect(warningEvents["NodeForgetFailed"]).To(BeFalse(), "NodeForgetFailed event should not be emitted")
 
 				// Transient errors that may occur during formation but should be resolved
-				hasTransientErrors := warningEvents["NodeAddFailed"] || warningEvents["ReplicaCreationFailed"] || warningEvents["PrimaryLost"]
+				hasTransientErrors := warningEvents["ReplicaCreationFailed"]
 				if hasTransientErrors {
 					// Verify cluster recovered and reached healthy state despite transient errors
 					cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
@@ -235,11 +234,9 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ValkeyNodeCreated"), "ValkeyNodeCreated event should appear in describe")
-				// TODO PrimaryCreated, ClusterMeet events are not always captured due to rate-limiting issues
-				// fix this removing events which are not important
-				// ReplicaCreated and ClusterReady may not always appear in describe output due to:
-				// - Rate limiting as described above
-				// We verify these through cluster status instead of strictly requiring the events
+				// PrimaryCreated, ClusterMeetBatch, ReplicaCreated and ClusterReady may not always
+				// appear in describe output due to rate-limiting (see kubernetes/kubernetes#136061).
+				// We verify these through cluster status instead of strictly requiring the events.
 			}
 			Eventually(verifyDescribeEvents).Should(Succeed())
 
@@ -879,6 +876,122 @@ spec:
 				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+		})
+	})
+})
+
+var _ = Describe("ValkeyCluster spec propagation", func() {
+	AfterEach(func() {
+		specReport := CurrentSpecReport()
+		if specReport.Failed() {
+			utils.CollectDebugInfo(namespace)
+		}
+	})
+
+	Context("workloadType immutability", func() {
+		const clusterName = "valkeycluster-immutable-e2e"
+
+		It("rejects a change to workloadType after creation", func() {
+			By("creating a ValkeyCluster with StatefulSet workload type")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  workloadType: StatefulSet
+`, clusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("attempting to change workloadType to Deployment")
+			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", `{"spec":{"workloadType":"Deployment"}}`)
+			output, err := utils.Run(patchCmd)
+			Expect(err).To(HaveOccurred(), "patch should be rejected")
+			Expect(output).To(ContainSubstring("workloadType is immutable"),
+				"error should mention that workloadType is immutable")
+		})
+	})
+
+	Context("rolling update", func() {
+		const clusterName = "valkeycluster-rolling-e2e"
+
+		It("propagates spec changes one node at a time and returns to Ready", func() {
+			By("creating a ValkeyCluster with 2 shards and 1 replica")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 2
+  replicas: 1
+`, clusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the cluster to become Ready")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("patching the cluster with new memory requests to trigger a rolling update")
+			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p",
+				`{"spec":{"resources":{"requests":{"cpu":"100m","memory":"384Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}}`)
+			_, err = utils.Run(patchCmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster resources")
+
+			By("waiting for the cluster to enter the UpdatingNodes progressing state")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				progressingCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+				g.Expect(progressingCond).NotTo(BeNil(), "Progressing condition should be set")
+				g.Expect(progressingCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("waiting for all ValkeyNodes to reflect the updated memory request")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+					"-o", "jsonpath={.items[*].spec.resources.requests.memory}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				fields := strings.Fields(output)
+				g.Expect(fields).To(HaveLen(4), "expected 4 ValkeyNodes (2 shards × 2 nodes each)")
+				for _, mem := range fields {
+					g.Expect(mem).To(Equal("384Mi"), "each ValkeyNode should have the updated memory request")
+				}
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the cluster to return to Ready with Progressing=False")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				progressingCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+				g.Expect(progressingCond).NotTo(BeNil())
+				g.Expect(progressingCond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonReconcileComplete))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
 })

@@ -144,6 +144,32 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(10 * time.Second))
 		})
+
+		It("should not update the StatefulSet on a second reconcile when nothing has changed", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("first reconcile creates the StatefulSet")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("capturing ResourceVersion after first reconcile")
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, childName, sts)).To(Succeed())
+			rvAfterFirst := sts.ResourceVersion
+
+			By("second reconcile with no changes")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying ResourceVersion is unchanged")
+			sts2 := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, childName, sts2)).To(Succeed())
+			Expect(sts2.ResourceVersion).To(Equal(rvAfterFirst), "StatefulSet should not be updated when nothing changed")
+		})
 	})
 
 	Context("When WorkloadType is Deployment", func() {
@@ -200,6 +226,39 @@ var _ = Describe("ValkeyNode Controller", func() {
 			sts := &appsv1.StatefulSet{}
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, childName, sts))).To(BeTrue())
 		})
+
+		It("should propagate Spec.Image changes to the Deployment on subsequent reconciles", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("first reconcile creates the Deployment")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the initial image is the default")
+			initialDeploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName, initialDeploy)).To(Succeed())
+			Expect(initialDeploy.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(initialDeploy.Spec.Template.Spec.Containers[0].Image).NotTo(Equal("valkey/valkey:8.0.0"))
+
+			By("updating the ValkeyNode image")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Image = "valkey/valkey:8.0.0"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			By("second reconcile should propagate the image change")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName, deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:8.0.0"))
+		})
 	})
 
 	Context("When WorkloadType is unsupported", func() {
@@ -213,6 +272,187 @@ var _ = Describe("ValkeyNode Controller", func() {
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: "DaemonSet"},
 			}
 			Expect(r.ensureWorkload(context.Background(), node)).To(MatchError(ContainSubstring("unsupported workload type")))
+		})
+	})
+})
+
+var _ = Describe("isWorkloadRolledOut", func() {
+	const ns = "default"
+	ctx := context.Background()
+
+	makeReconciler := func() *ValkeyNodeReconciler {
+		return &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			// Leave APIReader nil so the test uses the cached client (simpler for envtest)
+		}
+	}
+
+	makeNode := func(name string, wt valkeyiov1alpha1.WorkloadType) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: wt},
+		}
+	}
+
+	Context("StatefulSet workload", func() {
+		const nodeName = "isrolled-sts"
+		stsName := types.NamespacedName{Name: "valkey-" + nodeName, Namespace: ns}
+		node := makeNode(nodeName, valkeyiov1alpha1.WorkloadTypeStatefulSet)
+
+		It("returns false when the StatefulSet does not exist", func() {
+			r := makeReconciler()
+			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
+		It("returns false when ObservedGeneration < Generation", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsName.Name, Namespace: stsName.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeName}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeName}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			// Leave Status.ObservedGeneration at 0 while Generation > 0
+			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
+		It("returns false when CurrentRevision != UpdateRevision", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			stsName2 := types.NamespacedName{Name: "valkey-" + nodeName + "-rev", Namespace: ns}
+			node2 := makeNode(nodeName+"-rev", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsName2.Name, Namespace: stsName2.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node2.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node2.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			// Re-Get to ensure we have the latest ResourceVersion before status update
+			Expect(k8sClient.Get(ctx, stsName2, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 1
+			sts.Status.CurrentRevision = "old-rev"
+			sts.Status.UpdateRevision = "new-rev"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, node2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
+		It("returns true when fully rolled out", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			stsName3 := types.NamespacedName{Name: "valkey-" + nodeName + "-done", Namespace: ns}
+			node3 := makeNode(nodeName+"-done", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsName3.Name, Namespace: stsName3.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node3.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node3.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			Expect(k8sClient.Get(ctx, stsName3, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 1
+			sts.Status.CurrentRevision = "rev-1"
+			sts.Status.UpdateRevision = "rev-1"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, node3)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeTrue())
+		})
+	})
+
+	Context("Deployment workload", func() {
+		const nodeName = "isrolled-deploy"
+		node := makeNode(nodeName, valkeyiov1alpha1.WorkloadTypeDeployment)
+
+		It("returns false when ObservedGeneration < Generation", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "valkey-" + nodeName, Namespace: ns},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeName}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeName}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			// Status.ObservedGeneration stays at 0
+			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
+		It("returns true when fully rolled out", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			depName := "valkey-" + nodeName + "-done"
+			node2 := makeNode(nodeName+"-done", valkeyiov1alpha1.WorkloadTypeDeployment)
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: ns},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node2.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node2.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: ns}, dep)).To(Succeed())
+			dep.Status.ObservedGeneration = dep.Generation
+			dep.Status.Replicas = 1
+			dep.Status.UpdatedReplicas = 1
+			dep.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, node2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeTrue())
 		})
 	})
 })

@@ -261,11 +261,11 @@ func GetValkeyNodeStatus(name string) (*valkeyiov1alpha1.ValkeyNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	var vkn valkeyiov1alpha1.ValkeyNode
-	if err := json.Unmarshal([]byte(output), &vkn); err != nil {
+	var node valkeyiov1alpha1.ValkeyNode
+	if err := json.Unmarshal([]byte(output), &node); err != nil {
 		return nil, err
 	}
-	return &vkn, nil
+	return &node, nil
 }
 
 // GetEvents fetches and categorizes Kubernetes events for a given resource.

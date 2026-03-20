@@ -120,6 +120,30 @@ spec:
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodRunning))
 		})
+
+		It("owned StatefulSet resourceVersion stabilises after the node is ready", func() {
+			const stableName = "valkeynode-sts-stable-e2e"
+			defer createStandaloneValkeyNode(stableName, "StatefulSet")()
+
+			By("waiting for the ValkeyNode to become ready")
+			waitForValkeyNodeReady(stableName)
+
+			By("capturing the StatefulSet resourceVersion once ready")
+			rvCmd := exec.Command("kubectl", "get", "statefulset", "valkey-"+stableName,
+				"-o", "jsonpath={.metadata.resourceVersion}")
+			rv, err := utils.Run(rvCmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rv).NotTo(BeEmpty())
+
+			By("verifying the StatefulSet is not updated by spurious reconciles for 30s")
+			Consistently(func(g Gomega) {
+				checkCmd := exec.Command("kubectl", "get", "statefulset", "valkey-"+stableName,
+					"-o", "jsonpath={.metadata.resourceVersion}")
+				current, err := utils.Run(checkCmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(current).To(Equal(rv), "StatefulSet resourceVersion should not change after stabilising")
+			}, 30*time.Second, 5*time.Second).Should(Succeed())
+		})
 	})
 
 	Context("standalone Deployment", func() {
@@ -150,6 +174,30 @@ spec:
 			cmd := exec.Command("kubectl", "get", "statefulset", "valkey-"+nodeName)
 			_, err = utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "no StatefulSet should exist for Deployment workload type")
+		})
+
+		It("owned Deployment resourceVersion stabilises after the node is ready", func() {
+			const stableName = "valkeynode-deploy-stable-e2e"
+			defer createStandaloneValkeyNode(stableName, "Deployment")()
+
+			By("waiting for the ValkeyNode to become ready")
+			waitForValkeyNodeReady(stableName)
+
+			By("capturing the Deployment resourceVersion once ready")
+			rvCmd := exec.Command("kubectl", "get", "deployment", "valkey-"+stableName,
+				"-o", "jsonpath={.metadata.resourceVersion}")
+			rv, err := utils.Run(rvCmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rv).NotTo(BeEmpty())
+
+			By("verifying the Deployment is not updated by spurious reconciles for 30s")
+			Consistently(func(g Gomega) {
+				checkCmd := exec.Command("kubectl", "get", "deployment", "valkey-"+stableName,
+					"-o", "jsonpath={.metadata.resourceVersion}")
+				current, err := utils.Run(checkCmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(current).To(Equal(rv), "Deployment resourceVersion should not change after stabilising")
+			}, 30*time.Second, 5*time.Second).Should(Succeed())
 		})
 	})
 
@@ -258,6 +306,67 @@ spec:
 			}, 10*time.Second, 2*time.Second).Should(Succeed())
 
 			By("waiting for the ValkeyNode to become ready using the external ConfigMap")
+			waitForValkeyNodeReady(nodeName)
+		})
+	})
+
+	Context("ObservedGeneration tracking", func() {
+		const nodeName = "valkeynode-obsgen-e2e"
+
+		It("status.observedGeneration is populated and tracks spec changes", func() {
+			defer createStandaloneValkeyNode(nodeName, "StatefulSet")()
+
+			By("waiting for the ValkeyNode to become ready")
+			waitForValkeyNodeReady(nodeName)
+
+			By("verifying observedGeneration equals the current generation after first reconcile")
+			node, err := utils.GetValkeyNodeStatus(nodeName)
+			Expect(err).NotTo(HaveOccurred())
+			initialGen := node.Generation
+			Expect(node.Status.ObservedGeneration).To(Equal(initialGen),
+				"observedGeneration should equal generation after reconcile")
+
+			By("patching the ValkeyNode spec to increment the generation")
+			patchCmd := exec.Command("kubectl", "patch", "valkeynode", nodeName,
+				"--type=merge", "-p", `{"spec":{"image":"valkey/valkey:9.0.0"}}`)
+			_, err = utils.Run(patchCmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for observedGeneration to reflect the new generation")
+			Eventually(func(g Gomega) {
+				updated, err := utils.GetValkeyNodeStatus(nodeName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(updated.Status.ObservedGeneration).To(BeNumerically(">", initialGen),
+					"observedGeneration should advance after spec change")
+			}).Should(Succeed())
+		})
+	})
+
+	Context("rolling update readiness gate", func() {
+		const nodeName = "valkeynode-rollgate-e2e"
+
+		It("holds Ready=false during StatefulSet rolling update", func() {
+			defer createStandaloneValkeyNode(nodeName, "StatefulSet")()
+
+			By("waiting for the ValkeyNode to become ready")
+			waitForValkeyNodeReady(nodeName)
+
+			By("patching the ValkeyNode with new resource requests to trigger a rolling update")
+			patchCmd := exec.Command("kubectl", "patch", "valkeynode", nodeName,
+				"--type=merge", "-p",
+				`{"spec":{"resources":{"requests":{"memory":"384Mi"},"limits":{"memory":"512Mi"}}}}`)
+			_, err := utils.Run(patchCmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the ValkeyNode reports Ready=false during the rolling update")
+			Eventually(func(g Gomega) {
+				node, err := utils.GetValkeyNodeStatus(nodeName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(node.Status.Ready).To(BeFalse(),
+					"ValkeyNode should report Ready=false while StatefulSet is rolling out")
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("waiting for the ValkeyNode to recover to ready once the rollout completes")
 			waitForValkeyNodeReady(nodeName)
 		})
 	})

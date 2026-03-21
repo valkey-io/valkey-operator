@@ -11,13 +11,9 @@ Thank you for your interest in contributing to the Valkey Operator! We welcome c
 - kubectl v1.11.3+
 - Access to a Kubernetes cluster (kind, minikube, or cloud provider)
 
-### Development Setup
+### Development Tools
 
-See the [Developer Guide](./docs/developer-guide.md) for detailed setup instructions.
-
-### Pre-requisites
-
-This project uses the following tools for development.
+This project uses the following tools during development.
 
 #### golangci-lint
 
@@ -34,6 +30,10 @@ each commit.
 ```bash
 pre-commit install
 ```
+
+### Development Setup
+
+See the [Developer Guide](./docs/developer-guide.md) for detailed setup instructions.
 
 #### Optional: kubebuilder
 [Kubebuilder](https://kubebuilder.io/) is the framework we use for the operator. You will normally not need to use the kubebuilder CLI directly unless you are adding new CRDs or making major changes to the project structure.

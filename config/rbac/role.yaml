@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   - services
   verbs:
   - create
@@ -29,6 +30,7 @@ rules:
   - apps
   resources:
   - deployments
+  - statefulsets
   verbs:
   - create
   - delete
@@ -48,6 +50,7 @@ rules:
   - valkey.io
   resources:
   - valkeyclusters
+  - valkeynodes
   verbs:
   - create
   - delete
@@ -60,12 +63,14 @@ rules:
   - valkey.io
   resources:
   - valkeyclusters/finalizers
+  - valkeynodes/finalizers
   verbs:
   - update
 - apiGroups:
   - valkey.io
   resources:
   - valkeyclusters/status
+  - valkeynodes/status
   verbs:
   - get
   - patch

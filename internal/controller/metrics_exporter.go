@@ -25,10 +25,10 @@ import (
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(cluster *valkeyiov1alpha1.ValkeyCluster) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec) corev1.Container {
 	exporterImage := DefaultExporterImage
-	if cluster.Spec.Exporter.Image != "" {
-		exporterImage = cluster.Spec.Exporter.Image
+	if exporter.Image != "" {
+		exporterImage = exporter.Image
 	}
 	return corev1.Container{
 		Name:  "metrics-exporter",
@@ -63,6 +63,6 @@ func generateMetricsExporterContainerDef(cluster *valkeyiov1alpha1.ValkeyCluster
 				},
 			},
 		},
-		Resources: cluster.Spec.Exporter.Resources,
+		Resources: exporter.Resources,
 	}
 }

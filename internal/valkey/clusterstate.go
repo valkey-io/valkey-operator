@@ -54,6 +54,9 @@ type ClusterState struct {
 	PendingNodes []*NodeState
 }
 
+// TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
+const TotalSlots = 16384
+
 // SlotsRange is an interval or a single slot when Start and End are equal.
 type SlotsRange struct {
 	Start int
@@ -124,9 +127,9 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	remaining := []SlotsRange{{0, 16383}}
 	for _, shard := range s.Shards {
 		for _, slot := range shard.Slots {
-			var next []SlotsRange
+			var next []SlotsRange //nolint:prealloc
 			for _, base := range remaining {
-				parts := subtractSlotsRange(base, slot)
+				parts := SubtractSlotsRange(base, slot)
 				next = append(next, parts...)
 			}
 			remaining = next
@@ -167,6 +170,27 @@ func (n *NodeState) GetSlots() []string {
 // IsPrimary return true if this is a primary node.
 func (n *NodeState) IsPrimary() bool {
 	return slices.Contains(n.Flags, "master")
+}
+
+// IsIsolated returns true if the node's cluster_known_nodes is <= 1,
+// meaning it hasn't been introduced to any other cluster member yet.
+func (n *NodeState) IsIsolated() bool {
+	sval, ok := n.ClusterInfo["cluster_known_nodes"]
+	if !ok {
+		return false
+	}
+	val, err := strconv.Atoi(sval)
+	return err == nil && val <= 1
+}
+
+// IsReplicationInSync returns true if this replica node has its replication
+// link up (master_link_status:up in INFO REPLICATION). Primary nodes always
+// return true since they don't have a replication link to check.
+func (n *NodeState) IsReplicationInSync() bool {
+	if n.IsPrimary() {
+		return true
+	}
+	return n.Info["master_link_status"] == "up"
 }
 
 // GetFailingNodes returns all known nodes that are failing.
@@ -274,6 +298,13 @@ func parseSlotsRanges(s []string) ([]SlotsRange, error) {
 	ranges := []SlotsRange{}
 
 	for _, part := range s {
+		// During active slot migration, CLUSTER NODES appends entries like
+		// "[5461->-abc123]" (migrating) or "[5461-<-abc123]" (importing) to the
+		// slot fields. GetSlots() returns fields[8:] verbatim, so these entries
+		// can appear here. Skip them — they aren't assignable slot ranges.
+		if strings.HasPrefix(part, "[") {
+			continue
+		}
 		r, err := parseSlotsRange(part)
 		if err != nil {
 			return nil, err
@@ -312,8 +343,8 @@ func parseSlotsRange(s string) (SlotsRange, error) {
 	return SlotsRange{n, n}, nil
 }
 
-// subtractSlotsRange subtract a SlotsRange from another SlotsRange.
-func subtractSlotsRange(base, remove SlotsRange) []SlotsRange {
+// SubtractSlotsRange subtracts a SlotsRange from another SlotsRange.
+func SubtractSlotsRange(base, remove SlotsRange) []SlotsRange {
 	var result []SlotsRange
 
 	// No overlap

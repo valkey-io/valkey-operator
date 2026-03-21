@@ -1,14 +1,11 @@
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
-  name: cluster-sample
+  name: cluster-sample-deployment
 spec:
   shards: 3
   replicas: 1
-  valkey:
-    config:
-      maxmemory: 50mb
-      maxmemory-policy: allkeys-lfu
+  workloadType: Deployment
   resources:
     requests:
       memory: "256Mi"

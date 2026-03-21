@@ -4,30 +4,34 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: valkeyclusters.valkey.io
+  name: valkeynodes.valkey.io
 spec:
   group: valkey.io
   names:
-    kind: ValkeyCluster
-    listKind: ValkeyClusterList
-    plural: valkeyclusters
-    singular: valkeycluster
+    kind: ValkeyNode
+    listKind: ValkeyNodeList
+    plural: valkeynodes
+    singular: valkeynode
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Current state of the cluster
-      jsonPath: .status.state
-      name: State
+    - description: Whether the node is ready
+      jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - description: Valkey replication role
+      jsonPath: .status.role
+      name: Role
       type: string
-    - description: Reason for current state
-      jsonPath: .status.reason
-      name: Reason
+    - description: Pod name
+      jsonPath: .status.podName
+      name: Pod
       type: string
-    - description: Ready shards
-      jsonPath: .status.readyShards
-      name: ReadyShards
+    - description: Pod IP
+      jsonPath: .status.podIP
+      name: IP
       priority: 1
-      type: integer
+      type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
@@ -35,7 +39,9 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ValkeyCluster is the Schema for the valkeyclusters API
+        description: |-
+          ValkeyNode is the Schema for the valkeynodes API.
+          ValkeyNode is an internal CRD. Users should not create ValkeyNodes directly.
         properties:
           apiVersion:
             description: |-
@@ -55,12 +61,10 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of ValkeyCluster
+            description: ValkeyNodeSpec defines the desired state of ValkeyNode.
             properties:
               affinity:
-                description: |-
-                  Affinity to apply to the pods, overrides NodeSelector if set
-                  Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
+                description: Affinity defines the pod affinity/anti-affinity rules.
                 properties:
                   nodeAffinity:
                     description: Describes node affinity scheduling rules for the
@@ -972,8 +976,10 @@ spec:
                     type: object
                 type: object
               containers:
-                description: Additional containers or overrides for existing containers,
-                  applied using strategic merge patch
+                description: |-
+                  Containers allows patching the default containers via a strategic merge
+                  patch. Existing containers (e.g. "server", "metrics-exporter") are merged
+                  by name; any container name not present in the defaults is appended.
                 items:
                   description: A single application container that you want to run
                     within a pod.
@@ -2496,9 +2502,7 @@ spec:
                   type: object
                 type: array
               exporter:
-                default:
-                  enabled: true
-                description: Metrics exporter options
+                description: Exporter defines the metrics exporter sidecar configuration.
                 properties:
                   enabled:
                     description: Enable or disable the exporter sidecar container
@@ -2568,21 +2572,16 @@ spec:
                     type: object
                 type: object
               image:
-                description: Override the default Valkey image
+                description: Image is the Valkey container image to use.
                 type: string
               nodeSelector:
                 additionalProperties:
                   type: string
-                description: NodeSelector to apply to the pods
+                description: NodeSelector defines the node selection constraints.
                 type: object
-              replicas:
-                description: The number of replicas for each shard group.
-                format: int32
-                minimum: 0
-                type: integer
               resources:
-                description: Override resource requirements for the Valkey container
-                  in each pod
+                description: Resources defines the resource requirements for the Valkey
+                  container.
                 properties:
                   claims:
                     description: |-
@@ -2640,14 +2639,12 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              shards:
-                description: The number of shards groups. Each shard group contains
-                  one primary and N replicas.
-                format: int32
-                minimum: 1
-                type: integer
+              scriptsConfigMapName:
+                description: ScriptsConfigMapName specifies the name of the ConfigMap
+                  that contains the scripts for the ValkeyNode.
+                type: string
               tolerations:
-                description: Tolerations to apply to the pods
+                description: Tolerations defines the pod tolerations.
                 items:
                   description: |-
                     The pod this Toleration is attached to tolerates any taint that matches
@@ -2686,101 +2683,17 @@ spec:
                       type: string
                   type: object
                 type: array
-              users:
-                description: Users, and ACL-related configuration; see valkeyacls_types.go
-                items:
-                  description: An UserAclSpec contains user, authorization, and permissions-related
-                    configurations
-                  properties:
-                    channels:
-                      description: Channel restrictions
-                      properties:
-                        patterns:
-                          description: 'Pub/Sub channel patterns - maps to Valkey:
-                            &pattern'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    commands:
-                      description: Valkey command categories, commands, and subcommands
-                        restrictions for this user
-                      properties:
-                        allow:
-                          description: Allowed commands for this user
-                          items:
-                            type: string
-                          type: array
-                        deny:
-                          description: Denied commands for this user
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    enabled:
-                      default: true
-                      description: If the user is enabled or not
-                      type: boolean
-                    keys:
-                      description: Key restrictions
-                      properties:
-                        readOnly:
-                          description: 'Keys restricted to read-only; maps to Valkey:
-                            %R~pattern'
-                          items:
-                            type: string
-                          type: array
-                        readWrite:
-                          description: 'Keys on which this user can read, and write;
-                            maps to Valkey: ~pattern'
-                          items:
-                            type: string
-                          type: array
-                        writeOnly:
-                          description: 'Keys restricted to write-only; maps to Valkey:
-                            %W~pattern'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    name:
-                      description: Username
-                      type: string
-                    nopass:
-                      default: false
-                      description: Do not apply a password to this user
-                      type: boolean
-                    passwordSecret:
-                      description: Reference information to a Secret containing user
-                        passwords
-                      properties:
-                        keys:
-                          description: |-
-                            An array of keys inside the referencing Secret to find passwords; defaults to username
-                            Valkey supports multiple passwords per user for rotation
-                          items:
-                            type: string
-                          type: array
-                        name:
-                          description: Name of the referencing Secret; Defaults to
-                            clustername-users
-                          type: string
-                      type: object
-                    permissions:
-                      description: Raw ACL for (additional) permissions. Appended
-                        to anything generated.
-                      type: string
-                  required:
-                  - name
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - name
-                x-kubernetes-list-type: map
+              usersACLSecretName:
+                description: |-
+                  UsersACLSecretName is the name of the Secret containing the ACL user
+                  file. When set, mounts a users-acl volume from this Secret so the
+                  container can load aclfile /config/users/users.acl.
+                type: string
               workloadType:
                 default: StatefulSet
-                description: WorkloadType specifies whether ValkeyNodes create StatefulSets
-                  or Deployments.
+                description: |-
+                  WorkloadType specifies whether to create a StatefulSet or Deployment.
+                  This field is immutable after creation.
                 enum:
                 - StatefulSet
                 - Deployment
@@ -2790,21 +2703,10 @@ spec:
                   rule: self == oldSelf
             type: object
           status:
-            default:
-              readyShards: 0
-              state: Initializing
-            description: status defines the observed state of ValkeyCluster
+            description: ValkeyNodeStatus defines the observed state of ValkeyNode.
             properties:
               conditions:
-                description: |-
-                  Conditions represent the current state of the ValkeyCluster resource.
-                  Standard condition types:
-                  - "Ready": the cluster is fully functional and serving traffic
-                  - "Progressing": the cluster is being created, updated, or scaled
-                  - "Degraded": the cluster is impaired but may be partially functional
-                  Valkey-specific condition types:
-                  - "ClusterFormed": all nodes have joined and meet the shard/replica layout
-                  - "SlotsAssigned": all 16384 hash slots are assigned to primaries
+                description: Conditions represent the current state of the ValkeyNode.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -2863,39 +2765,30 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              message:
-                description: Message provides human-readable details about the current
-                  state.
-                type: string
-              readyShards:
-                default: 0
-                description: ReadyShards represents the number of shards that are
-                  fully healthy.
-                format: int32
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the controller.
+                  It corresponds to the ValkeyNode's generation, which is updated on mutation
+                  of the spec field.
+                format: int64
                 type: integer
-              reason:
-                description: Reason provides a brief machine-readable explanation
-                  for the current state.
+              podIP:
+                description: PodIP is the IP address of the pod.
                 type: string
-              shards:
-                default: 0
-                description: Shards represents the number of shards currently formed
-                  in the cluster.
-                format: int32
-                type: integer
-              state:
-                default: Initializing
-                description: State provides a high-level summary of the cluster's
-                  current state.
-                enum:
-                - Initializing
-                - Reconciling
-                - Ready
-                - Degraded
-                - Failed
+              podName:
+                description: PodName is the name of the pod created by the workload.
+                type: string
+              ready:
+                description: Ready indicates whether the ValkeyNode is ready to serve
+                  traffic.
+                type: boolean
+              role:
+                description: Role is the Valkey replication role of this node (primary
+                  or replica).
                 type: string
             type: object
         required:
+        - metadata
         - spec
         type: object
     served: true

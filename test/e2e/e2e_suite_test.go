@@ -65,9 +65,14 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	By("purging old events")
+	cmd := exec.Command("kubectl", "delete", "events", "--field-selector", "involvedObject.name=valkeycluster-sample")
 	_, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to purge old events")
+
+	By("building the manager image")
+	cmd = exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	By("loading the manager image on Kind")

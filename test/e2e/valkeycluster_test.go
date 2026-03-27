@@ -76,7 +76,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating the ConfigMap")
 			verifyConfigMapExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName + "-config")
+				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName+"-config")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}

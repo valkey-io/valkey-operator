@@ -37,8 +37,8 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 			Namespace: namespace,
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
-			Image:                "valkey/valkey:9.0.0",
-			ScriptsConfigMapName: "valkey-scripts",
+			Image:              "valkey/valkey:9.0.0",
+			UsersConfigMapName: "valkey-config",
 		},
 	}
 }
@@ -293,21 +293,21 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
-	t.Run("uses ScriptsConfigMapName when set", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns") // ScriptsConfigMapName = "valkey-scripts"
+	t.Run("uses UsersConfigMapName when set", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns") // UsersConfigMapName = "valkey-config"
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 
-	t.Run("falls back to resource name when ScriptsConfigMapName is empty", func(t *testing.T) {
+	t.Run("falls back to resource name when UsersConfigMapName is empty", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns")
-		node.Spec.ScriptsConfigMapName = ""
+		node.Spec.UsersConfigMapName = ""
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, "mynode-config", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "mynode-config", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 }
 
@@ -600,7 +600,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, cluster.Name, node.Spec.ScriptsConfigMapName, "ScriptsConfigMapName must be the cluster name")
+	assert.Equal(t, getConfigMapName(cluster.Name), node.Spec.UsersConfigMapName, "UsersConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 

@@ -153,11 +153,11 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 }
 
 // ensureConfigMap creates or updates the ConfigMap for the ValkeyNode.
-// If ScriptsConfigMapName is set, the ConfigMap is assumed to
+// If UsersConfigMapName is set, the ConfigMap is assumed to
 // be managed externally and this step is skipped.
 func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
-	if node.Spec.ScriptsConfigMapName != "" {
+	if node.Spec.UsersConfigMapName != "" {
 		// ConfigMap is provided externally (e.g. by ValkeyCluster), skip creation.
 		return nil
 	}

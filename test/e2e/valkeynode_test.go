@@ -80,13 +80,13 @@ spec:
 
 			By("waiting for the ConfigMap to be created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", "valkey-"+nodeName)
+				cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config")
 				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "ConfigMap valkey-%s should exist", nodeName)
+				g.Expect(err).NotTo(HaveOccurred(), "ConfigMap %s-config should exist", nodeName)
 			}).Should(Succeed())
 
 			By("verifying the ConfigMap contains the required script keys")
-			cmd := exec.Command("kubectl", "get", "configmap", "valkey-"+nodeName,
+			cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config",
 				"-o", "jsonpath={.data}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
@@ -285,7 +285,7 @@ kind: ValkeyNode
 metadata:
   name: %s
 spec:
-  scriptsConfigMapName: %s
+  usersConfigMapName: %s
 `, nodeName, cmName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
@@ -299,10 +299,10 @@ spec:
 
 			By("verifying the controller did NOT create an owned ConfigMap")
 			Consistently(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", "valkey-"+nodeName)
+				cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config")
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(),
-					"controller should not create a ConfigMap when scriptsConfigMapName is set")
+					"controller should not create a ConfigMap when UsersConfigMapName is set")
 			}, 10*time.Second, 2*time.Second).Should(Succeed())
 
 			By("waiting for the ValkeyNode to become ready using the external ConfigMap")

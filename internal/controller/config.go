@@ -17,7 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -101,135 +100,6 @@ func getUserConfig(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster)
 	return configBuilder.String()
 }
 
-// Build config file contents for any modules
-func getModulesConfig(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, r *ValkeyClusterReconciler) string {
-
-	modulesConfig := cluster.Spec.Modules
-
-	// Exit early if no modules
-	if len(modulesConfig) == 0 {
-		return ""
-	}
-
-	log := logf.FromContext(ctx)
-
-	// Build each module's config
-	var moduleBuilder strings.Builder
-	moduleBuilder.Grow(len(modulesConfig) * averageParameterLength)
-	writeConfigLine(&moduleBuilder, "#", "Modules")
-
-	// Sort using module names to keep consistent processing order, as some modules might depend on others
-	slices.SortFunc(modulesConfig, func(a, b valkeyiov1alpha1.ValkeyModule) int {
-		return cmp.Compare(a.Name, b.Name)
-	})
-
-	for _, module := range modulesConfig {
-
-		// Build the individual config parameters for this module, which could be a
-		// raw value, in a ConfigMap, or in a Secret
-		cfg, err := buildModuleConfig(ctx, module, cluster.Namespace, r)
-		if err != nil {
-			log.Error(err, "error building module config", "module", module.Name)
-
-			// This module had issues with its config, but continue processing other modules
-			continue
-		}
-
-		// Module entry
-		writeConfigLine(&moduleBuilder, "#", module.Name)
-		writeConfigLine(&moduleBuilder, "loadmodule", module.Path)
-
-		// Module's config lines
-		moduleBuilder.WriteString(cfg)
-		moduleBuilder.WriteString("\n")
-	}
-
-	return moduleBuilder.String()
-}
-
-// Module config parameters and values can be in raw, string form,
-// or stored in a ConfigMap, or stored in a Secret.
-func buildModuleConfig(ctx context.Context, module valkeyiov1alpha1.ValkeyModule, namespace string, r *ValkeyClusterReconciler) (string, error) {
-
-	var moduleConfigBuilder strings.Builder
-
-	// Individual config parameters for this module
-	for _, config := range module.Config {
-
-		if len(config.Value) > 0 {
-
-			// Simple, raw value
-			writeConfigLine(&moduleConfigBuilder, config.Name, config.Value)
-
-		} else if config.ValueFrom != nil {
-
-			// Value is stored in ConfigMap, or Secret
-			var val string
-			var err error
-
-			if keyRef := config.ValueFrom.ConfigMapKeyRef; keyRef != nil {
-
-				val, err = r.getConfigValue(ctx, namespace, keyRef.Name, keyRef.Key, false)
-
-			} else if keyRef := config.ValueFrom.SecretKeyRef; keyRef != nil {
-
-				val, err = r.getConfigValue(ctx, namespace, keyRef.Name, keyRef.Key, true)
-
-			} else {
-				return "", fmt.Errorf("no reference to ConfigMap/Secret for module config parameter %q", config.Name)
-			}
-
-			if err != nil {
-				return "", fmt.Errorf("failed to retrieve module config %q: %w", config.Name, err)
-			}
-
-			writeConfigLine(&moduleConfigBuilder, config.Name, val)
-
-		} else {
-			return "", fmt.Errorf("missing value for module config parameter %q", config.Name)
-		}
-	}
-
-	return moduleConfigBuilder.String(), nil
-}
-
-func (r *ValkeyClusterReconciler) getConfigValue(ctx context.Context, namespace, name, key string, isSecret bool) (string, error) {
-
-	if name == "" || key == "" {
-		return "", fmt.Errorf("name and key must not be empty")
-	}
-
-	if isSecret {
-		secret := &corev1.Secret{}
-		if err := r.Get(ctx, types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
-		}, secret); err != nil {
-			return "", fmt.Errorf("failed to locate module secret %q: %w", name, err)
-		}
-
-		if val, exists := secret.Data[key]; exists {
-			return string(val), nil
-		}
-
-		return "", fmt.Errorf("key %q not found in secret %q", key, name)
-	}
-
-	configMap := &corev1.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      name,
-		Namespace: namespace,
-	}, configMap); err != nil {
-		return "", fmt.Errorf("failed to locate module configmap %q: %w", name, err)
-	}
-
-	if val, exists := configMap.Data[key]; exists {
-		return val, nil
-	}
-
-	return "", fmt.Errorf("key %q not found in configmap %q", key, name)
-}
-
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
@@ -254,9 +124,6 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 
 	// User-provided config from spec
 	newConfigBuilder.WriteString(getUserConfig(ctx, cluster))
-
-	// Modules config
-	newConfigBuilder.WriteString(getModulesConfig(ctx, cluster, r))
 
 	// Final string version of the config
 	newServerConfig := newConfigBuilder.String()

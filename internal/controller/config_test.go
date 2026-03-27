@@ -21,8 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -59,24 +57,5 @@ func TestGetUserConfig(t *testing.T) {
 	userConfig := getUserConfig(ctx, cluster)
 	if !strings.Contains(userConfig, "maxmemory-policy") {
 		t.Fatalf("unexpected user config: missing 'maxmemory-policy'")
-	}
-
-	// Fake K8S Client
-	k8sClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-
-	// Fake reconciler
-	reconciler := &ValkeyClusterReconciler{
-		Client: k8sClient,
-	}
-
-	modulesConfig := getModulesConfig(ctx, cluster, reconciler)
-	if !strings.Contains(modulesConfig, "# Modules") {
-		t.Fatalf("unexpected modules config: missing '# Modules' header")
-	}
-	if !strings.Contains(modulesConfig, "bloom-fp-rate") {
-		t.Fatalf("unexpected modules config: missing 'bloom' module")
-	}
-	if !strings.Contains(modulesConfig, "max-path-limit") {
-		t.Fatalf("unexpected modules config: missing 'max-path-limit' parameter")
 	}
 }

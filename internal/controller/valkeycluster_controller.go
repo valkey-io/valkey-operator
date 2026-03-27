@@ -353,46 +353,6 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
-// Create or update a basic valkey.conf
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
-	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
-	if err != nil {
-		return err
-	}
-	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
-	if err != nil {
-		return err
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
-			Namespace: cluster.Namespace,
-		},
-	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Labels = labels(cluster)
-		cm.Data = map[string]string{
-			"readiness-check.sh": string(readiness),
-			"liveness-check.sh":  string(liveness),
-			"valkey.conf": `
-cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000
-aclfile /config/users/users.acl`,
-		}
-		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
-	})
-	if err != nil {
-		r.Recorder.Eventf(cluster, cm, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpdateConfigMap", "Failed to upsert ConfigMap: %v", err)
-		return err
-	}
-	if result == controllerutil.OperationResultCreated {
-		r.Recorder.Eventf(cluster, cm, corev1.EventTypeNormal, "ConfigMapCreated", "CreateConfigMap", "Created ConfigMap with configuration")
-	}
-	return nil
-}
-
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:

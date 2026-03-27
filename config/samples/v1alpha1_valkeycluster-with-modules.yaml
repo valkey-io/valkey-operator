@@ -1,0 +1,58 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-sample
+spec:
+  shards: 3
+  replicas: 1
+
+  config:
+    maxmemory: 50mb
+    maxmemory-policy: allkeys-lfu
+    appendonly: yes
+    appendfilename: "orbit.aof"
+
+  modules:
+  - name: valkeyjson
+    path: /valkey/modules/libjson.so
+    config:
+    - name: max-document-size
+      value: 1024
+    - name: max-path-limit
+      value: 128
+  - name: bloom
+    path: /valkey/modules/valkeybloom.so
+    config:
+    - name: bloom-fp-rate
+      value: "0.02"
+  - name: aisearch
+    path: /valkey/modules/valkeysearch.so
+    config:
+    - name: search.query-string-bytes
+      value: 128
+    - name: search.log-level
+      value: DEBUG
+    - name: search.max-indexes
+      value: 64
+  - name: ldap
+    path: /valkey/modules/ldap.so
+    config:
+    - name: ldap.servers
+      value: "ldap://ldap ldap://ldap-2"
+    - name: ldap.search_base
+      value: "dc=valkey,dc=io"
+    - name: ldap.search_bind_dn
+      value: "dc=valkey,dc=io"
+    - name: ldap.search_bind_passwd
+      valueFrom:
+        secretKeyRef:
+          name: valkey-ldap-secret
+          key: bindpasswd
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"

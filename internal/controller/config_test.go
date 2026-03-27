@@ -28,7 +28,7 @@ import (
 // getSampleCluster parses the v1alpha1_valkeycluster.yaml sample file
 // and returns the ValkeyCluster object.
 func getSampleCluster(t *testing.T) *valkeyiov1alpha1.ValkeyCluster {
-	valkeyClusterCR := "../../config/samples/v1alpha1_valkeycluster-with-modules.yaml"
+	valkeyClusterCR := "../../config/samples/v1alpha1_valkeycluster.yaml"
 
 	data, err := os.ReadFile(valkeyClusterCR)
 	if err != nil {

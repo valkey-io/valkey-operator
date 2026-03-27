@@ -101,56 +101,6 @@ type ValkeyClusterSpec struct {
 	// Additional Valkey configuration parameters
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
-
-	// Modules to load into Valkey
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	Modules []ValkeyModule `json:"modules,omitempty"`
-}
-
-type ValkeyModule struct {
-
-	// Name is the module's registered name (as returned by MODULE LIST)
-	// Used for diffing and MODULE UNLOAD operations.
-	// +required
-	Name string `json:"name"`
-
-	// Path is the filesystem path to the module shared object.
-	// +required
-	Path string `json:"path"`
-
-	// Optional configuration parameters/args passed to the module on load
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	Config []ValkeyModuleConfigEntry `json:"config,omitempty"`
-}
-
-type ValkeyModuleConfigEntry struct {
-
-	// Name is the Valkey configuration parameter name (e.g. "maxmemory")
-	// +required
-	Name string `json:"name"`
-
-	// Value is the configuration parameter value
-	// +optional
-	Value string `json:"value,omitempty"`
-
-	// ValueFrom is a reference to a configuration parameter stored in a ConfigMap, or Secret
-	// +optional
-	ValueFrom *ModuleValueFromSource `json:"valueFrom,omitempty"`
-}
-
-type ModuleValueFromSource struct {
-
-	// Selects a key of a ConfigMap.
-	// +optional
-	ConfigMapKeyRef *corev1.ConfigMapKeySelector `json:"configMapKeyRef,omitempty"`
-
-	// Selects a key of a secret in the pod's namespace
-	// +optional
-	SecretKeyRef *corev1.SecretKeySelector `json:"secretKeyRef,omitempty"`
 }
 
 type ExporterSpec struct {

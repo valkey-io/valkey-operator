@@ -119,10 +119,10 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Volumes
 	require.Len(t, pts.Spec.Volumes, 2)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
+	assert.Equal(t, getConfigMapName("valkey"), pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, getConfigMapName("valkey"), pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -282,7 +282,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	cm, err := buildValkeyNodeConfigMap(node)
 
 	require.NoError(t, err)
-	assert.Equal(t, "valkey-mynode", cm.Name)
+	assert.Equal(t, getConfigMapName("mynode"), cm.Name)
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 

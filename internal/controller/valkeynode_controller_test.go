@@ -45,8 +45,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      resourceName,
 			Namespace: "default",
 		}
-		childName := types.NamespacedName{
+		statefulSetName := types.NamespacedName{
 			Name:      "valkey-" + resourceName,
+			Namespace: "default",
+		}
+		configName := types.NamespacedName{
+			Name:      getConfigMapName(resourceName),
 			Namespace: "default",
 		}
 
@@ -71,11 +75,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 		AfterEach(func() {
 			// Delete owned resources explicitly — envtest does not run garbage collection.
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, childName, cm); err == nil {
+			if err := k8sClient.Get(ctx, configName, cm); err == nil {
 				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
 			}
 			sts := &appsv1.StatefulSet{}
-			if err := k8sClient.Get(ctx, childName, sts); err == nil {
+			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
 				Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
 			}
 
@@ -97,14 +101,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			By("verifying the ConfigMap was created with probe scripts")
 			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, childName, cm)).To(Succeed())
+			Expect(k8sClient.Get(ctx, configName, cm)).To(Succeed())
 			Expect(cm.Data).To(HaveKey("valkey.conf"))
 			Expect(cm.Data).To(HaveKey("liveness-check.sh"))
 			Expect(cm.Data).To(HaveKey("readiness-check.sh"))
 
 			By("verifying the StatefulSet was created with correct labels")
 			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, childName, sts)).To(Succeed())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/instance", resourceName))
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
 		})
@@ -158,7 +162,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			By("capturing ResourceVersion after first reconcile")
 			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, childName, sts)).To(Succeed())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			rvAfterFirst := sts.ResourceVersion
 
 			By("second reconcile with no changes")
@@ -167,7 +171,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			By("verifying ResourceVersion is unchanged")
 			sts2 := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, childName, sts2)).To(Succeed())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
 			Expect(sts2.ResourceVersion).To(Equal(rvAfterFirst), "StatefulSet should not be updated when nothing changed")
 		})
 	})
@@ -177,8 +181,18 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		ctx := context.Background()
 
-		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: "default"}
-		childName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+		childName := types.NamespacedName{
+			Name:      "valkey-" + resourceName,
+			Namespace: "default",
+		}
+		configName := types.NamespacedName{
+			Name:      getConfigMapName(resourceName),
+			Namespace: "default",
+		}
 
 		BeforeEach(func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
@@ -195,7 +209,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		AfterEach(func() {
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, childName, cm); err == nil {
+			if err := k8sClient.Get(ctx, configName, cm); err == nil {
 				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
 			}
 			deploy := &appsv1.Deployment{}

@@ -52,7 +52,7 @@ func conditionsChanged(old, new []metav1.Condition) bool {
 // nodeStatusChanged compares two ValkeyNodeStatus values and returns true if
 // they differ (ignoring LastTransitionTime on conditions).
 func nodeStatusChanged(old, new valkeyiov1alpha1.ValkeyNodeStatus) bool {
-	if old.Ready != new.Ready || old.PodName != new.PodName || old.PodIP != new.PodIP || old.Role != new.Role || old.ObservedGeneration != new.ObservedGeneration {
+	if old.Ready != new.Ready || old.Running != new.Running || old.PodName != new.PodName || old.PodIP != new.PodIP || old.Role != new.Role || old.ObservedGeneration != new.ObservedGeneration {
 		return true
 	}
 	return conditionsChanged(old.Conditions, new.Conditions)

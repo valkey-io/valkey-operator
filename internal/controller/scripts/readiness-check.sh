@@ -47,16 +47,14 @@ if [ "$response" != "PONG" ]; then
     exit 1
 fi
 
-# valkey_status_file=/tmp/.valkey_cluster_check
-# if [ ! -f "$valkey_status_file" ]; then
-#     response=$(
-#         timeout $timeout \
-#         valkey-cli -h localhost -p $port CLUSTER INFO | grep cluster_state | tr -d '[:space:]')
-
-#     if [ "$response" != "cluster_state:ok" ]; then
-#         echo "$response" >&2
-#         exit 1
-#     else
-#         touch "$valkey_status_file"
-#     fi
-# fi
+# In standalone mode CLUSTER INFO returns "ERR This instance has cluster support
+# disabled" (no cluster_state line).  Skip the check in that case.
+# When non-Cluster mode is implemented, this check will be revisited
+cluster_info=$(timeout $timeout valkey-cli -h localhost -p $port CLUSTER INFO)
+if echo "$cluster_info" | grep -q '^cluster_state:'; then
+    response=$(echo "$cluster_info" | grep '^cluster_state:' | tr -d '[:space:]')
+    if [ "$response" != "cluster_state:ok" ]; then
+        echo "$response" >&2
+        exit 1
+    fi
+fi

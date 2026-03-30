@@ -135,7 +135,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 	containers := []corev1.Container{
 		{
-			Name:      "server",
+			Name:      ValkeyContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
 			Command: []string{

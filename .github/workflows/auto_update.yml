@@ -13,7 +13,7 @@ permissions:
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 2" # Every Tuesday at 00:00 UTC
+    - cron: "0 0 * * 0" # Every Tuesday at 00:00 UTC
 
 jobs:
   auto-update:

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"sort"
@@ -39,12 +40,23 @@ const (
 	aclFilename       = "users.acl"
 )
 
+var (
+	systemUsersAcl = map[string]string{
+		"_operator": "",
+		"_exporter": "",
+	}
+)
+
 func getInternalSecretName(clusterName string) string {
 	return "internal-" + clusterName + "-acl"
 }
 
 func getDefaultSecretName(clusterName string) string {
 	return clusterName + "-users"
+}
+
+func getSystemPasswordSecretName(clusterName string) string {
+	return "internal-" + clusterName + "-system-passwords"
 }
 
 // When a Secret is updated, Watch() calls this function to discover
@@ -88,6 +100,46 @@ func (r *ValkeyClusterReconciler) findReferencedClusters(ctx context.Context, se
 	}
 
 	return requests
+}
+
+func (r *ValkeyClusterReconciler) reconcileSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	log := logf.FromContext(ctx)
+
+	var systemsAcls strings.Builder
+	systemUserSecret := &corev1.Secret{}
+	err := r.Client.Get(ctx, types.NamespacedName{
+		Namespace: cluster.Namespace,
+		Name:      getSystemPasswordSecretName(cluster.Name),
+	}, systemUserSecret)
+	if err != nil {
+		*systemUserSecret, err = createSystemUsersPasswordSecret(ctx, r.Client, cluster)
+		if err != nil {
+			log.Error(err, "failed to create system user password secret")
+			return err
+		}
+	}
+	for user, acl := range systemUsersAcl {
+		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
+		userAcl := valkeyiov1alpha1.UserAclSpec{
+			Name:    user,
+			Enabled: true,
+			RawAcl:  acl,
+			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+				Name: systemUserSecret.Name,
+				Keys: []string{user},
+			},
+		}
+		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, []string{passwordHash}))
+	}
+	systemUsersAclsBytes := []byte(systemsAcls.String())
+
+	err = r.upsertInternalAclSecret(ctx, cluster, systemUsersAclsBytes)
+	if err != nil {
+		log.Error(err, "failed to reconcile system users ACL")
+		return err
+	}
+
+	return nil
 }
 
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {

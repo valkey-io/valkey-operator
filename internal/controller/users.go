@@ -121,6 +121,9 @@ func (r *ValkeyClusterReconciler) reconcileSystemUsersAcl(ctx context.Context, c
 		}
 	}
 	for user, acl := range systemUsersAcl {
+		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+			continue
+		}
 		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
 		userAcl := valkeyiov1alpha1.UserAclSpec{
 			Name:    user,
@@ -366,6 +369,18 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 	}
 
 	return passwords, nil
+}
+
+func fetchSystemUserPassword(ctx context.Context, username string, apiClient client.Client, clusterName, clusterNamespace string) (string, error) {
+	systemSecret := &corev1.Secret{}
+	err := apiClient.Get(ctx, types.NamespacedName{
+		Namespace: clusterNamespace,
+		Name:      getSystemPasswordSecretName(clusterName),
+	}, systemSecret)
+	if err != nil {
+		return "", err
+	}
+	return string(systemSecret.Data[username]), nil
 }
 
 // Check if byte-string begins with # (byte 35) and is 65 total characters long.

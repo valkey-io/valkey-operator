@@ -156,7 +156,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	state := r.getValkeyClusterState(ctx, nodes)
+	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	state := r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
@@ -543,7 +544,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -551,7 +552,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nod
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort)
+	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -1138,6 +1139,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
+		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),

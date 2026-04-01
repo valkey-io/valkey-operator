@@ -128,14 +128,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	nodeTransitioning := false
 	if requeue, err := r.reconcileValkeyNodes(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	} else if requeue {
+		nodeTransitioning = true
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
-		return r.reconcileNodeTransition(ctx, cluster)
 	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -215,6 +216,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+	}
+
+	// While a node is transitioning (Running but not yet Ready), skip
+	// downstream health checks, scale-in, and rebalancing. The cluster
+	// topology is transient and those checks would either make incorrect
+	// decisions or prematurely mark the cluster as healthy with a 30s
+	// requeue, delaying recovery. Requeue quickly so the phases above
+	// can continue integrating the node on the next pass.
+	if nodeTransitioning {
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	// Build the effective shard list: state.Shards plus any pending primaries
@@ -394,43 +406,6 @@ aclfile /config/users/users.acl`,
 		r.Recorder.Eventf(cluster, cm, corev1.EventTypeNormal, "ConfigMapCreated", "CreateConfigMap", "Created ConfigMap with configuration")
 	}
 	return nil
-}
-
-// reconcileNodeTransition runs cluster management phases while a node is
-// transitioning (Running but not yet Ready). During a rolling update the
-// replacement pod starts isolated: it needs to be met, have its slots
-// re-assigned (if primary) or be replicated (if replica) before its readiness
-// probe can pass. Without this, the pod stays in cluster_state:fail and never
-// becomes Ready. All three phases run in a single pass (no early return between
-// them) because we requeue in 2 s regardless; gossip propagation happens
-// between requeues rather than within a single reconcile.
-func (r *ValkeyClusterReconciler) reconcileNodeTransition(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		log.Error(err, "failed to list ValkeyNodes during transition")
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
-	state := r.getValkeyClusterState(ctx, nodes)
-	defer state.CloseClients()
-	r.forgetStaleNodes(ctx, cluster, state, nodes)
-	if _, err := r.meetIsolatedNodes(ctx, cluster, state); err != nil {
-		log.Error(err, "meetIsolatedNodes during transition")
-		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
-	}
-	if len(state.PendingNodes) > 0 {
-		if _, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes); err != nil {
-			log.Error(err, "assignSlotsToPendingPrimaries during transition")
-			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
-		}
-		if _, err := r.replicatePendingReplicas(ctx, cluster, state, nodes); err != nil {
-			log.Error(err, "replicatePendingReplicas during transition")
-			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
-		}
-	}
-	_ = r.updateStatus(ctx, cluster, state)
-	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.

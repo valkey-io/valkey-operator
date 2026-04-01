@@ -42,8 +42,8 @@ const (
 
 var (
 	systemUsersAcl = map[string]string{
-		"_operator": "",
-		"_exporter": "",
+		"_operator": "+@all",
+		"_exporter": "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 	}
 )
 

@@ -41,9 +41,11 @@ const (
 )
 
 var (
+	operatorUser   = "_operator"
+	exporterUser   = "_exporter"
 	systemUsersAcl = map[string]string{
-		"_operator": "+@all",
-		"_exporter": "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
+		operatorUser: "+@all",
+		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 	}
 )
 
@@ -387,7 +389,7 @@ func createSystemUsersPasswordSecret(ctx context.Context, apiClient client.Clien
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			OwnerReferences: []metav1.OwnerReference{
-				metav1.OwnerReference{
+				{
 					Kind: cluster.Kind,
 					Name: cluster.Name,
 					UID:  cluster.UID,
@@ -396,7 +398,7 @@ func createSystemUsersPasswordSecret(ctx context.Context, apiClient client.Clien
 		},
 	}
 
-	for user, _ := range systemUsersAcl {
+	for user := range systemUsersAcl {
 		systemUsersSecret.Data[user] = []byte(generatePassword())
 	}
 

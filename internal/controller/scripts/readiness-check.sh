@@ -51,10 +51,8 @@ fi
 # disabled" (no cluster_state line).  Skip the check in that case.
 # When non-Cluster mode is implemented, this check will be revisited
 cluster_info=$(timeout $timeout valkey-cli -h localhost -p $port CLUSTER INFO)
-if echo "$cluster_info" | grep -q '^cluster_state:'; then
-    response=$(echo "$cluster_info" | grep '^cluster_state:' | tr -d '[:space:]')
-    if [ "$response" != "cluster_state:ok" ]; then
-        echo "$response" >&2
-        exit 1
-    fi
+cluster_state=$(echo "$cluster_info" | grep '^cluster_state:' | tr -d '[:space:]')
+if [ -n "$cluster_state" ] && [ "$cluster_state" != "cluster_state:ok" ]; then
+    echo "$cluster_state" >&2
+    exit 1
 fi

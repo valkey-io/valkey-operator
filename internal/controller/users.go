@@ -106,7 +106,7 @@ func (r *ValkeyClusterReconciler) findReferencedClusters(ctx context.Context, se
 
 func (r *ValkeyClusterReconciler) reconcileSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	log := logf.FromContext(ctx)
-
+	log.Info("getting system users secret: " + cluster.Name)
 	var systemsAcls strings.Builder
 	systemUserSecret := &corev1.Secret{}
 	err := r.Client.Get(ctx, types.NamespacedName{
@@ -114,11 +114,12 @@ func (r *ValkeyClusterReconciler) reconcileSystemUsersAcl(ctx context.Context, c
 		Name:      getSystemPasswordSecretName(cluster.Name),
 	}, systemUserSecret)
 	if err != nil {
-		*systemUserSecret, err = createSystemUsersPasswordSecret(ctx, r.Client, cluster)
-		if err != nil {
-			log.Error(err, "failed to create system user password secret")
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to fetch system users secret")
 			return err
 		}
+		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
+
 	}
 	for user, acl := range systemUsersAcl {
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
@@ -138,8 +139,7 @@ func (r *ValkeyClusterReconciler) reconcileSystemUsersAcl(ctx context.Context, c
 	}
 	systemUsersAclsBytes := []byte(systemsAcls.String())
 
-	err = r.upsertInternalAclSecret(ctx, cluster, systemUsersAclsBytes)
-	if err != nil {
+	if err := r.upsertInternalAclSecret(ctx, cluster, systemUsersAclsBytes); err != nil {
 		log.Error(err, "failed to reconcile system users ACL")
 		return err
 	}
@@ -173,81 +173,10 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	}
 	usersAclsBytes := []byte(usersAcls.String())
 
-<<<<<<< HEAD
-	// Calculate hash of the ACL file contents
-	internalAclHash := fmt.Sprintf("%x", sha256.Sum256(usersAclsBytes))
-
-	// An "internal" secrets object is used for synchronization
-	internalSecretName := getInternalSecretName(cluster.Name)
-	internalAclSecret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      internalSecretName,
-		Namespace: cluster.Namespace,
-	}, internalAclSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch internal acl secret")
-			return err
-		}
-
-		// Internal secret was not found.
-		// Init, and add metadata to the new Secret object
-		log.V(2).Info("creating internal secret", "secretName", internalSecretName)
-
-		internalAclSecret.ObjectMeta = metav1.ObjectMeta{
-			Name:      internalSecretName,
-			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
-			Annotations: map[string]string{
-				hashAnnotationKey: internalAclHash,
-			},
-		}
-		internalAclSecret.Data = map[string][]byte{
-			aclFilename: usersAclsBytes,
-		}
-		internalAclSecret.Type = AclSecretType
-
-		// Register ownership of the new internal Secret
-		if err := controllerutil.SetControllerReference(cluster, internalAclSecret, r.Scheme); err != nil {
-			log.Error(err, "Failed to grab ownership of internal secret")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of internal secret: %v", err)
-			return err
-		}
-
-		// Create the internal Secret
-		if err := r.Create(ctx, internalAclSecret); err != nil {
-			log.Error(err, "Failed to create internal secret")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to create internal secret: %v", err)
-			return err
-		}
-
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "InternalSecretsCreated", "ReconcileUsers", "Created internal ACLs")
-
-		// All good; new internal Secret with contents created
-		return nil
-	}
-
-	// Internal Secret exists; Calculate, and compare the hashes to
-	// determine if anything needs updating. If the hashes are the
-	// same, don't update as that would cause infinite reconciliation
-
-	if !upsertAnnotation(internalAclSecret, hashAnnotationKey, internalAclHash) {
-		log.V(1).Info("internal ACLs unchanged")
-		return nil
-	}
-
-	// Hashes are different; Update the acl contents of the internal secret
-	internalAclSecret.Data[aclFilename] = usersAclsBytes
-
-	// Update secret
-	if err := r.Update(ctx, internalAclSecret); err != nil {
-		log.Error(err, "Failed to update internal secret")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsUpdateFailed", "ReconcileUsers", "Failed to update internal secret: %v", err)
-=======
 	// update the internal ACL secret with the generated users ACLs
 	err := r.upsertInternalAclSecret(ctx, cluster, usersAclsBytes)
 	if err != nil {
 		log.Error(err, "failed to reconcile users ACL")
->>>>>>> 5f787ba (add func upsertInternalAclSecret)
 		return err
 	}
 	// All is good; The internal secret will be auto-mounted in the deployment
@@ -397,28 +326,29 @@ func generatePassword() string {
 	return randstr
 }
 
-func createSystemUsersPasswordSecret(ctx context.Context, apiClient client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) (corev1.Secret, error) {
+func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, apiClient client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
+	log := logf.FromContext(ctx)
+
 	systemUsersSecret := corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      getSystemPasswordSecretName(cluster.Name),
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					Kind: cluster.Kind,
-					Name: cluster.Name,
-					UID:  cluster.UID,
-				},
-			},
 		},
+		Data: map[string][]byte{},
 	}
-
+	// Register ownership of the new internal Secret
+	if err := controllerutil.SetControllerReference(cluster, &systemUsersSecret, r.Scheme); err != nil {
+		log.Error(err, "Failed to grab ownership of system users secret")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
+		return &systemUsersSecret, err
+	}
 	for user := range systemUsersAcl {
 		systemUsersSecret.Data[user] = []byte(generatePassword())
 	}
 
 	err := apiClient.Create(ctx, &systemUsersSecret)
-	return systemUsersSecret, err
+	return &systemUsersSecret, err
 }
 
 func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclBytes []byte) error {
@@ -439,17 +369,19 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		// Init, and add metadata to the new Secret object
 		log.V(2).Info("creating internal secret", "secretName", internalSecretName)
 
+		aclHash := fmt.Sprintf("%x", sha256.Sum256(aclBytes))
+
 		internalAclSecret.ObjectMeta = metav1.ObjectMeta{
 			Name:      internalSecretName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
-			// Annotations: map[string]string{
-			// hashAnnotationKey: internalAclHash,
-			// },
+			Annotations: map[string]string{
+				hashAnnotationKey: aclHash,
+			},
 		}
-		// internalAclSecret.Data = map[string][]byte{
-		// aclFilename: usersAclsBytes,
-		// }
+		internalAclSecret.Data = map[string][]byte{
+			aclFilename: aclBytes,
+		}
 
 		// Register ownership of the new internal Secret
 		if err := controllerutil.SetControllerReference(cluster, internalAclSecret, r.Scheme); err != nil {
@@ -473,7 +405,6 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		// determine if anything needs updating. If the hashes are the
 		// same, don't update as that would cause infinite reconciliation
 
-		aclHash := fmt.Sprintf("%x", sha256.Sum256(aclBytes))
 		if !upsertAnnotation(internalAclSecret, hashAnnotationKey, aclHash) {
 			log.V(1).Info("internal ACLs unchanged")
 			return nil

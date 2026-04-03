@@ -115,6 +115,74 @@ func TestSubtractSlotsRange(t *testing.T) {
 	}
 }
 
+func TestShardState_GetSyncedReplicas(t *testing.T) {
+	primary := &NodeState{
+		Id:      "primary-id",
+		Address: "10.0.0.1",
+		Flags:   []string{"myself", "master"},
+		Info:    map[string]string{"role": "master"},
+	}
+	syncedReplica := &NodeState{
+		Id:      "replica-1-id",
+		Address: "10.0.0.2",
+		Flags:   []string{"slave"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
+	}
+	unsyncedReplica := &NodeState{
+		Id:      "replica-2-id",
+		Address: "10.0.0.3",
+		Flags:   []string{"slave"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "down"},
+	}
+	failingReplica := &NodeState{
+		Id:      "replica-3-id",
+		Address: "10.0.0.4",
+		Flags:   []string{"slave", "fail"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
+	}
+	pfailReplica := &NodeState{
+		Id:      "replica-4-id",
+		Address: "10.0.0.5",
+		Flags:   []string{"slave", "pfail"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
+	}
+
+	shard := &ShardState{
+		Id:        "shard-0",
+		PrimaryId: "primary-id",
+		Slots:     []SlotsRange{{0, 5461}},
+		Nodes:     []*NodeState{primary, syncedReplica, unsyncedReplica, failingReplica, pfailReplica},
+	}
+
+	replicas := shard.GetSyncedReplicas()
+	if len(replicas) != 1 {
+		t.Fatalf("expected 1 synced replica, got %d", len(replicas))
+	}
+	if replicas[0].Id != "replica-1-id" {
+		t.Errorf("expected replica-1-id, got %s", replicas[0].Id)
+	}
+}
+
+func TestShardState_GetSyncedReplicas_Empty(t *testing.T) {
+	primary := &NodeState{
+		Id:      "primary-id",
+		Address: "10.0.0.1",
+		Flags:   []string{"myself", "master"},
+		Info:    map[string]string{"role": "master"},
+	}
+	shard := &ShardState{
+		Id:        "shard-0",
+		PrimaryId: "primary-id",
+		Slots:     []SlotsRange{{0, 5461}},
+		Nodes:     []*NodeState{primary},
+	}
+
+	replicas := shard.GetSyncedReplicas()
+	if len(replicas) != 0 {
+		t.Fatalf("expected 0 synced replicas, got %d", len(replicas))
+	}
+}
+
 func TestGetUnassignedSlots(t *testing.T) {
 	// A shard with no unassigned slots
 	cluster := ClusterState{

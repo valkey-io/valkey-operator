@@ -420,10 +420,25 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
+	// Scrape cluster state once for proactive failover decisions.
+	// During initial bootstrap no nodes exist, so state stays nil.
+	// This snapshot is safe to reuse across the loop because nodes are
+	// iterated replicas-first (the primary is last in each shard), and
+	// after an update we requeue immediately, re-scraping fresh state.
+	nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodeList, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		return false, err
+	}
+	var clusterState *valkey.ClusterState
+	if len(nodeList.Items) > 0 {
+		clusterState = r.getValkeyClusterState(ctx, nodeList)
+		defer clusterState.CloseClients()
+	}
+
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex)
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState)
 			if err != nil {
 				return false, err
 			}
@@ -445,7 +460,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState) (bool, bool, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
@@ -455,6 +470,27 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			Namespace: desired.Namespace,
 		},
 	}
+
+	// Check if proactive failover is needed before updating.
+	if clusterState != nil {
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
+					"name", node.Name, "err", err)
+			}
+		} else if !specEqual(current.Spec, desired.Spec) && current.Status.PodIP != "" {
+			if shouldFailoverBeforeUpdate(clusterState, current.Status.PodIP) {
+				log.Info("proactive failover before rolling primary",
+					"name", node.Name, "address", current.Status.PodIP)
+				if err := proactiveFailover(ctx, r.Recorder, cluster, clusterState, current.Status.PodIP); err != nil {
+					log.Info("proactive failover did not complete, proceeding with roll",
+						"name", node.Name, "err", err)
+				}
+			}
+		}
+	}
+
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
 		node.Labels = desired.Labels
 		node.Spec = desired.Spec

@@ -226,8 +226,19 @@ func getNodeState(ctx context.Context, address string, port int, username string
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		log.Error(err, "failed to create Valkey client")
-		return nil
+		if !strings.Contains(err.Error(), "WRONGPASS") {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
+		// fallback to unauthenticated
+		log.V(1).Info("fall back to unauthenticated default user on WRONGPASS error")
+		opt.Username = ""
+		opt.Password = ""
+		client, err = vclient.NewClient(opt)
+		if err != nil {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
 	}
 
 	node := NodeState{Client: client,

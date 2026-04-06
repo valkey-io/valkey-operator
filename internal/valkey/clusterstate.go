@@ -224,10 +224,9 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		Username:          username,
 		Password:          password,
 	}
-
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		log.Info("failed to create Valkey client", "err", err)
+		log.Error(err, "failed to create Valkey client")
 		return nil
 	}
 

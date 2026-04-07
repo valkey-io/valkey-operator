@@ -55,46 +55,46 @@ const (
 var scripts embed.FS
 
 func getConfigMapName(clusterName string) string {
-	return clusterName + "-config"
+	return "valkey-" + clusterName + "-config"
 }
 
 // Return a base config of parameters that users shouldn't be able to override
-func getBaseConfig() string {
-	return `# Base operator config
-cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000
-aclfile /config/users/users.acl
-`
+func getBaseConfig() map[string]string {
+	return map[string]string{
+		"cluster-enabled": "yes",
+		"protected-mode": "no",
+		"cluster-node-timeout": "2000",
+		"aclfile": "/config/users/users.acl",
+	}
 }
 
-func getUserConfig(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) string {
+func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
-	specConfig := cluster.Spec.Config
-
-	// Exit early if nothing
-	if len(specConfig) == 0 {
-		return ""
-	}
-
-	log := logf.FromContext(ctx)
+	baseConfig := getBaseConfig()
+	userConfig := cluster.Spec.Config
 
 	// Build the config
 	var configBuilder strings.Builder
-	configBuilder.Grow(len(specConfig) * averageParameterLength)
-	writeConfigLine(&configBuilder, "#", "Extra Config")
+	configBuilder.Grow((len(baseConfig) + len(userConfig)) * averageParameterLength)
 
-	// Sort the config keys to keep consistent processing order
-	sortedKeys := slices.Sorted(maps.Keys(specConfig))
+	// User config goes first, and base config goes last. This prevents users from overriding
+	// key parameters as Valkey uses the last value in the file.
 
-	for _, param := range sortedKeys {
+	if len(userConfig) > 0 {
+		writeConfigLine(&configBuilder, "#", "User Config")
 
-		if slices.Contains(valkeyiov1alpha1.NonUserOverrideConfigParameters, param) {
-			log.Error(nil, "Prohibited valkey server config", "parameter", param)
-			continue
+		// Sort the config keys to keep consistent processing order
+		sortedKeys := slices.Sorted(maps.Keys(userConfig))
+
+		for _, param := range sortedKeys {
+			writeConfigLine(&configBuilder, param, userConfig[param])
 		}
+	}
 
-		writeConfigLine(&configBuilder, param, specConfig[param])
+	// Add base config
+	writeConfigLine(&configBuilder, "#", "Base Config")
+	for _, param := range baseConfig {
+		writeConfigLine(&configBuilder, param, baseConfig[param])
 	}
 
 	return configBuilder.String()
@@ -118,15 +118,8 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
-	// Get base config
-	var newConfigBuilder strings.Builder
-	newConfigBuilder.WriteString(getBaseConfig())
-
-	// User-provided config from spec
-	newConfigBuilder.WriteString(getUserConfig(ctx, cluster))
-
-	// Final string version of the config
-	newServerConfig := newConfigBuilder.String()
+	// Get the new server config
+	newServerConfig := buildServerConfig(cluster)
 
 	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))

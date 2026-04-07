@@ -38,15 +38,6 @@ const (
 	ClusterStateFailed ClusterState = "Failed"
 )
 
-// This list defines specific Valkey server configuration parameters that cannot
-// be overridden by a user-supplied configuration within the CR. Doing so would
-// potentially break the operator's behavior, which could result in data loss, or
-// a non-functioning cluster
-var NonUserOverrideConfigParameters = []string{
-	"cluster-enabled",
-	"aclfile",
-}
-
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 type ValkeyClusterSpec struct {
 

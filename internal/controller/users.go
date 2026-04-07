@@ -41,9 +41,10 @@ const (
 )
 
 var (
-	operatorUser   = "_operator"
-	exporterUser   = "_exporter"
-	systemUsersAcl = map[string]string{
+	operatorUser    = "_operator"
+	exporterUser    = "_exporter"
+	systemUsers     = []string{operatorUser, exporterUser}
+	systemUsersAcls = map[string]string{
 		operatorUser: "+@all",
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 	}
@@ -121,7 +122,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
 
 	}
-	for user, acl := range systemUsersAcl {
+	for _, user := range systemUsers {
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
 			continue
 		}
@@ -129,7 +130,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 		userAcl := valkeyiov1alpha1.UserAclSpec{
 			Name:    user,
 			Enabled: true,
-			RawAcl:  acl,
+			RawAcl:  systemUsersAcls[user],
 			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
 				Name: systemUserSecret.Name,
 				Keys: []string{user},
@@ -244,7 +245,6 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 	if user.NoPassword {
 		return []string{}, nil
 	}
-
 	// Look for a Secret matching the user-provided name, or clusterName-users
 	userSecretName := getDefaultSecretName(clusterName)
 	if user.PasswordSecret.Name != "" {
@@ -261,7 +261,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 			log.Error(err, "failed to fetch acl secret")
 			return []string{}, err
 		}
-		log.V(1).Info("Users secret not found", "userSecretName", userSecretName)
+		log.V(1).Info("Users secret not found", "userSecretName", userSecretName, "user", user.Name)
 
 		// The Secret was not found; And since NoPassword is false, then we cannot add this user
 		return []string{}, fmt.Errorf("no password or reference found")
@@ -344,7 +344,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
 		return &systemUsersSecret, err
 	}
-	for user := range systemUsersAcl {
+	for _, user := range systemUsers {
 		systemUsersSecret.Data[user] = []byte(generatePassword())
 	}
 
@@ -410,7 +410,6 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		log.V(1).Info("internal ACLs unchanged")
 		return nil
 	}
-
 	// Hashes are different; Update the acl contents of the internal secret
 	internalAclSecret.Data[aclFilename] = aclBytes
 

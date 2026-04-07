@@ -231,7 +231,7 @@ func getNodeState(ctx context.Context, address string, port int, username string
 			return nil
 		}
 		// fallback to unauthenticated
-		log.V(1).Info("fall back to unauthenticated default user on WRONGPASS error")
+		log.Info("fall back to unauthenticated default user on WRONGPASS error")
 		opt.Username = ""
 		opt.Password = ""
 		client, err = vclient.NewClient(opt)

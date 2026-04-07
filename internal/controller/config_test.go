@@ -17,45 +17,34 @@ limitations under the License.
 package controller
 
 import (
-	"os"
-	"strings"
-	"testing"
-
-	"sigs.k8s.io/yaml"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
-// getSampleCluster parses the v1alpha1_valkeycluster.yaml sample file
-// and returns the ValkeyCluster object.
-func getSampleCluster(t *testing.T) *valkeyiov1alpha1.ValkeyCluster {
-	valkeyClusterCR := "../../config/samples/v1alpha1_valkeycluster.yaml"
-
-	data, err := os.ReadFile(valkeyClusterCR)
-	if err != nil {
-		t.Fatalf("failed to read sample YAML file: %v", err)
-	}
-
-	cluster := &valkeyiov1alpha1.ValkeyCluster{}
-	if err := yaml.Unmarshal(data, cluster); err != nil {
-		t.Fatalf("failed to unmarshal sample YAML: %v", err)
-	}
-
-	return cluster
-}
-
-func TestGetUserConfig(t *testing.T) {
-
-	ctx := t.Context()
-	cluster := getSampleCluster(t)
-
-	baseConfig := getBaseConfig()
-	baseConfigLen := len(baseConfig)
-	if baseConfigLen != 119 {
-		t.Fatalf("unexpected base config length: got %d, want 118", baseConfigLen)
-	}
-
-	userConfig := getUserConfig(ctx, cluster)
-	if !strings.Contains(userConfig, "maxmemory-policy") {
-		t.Fatalf("unexpected user config: missing 'maxmemory-policy'")
+// getSampleCluster returns a ValkeyCluster object with config options.
+func getSampleCluster() *valkeyiov1alpha1.ValkeyCluster {
+	return &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Config: map[string]string{
+				"maxmemory":        "50mb",
+				"maxmemory-policy": "allkeys-lfu",
+			},
+		},
 	}
 }
+
+var _ = Describe("When creating a cluster", Label("userconfig"), func() {
+	It("should have base, and user-supplied configuration", func() {
+		By("verifying the rendered config")
+		cluster := getSampleCluster()
+
+		testConfigString := buildServerConfig(cluster)
+
+		// Check user-added parameter
+		Expect(testConfigString).To(ContainSubstring("maxmemory-policy"))
+
+		// Base, non-overridable parameter
+		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
+	})
+})

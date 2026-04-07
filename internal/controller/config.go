@@ -61,10 +61,10 @@ func getConfigMapName(clusterName string) string {
 // Return a base config of parameters that users shouldn't be able to override
 func getBaseConfig() map[string]string {
 	return map[string]string{
-		"cluster-enabled": "yes",
-		"protected-mode": "no",
+		"cluster-enabled":      "yes",
+		"protected-mode":       "no",
 		"cluster-node-timeout": "2000",
-		"aclfile": "/config/users/users.acl",
+		"aclfile":              "/config/users/users.acl",
 	}
 }
 
@@ -93,8 +93,8 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
 	// Add base config
 	writeConfigLine(&configBuilder, "#", "Base Config")
-	for _, param := range baseConfig {
-		writeConfigLine(&configBuilder, param, baseConfig[param])
+	for param, val := range baseConfig {
+		writeConfigLine(&configBuilder, param, val)
 	}
 
 	return configBuilder.String()

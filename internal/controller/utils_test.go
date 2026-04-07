@@ -73,8 +73,8 @@ func TestAnnotations(t *testing.T) {
 }
 
 func TestConfigMapName(t *testing.T) {
-	testMapName := "test-resource-config"
-	result := getConfigMapName("test-resource")
+	testMapName := "valkey-test-resource-config"
+	result := getServerConfigMapName("test-resource")
 	if result != testMapName {
 		t.Errorf("Expected '%v', got '%v'", testMapName, result)
 	}

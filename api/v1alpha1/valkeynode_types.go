@@ -65,10 +65,10 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// UsersConfigMapName specifies the name of the ConfigMap that contains the
+	// ServerConfigMapName specifies the name of the ConfigMap that contains the
 	// scripts, and Valkey config for the ValkeyNode.
 	// +optional
-	UsersConfigMapName string `json:"usersConfigMapName,omitempty"`
+	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
 
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the

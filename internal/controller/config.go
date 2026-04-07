@@ -54,7 +54,7 @@ const (
 //go:embed scripts/*
 var scripts embed.FS
 
-func getConfigMapName(clusterName string) string {
+func getServerConfigMapName(clusterName string) string {
 	return "valkey-" + clusterName + "-config"
 }
 
@@ -125,7 +125,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
 
 	// Look for, and fetch existing configMap for this cluster
-	serverConfigMapName := getConfigMapName(cluster.Name)
+	serverConfigMapName := getServerConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      serverConfigMapName,

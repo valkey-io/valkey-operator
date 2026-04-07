@@ -285,7 +285,7 @@ kind: ValkeyNode
 metadata:
   name: %s
 spec:
-  usersConfigMapName: %s
+  serverConfigMapName: %s
 `, nodeName, cmName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
@@ -302,7 +302,7 @@ spec:
 				cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config")
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(),
-					"controller should not create a ConfigMap when UsersConfigMapName is set")
+					"controller should not create a ConfigMap when ServerConfigMapName is set")
 			}, 10*time.Second, 2*time.Second).Should(Succeed())
 
 			By("waiting for the ValkeyNode to become ready using the external ConfigMap")

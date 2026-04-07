@@ -2639,6 +2639,11 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              serverConfigMapName:
+                description: |-
+                  ServerConfigMapName specifies the name of the ConfigMap that contains the
+                  scripts, and Valkey config for the ValkeyNode.
+                type: string
               tolerations:
                 description: Tolerations defines the pod tolerations.
                 items:
@@ -2684,11 +2689,6 @@ spec:
                   UsersACLSecretName is the name of the Secret containing the ACL user
                   file. When set, mounts a users-acl volume from this Secret so the
                   container can load aclfile /config/users/users.acl.
-                type: string
-              usersConfigMapName:
-                description: |-
-                  UsersConfigMapName specifies the name of the ConfigMap that contains the
-                  scripts, and Valkey config for the ValkeyNode.
                 type: string
               workloadType:
                 default: StatefulSet

@@ -50,7 +50,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Namespace: "default",
 		}
 		configName := types.NamespacedName{
-			Name:      getConfigMapName(resourceName),
+			Name:      getServerConfigMapName(resourceName),
 			Namespace: "default",
 		}
 
@@ -190,7 +190,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Namespace: "default",
 		}
 		configName := types.NamespacedName{
-			Name:      getConfigMapName(resourceName),
+			Name:      getServerConfigMapName(resourceName),
 			Namespace: "default",
 		}
 

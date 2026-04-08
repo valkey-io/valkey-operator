@@ -193,8 +193,8 @@ make install    # Install CRDs
 make run        # Run controller locally
 
 # 5. Build and test container
-make docker-build IMG=valkey-operator VERSION=dev
-make deploy IMG=valkey-operator VERSION=dev
+make docker-build IMG=valkey-operator:dev
+make deploy IMG=valkey-operator:dev
 ```
 
 ## Code Review Process

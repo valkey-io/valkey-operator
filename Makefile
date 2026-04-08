@@ -1,7 +1,7 @@
 # Image URL to use all building/pushing image targets
-VERSION              ?= latest
-IMG                  ?= controller
-CONTAINER_IMAGE_NAME ?= $(IMG):$(VERSION)
+IMG                  ?= controller:latest
+VERSION              ?= $(if $(findstring :,$(IMG)),$(lastword $(subst :, ,$(IMG))),latest)
+CONTAINER_IMAGE_NAME ?= $(IMG)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -129,17 +129,17 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg "LDFLAGS=$(VERSION_LDFLAGS)" -t ${CONTAINER_IMAGE_NAME} .
+	$(CONTAINER_TOOL) build --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" -t ${CONTAINER_IMAGE_NAME} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${CONTAINER_IMAGE_NAME}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator VERSION=0.0.1). To use this option you need to:
+# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image VERSION:<tag>> then the export will fail)
+# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:tag> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
@@ -148,7 +148,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name valkey-operator-builder
 	$(CONTAINER_TOOL) buildx use valkey-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg "LDFLAGS=$(VERSION_LDFLAGS)" --tag ${CONTAINER_IMAGE_NAME} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" --tag ${CONTAINER_IMAGE_NAME} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm valkey-operator-builder
 	rm Dockerfile.cross
 

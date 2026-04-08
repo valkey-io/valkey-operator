@@ -69,7 +69,6 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
 	if err := r.ensureConfigMap(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -116,11 +115,11 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 			Namespace: desired.Namespace,
 		},
 	}
-	aclSecretName := getInternalSecretName(node.Labels[LabelCluster])
+	aclSecretName := getInternalSecretName(desired.Labels["app.kubernetes.io/instance"])
 	aclSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{
 		Name:      aclSecretName,
-		Namespace: node.Namespace,
+		Namespace: desired.Namespace,
 	}, aclSecret)
 	if err != nil {
 		return err
@@ -153,11 +152,11 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 			Namespace: desired.Namespace,
 		},
 	}
-	aclSecretName := getInternalSecretName(node.Labels[LabelCluster])
+	aclSecretName := getInternalSecretName(desired.Labels["app.kubernetes.io/instance"])
 	aclSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{
 		Name:      aclSecretName,
-		Namespace: node.Namespace,
+		Namespace: desired.Namespace,
 	}, aclSecret)
 	if err != nil {
 		return err

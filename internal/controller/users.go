@@ -385,6 +385,7 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		internalAclSecret.Data = map[string][]byte{
 			aclFilename: aclBytes,
 		}
+		internalAclSecret.Type = AclSecretType
 
 		// Register ownership of the new internal Secret
 		if err := controllerutil.SetControllerReference(cluster, internalAclSecret, r.Scheme); err != nil {

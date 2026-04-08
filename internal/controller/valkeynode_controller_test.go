@@ -49,6 +49,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      "valkey-" + resourceName,
 			Namespace: "default",
 		}
+		secretName := types.NamespacedName{
+			Name:      getInternalSecretName(resourceName),
+			Namespace: "default",
+		}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind ValkeyNode")
@@ -66,6 +70,19 @@ var _ = Describe("ValkeyNode Controller", func() {
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
+			By("creating the ACL secret")
+			secret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, secretName, secret)
+			if err != nil && apierrors.IsNotFound(err) {
+				secret = &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      getInternalSecretName(resourceName),
+						Namespace: "default",
+					},
+					Type: AclSecretType,
+				}
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			}
 		})
 
 		AfterEach(func() {
@@ -82,6 +99,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+
+			secret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretName, secret)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 		})
 
 		It("should create a ConfigMap and StatefulSet on first reconcile", func() {
@@ -179,6 +200,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: "default"}
 		childName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
+		secretName := types.NamespacedName{Name: getInternalSecretName(resourceName), Namespace: "default"}
 
 		BeforeEach(func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
@@ -190,6 +212,15 @@ var _ = Describe("ValkeyNode Controller", func() {
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 					},
 				})).To(Succeed())
+			}
+			secret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, secretName, secret)
+			if err != nil && apierrors.IsNotFound(err) {
+				secret = &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(resourceName), Namespace: "default"},
+					Type:       AclSecretType,
+				}
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 			}
 		})
 
@@ -205,6 +236,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+			secret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretName, secret)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 		})
 
 		It("should create a Deployment and no StatefulSet", func() {

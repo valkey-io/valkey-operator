@@ -63,6 +63,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
+						Labels: map[string]string{
+							LabelCluster: resourceName,
+						},
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
@@ -207,7 +210,13 @@ var _ = Describe("ValkeyNode Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, node)
 			if err != nil && apierrors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
-					ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+						Labels: map[string]string{
+							LabelCluster: resourceName,
+						},
+					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 					},

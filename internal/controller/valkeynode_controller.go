@@ -115,7 +115,8 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 			Namespace: desired.Namespace,
 		},
 	}
-	aclSecretName := getInternalSecretName(desired.Labels["app.kubernetes.io/instance"])
+	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
+	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
 	aclSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{
 		Name:      aclSecretName,
@@ -152,7 +153,8 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 			Namespace: desired.Namespace,
 		},
 	}
-	aclSecretName := getInternalSecretName(desired.Labels["app.kubernetes.io/instance"])
+	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
+	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
 	aclSecret := &corev1.Secret{}
 	err = r.Get(ctx, types.NamespacedName{
 		Name:      aclSecretName,

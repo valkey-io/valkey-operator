@@ -110,7 +110,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	log.Info("getting system users secret: " + cluster.Name)
 	var systemsAcls strings.Builder
 	systemUserSecret := &corev1.Secret{}
-	err := r.Client.Get(ctx, types.NamespacedName{
+	err := r.Get(ctx, types.NamespacedName{
 		Namespace: cluster.Namespace,
 		Name:      getSystemPasswordSecretName(cluster.Name),
 	}, systemUserSecret)
@@ -120,7 +120,10 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 			return "", err
 		}
 		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
-
+		if err != nil {
+			log.Error(err, "failed to create system user secret")
+			return "", err
+		}
 	}
 	for _, user := range systemUsers {
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {

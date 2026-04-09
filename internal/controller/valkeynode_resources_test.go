@@ -422,14 +422,14 @@ func TestParseValkeyRole(t *testing.T) {
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, map[string]string{})
+		c := generateMetricsExporterContainerDef(exporter, "")
 		assert.Equal(t, DefaultExporterImage, c.Image)
 		assert.Equal(t, "metrics-exporter", c.Name)
 	})
 
 	t.Run("custom image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Image: "custom:1.0"}
-		c := generateMetricsExporterContainerDef(exporter, map[string]string{})
+		c := generateMetricsExporterContainerDef(exporter, "")
 		assert.Equal(t, "custom:1.0", c.Image)
 	})
 
@@ -440,13 +440,13 @@ func TestBuildExporterContainer(t *testing.T) {
 			},
 		}
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Resources: resources}
-		c := generateMetricsExporterContainerDef(exporter, map[string]string{})
+		c := generateMetricsExporterContainerDef(exporter, "")
 		assert.Equal(t, resources, c.Resources)
 	})
 
 	t.Run("args contain redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, map[string]string{})
+		c := generateMetricsExporterContainerDef(exporter, "")
 		require.Len(t, c.Args, 1)
 		assert.Contains(t, c.Args[0], "--redis.addr=localhost:6379")
 	})

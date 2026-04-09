@@ -361,13 +361,18 @@ spec:
 			By("Waiting for pod to be running")
 			Eventually(func(g Gomega) {
 				args := []string{
-					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
-					"-o", "jsonpath={.items[0].status.phase}",
+					"get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyName),
+					"-o", "go-template={{ range .items }}{{ range .status.conditions }}" +
+						"{{ if and (eq .type \"Ready\") (eq .status \"True\")}}" +
+						"{{ $.metadata.name}} {{ \"\\n\" }}" +
+						"{{ end }}{{ end }}{{ end }}",
 				}
 				cmd := exec.Command("kubectl", args...)
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod status")
-				g.Expect(out).To(Equal("Running"), "Pod should be running")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podStatuses := utils.GetNonEmptyLines(output)
+				g.Expect(podStatuses).To(HaveLen(1), "Expected Pod to be ready")
 			}).Should(Succeed())
 
 			By("verifying created users")

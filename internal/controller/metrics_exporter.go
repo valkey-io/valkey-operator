@@ -25,7 +25,7 @@ import (
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, labels map[string]string) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string) corev1.Container {
 	exporterImage := DefaultExporterImage
 	if exporter.Image != "" {
 		exporterImage = exporter.Image
@@ -40,7 +40,7 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: getSystemPasswordSecretName(labels[LabelCluster]),
+							Name: getSystemPasswordSecretName(clusterName),
 						},
 						Key: exporterUser,
 					},

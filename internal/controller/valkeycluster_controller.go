@@ -488,7 +488,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Tolerations:         cluster.Spec.Tolerations,
 			Exporter:            cluster.Spec.Exporter,
 			Containers:          cluster.Spec.Containers,
-			ServerConfigMapName: getServerConfigMapName(cluster.Name),
+			ServerConfigMapName: GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:  getInternalSecretName(cluster.Name),
 		},
 	}

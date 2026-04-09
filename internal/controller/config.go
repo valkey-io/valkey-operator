@@ -42,19 +42,15 @@ const (
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
 
-	// This hash should be updated whenever the contents of either script changes, which would
-	// coincide with operator version bump.
-	// $ cat internal/controller/scripts/{liveness-check.sh,readiness-check.sh} | sha256sum
-	scriptsHash = "8531132f52ac311772dfcb45c107c34ab05e719a0df644cc332512277b564346"
-
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 )
 
 //go:embed scripts/*
 var scripts embed.FS
+var scriptsHash string
 
-func getServerConfigMapName(clusterName string) string {
+func GetServerConfigMapName(clusterName string) string {
 	return "valkey-" + clusterName + "-config"
 }
 
@@ -77,8 +73,8 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 	var configBuilder strings.Builder
 	configBuilder.Grow((len(baseConfig) + len(userConfig)) * averageParameterLength)
 
-	// User config goes first, and base config goes last. This prevents users from overriding
-	// key parameters as Valkey uses the last value in the file.
+	// User-provided config goes first, and base config goes last. This prevents
+	// users from overriding key parameters as Valkey uses the last value in the file.
 
 	if len(userConfig) > 0 {
 		writeConfigLine(&configBuilder, "#", "User Config")
@@ -125,7 +121,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
 
 	// Look for, and fetch existing configMap for this cluster
-	serverConfigMapName := getServerConfigMapName(cluster.Name)
+	serverConfigMapName := GetServerConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      serverConfigMapName,
@@ -214,4 +210,24 @@ func writeConfigLine(builder *strings.Builder, name, value string) {
 	builder.WriteString(" ")
 	builder.WriteString(value)
 	builder.WriteString("\n")
+}
+
+// Calculate the hash of the embedded scripts once on operator init
+// to avoid recalculating on each reconcile loop
+func init() {
+
+	// Read readiness script
+	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
+	if err != nil {
+		panic("failure reading embedded readiness-check.sh")
+	}
+
+	// Read liveness check script
+	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
+	if err != nil {
+		panic("failure reading embedded liveness-check.sh")
+	}
+
+	// Calculate hash of both files
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(readiness, liveness...)))
 }

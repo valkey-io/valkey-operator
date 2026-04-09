@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	controller "valkey.io/valkey-operator/internal/controller"
 	"valkey.io/valkey-operator/test/utils"
 )
 
@@ -74,19 +75,20 @@ spec:
 
 	Context("standalone StatefulSet", func() {
 		const nodeName = "valkeynode-sts-e2e"
+		expectedConfigMapName := controller.GetServerConfigMapName(nodeName)
 
 		It("creates owned resources and populates status with role", func() {
 			defer createStandaloneValkeyNode(nodeName, "StatefulSet")()
 
 			By("waiting for the ConfigMap to be created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config")
+				cmd := exec.Command("kubectl", "get", "configmap", expectedConfigMapName)
 				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "ConfigMap %s-config should exist", nodeName)
+				g.Expect(err).NotTo(HaveOccurred(), "ConfigMap %s should exist", expectedConfigMapName)
 			}).Should(Succeed())
 
 			By("verifying the ConfigMap contains the required script keys")
-			cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config",
+			cmd := exec.Command("kubectl", "get", "configmap", expectedConfigMapName,
 				"-o", "jsonpath={.data}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
@@ -299,7 +301,7 @@ spec:
 
 			By("verifying the controller did NOT create an owned ConfigMap")
 			Consistently(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", nodeName+"-config")
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(nodeName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(),
 					"controller should not create a ConfigMap when ServerConfigMapName is set")

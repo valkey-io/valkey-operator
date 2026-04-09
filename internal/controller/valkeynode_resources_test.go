@@ -282,7 +282,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	cm, err := buildValkeyNodeConfigMap(node)
 
 	require.NoError(t, err)
-	assert.Equal(t, getServerConfigMapName("mynode"), cm.Name)
+	assert.Equal(t, GetServerConfigMapName("mynode"), cm.Name)
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
@@ -306,8 +306,8 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 		node.Spec.ServerConfigMapName = ""
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, getServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, getServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 }
 
@@ -600,7 +600,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, getServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
+	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 

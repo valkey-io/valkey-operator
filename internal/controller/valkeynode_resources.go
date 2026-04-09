@@ -64,7 +64,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      getServerConfigMapName(node.Name),
+			Name:      GetServerConfigMapName(node.Name),
 			Namespace: node.Namespace,
 			Labels:    valkeyNodeLabels(node),
 		},
@@ -234,7 +234,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	// resource name (which the controller creates automatically).
 	configMapName := node.Spec.ServerConfigMapName
 	if configMapName == "" {
-		configMapName = getServerConfigMapName(node.Name)
+		configMapName = GetServerConfigMapName(node.Name)
 	}
 
 	podSpec := corev1.PodSpec{

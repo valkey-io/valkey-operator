@@ -45,7 +45,9 @@ var (
 	exporterUser    = "_exporter"
 	systemUsers     = []string{operatorUser, exporterUser}
 	systemUsersAcls = map[string]string{
+		// TODO: tighten the permission for the operator user
 		operatorUser: "+@all",
+		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 	}
 )
@@ -322,11 +324,9 @@ func isPreHashedPassword(password []byte) bool {
 	return password[0] == 35 && len(password) == 65
 }
 
+// GeneratePassword creates a random (alphanumeric) 26 chars long password using rand.Text()
 func generatePassword() string {
 	randstr := rand.Text()
-	// hasher := sha256.New()
-	// hasher.Write([]byte(randstr))
-	// hashBytes := hasher.Sum(nil)
 	return randstr
 }
 
@@ -348,6 +348,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		return &systemUsersSecret, err
 	}
 	for _, user := range systemUsers {
+		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+			continue
+		}
 		systemUsersSecret.Data[user] = []byte(generatePassword())
 	}
 

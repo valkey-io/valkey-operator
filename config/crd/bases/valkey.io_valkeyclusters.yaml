@@ -2566,6 +2566,8 @@ spec:
                           More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                         type: object
                     type: object
+                required:
+                - enabled
                 type: object
               image:
                 description: Override the default Valkey image

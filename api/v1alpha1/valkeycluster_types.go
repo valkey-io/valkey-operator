@@ -100,7 +100,7 @@ type ExporterSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Enable or disable the exporter sidecar container
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

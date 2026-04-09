@@ -285,7 +285,7 @@ spec:
 		})
 	})
 
-	Context("Metrics Exporter Disabled", func() {
+	Context("Metrics Exporter Disabled", Label("metrics-exporter", "disabled"), func() {
 		It("should deploy ValkeyCluster without metrics exporter when disabled", func() {
 			valkeyName := "valkeycluster-no-exporter"
 			// Create ValkeyCluster YAML with exporter explicitly disabled
@@ -320,6 +320,16 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "ValkeyNodes not found")
 				g.Expect(out).To(ContainSubstring(valkeyName))
+			}).Should(Succeed())
+
+			By("Verifying the exporter user password is not created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", "internal-"+valkeyName+"-system-passwords",
+					"-o", "jsonpath={.data._exporter}",
+				)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "system user password secret not found")
+				g.Expect(out).To(Equal(""), "_exporter password is created")
 			}).Should(Succeed())
 
 			By("Verifying pod has only 1 container (server)")
@@ -359,6 +369,34 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod status")
 				g.Expect(out).To(Equal("Running"), "Pod should be running")
 			}).Should(Succeed())
+
+			By("verifying created users")
+			verifyCreatedUsers := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).NotTo(ContainSubstring("user _exporter"))
+			}
+			Eventually(verifyCreatedUsers).Should(Succeed())
 
 			By("Cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")

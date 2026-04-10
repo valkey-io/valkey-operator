@@ -809,7 +809,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 					continue
 				}
 				// A live replica still considers this failing node its
-				// master. Forgetting it from the other masters now would
+				// primary. Forgetting it from the other primaries now would
 				// remove it from their node tables and prevent them from
 				// voting in the auto-failover election, permanently
 				// blocking the replica's promotion.

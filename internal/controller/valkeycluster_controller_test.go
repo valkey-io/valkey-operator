@@ -445,12 +445,22 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		return node.Spec.Image
 	}
 
+	// reconcileNodes lists the current ValkeyNodes and calls reconcileValkeyNodes.
+	reconcileNodes := func() (bool, error) {
+		GinkgoHelper()
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(testCtx, nodeList,
+			client.InNamespace("default"),
+			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList)
+	}
+
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.
 	// On first reconcile every position is Created so the loop completes without
 	// triggering an early-exit requeue.
 	createAllNodes := func() {
 		GinkgoHelper()
-		requeue, err := r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err := reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse(), "initial create pass must not requeue")
 	}
@@ -476,7 +486,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		}
 
 		By("reconciling with no spec change")
-		requeue, err := r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err := reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse())
 
@@ -503,7 +513,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 				rvsBefore[n] = getResourceVersion(n)
 			}
 
-			requeue, err := r.reconcileValkeyNodes(testCtx, cluster)
+			requeue, err := reconcileNodes()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(requeue).To(BeTrue(), "expected requeue after updating %s", name)
 
@@ -534,7 +544,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		for _, name := range allNodes {
 			rvsFinal[name] = getResourceVersion(name)
 		}
-		requeue, err := r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err := reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse())
 		for _, name := range allNodes {
@@ -551,7 +561,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
 
 		By("first reconcile: " + node01 + " (shard 0 replica) is updated and left not-ready")
-		requeue, err := r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err := reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 
@@ -565,7 +575,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		}
 
 		By("reconciling while " + node01 + " is not ready (and ObservedGeneration is stale): rollout must pause")
-		requeue, err = r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err = reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "expected requeue while %s is not ready", node01)
 		for name, rv := range rvOthers {
@@ -577,7 +587,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 
 		By("marking " + node01 + " ready: rollout resumes and " + node00 + " is updated next")
 		setReady(node01)
-		requeue, err = r.reconcileValkeyNodes(testCtx, cluster)
+		requeue, err = reconcileNodes()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
@@ -643,7 +653,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 	}
 
 	It("creates the ValkeyNode and emits ValkeyNodeCreated event", func() {
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse())
 		Expect(created).To(BeTrue())
@@ -654,12 +664,12 @@ var _ = Describe("reconcileValkeyNode", func() {
 	})
 
 	It("updates the ValkeyNode spec, emits ValkeyNodeUpdated event, and signals requeue", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(created).To(BeFalse())
@@ -669,25 +679,25 @@ var _ = Describe("reconcileValkeyNode", func() {
 	})
 
 	It("signals requeue when node is unchanged but not yet ready", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		// Status.Ready defaults to false after creation
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(created).To(BeFalse())
 	})
 
 	It("does not requeue when node is unchanged and ready", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		setNodeReady(true)
 
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse())
 		Expect(created).To(BeFalse())
@@ -695,7 +705,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 
 	It("signals requeue when node is unchanged but ObservedGeneration is stale", func() {
 		// Create the node
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Mark ready but leave ObservedGeneration at 0
@@ -711,7 +721,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 		// Because ObservedGeneration > 0 guard: newly created node with
 		// ObservedGeneration=0 falls through to the Ready check, which
 		// passes (Ready=true). No requeue.
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse())
 		Expect(created).To(BeFalse())
@@ -727,13 +737,13 @@ var _ = Describe("reconcileValkeyNode", func() {
 
 		// Change cluster spec to trigger an update on next reconcile
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		requeue, _, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, _, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "should requeue after updating node")
 
 		// Next reconcile: spec matches (OperationResultNone), but
 		// Generation (2) != ObservedGeneration (1) — must requeue.
-		requeue, created, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, created, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "should requeue while ObservedGeneration is stale")
 		Expect(created).To(BeFalse())
@@ -751,7 +761,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 
 	It("during rolling update (clusterFormed), waits when Running but not Ready", func() {
 		// Create the node, then mark the cluster as already formed.
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		setClusterFormed()
 
@@ -764,18 +774,18 @@ var _ = Describe("reconcileValkeyNode", func() {
 		node.Status.ObservedGeneration = node.Generation
 		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
 
-		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "should wait for Ready when cluster is already formed")
 	})
 
 	It("during rolling update (clusterFormed), proceeds when Ready", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		setClusterFormed()
 		setNodeReady(true)
 
-		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex)
+		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeFalse(), "should proceed when Ready and cluster is formed")
 	})

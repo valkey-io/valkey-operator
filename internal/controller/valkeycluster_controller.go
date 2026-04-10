@@ -805,14 +805,25 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				idx := slices.IndexFunc(nodes.Items, func(n valkeyiov1alpha1.ValkeyNode) bool {
 					return n.Status.PodIP == failing.Address
 				})
-				if idx == -1 {
-					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
-					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
-						log.Error(err, "command failed: CLUSTER FORGET")
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
-					} else {
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
-					}
+				if idx != -1 {
+					continue
+				}
+				// A live replica still considers this failing node its
+				// primary. Forgetting it from the other primaries now would
+				// remove it from their node tables and prevent them from
+				// voting in the auto-failover election, permanently
+				// blocking the replica's promotion.
+				if state.HasReplicaOf(failing.Id) {
+					log.V(1).Info("skipping forget; failover pending for node",
+						"address", failing.Address, "Id", failing.Id)
+					continue
+				}
+				log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
+				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
+					log.Error(err, "command failed: CLUSTER FORGET")
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
+				} else {
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
 				}
 			}
 		}

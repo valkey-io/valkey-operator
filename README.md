@@ -41,7 +41,7 @@ Valkey Operator is a Kubernetes operator that automates the deployment and manag
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/valkey-operator:tag
+make docker-build docker-push IMG=<some-registry>/valkey-operator VERSION=tag
 ```
 
 **NOTE:** This image ought to be published in the personal registry you specified.
@@ -57,7 +57,7 @@ make install
 **Deploy the Manager to the cluster with the image specified by `IMG`:**
 
 ```sh
-make deploy IMG=<some-registry>/valkey-operator:tag
+make deploy IMG=<some-registry>/valkey-operator VERSION=tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin privileges or be logged in as admin.
@@ -100,7 +100,7 @@ Following the options to release and provide this solution to the users.
 1. Build the installer for the image built and published in the registry:
 
 ```sh
-make build-installer IMG=<some-registry>/valkey-operator:tag
+make build-installer IMG=<some-registry>/valkey-operator VERSION=tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'

@@ -122,6 +122,59 @@ func TestTakeSlotsFromRanges(t *testing.T) {
 	}
 }
 
+func TestPlanDrainMove_Basic(t *testing.T) {
+	src := newPrimaryShard("10.0.0.3", "node-3", []SlotsRange{{Start: 10923, End: 16383}})
+	dsts := []*ShardState{
+		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 0, End: 5460}}),
+		newPrimaryShard("10.0.0.2", "node-2", []SlotsRange{{Start: 5461, End: 10922}}),
+	}
+
+	move, err := PlanDrainMove(src, dsts, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if move == nil {
+		t.Fatal("expected move, got nil")
+	}
+	if move.Src.Address != "10.0.0.3" {
+		t.Fatalf("expected src 10.0.0.3, got %s", move.Src.Address)
+	}
+	if len(move.Slots) != 100 {
+		t.Fatalf("expected 100 slots, got %d", len(move.Slots))
+	}
+}
+
+func TestPlanDrainMove_PicksFirstDst(t *testing.T) {
+	src := newPrimaryShard("10.0.0.3", "node-3", []SlotsRange{{Start: 0, End: 99}})
+	dsts := []*ShardState{
+		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 100, End: 10000}}),
+		newPrimaryShard("10.0.0.2", "node-2", []SlotsRange{{Start: 10001, End: 16383}}),
+	}
+
+	move, err := PlanDrainMove(src, dsts, 50)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if move.Dst.Address != "10.0.0.1" {
+		t.Fatalf("expected dst 10.0.0.1 (first valid), got %s", move.Dst.Address)
+	}
+}
+
+func TestPlanDrainMove_EmptySrc(t *testing.T) {
+	src := newPrimaryShard("10.0.0.3", "node-3", nil)
+	dsts := []*ShardState{
+		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 0, End: 16383}}),
+	}
+
+	move, err := PlanDrainMove(src, dsts, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if move != nil {
+		t.Fatalf("expected nil for empty src, got %+v", move)
+	}
+}
+
 func newPrimaryShard(address, nodeID string, slots []SlotsRange) *ShardState {
 	node := &NodeState{
 		Address: address,

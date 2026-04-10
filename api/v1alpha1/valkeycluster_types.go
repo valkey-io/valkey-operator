@@ -74,10 +74,20 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
+	// WorkloadType specifies whether ValkeyNodes create StatefulSets or Deployments.
+	// +kubebuilder:default=StatefulSet
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +optional
+	WorkloadType WorkloadType `json:"workloadType,omitempty"`
+
 	// Users, and ACL-related configuration; see valkeyacls_types.go
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
+
+	// Additional containers or overrides for existing containers, applied using strategic merge patch
+	// +optional
+	Containers []corev1.Container `json:"containers,omitempty"`
 }
 
 type ExporterSpec struct {
@@ -142,29 +152,31 @@ const (
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing      = "Initializing"
-	ReasonReconciling       = "Reconciling"
-	ReasonClusterHealthy    = "ClusterHealthy"
-	ReasonServiceError      = "ServiceError"
-	ReasonConfigMapError    = "ConfigMapError"
-	ReasonDeploymentError   = "DeploymentError"
-	ReasonPodListError      = "PodListError"
-	ReasonAddingNodes       = "AddingNodes"
-	ReasonNodeAddFailed     = "NodeAddFailed"
-	ReasonMissingShards     = "MissingShards"
-	ReasonMissingReplicas   = "MissingReplicas"
-	ReasonReconcileComplete = "ReconcileComplete"
-	ReasonTopologyComplete  = "TopologyComplete"
-	ReasonAllSlotsAssigned  = "AllSlotsAssigned"
-	ReasonSlotsUnassigned   = "SlotsUnassigned"
-	ReasonPrimaryLost       = "PrimaryLost"
-	ReasonNoSlots           = "NoSlotsAvailable"
-	ReasonUsersAclError     = "UsersACLError"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	ReasonMissingShards       = "MissingShards"
+	ReasonMissingReplicas     = "MissingReplicas"
+	ReasonReconcileComplete   = "ReconcileComplete"
+	ReasonTopologyComplete    = "TopologyComplete"
+	ReasonAllSlotsAssigned    = "AllSlotsAssigned"
+	ReasonSlotsUnassigned     = "SlotsUnassigned"
+	ReasonPrimaryLost         = "PrimaryLost"
+	ReasonNoSlots             = "NoSlotsAvailable"
+	ReasonRebalancingSlots    = "RebalancingSlots"
+	ReasonRebalanceFailed     = "RebalanceFailed"
+	ReasonUsersAclError       = "UsersACLError"
+	ReasonUpdatingNodes       = "UpdatingNodes"
 )
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=vkc
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"

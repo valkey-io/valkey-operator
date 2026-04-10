@@ -17,11 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
@@ -31,7 +31,7 @@ const appName = "valkey"
 
 // Naming and labelling scheme
 //
-// Every Deployment (and therefore every Pod) encodes the node's position in
+// Every ValkeyNode (and therefore every Pod) encodes the node's position in
 // the Valkey cluster in its *name*:
 //
 //	<cluster>-<N>-<M>    e.g. "mycluster-0-0", "mycluster-1-2"
@@ -46,7 +46,7 @@ const appName = "valkey"
 //	valkey.io/shard-index  – which shard ("0", "1", …)
 //	valkey.io/node-index   – node within shard ("0", "1", …)
 //
-// The reconciler reads pod labels (via podRoleAndShard) to decide whether
+// The reconciler reads ValkeyNode labels (via nodeRoleAndShard) to decide whether
 // to assign slots (node 0 = initial primary) or issue CLUSTER REPLICATE
 // (node 1+ = initial replica), and for which shard. After a failover,
 // Valkey may promote a replica to primary, making node 0 a replica. The
@@ -55,8 +55,10 @@ const appName = "valkey"
 // joins as a replica instead of trying to claim slots. The labels themselves are not
 // updated — the live role is always read from CLUSTER NODES.
 //
-// Names are set by deploymentName, labels by createClusterDeployment.
+// Names and labels are set by valkeyNodeName when creating ValkeyNode CRs.
 const (
+	// LabelCluster identifies the Valkey cluster (e.g. "mycluster").
+	LabelCluster = "valkey.io/cluster"
 	// LabelShardIndex identifies which shard a pod belongs to (e.g. "0", "1", "2").
 	LabelShardIndex = "valkey.io/shard-index"
 	// LabelNodeIndex identifies the node within a shard (e.g. "0", "1", "2").
@@ -69,20 +71,32 @@ const (
 const (
 	RolePrimary = "primary"
 	RoleReplica = "replica"
+	RoleMaster  = "master"
+	RoleSlave   = "slave"
 )
 
-// Labels returns a copy of user defined labels including recommended:
-// https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
-func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
-	if cluster.Labels == nil {
-		cluster.Labels = make(map[string]string)
+// baseLabels returns the standard Kubernetes recommended labels for a Valkey
+// resource with the given instance name and component type.
+func baseLabels(name, component string) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       appName,
+		"app.kubernetes.io/instance":   name,
+		"app.kubernetes.io/component":  component,
+		"app.kubernetes.io/part-of":    appName,
+		"app.kubernetes.io/managed-by": "valkey-operator",
 	}
-	l := maps.Clone(cluster.Labels)
-	l["app.kubernetes.io/name"] = appName
-	l["app.kubernetes.io/instance"] = cluster.Name
-	l["app.kubernetes.io/component"] = "valkey-cluster"
-	l["app.kubernetes.io/part-of"] = appName
-	l["app.kubernetes.io/managed-by"] = "valkey-operator"
+}
+
+// labels returns the standard Kubernetes recommended labels merged with any
+// user-defined labels on the cluster. The k8s recommended labels always take
+// precedence over user-defined labels with the same key.
+func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
+	l := baseLabels(cluster.Name, "valkey-cluster")
+	for k, v := range cluster.Labels {
+		if _, exists := l[k]; !exists {
+			l[k] = v
+		}
+	}
 	return l
 }
 
@@ -113,23 +127,24 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	return true
 }
 
-// podRoleAndShard finds the pod matching the given IP address and reads its
-// labels to determine the intended role and shard index.
+// nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
+// and reads its CR labels to determine the intended role and shard index.
 //
 // The role is derived from valkey.io/node-index: node 0 is the initial
-// primary, nodes 1+ are replicas. Returns ("", -1) if the pod is not
-// found or the labels are missing.
-func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
-	idx := slices.IndexFunc(pods.Items, func(p corev1.Pod) bool { return p.Status.PodIP == address })
+// primary, nodes 1+ are replicas. Returns ("", -1) if not found or labels missing.
+func nodeRoleAndShard(address string, nodes *valkeyv1.ValkeyNodeList) (string, int) {
+	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
+		return n.Status.PodIP == address
+	})
 	if idx == -1 {
 		return "", -1
 	}
-	pod := &pods.Items[idx]
-	shardIndex, err := strconv.Atoi(pod.Labels[LabelShardIndex])
+	node := &nodes.Items[idx]
+	shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
 	if err != nil {
 		return "", -1
 	}
-	nodeIndex, err := strconv.Atoi(pod.Labels[LabelNodeIndex])
+	nodeIndex, err := strconv.Atoi(node.Labels[LabelNodeIndex])
 	if err != nil {
 		return "", -1
 	}
@@ -151,16 +166,16 @@ func podRoleAndShard(address string, pods *corev1.PodList) (string, int) {
 // assignSlotsToNewPrimary. Instead it should fall through to
 // replicateToShardPrimary, which will either succeed (case 1) or return an
 // error and retry on the next reconcile (case 2).
-func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) bool {
+func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *valkeyv1.ValkeyNodeList) bool {
 	si := strconv.Itoa(shardIndex)
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
 			continue
 		}
 		for _, shard := range state.Shards {
 			for _, node := range shard.Nodes {
-				if node.Address == p.Status.PodIP {
+				if node.Address == n.Status.PodIP {
 					return true
 				}
 			}
@@ -174,19 +189,41 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, pods *cor
 // primary, regardless of its node-index label. This handles the post-failover
 // case where node-index=1 (or higher) was promoted by Valkey.
 // Returns ("", "") if no primary is found.
-func findShardPrimary(state *valkey.ClusterState, shardIndex int, pods *corev1.PodList) (nodeID, ip string) {
+func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv1.ValkeyNodeList) (nodeID, ip string) {
 	si := strconv.Itoa(shardIndex)
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.Labels[LabelShardIndex] != si || p.Status.PodIP == "" {
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
 			continue
 		}
 		for _, shard := range state.Shards {
+			if len(shard.Slots) == 0 {
+				continue
+			}
 			primary := shard.GetPrimaryNode()
-			if primary != nil && primary.Address == p.Status.PodIP {
-				return primary.Id, p.Status.PodIP
+			if primary != nil && primary.Address == n.Status.PodIP {
+				return primary.Id, n.Status.PodIP
 			}
 		}
 	}
 	return "", ""
+}
+
+func countSlots(ranges []valkey.SlotsRange) int {
+	count := 0
+	for _, slot := range ranges {
+		count += slot.End - slot.Start + 1
+	}
+	return count
+}
+
+// valkeyNodeName returns the deterministic name for a ValkeyNode CR.
+// The name encodes the shard index and node index within the shard:
+//
+//	<cluster>-<N>-<M>    e.g. "mycluster-0-0", "mycluster-1-2"
+//
+// By convention, node 0 is the initial primary and nodes 1, 2, … are
+// replicas.
+func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
+	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }

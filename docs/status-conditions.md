@@ -51,9 +51,11 @@ Indicates whether the cluster is fully functional and serving traffic.
 Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
-- `DeploymentError` – failed to create/update deployments
-- `PodListError` – failed to list pods
+- `UsersACLError` – failed to reconcile ACL users/secrets
+- `ValkeyNodeError` – failed to create/update ValkeyNode CRs
+- `ValkeyNodeListError` – failed to list ValkeyNodes
 - `Reconciling` – controller is making changes
+- `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 
@@ -72,6 +74,8 @@ Common reasons:
 - `Initializing` – initial cluster creation
 - `Reconciling` – general reconciliation in progress
 - `AddingNodes` – adding nodes to the cluster
+- `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
+- `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -84,8 +88,7 @@ Indicates whether the cluster is impaired but may still be partially functional.
 
 Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
-- `PrimaryLost` – primary lost in one or more shards
-- `NoSlotsAvailable` – no unassigned slots available for new shard
+- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 
 ---
 
@@ -124,17 +127,19 @@ The high-level `state` is derived from conditions (priority order):
 
 1. `Degraded=True` → `state=Degraded`
 2. `Ready=True` → `state=Ready`
-3. `Progressing=True` and cluster already has shards → `state=Reconciling`
-4. `Progressing=True` and new cluster (no shards yet) → `state=Initializing`
-5. `Ready=False` with no other stronger signal → `state=Failed`
+3. `Progressing=True` → `state=Reconciling`
+4. `Ready=False` with no other stronger signal → `state=Failed`
+
+> **Note:** `Initializing` is the kubebuilder default for `status.state` and is visible briefly on a brand-new cluster before the controller first updates the status to `Reconciling`.
 
 ### Visual flow
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Initializing: New cluster / Progressing=True
-  Initializing --> Reconciling: Progressing=True (making changes)
+  [*] --> Initializing: CRD default (before first reconcile)
+  Initializing --> Reconciling: Controller first runs / Progressing=True
   Reconciling --> Ready: Ready=True
+  Ready --> Reconciling: Spec changed / Progressing=True
   Ready --> Degraded: Issues detected / Degraded=True
   Degraded --> Ready: Issues cleared / Degraded=False and Ready=True
   Reconciling --> Failed: Unrecoverable
@@ -162,10 +167,10 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ServiceCreated` | Normal | Headless Service is created |
 | `ServiceUpdateFailed` | Warning | Service update fails |
 | `ConfigMapCreated` | Normal | ConfigMap with Valkey configuration is created |
-| `ConfigMapUpdateFailed` | Warning | ConfigMap update fails |
-| `ConfigMapCreationFailed` | Warning | ConfigMap creation fails |
-| `DeploymentCreated` | Normal | Each Deployment (shard/replica) is created |
-| `DeploymentCreationFailed` | Warning | Deployment creation fails |
+| `ConfigMapUpdateFailed` | Warning | ConfigMap creation/update fails |
+| `ValkeyNodeCreated` | Normal | ValkeyNode CR is created for a shard/replica position |
+| `ValkeyNodeUpdated` | Normal | ValkeyNode CR spec is updated (rolling update) |
+| `ValkeyNodeFailed` | Warning | Failed to create or update a ValkeyNode CR |
 
 ### Cluster topology events
 
@@ -173,16 +178,34 @@ These events track the formation and changes to the Valkey cluster topology.
 
 | Event Type | Type | Description |
 |---|---|---|
-| `NodeAdding` | Normal | Starting to add a node to the cluster |
-| `NodeAdded` | Normal | Node successfully joins the cluster |
-| `NodeAddFailed` | Warning | Node addition fails |
-| `ClusterMeet` | Normal | Node successfully meets another node (CLUSTER MEET) |
+| `ClusterMeetBatch` | Normal | Isolated nodes introduced to the cluster in batch |
 | `ClusterMeetFailed` | Warning | CLUSTER MEET command fails |
-| `PrimaryCreated` | Normal | Primary node is created with slot assignment |
+| `PrimariesCreated` | Normal | Slot assignment completed for new primary nodes (batch) |
+| `PrimaryCreated` | Normal | Primary node created with slot assignment |
 | `SlotAssignmentFailed` | Warning | Slot assignment to primary fails |
-| `ReplicaCreated` | Normal | Replica is created for a primary |
+| `ReplicasAttached` | Normal | Replica nodes attached to their primaries (batch) |
+| `ReplicaCreated` | Normal | Replica created for a primary |
 | `ReplicaCreationFailed` | Warning | Replica creation fails |
-| `PrimaryLost` | Warning | Primary is lost in a shard (requires failover) |
+
+### Slot rebalancing events
+
+These events are emitted during scale-out slot rebalancing.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
+| `SlotsRebalancePending` | Normal | Waiting for a shard to learn its migration target before moving slots |
+| `SlotRebalanceFailed` | Warning | Slot rebalancing failed |
+
+### Scale-in events
+
+These events are emitted during scale-in operations.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
+| `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
+| `DrainFailed` | Warning | Failed to drain slots from excess shards |
 
 ### Maintenance events
 
@@ -202,6 +225,17 @@ These events provide high-level status information about the cluster.
 | `WaitingForShards` | Normal | Waiting for shards to be created |
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
+
+### Users/ACL events
+
+These events are emitted during ACL user management.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `InternalSecretsCreated` | Normal | Internal ACL secret created |
+| `InternalSecretsUpdated` | Normal | Internal ACL secret synchronized |
+| `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
+| `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
 
 ### Viewing events
 
@@ -326,7 +360,7 @@ Events:
   ----    ------             ----  ----                      -------
   Normal  ServiceCreated     30s   valkeycluster-controller  Created headless Service
   Normal  ConfigMapCreated   30s   valkeycluster-controller  Created ConfigMap with configuration
-  Normal  DeploymentCreated  25s   valkeycluster-controller  Created deployment 1 of 6
+  Normal  ValkeyNodeCreated  25s   valkeycluster-controller  Created ValkeyNode for shard 0 node 0
   Normal  WaitingForShards   20s   valkeycluster-controller  0 of 3 shards exist
 ```
 
@@ -368,24 +402,24 @@ status:
 **Recent events** (from `kubectl describe`):
 ```text
 Events:
-  Type    Reason             Age   From                      Message
-  ----    ------             ----  ----                      -------
-  Normal  ServiceCreated     30s   valkeycluster-controller  Created headless Service
-  Normal  ConfigMapCreated   30s   valkeycluster-controller  Created ConfigMap with configuration
-  Normal  DeploymentCreated  25s   valkeycluster-controller  Created deployment 1 of 6
-  Normal  NodeAdding         15m   valkeycluster-controller  Adding node 10.244.0.10 to cluster
-  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.10 joined cluster
-  Warning NodeAddFailed      14m   valkeycluster-controller  Failed to add node: connection timeout
+  Type     Reason               Age   From                      Message
+  ----     ------               ----  ----                      -------
+  Normal   ServiceCreated       30s   valkeycluster-controller  Created headless Service
+  Normal   ConfigMapCreated     30s   valkeycluster-controller  Created ConfigMap with configuration
+  Normal   ValkeyNodeCreated    25s   valkeycluster-controller  Created ValkeyNode for shard 0 node 0
+  Normal   ClusterMeetBatch     15m   valkeycluster-controller  Introduced 6 isolated node(s) to the cluster
+  Warning  ClusterMeetFailed    14m   valkeycluster-controller  CLUSTER MEET 10.244.0.10 -> 10.244.0.11 failed: connection timeout
+  Warning  ReplicaCreationFailed 14m  valkeycluster-controller  Failed to create replica: connection timeout
 ```
 
 ---
 
-## Sample: `kubectl describe vkc valkeycluster-sample`
+## Sample: `kubectl describe valkeycluster valkeycluster-sample`
 
 Below is an example of `kubectl describe` output for a healthy 3-shard cluster with 1 replica per shard. (`k` is a common `kubectl` alias.)
 
 ```text
-k describe vkc valkeycluster-sample
+k describe valkeycluster valkeycluster-sample
 Name:         valkeycluster-sample
 Namespace:    default
 Labels:       <none>
@@ -436,23 +470,21 @@ Events:
   ----    ------             ----  ----                      -------
   Normal  ServiceCreated     15m   valkeycluster-controller  Created headless Service
   Normal  ConfigMapCreated   15m   valkeycluster-controller  Created ConfigMap with configuration
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 1 of 6
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 2 of 6
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 3 of 6
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 4 of 6
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 5 of 6
-  Normal  DeploymentCreated  15m   valkeycluster-controller  Created deployment 6 of 6
-  Normal  NodeAdding         15m   valkeycluster-controller  Adding node 10.244.0.10 to cluster
-  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.10 joined cluster
-  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary with slots 0-5460
-  Normal  NodeAdding         14m   valkeycluster-controller  Adding node 10.244.0.11 to cluster
-  Normal  ClusterMeet        14m   valkeycluster-controller  Node 10.244.0.11 met node 10.244.0.10
-  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.11 joined cluster
-  Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary abc123
-  Normal  NodeAdding         14m   valkeycluster-controller  Adding node 10.244.0.12 to cluster
-  Normal  ClusterMeet        14m   valkeycluster-controller  Node 10.244.0.12 met node 10.244.0.10
-  Normal  NodeAdded          14m   valkeycluster-controller  Node 10.244.0.12 joined cluster
-  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary with slots 5461-10922
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 0 node 0
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 0 node 1
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 1 node 0
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 1 node 1
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 2 node 0
+  Normal  ValkeyNodeCreated  15m   valkeycluster-controller  Created ValkeyNode for shard 2 node 1
+  Normal  ClusterMeetBatch   14m   valkeycluster-controller  Introduced 6 isolated node(s) to the cluster
+  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary 10.244.0.10 with slots 0-5460
+  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary 10.244.0.11 with slots 5461-10922
+  Normal  PrimaryCreated     14m   valkeycluster-controller  Created primary 10.244.0.12 with slots 10923-16383
+  Normal  PrimariesCreated   14m   valkeycluster-controller  Assigned slots to 3 new primary node(s)
+  Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary abc123 (shard 0)
+  Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary def456 (shard 1)
+  Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary ghi789 (shard 2)
+  Normal  ReplicasAttached   14m   valkeycluster-controller  Attached 3 replica node(s)
   Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready with 3 shards and 1 replicas
 ```
 
@@ -479,12 +511,12 @@ Events:
 
 ---
 
-## Sample: `kubectl get vkc -A -o wide -w` (watch)
+## Sample: `kubectl get valkeycluster -A -o wide -w` (watch)
 
 The watch output below shows how `state` and `reason` evolve during creation:
 
 ```text
-k get vkc -A -o wide -w
+k get valkeycluster -A -o wide -w
 NAMESPACE   NAME                   STATE          REASON           READYSHARDS   AGE
 default     valkeycluster-sample   Initializing   Reconciling      0             0s
 default     valkeycluster-sample   Reconciling    Reconciling      0             0s
@@ -497,6 +529,16 @@ default     valkeycluster-sample   Reconciling    AddingNodes      2            
 default     valkeycluster-sample   Ready          ClusterHealthy   3             11s
 ```
 
+After a spec update (e.g. image upgrade), the rolling update path produces:
+
+```text
+k get valkeycluster -A -o wide -w
+NAMESPACE   NAME                   STATE          REASON           READYSHARDS   AGE
+default     valkeycluster-sample   Reconciling    UpdatingNodes    3             5m
+default     valkeycluster-sample   Reconciling    UpdatingNodes    3             5m
+default     valkeycluster-sample   Ready          ClusterHealthy   3             6m
+```
+
 ### What this indicates
 
 - **Initializing → Reconciling**
@@ -506,6 +548,9 @@ default     valkeycluster-sample   Ready          ClusterHealthy   3            
 - **Reconciling (AddingNodes)**
   - `Reason=AddingNodes` indicates the controller is actively joining pods to the Valkey cluster.
   - `READYSHARDS` increases (0 → 1 → 2 → 3) as shards become fully healthy.
+
+- **Reconciling (UpdatingNodes)**
+  - `Reason=UpdatingNodes` indicates a rolling update of ValkeyNode CRs is in progress (one node at a time, replicas before primaries).
 
 - **Ready (ClusterHealthy)**
   - Once `READYSHARDS` reaches the desired shard count and the cluster is healthy, the summary switches to `Ready / ClusterHealthy`.

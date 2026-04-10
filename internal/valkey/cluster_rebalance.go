@@ -87,10 +87,41 @@ func PlanRebalanceMove(shards []*ShardState, expectedShards int, maxSlots int) (
 
 	numSlotsToMove := min(src.numSlots-src.targetNumSlots, dst.targetNumSlots-dst.numSlots, maxSlots)
 	slots := takeSlotsFromRanges(src.ranges, numSlotsToMove)
-	if len(slots) == 0 {
+	return &SlotMove{Src: src.node, Dst: dst.node, Slots: slots}, nil
+}
+
+// PlanDrainMove computes a single slot migration that moves a batch of slots
+// from src to the first valid destination in dsts. Returns nil when src has no
+// slots. The destination choice is intentionally simple — after draining
+// completes, PlanRebalanceMove equalizes the remaining shards.
+func PlanDrainMove(src *ShardState, dsts []*ShardState, maxSlots int) (*SlotMove, error) {
+	if maxSlots <= 0 || len(dsts) == 0 {
 		return nil, nil
 	}
-	return &SlotMove{Src: src.node, Dst: dst.node, Slots: slots}, nil
+	srcPrimary := src.GetPrimaryNode()
+	if srcPrimary == nil {
+		return nil, fmt.Errorf("primary missing for draining shard %s", src.Id)
+	}
+	srcCount := 0
+	for _, slot := range src.Slots {
+		srcCount += slot.End - slot.Start + 1
+	}
+	if srcCount == 0 {
+		return nil, nil
+	}
+
+	var dstPrimary *NodeState
+	for _, shard := range dsts {
+		if dstPrimary = shard.GetPrimaryNode(); dstPrimary != nil {
+			break
+		}
+	}
+	if dstPrimary == nil {
+		return nil, fmt.Errorf("no valid destination for draining shard %s", src.Id)
+	}
+
+	slots := takeSlotsFromRanges(append([]SlotsRange(nil), src.Slots...), min(srcCount, maxSlots))
+	return &SlotMove{Src: srcPrimary, Dst: dstPrimary, Slots: slots}, nil
 }
 
 func takeSlotsFromRanges(ranges []SlotsRange, slotsToMove int) []int {

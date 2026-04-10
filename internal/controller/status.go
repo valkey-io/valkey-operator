@@ -32,25 +32,37 @@ func setCondition(cluster *valkeyiov1alpha1.ValkeyCluster, condType, reason, mes
 	})
 }
 
+// conditionsChanged returns true if two condition slices differ, ignoring LastTransitionTime.
+func conditionsChanged(old, new []metav1.Condition) bool {
+	if len(old) != len(new) {
+		return true
+	}
+	for _, newCond := range new {
+		oldCond := meta.FindStatusCondition(old, newCond.Type)
+		if oldCond == nil {
+			return true
+		}
+		if oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason || oldCond.Message != newCond.Message || oldCond.ObservedGeneration != newCond.ObservedGeneration {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeStatusChanged compares two ValkeyNodeStatus values and returns true if
+// they differ (ignoring LastTransitionTime on conditions).
+func nodeStatusChanged(old, new valkeyiov1alpha1.ValkeyNodeStatus) bool {
+	if old.Ready != new.Ready || old.PodName != new.PodName || old.PodIP != new.PodIP || old.Role != new.Role || old.ObservedGeneration != new.ObservedGeneration {
+		return true
+	}
+	return conditionsChanged(old.Conditions, new.Conditions)
+}
+
 // statusChanged compares two statuses and returns true if they differ (ignoring LastTransitionTime)
 func statusChanged(old, new valkeyiov1alpha1.ValkeyClusterStatus) bool {
 	// Compare summary fields
 	if old.State != new.State || old.Reason != new.Reason || old.Message != new.Message || old.Shards != new.Shards || old.ReadyShards != new.ReadyShards {
 		return true
 	}
-	// Compare conditions (ignoring LastTransitionTime)
-	if len(old.Conditions) != len(new.Conditions) {
-		return true
-	}
-	for _, newCond := range new.Conditions {
-		oldCond := meta.FindStatusCondition(old.Conditions, newCond.Type)
-		if oldCond == nil {
-			return true
-		}
-		// Compare everything except LastTransitionTime
-		if oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason || oldCond.Message != newCond.Message || oldCond.ObservedGeneration != newCond.ObservedGeneration {
-			return true
-		}
-	}
-	return false
+	return conditionsChanged(old.Conditions, new.Conditions)
 }

@@ -49,8 +49,7 @@ const valkeyClientImage = "valkey/valkey:9.0.0"
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage   = "valkey/valkey-operator"
-	managerVersion = "v0.0.1"
+	managerImage = "valkey/valkey-operator:v0.0.1"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -72,12 +71,12 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to purge old events")
 
 	By("building the manager image")
-	cmd = exec.Command("make", "docker-build", "IMG="+managerImage, "VERSION="+managerVersion)
+	cmd = exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
 	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage + ":" + managerVersion)
+	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	setupCertManager()
@@ -105,7 +104,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 	By("deploying the controller-manager")
-	cmd = exec.Command("make", "deploy", "IMG="+managerImage, "VERSION="+managerVersion)
+	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 	_, err = utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 })

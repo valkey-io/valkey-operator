@@ -258,7 +258,6 @@ func (n *NodeState) PrimaryIdFromSelf() string {
 	return ""
 }
 
-
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}

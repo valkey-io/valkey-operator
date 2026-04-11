@@ -11,9 +11,32 @@ Thank you for your interest in contributing to the Valkey Operator! We welcome c
 - kubectl v1.11.3+
 - Access to a Kubernetes cluster (kind, minikube, or cloud provider)
 
+### Development Tools
+
+This project uses the following tools during development.
+
+#### golangci-lint
+
+To install `golangci-lint` locally follow the [official documentation](https://golangci-lint.run/usage/install/#local-installation).
+
+#### pre-commit
+
+To install `pre-commit` locally follow the [official documentation](https://pre-commit.com/#install).
+`pre-commit` uses the [.pre-commit-config.yaml](.pre-commit-config.yaml) configuration file located in the root of the
+project.
+
+To set up the `git` hook script execute the following command so that the pre-commit steps runs automatically on
+each commit.
+```bash
+pre-commit install
+```
+
 ### Development Setup
 
 See the [Developer Guide](./docs/developer-guide.md) for detailed setup instructions.
+
+#### Optional: kubebuilder
+[Kubebuilder](https://kubebuilder.io/) is the framework we use for the operator. You will normally not need to use the kubebuilder CLI directly unless you are adding new CRDs or making major changes to the project structure.
 
 Quick start:
 

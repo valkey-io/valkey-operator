@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"time"
@@ -241,7 +242,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 
 		current.Status.Ready = podReady
 		if podReady {
-			current.Status.Role = getValkeyRole(ctx, pod.Status.PodIP, DefaultPort)
+			current.Status.Role = r.getValkeyRole(ctx, current)
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionTrue,
@@ -345,11 +346,25 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 
 // getValkeyRole connects to a Valkey pod and returns its replication role
 // ("primary" or "replica"). Returns an empty string if the role cannot be determined.
-func getValkeyRole(ctx context.Context, podIP string, port int) string {
-	c, err := vclient.NewClient(vclient.ClientOption{
-		InitAddress:       []string{fmt.Sprintf("%s:%d", podIP, port)},
-		ForceSingleClient: true,
-	})
+func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string {
+	var tlsConfig *tls.Config
+	if node.Spec.TLS != nil && node.Spec.TLS.Certificate.SecretName != "" {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: node.Labels["valkey.io/cluster"]}, cluster); err == nil {
+			cfg, err := GetTLSConfig(ctx, r.Client, cluster)
+			if err == nil {
+				tlsConfig = cfg
+			}
+		}
+	}
+
+	opt := vclient.ClientOption{
+		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
+		ForceSingleClient: true, // Don't connect to another cluster node.
+		TLSConfig:         tlsConfig,
+	}
+
+	c, err := vclient.NewClient(opt)
 	if err != nil {
 		return ""
 	}

@@ -214,6 +214,22 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
+	if node.Spec.TLS != nil {
+		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      tlsVolumeName,
+			MountPath: tlsCertMountPath,
+			ReadOnly:  true,
+		})
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCA},
+			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
+			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
+			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: fmt.Sprintf("--tls --cacert %s --cert %s --key %s",
+				tlsCertMountPath+"/"+tlsSecretKeyCA, tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)},
+		)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter))
@@ -281,6 +297,17 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name:      "users-acl",
 			MountPath: "/config/users",
 			ReadOnly:  true,
+		})
+	}
+
+	if node.Spec.TLS != nil {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: node.Spec.TLS.Certificate.SecretName,
+				},
+			},
 		})
 	}
 

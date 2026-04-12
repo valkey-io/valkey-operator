@@ -193,6 +193,38 @@ func (n *NodeState) IsReplicationInSync() bool {
 	return n.Info["master_link_status"] == "up"
 }
 
+// HasReplicaOf returns true if any live node in the cluster state reports
+// itself as a replica of the given node ID. This is used to prevent
+// CLUSTER FORGET from racing with auto-failover: forgetting a failed
+// primary from other primaries removes it from their node tables, which
+// prevents them from voting in the replica's failover election.
+func (s *ClusterState) HasReplicaOf(nodeId string) bool {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.PrimaryIdFromSelf() == nodeId {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// PrimaryIdFromSelf returns the primary node ID that this node reports as its
+// own primary in CLUSTER NODES (fields[3] of the "myself" line). Returns "-"
+// for primaries and the primary's node ID for replicas.
+func (n *NodeState) PrimaryIdFromSelf() string {
+	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			continue
+		}
+		if strings.Contains(fields[2], "myself") {
+			return fields[3]
+		}
+	}
+	return ""
+}
+
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}

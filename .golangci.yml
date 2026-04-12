@@ -1,6 +1,7 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  go: "1.25"
 linters:
   default: none
   enable:

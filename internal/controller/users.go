@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -38,6 +39,7 @@ import (
 const (
 	hashAnnotationKey = "valkey.io/internal-acl-hash"
 	aclFilename       = "users.acl"
+	passwordLength    = 26
 )
 
 var (
@@ -324,10 +326,18 @@ func isPreHashedPassword(password []byte) bool {
 	return password[0] == 35 && len(password) == 65
 }
 
-// GeneratePassword creates a random (alphanumeric) 26 chars long password using rand.Text()
-func generatePassword() string {
-	randstr := rand.Text()
-	return randstr
+// GeneratePassword creates a random (alphanumeric) n chars long password
+func generatePassword(length int) ([]byte, error) {
+	const letters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	ret := make([]byte, length)
+	for i := range length {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+		if err != nil {
+			return nil, err
+		}
+		ret[i] = letters[num.Int64()]
+	}
+	return ret, nil
 }
 
 func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, apiClient client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
@@ -351,7 +361,13 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
 			continue
 		}
-		systemUsersSecret.Data[user] = []byte(generatePassword())
+		password, err := generatePassword(passwordLength)
+		if err != nil {
+			log.Error(err, "Failed to generate random password", "username", user)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to generate random password: %v", err)
+			return &systemUsersSecret, err
+		}
+		systemUsersSecret.Data[user] = password
 	}
 
 	err := apiClient.Create(ctx, &systemUsersSecret)

@@ -344,6 +344,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	log := logf.FromContext(ctx)
 
 	systemUsersSecret := corev1.Secret{
+		Type: AclSecretType,
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      getSystemPasswordSecretName(cluster.Name),
 			Namespace: cluster.Namespace,

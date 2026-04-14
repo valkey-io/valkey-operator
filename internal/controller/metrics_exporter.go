@@ -25,7 +25,7 @@ import (
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string) corev1.Container {
 	exporterImage := DefaultExporterImage
 	if exporter.Image != "" {
 		exporterImage = exporter.Image
@@ -33,7 +33,21 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec)
 	return corev1.Container{
 		Name:  "metrics-exporter",
 		Image: exporterImage,
-		Args:  []string{fmt.Sprintf("--redis.addr=localhost:%d", DefaultPort)},
+		Env: []corev1.EnvVar{
+			{Name: "REDIS_USER", Value: exporterUser},
+			{
+				Name: "REDIS_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: getSystemPasswordSecretName(clusterName),
+						},
+						Key: exporterUser,
+					},
+				},
+			},
+		},
+		Args: []string{fmt.Sprintf("--redis.addr=localhost:%d", DefaultPort)},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "metrics",

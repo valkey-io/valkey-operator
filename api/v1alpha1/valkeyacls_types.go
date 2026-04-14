@@ -21,6 +21,7 @@ type UserAclSpec struct {
 
 	// Username
 	// +kubebuilder:required:message=A username is required
+	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
 	Name string `json:"name"`
 
 	// If the user is enabled or not

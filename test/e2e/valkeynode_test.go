@@ -44,21 +44,36 @@ var _ = Describe("ValkeyNode", func() {
 	// createStandaloneValkeyNode applies a ValkeyNode manifest and returns a cleanup func.
 	// workloadType must be "StatefulSet" or "Deployment".
 	createStandaloneValkeyNode := func(name, workloadType string) func() {
+		// create the internal ACL secret
+		secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-acl
+`, name)
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(secretManifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create internal ACL secret internal-%s-acl", name)
 		manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyNode
 metadata:
   name: %s
+  labels:
+    valkey.io/cluster: %s
 spec:
   workloadType: %s
-`, name, workloadType)
+`, name, name, workloadType)
 
-		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = strings.NewReader(manifest)
-		_, err := utils.Run(cmd)
+		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyNode %s", name)
 
 		return func() {
 			cmd := exec.Command("kubectl", "delete", "valkeynode", name, "--ignore-not-found=true", "--wait=false")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret", "internal-"+name+"-acl", "--ignore-not-found=true", "--wait=false")
 			_, _ = utils.Run(cmd)
 		}
 	}
@@ -72,7 +87,7 @@ spec:
 		}).Should(Succeed())
 	}
 
-	Context("standalone StatefulSet", func() {
+	Context("standalone StatefulSet", Label("valkeynode"), func() {
 		const nodeName = "valkeynode-sts-e2e"
 
 		It("creates owned resources and populates status with role", func() {
@@ -146,7 +161,7 @@ spec:
 		})
 	})
 
-	Context("standalone Deployment", func() {
+	Context("standalone Deployment", Label("valkeynode"), func() {
 		const nodeName = "valkeynode-deploy-e2e"
 
 		It("creates owned resources and populates status with role", func() {
@@ -201,7 +216,7 @@ spec:
 		})
 	})
 
-	Context("pod deletion recovery", func() {
+	Context("pod deletion recovery", Label("valkeynode"), func() {
 		const nodeName = "valkeynode-recovery-e2e"
 
 		It("status tracks pod lifecycle and recovers after pod deletion", func() {
@@ -240,7 +255,7 @@ spec:
 		})
 	})
 
-	Context("external ConfigMap", func() {
+	Context("external ConfigMap", Label("valkeynode", "external-cm"), func() {
 		const nodeName = "valkeynode-extcm-e2e"
 		const cmName = "valkeynode-extcm-scripts"
 
@@ -280,13 +295,26 @@ data:
 			}()
 
 			By("creating a ValkeyNode that references the external ConfigMap")
+			secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-acl
+`, nodeName)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(secretManifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create internal ACL secret")
 			nodeManifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyNode
 metadata:
   name: %s
+  labels:
+    valkey.io/cluster: %s
 spec:
   scriptsConfigMapName: %s
-`, nodeName, cmName)
+`, nodeName, nodeName, cmName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(nodeManifest)
@@ -294,6 +322,8 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyNode with external ConfigMap")
 			defer func() {
 				cmd := exec.Command("kubectl", "delete", "valkeynode", nodeName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "secret", "internal-"+nodeName+"-acl", "--ignore-not-found=true", "--wait=false")
 				_, _ = utils.Run(cmd)
 			}()
 

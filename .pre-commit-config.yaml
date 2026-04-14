@@ -1,0 +1,30 @@
+default_stages: [pre-commit]
+minimum_pre_commit_version: "2.0.0"
+repos:
+  - repo: local
+    hooks:
+      - id: make-generate
+        name: generate code and manifests
+        language: system
+        entry: bash -c "make manifests generate"
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: run go mod tidy
+        language: system
+        entry: go mod tidy
+        files: ^go\.(mod|sum)$
+        pass_filenames: false
+
+      - id: make-lint
+        name: run golangci-lint
+        language: system
+        entry: bash -c "GOTOOLCHAIN=go1.25.3 make lint"
+        types: [go]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v0.7.1
+    hooks:
+      - id: check-merge-conflict

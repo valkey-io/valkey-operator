@@ -33,10 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -47,6 +49,9 @@ const (
 	DefaultImage          = "valkey/valkey:9.0.0"
 	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
 	DefaultExporterPort   = 9121
+
+	// AclSecretType is used to filter ACL Secret watch events.
+	AclSecretType = corev1.SecretType("valkey.io/acl")
 
 	// Error messages
 	statusUpdateFailedMsg = "failed to update status"
@@ -101,7 +106,7 @@ var scripts embed.FS
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.1/pkg/reconcile
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
@@ -146,7 +151,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	state := r.getValkeyClusterState(ctx, nodes)
+	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	if err != nil {
+		log.Error(err, "failed to retrieve system user password")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, nil
+	}
+	state := r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
@@ -428,7 +440,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// re-scraping fresh state.
 	var clusterState *valkey.ClusterState
 	if anyNodeRequiresRoll(cluster, nodes) {
-		clusterState = r.getValkeyClusterState(ctx, nodes)
+		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+		if err != nil {
+			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
+		}
+		clusterState = r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
 		defer clusterState.CloseClients()
 	}
 
@@ -566,7 +582,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -574,7 +590,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nod
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort)
+	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -833,14 +849,25 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				idx := slices.IndexFunc(nodes.Items, func(n valkeyiov1alpha1.ValkeyNode) bool {
 					return n.Status.PodIP == failing.Address
 				})
-				if idx == -1 {
-					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
-					if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
-						log.Error(err, "command failed: CLUSTER FORGET")
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
-					} else {
-						r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
-					}
+				if idx != -1 {
+					continue
+				}
+				// A live replica still considers this failing node its
+				// primary. Forgetting it from the other primaries now would
+				// remove it from their node tables and prevent them from
+				// voting in the auto-failover election, permanently
+				// blocking the replica's promotion.
+				if state.HasReplicaOf(failing.Id) {
+					log.V(1).Info("skipping forget; failover pending for node",
+						"address", failing.Address, "Id", failing.Id)
+					continue
+				}
+				log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
+				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
+					log.Error(err, "command failed: CLUSTER FORGET")
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
+				} else {
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
 				}
 			}
 		}
@@ -1161,9 +1188,14 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
+		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				secret, ok := obj.(*corev1.Secret)
+				return ok && secret.Type == AclSecretType
+			})),
 		).
 		Named("valkeycluster").
 		Complete(r)

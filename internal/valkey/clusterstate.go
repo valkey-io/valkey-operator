@@ -64,7 +64,7 @@ type SlotsRange struct {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int) *ClusterState {
+func GetClusterState(ctx context.Context, addresses []string, port int, username, password string) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -72,7 +72,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int) *Cluster
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port)
+		node := getNodeState(ctx, address, port, username, password)
 		if node != nil {
 			// Check if node is pending to be added.
 			if node.IsPrimary() && len(node.GetSlots()) == 0 {
@@ -226,6 +226,38 @@ func (n *NodeState) IsReplicationInSync() bool {
 	return n.Info["master_link_status"] == "up"
 }
 
+// HasReplicaOf returns true if any live node in the cluster state reports
+// itself as a replica of the given node ID. This is used to prevent
+// CLUSTER FORGET from racing with auto-failover: forgetting a failed
+// primary from other primaries removes it from their node tables, which
+// prevents them from voting in the replica's failover election.
+func (s *ClusterState) HasReplicaOf(nodeId string) bool {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.PrimaryIdFromSelf() == nodeId {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// PrimaryIdFromSelf returns the primary node ID that this node reports as its
+// own primary in CLUSTER NODES (fields[3] of the "myself" line). Returns "-"
+// for primaries and the primary's node ID for replicas.
+func (n *NodeState) PrimaryIdFromSelf() string {
+	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			continue
+		}
+		if strings.Contains(fields[2], "myself") {
+			return fields[3]
+		}
+	}
+	return ""
+}
+
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}
@@ -248,18 +280,30 @@ func (n *NodeState) GetFailingNodes() []NodeState {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, username string, password string) *NodeState {
 	log := logf.FromContext(ctx)
 
 	opt := vclient.ClientOption{
 		InitAddress:       []string{fmt.Sprintf("%s:%d", address, port)},
 		ForceSingleClient: true, // Don't connect to another cluster node.
+		Username:          username,
+		Password:          password,
 	}
-
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		log.Info("failed to create Valkey client", "err", err)
-		return nil
+		if !strings.Contains(err.Error(), "WRONGPASS") {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
+		// fallback to unauthenticated
+		log.Info("fall back to unauthenticated default user on WRONGPASS error")
+		opt.Username = ""
+		opt.Password = ""
+		client, err = vclient.NewClient(opt)
+		if err != nil {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
 	}
 
 	node := NodeState{Client: client,

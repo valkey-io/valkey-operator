@@ -500,7 +500,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList)
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "", "")
 	}
 
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.

@@ -142,7 +142,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
+	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	if err != nil {
+		log.Error(err, "failed to retrieve system user password")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, nil
+	}
+
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, operatorUser, operatorPassword); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -151,7 +159,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	}
-	state := r.getValkeyClusterState(ctx, nodes)
+	state := r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
@@ -430,7 +438,7 @@ aclfile /config/users/users.acl`,
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -444,7 +452,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// re-scraping fresh state.
 	var clusterState *valkey.ClusterState
 	if anyNodeRequiresRoll(cluster, nodes) {
-		clusterState = r.getValkeyClusterState(ctx, nodes)
+		clusterState = r.getValkeyClusterState(ctx, nodes, username, password)
 		defer clusterState.CloseClients()
 	}
 
@@ -599,7 +607,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -607,7 +615,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nod
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort)
+	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -1205,6 +1213,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
+		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),

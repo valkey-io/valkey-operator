@@ -194,6 +194,7 @@ const (
 	ReasonRebalanceFailed     = "RebalanceFailed"
 	ReasonUsersAclError       = "UsersACLError"
 	ReasonUpdatingNodes       = "UpdatingNodes"
+	ReasonSystemUsersAclError = "SystemUsersACLError"
 )
 
 // +kubebuilder:object:root=true

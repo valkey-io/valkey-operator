@@ -65,12 +65,7 @@ type SlotsRange struct {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int, tlsCfg ...*tls.Config) *ClusterState {
-	var tlsConfig *tls.Config
-	if len(tlsCfg) > 0 {
-		tlsConfig = tlsCfg[0]
-	}
-
+func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -78,7 +73,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, tlsCfg .
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, tlsConfig)
+		node := getNodeState(ctx, address, port, username, password, tlsCfg)
 		if node != nil {
 			// Check if node is pending to be added.
 			if node.IsPrimary() && len(node.GetSlots()) == 0 {
@@ -253,19 +248,31 @@ func (n *NodeState) GetFailingNodes() []NodeState {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, tlsConfig *tls.Config) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
 	log := logf.FromContext(ctx)
 
 	opt := vclient.ClientOption{
 		InitAddress:       []string{fmt.Sprintf("%s:%d", address, port)},
 		ForceSingleClient: true, // Don't connect to another cluster node.
+		Username:          username,
+		Password:          password,
 		TLSConfig:         tlsConfig,
 	}
-
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		log.Info("failed to create Valkey client", "err", err)
-		return nil
+		if !strings.Contains(err.Error(), "WRONGPASS") {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
+		// fallback to unauthenticated
+		log.Info("fall back to unauthenticated default user on WRONGPASS error")
+		opt.Username = ""
+		opt.Password = ""
+		client, err = vclient.NewClient(opt)
+		if err != nil {
+			log.Error(err, "failed to create Valkey client")
+			return nil
+		}
 	}
 
 	node := NodeState{Client: client,

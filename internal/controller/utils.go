@@ -258,7 +258,8 @@ tls-cluster yes
 tls-replication yes
 tls-cert-file %s
 tls-key-file %s
-tls-ca-cert-file %s`,
+tls-ca-cert-file %s
+tls-auth-clients optional`, // allow clients to connect without client certificate
 			DefaultPort,
 			tlsCertMountPath+"/"+tlsSecretKeyCert,
 			tlsCertMountPath+"/"+tlsSecretKeyKey,
@@ -269,27 +270,17 @@ tls-ca-cert-file %s`,
 }
 
 // GetTLSConfig returns the TLS configuration for a ValkeyCluster.
-func GetTLSConfig(ctx context.Context, c client.Client, cluster *valkeyv1.ValkeyCluster) (*tls.Config, error) {
-	secretName := cluster.Spec.TLS.Certificate.SecretName
-	serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
-
+func GetTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: secretName}, secret)
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
 		return nil, err
 	}
 
-	certData, certOk := secret.Data[tlsSecretKeyCert]
-	keyData, keyOk := secret.Data[tlsSecretKeyKey]
 	caData, caOk := secret.Data[tlsSecretKeyCA]
 
-	if !certOk || !keyOk || !caOk {
-		return nil, fmt.Errorf("TLS secret is missing required keys: cert=%v, key=%v, ca=%v", certOk, keyOk, caOk)
-	}
-
-	cert, err := tls.X509KeyPair(certData, keyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse TLS key pair: %w", err)
+	if !caOk {
+		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
 	}
 
 	caCertPool := x509.NewCertPool()
@@ -298,10 +289,9 @@ func GetTLSConfig(ctx context.Context, c client.Client, cluster *valkeyv1.Valkey
 	}
 
 	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caCertPool,
-		ServerName:   serverName,
-		MinVersion:   tls.VersionTLS12,
+		RootCAs:    caCertPool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
 	}
 	return tlsCfg, nil
 }

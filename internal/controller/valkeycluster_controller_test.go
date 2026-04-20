@@ -118,6 +118,42 @@ var _ = Describe("ValkeyCluster Controller", func() {
 
 var _ = Describe("reconcileUsersAcl", func() {
 	Context("When reconciling ACL secrets", func() {
+		It("should return an error when a user references a missing password secret", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-missing-secret-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Users: []valkeyiov1alpha1.UserAclSpec{
+						{
+							Name:    "testuser",
+							Enabled: true,
+							PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+								Name: "nonexistent-secret",
+								Keys: []string{"password"},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("testuser"))
+		})
+
 		It("should create the internal ACL secret with the ACL secret type", func() {
 			ctx := context.Background()
 			cluster := &valkeyiov1alpha1.ValkeyCluster{

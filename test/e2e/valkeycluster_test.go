@@ -83,6 +83,21 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyConfigMapExists).Should(Succeed())
 
+			By("validating the system user ACLs")
+			verifySystemUserAcls := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret",
+					"internal-"+valkeyClusterName+"-system-passwords",
+					"-o", "jsonpath={.data}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve system user ACLs secret")
+				g.Expect(output).To(SatisfyAll(
+					ContainSubstring("_operator"),
+					ContainSubstring("_exporter"),
+				))
+			}
+			Eventually(verifySystemUserAcls).Should(Succeed())
+
 			By("validating ValkeyNodes")
 			verifyValkeyNodesExist := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "valkeynodes",
@@ -235,6 +250,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("ServiceCreated"), "ServiceCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ConfigMapCreated"), "ConfigMapCreated event should appear in describe")
 				g.Expect(output).To(ContainSubstring("ValkeyNodeCreated"), "ValkeyNodeCreated event should appear in describe")
+				g.Expect(output).To(ContainSubstring("InternalSecretsCreated"), "InternalSecretsCreated event should appear in describe")
 				// PrimaryCreated, ClusterMeetBatch, ReplicaCreated and ClusterReady may not always
 				// appear in describe output due to rate-limiting (see kubernetes/kubernetes#136061).
 				// We verify these through cluster status instead of strictly requiring the events.
@@ -270,13 +286,54 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// The cluster should be ok.
 				g.Expect(output).To(ContainSubstring(expected))
 			}
-
 			Eventually(verifyClusterAccess).
 				WithArguments("cluster_state:ok", "CLUSTER", "INFO").
 				Should(Succeed(), "Failed CLUSTER INFO")
 			Eventually(verifyClusterAccess).
 				WithArguments("52428800", "CONFIG", "GET", "maxmemory").
 				Should(Succeed(), "Failed CONFIG GET maxmemory")
+
+			By("get the original ACL hash")
+			cmd = exec.Command("kubectl", "get", "pod",
+				"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
+			)
+			aclHash, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("delete system users password secret")
+			secretName := "internal-" + valkeyClusterName + "-system-passwords"
+			cmd = exec.Command("kubectl", "delete", "secret", secretName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("validating system users passwords secret is recreated if deleted")
+			verifySecretRecreation := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", secretName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifySecretRecreation).Should(Succeed())
+
+			By("validating valkey-operator fallback to default user")
+			verifyAuthFallback := func(g Gomega) {
+				cmd := exec.Command("kubectl", "logs",
+					"-n", namespace, "-l", "app.kubernetes.io/name=valkey-operator")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("fall back to unauthenticated default user on WRONGPASS error"))
+			}
+			Eventually(verifyAuthFallback).Should(Succeed())
+
+			By("validating pod is recreated with new ACL")
+			verifyPodRoll := func(g Gomega) {
+				cmd = exec.Command("kubectl", "get", "pod",
+					"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
+				)
+				newAclHash, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(newAclHash).NotTo(Equal(aclHash))
+			}
+			Eventually(verifyPodRoll, 5*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
 		It("creates a cluster with custom users", func() {
@@ -339,6 +396,8 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 					ContainSubstring("user alice on"),
 					ContainSubstring("user bob on nopass"),
 					ContainSubstring("user david on"),
+					ContainSubstring("user _exporter on"),
+					ContainSubstring("user _operator on"),
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,7 +69,6 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
 	if err := r.ensureConfigMap(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -115,9 +115,22 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 			Namespace: desired.Namespace,
 		},
 	}
+	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
+	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
+	aclSecret := &corev1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{
+		Name:      aclSecretName,
+		Namespace: desired.Namespace,
+	}, aclSecret)
+	if err != nil {
+		return err
+	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		sts.Labels = desired.Labels
 		sts.Spec = desired.Spec
+		sts.Spec.Template.Annotations = map[string]string{
+			hashAnnotationKey: aclSecret.Annotations[hashAnnotationKey],
+		}
 		return controllerutil.SetControllerReference(node, sts, r.Scheme)
 	})
 	if err != nil {
@@ -140,9 +153,23 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 			Namespace: desired.Namespace,
 		},
 	}
+	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
+	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
+	aclSecret := &corev1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{
+		Name:      aclSecretName,
+		Namespace: desired.Namespace,
+	}, aclSecret)
+	if err != nil {
+		return err
+	}
+
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
 		dep.Labels = desired.Labels
 		dep.Spec = desired.Spec
+		dep.Spec.Template.Annotations = map[string]string{
+			hashAnnotationKey: aclSecret.Annotations[hashAnnotationKey],
+		}
 		return controllerutil.SetControllerReference(node, dep, r.Scheme)
 	})
 	if err != nil {

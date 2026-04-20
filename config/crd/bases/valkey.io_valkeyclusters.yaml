@@ -2751,6 +2751,9 @@ spec:
                     name:
                       description: Username
                       type: string
+                      x-kubernetes-validations:
+                      - message: Username cannot start with '_'
+                        rule: '!self.startsWith(''_'')'
                     nopass:
                       default: false
                       description: Do not apply a password to this user

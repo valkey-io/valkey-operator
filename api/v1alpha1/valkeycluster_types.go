@@ -64,8 +64,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// Affinity to apply to the pods, overrides NodeSelector if set
-	// Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
+	// Affinity to apply to the pods, overrides NodeSelector if set.
+	// By default, pods from the same shard are required to land on different
+	// Kubernetes nodes to avoid primary/replica single-node SPOF.
+	// User-supplied affinity is merged with these defaults.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 

@@ -532,7 +532,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			WorkloadType:         cluster.Spec.WorkloadType,
 			Resources:            cluster.Spec.Resources,
 			NodeSelector:         cluster.Spec.NodeSelector,
-			Affinity:             cluster.Spec.Affinity,
+			Affinity:             buildDefaultShardAffinity(cluster, shardIndex),
 			Tolerations:          cluster.Spec.Tolerations,
 			Exporter:             cluster.Spec.Exporter,
 			Containers:           cluster.Spec.Containers,
@@ -541,6 +541,34 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TLS:                  cluster.Spec.TLS,
 		},
 	}
+}
+
+func buildDefaultShardAffinity(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int) *corev1.Affinity {
+	var affinity *corev1.Affinity
+	if cluster.Spec.Affinity != nil {
+		affinity = cluster.Spec.Affinity.DeepCopy()
+	} else {
+		affinity = &corev1.Affinity{}
+	}
+
+	if affinity.PodAntiAffinity == nil {
+		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+
+	affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					LabelCluster:    cluster.Name,
+					LabelShardIndex: strconv.Itoa(shardIndex),
+				},
+			},
+			TopologyKey: corev1.LabelHostname,
+		},
+	)
+
+	return affinity
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {

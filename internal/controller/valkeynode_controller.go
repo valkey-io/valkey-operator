@@ -388,10 +388,23 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 		}
 	}
 
+	// Use _operator credentials when available (cluster-managed nodes).
+	// Standalone ValkeyNodes have no cluster label and no system password
+	// secret, so we skip the lookup entirely and connect unauthenticated.
+	var username, operatorPassword string
+	if clusterName, ok := node.Labels[LabelCluster]; ok {
+		operatorPassword, _ = fetchSystemUserPassword(ctx, operatorUser, r.Client, clusterName, node.Namespace)
+		if operatorPassword != "" {
+			username = operatorUser
+		}
+	}
+
 	opt := vclient.ClientOption{
 		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
 		ForceSingleClient: true, // Don't connect to another cluster node.
 		TLSConfig:         tlsConfig,
+		Username:          username,
+		Password:          operatorPassword,
 	}
 
 	c, err := vclient.NewClient(opt)

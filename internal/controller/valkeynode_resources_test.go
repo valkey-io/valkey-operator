@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -422,14 +423,14 @@ func TestParseValkeyRole(t *testing.T) {
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, DefaultExporterImage, c.Image)
 		assert.Equal(t, "metrics-exporter", c.Name)
 	})
 
 	t.Run("custom image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Image: "custom:1.0"}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, "custom:1.0", c.Image)
 	})
 
@@ -440,15 +441,28 @@ func TestBuildExporterContainer(t *testing.T) {
 			},
 		}
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Resources: resources}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, resources, c.Resources)
 	})
 
 	t.Run("args contain redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=localhost:6379")
+		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		assert.Empty(t, c.VolumeMounts)
+	})
+
+	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+
+		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
+		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
+		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		assert.Len(t, c.VolumeMounts, 1)
+		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
+		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
 	})
 }
 

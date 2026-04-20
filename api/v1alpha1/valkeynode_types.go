@@ -80,6 +80,10 @@ type ValkeyNodeSpec struct {
 	// by name; any container name not present in the defaults is appended.
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
+
+	// TLS configuration for the node
+	// +optional
+	TLS *TLSConfig `json:"tls,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

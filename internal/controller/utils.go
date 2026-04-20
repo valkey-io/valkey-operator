@@ -17,12 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -65,6 +70,16 @@ const (
 	// Node 0 is the initial primary; nodes 1+ are replicas. Together with
 	// LabelShardIndex this forms a unique selector per Deployment.
 	LabelNodeIndex = "valkey.io/node-index"
+)
+
+const (
+	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
+	tlsVolumeName = "tls-certs"
+	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
+	tlsCertMountPath = "/tls"
+	tlsSecretKeyCA   = "ca.crt"
+	tlsSecretKeyCert = "tls.crt"
+	tlsSecretKeyKey  = "tls.key"
 )
 
 // Role label values.
@@ -226,4 +241,57 @@ func countSlots(ranges []valkey.SlotsRange) int {
 // replicas.
 func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
+}
+
+// generateValkeyConfig generates the Valkey configuration for a ValkeyCluster.
+func generateValkeyConfig(cluster *valkeyv1.ValkeyCluster) string {
+	config := `cluster-enabled yes
+protected-mode no
+cluster-node-timeout 2000
+aclfile /config/users/users.acl`
+
+	if cluster.Spec.TLS != nil {
+		config += fmt.Sprintf(`
+tls-port %d
+port 0
+tls-cluster yes
+tls-replication yes
+tls-cert-file %s
+tls-key-file %s
+tls-ca-cert-file %s
+tls-auth-clients optional`, // allow clients to connect without client certificate
+			DefaultPort,
+			tlsCertMountPath+"/"+tlsSecretKeyCert,
+			tlsCertMountPath+"/"+tlsSecretKeyKey,
+			tlsCertMountPath+"/"+tlsSecretKeyCA,
+		)
+	}
+	return config
+}
+
+// GetTLSConfig returns the TLS configuration for a ValkeyCluster.
+func GetTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+	secret := &corev1.Secret{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	caData, caOk := secret.Data[tlsSecretKeyCA]
+
+	if !caOk {
+		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
+	}
+
+	tlsCfg := &tls.Config{
+		RootCAs:    caCertPool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	}
+	return tlsCfg, nil
 }

@@ -37,10 +37,16 @@ function timeout {
     wait
 }
 
+# Build TLS args from environment variables if set
+tls_args=""
+if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
+    tls_args="$VALKEY_TLS_ARGS"
+fi
+
 # Perform check
 response=$(
     timeout $timeout \
-    valkey-cli -h localhost -p $port PING)
+    valkey-cli -h localhost -p $port $tls_args PING)
 
 responseFirstWord=$(echo "$response" | head -n1 | awk '{print $1;}')
 if [ "$response" != "PONG" ] && [ "$responseFirstWord" != "LOADING" ] && [ "$responseFirstWord" != "MASTERDOWN" ]; then

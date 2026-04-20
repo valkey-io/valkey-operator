@@ -2646,6 +2646,34 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              storage:
+                description: |-
+                  Storage configures durable storage for each Valkey node. When omitted,
+                  Valkey uses ephemeral container storage.
+                properties:
+                  accessModes:
+                    description: |-
+                      AccessModes are the desired access modes for the persistent volume.
+                      Defaults to ReadWriteOnce when omitted.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the requested persistent volume size for
+                      each Valkey node.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: StorageClassName is the StorageClass used for dynamically
+                      provisioned volumes.
+                    type: string
+                required:
+                - size
+                type: object
               tls:
                 description: TLS configuration for the cluster
                 properties:

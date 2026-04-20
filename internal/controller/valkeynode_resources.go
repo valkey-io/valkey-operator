@@ -69,7 +69,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			Labels:    valkeyNodeLabels(node),
 		},
 		Data: map[string]string{
-			"valkey.conf":        "",
+			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
 		},
@@ -214,6 +214,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
+	if node.Spec.Storage != nil {
+		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      dataVolumeName,
+			MountPath: dataMountPath,
+		})
+	}
+
 	if node.Spec.TLS != nil {
 		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
 			Name:      tlsVolumeName,
@@ -322,6 +329,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 // buildValkeyNodeDeployment constructs a single-replica Deployment for a
 // ValkeyNode. This is used when node.Spec.WorkloadType is Deployment.
 func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Deployment, error) {
+	if node.Spec.Storage != nil {
+		return nil, fmt.Errorf("persistent storage is only supported for StatefulSet workloads")
+	}
 	labels := valkeyNodeLabels(node)
 	tmpl, err := buildValkeyNodePodTemplateSpec(node, labels)
 	if err != nil {
@@ -352,7 +362,7 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 	if err != nil {
 		return nil, err
 	}
-	return &appsv1.StatefulSet{
+	statefulSet := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeResourceName(node),
 			Namespace: node.Namespace,
@@ -366,5 +376,34 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			},
 			Template: tmpl,
 		},
-	}, nil
+	}
+
+	if node.Spec.Storage != nil {
+		storageClassName := node.Spec.Storage.StorageClassName
+		accessModes := append([]corev1.PersistentVolumeAccessMode(nil), node.Spec.Storage.AccessModes...)
+		if len(accessModes) == 0 {
+			accessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+		}
+
+		pvc := corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   dataVolumeName,
+				Labels: labels,
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: accessModes,
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: node.Spec.Storage.Size.DeepCopy(),
+					},
+				},
+			},
+		}
+		if storageClassName != "" {
+			pvc.Spec.StorageClassName = &storageClassName
+		}
+		statefulSet.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{pvc}
+	}
+
+	return statefulSet, nil
 }

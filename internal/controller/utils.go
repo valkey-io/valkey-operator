@@ -73,6 +73,10 @@ const (
 )
 
 const (
+	// dataVolumeName is the name of the persistent data volume mounted into Valkey.
+	dataVolumeName = "data"
+	// dataMountPath is the mount path for persistent Valkey data.
+	dataMountPath = "/data"
 	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
 	tlsVolumeName = "tls-certs"
 	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
@@ -250,6 +254,12 @@ protected-mode no
 cluster-node-timeout 2000
 aclfile /config/users/users.acl`
 
+	if cluster.Spec.Storage != nil {
+		config += fmt.Sprintf(`
+dir %s
+appendonly yes`, dataMountPath)
+	}
+
 	if cluster.Spec.TLS != nil {
 		config += fmt.Sprintf(`
 tls-port %d
@@ -267,6 +277,15 @@ tls-auth-clients optional`, // allow clients to connect without client certifica
 		)
 	}
 	return config
+}
+
+func generateValkeyNodeConfig(node *valkeyv1.ValkeyNode) string {
+	if node.Spec.Storage == nil {
+		return ""
+	}
+
+	return fmt.Sprintf(`dir %s
+appendonly yes`, dataMountPath)
 }
 
 // GetTLSConfig returns the TLS configuration for a ValkeyCluster.

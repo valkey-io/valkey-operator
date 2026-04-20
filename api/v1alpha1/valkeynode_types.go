@@ -61,6 +61,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
+	// Storage configures durable storage for this node.
+	// Only StatefulSet workloads support persistent storage.
+	// +optional
+	Storage *StorageSpec `json:"storage,omitempty"`
+
 	// Exporter defines the metrics exporter sidecar configuration.
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`

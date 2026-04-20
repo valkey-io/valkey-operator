@@ -124,6 +124,23 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
+			By("validating PVCs are created for each Valkey node")
+			verifyPVCsExist := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pvc",
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				pvcCount := 0
+				for _, line := range utils.GetNonEmptyLines(output) {
+					if strings.HasPrefix(line, "data-valkey-"+valkeyClusterName+"-") {
+						pvcCount++
+					}
+				}
+				g.Expect(pvcCount).To(Equal(6), "Expected 6 PVCs to back 6 Valkey nodes")
+			}
+			Eventually(verifyPVCsExist).Should(Succeed())
+
 			By("validating server containers have resources configuration")
 			cmd = exec.Command("kubectl", "get", "pods",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),

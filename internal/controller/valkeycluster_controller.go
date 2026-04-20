@@ -534,6 +534,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			NodeSelector:         cluster.Spec.NodeSelector,
 			Affinity:             cluster.Spec.Affinity,
 			Tolerations:          cluster.Spec.Tolerations,
+			Storage:              cluster.Spec.Storage,
 			Exporter:             cluster.Spec.Exporter,
 			Containers:           cluster.Spec.Containers,
 			ScriptsConfigMapName: cluster.Name,

@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"embed"
 	"fmt"
 	"maps"
@@ -29,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -55,18 +58,32 @@ func GetServerConfigMapName(clusterName string) string {
 }
 
 // Return a base config of parameters that users shouldn't be able to override
-func getBaseConfig() map[string]string {
-	return map[string]string{
+func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
+
+	baseConfig := map[string]string{
 		"cluster-enabled":      "yes",
 		"protected-mode":       "no",
 		"cluster-node-timeout": "2000",
 		"aclfile":              "/config/users/users.acl",
 	}
+
+	if cluster.Spec.TLS != nil {
+		baseConfig["tls-port"] = fmt.Sprintf("%d", DefaultPort)
+		baseConfig["port"] = "0"
+		baseConfig["tls-cluster"] = "yes"
+		baseConfig["tls-replication"] = "yes"
+		baseConfig["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
+		baseConfig["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
+		baseConfig["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
+		baseConfig["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
+	}
+
+	return baseConfig
 }
 
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
-	baseConfig := getBaseConfig()
+	baseConfig := getBaseConfig(cluster)
 	userConfig := cluster.Spec.Config
 
 	// Build the config
@@ -202,6 +219,33 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 
 	// All is good. configMap was updated with new contents.
 	return nil
+}
+
+// getTLSConfig returns the TLS configuration for a ValkeyCluster.
+func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+	secret := &corev1.Secret{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	caData, caOk := secret.Data[tlsSecretKeyCA]
+
+	if !caOk {
+		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
+	}
+
+	tlsCfg := &tls.Config{
+		RootCAs:    caCertPool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	}
+	return tlsCfg, nil
 }
 
 // Helper function to write a config line in the form of "parameter value\n" to a strings.Builder

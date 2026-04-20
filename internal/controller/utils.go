@@ -67,6 +67,16 @@ const (
 	LabelNodeIndex = "valkey.io/node-index"
 )
 
+const (
+	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
+	tlsVolumeName = "tls-certs"
+	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
+	tlsCertMountPath = "/tls"
+	tlsSecretKeyCA   = "ca.crt"
+	tlsSecretKeyCert = "tls.crt"
+	tlsSecretKeyKey  = "tls.key"
+)
+
 // Role label values.
 const (
 	RolePrimary = "primary"

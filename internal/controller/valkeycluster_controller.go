@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"slices"
@@ -154,7 +155,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, nil
 	}
-	state := r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
+	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
@@ -497,11 +498,12 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Containers:          cluster.Spec.Containers,
 			ServerConfigMapName: GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:  getInternalSecretName(cluster.Name),
+			TLS:                 cluster.Spec.TLS,
 		},
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -509,7 +511,15 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nod
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password)
+	var tlsConfig *tls.Config
+	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
+		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
+		if err == nil {
+			tlsConfig = cfg
+		}
+	}
+	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.

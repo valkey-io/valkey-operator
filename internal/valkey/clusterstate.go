@@ -18,6 +18,7 @@ package valkey
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"slices"
 	"strconv"
@@ -64,7 +65,7 @@ type SlotsRange struct {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int, username, password string) *ClusterState {
+func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -72,7 +73,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, username, password)
+		node := getNodeState(ctx, address, port, username, password, tlsCfg)
 		if node != nil {
 			// Check if node is pending to be added.
 			if node.IsPrimary() && len(node.GetSlots()) == 0 {
@@ -247,7 +248,7 @@ func (n *NodeState) GetFailingNodes() []NodeState {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, username string, password string) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
 	log := logf.FromContext(ctx)
 
 	opt := vclient.ClientOption{
@@ -255,6 +256,7 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		ForceSingleClient: true, // Don't connect to another cluster node.
 		Username:          username,
 		Password:          password,
+		TLSConfig:         tlsConfig,
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {

@@ -37,10 +37,16 @@ function timeout {
     wait
 }
 
+# Build TLS args from environment variables if set
+tls_args=""
+if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
+    tls_args="$VALKEY_TLS_ARGS"
+fi
+
 # Perform checks
 response=$(
     timeout $timeout \
-    valkey-cli -h localhost -p $port PING)
+    valkey-cli -h localhost -p $port $tls_args PING)
 
 if [ "$response" != "PONG" ]; then
     echo "$response" >&2

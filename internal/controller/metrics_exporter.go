@@ -25,11 +25,29 @@ import (
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string, tlsSpec *valkeyiov1alpha1.TLSConfig) corev1.Container {
 	exporterImage := DefaultExporterImage
 	if exporter.Image != "" {
 		exporterImage = exporter.Image
 	}
+
+	scheme := "redis"
+	if tlsSpec != nil {
+		scheme = "rediss"
+	}
+
+	args := []string{fmt.Sprintf("--redis.addr=%s://localhost:%d", scheme, DefaultPort)}
+	var volumeMounts []corev1.VolumeMount
+
+	if tlsSpec != nil {
+		args = append(args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      tlsVolumeName,
+			MountPath: tlsCertMountPath,
+			ReadOnly:  true,
+		})
+	}
+
 	return corev1.Container{
 		Name:  "metrics-exporter",
 		Image: exporterImage,
@@ -47,7 +65,8 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 				},
 			},
 		},
-		Args: []string{fmt.Sprintf("--redis.addr=localhost:%d", DefaultPort)},
+		Args:         args,
+		VolumeMounts: volumeMounts,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "metrics",

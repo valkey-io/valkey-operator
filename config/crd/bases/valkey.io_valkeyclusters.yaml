@@ -58,9 +58,8 @@ spec:
             description: spec defines the desired state of ValkeyCluster
             properties:
               affinity:
-                description: |-
-                  Affinity to apply to the pods, overrides NodeSelector if set
-                  Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
+                description: Affinity to apply to the pods, overrides NodeSelector
+                  if set.
                 properties:
                   nodeAffinity:
                     description: Describes node affinity scheduling rules for the
@@ -2639,6 +2638,27 @@ spec:
                       otherwise to an implementation-defined value. Requests cannot exceed Limits.
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
+                type: object
+              shardAntiAffinity:
+                description: |-
+                  ShardAntiAffinity controls how pods from the same shard are spread across
+                  topology domains. When omitted, the operator does not add shard-specific
+                  anti-affinity rules beyond any user-supplied affinity.
+                properties:
+                  topologyKey:
+                    description: |-
+                      TopologyKey selects the topology domain used for shard spreading.
+                      Defaults to kubernetes.io/hostname.
+                    type: string
+                  type:
+                    description: |-
+                      Type controls whether same-shard anti-affinity is disabled, preferred,
+                      or strictly required.
+                    enum:
+                    - Disabled
+                    - Preferred
+                    - Required
+                    type: string
                 type: object
               shards:
                 description: The number of shards groups. Each shard group contains

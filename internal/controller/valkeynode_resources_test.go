@@ -597,6 +597,9 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
 			},
+			ShardAntiAffinity: &valkeyv1.ShardAntiAffinitySpec{
+				Type: valkeyv1.ShardAntiAffinityTypePreferred,
+			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
@@ -613,9 +616,11 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	require.NotNil(t, node.Spec.Affinity, "Affinity must be populated")
 	require.NotNil(t, node.Spec.Affinity.NodeAffinity, "NodeAffinity must be propagated")
 	assert.Equal(t, cluster.Spec.Affinity.NodeAffinity, node.Spec.Affinity.NodeAffinity, "NodeAffinity must be propagated")
-	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity, "Default shard PodAntiAffinity must be added")
-	require.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
-	term := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity, "Shard PodAntiAffinity must be added")
+	require.Len(t, node.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution, 1)
+	weightedTerm := node.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
+	assert.Equal(t, int32(100), weightedTerm.Weight, "Preferred shard anti-affinity should use a strong weight")
+	term := weightedTerm.PodAffinityTerm
 	require.NotNil(t, term.LabelSelector, "Default shard anti-affinity selector must be present")
 	assert.Equal(t, map[string]string{
 		LabelCluster:    cluster.Name,
@@ -629,7 +634,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 
-func TestBuildClusterValkeyNode_DefaultShardAntiAffinityWithoutUserAffinity(t *testing.T) {
+func TestBuildClusterValkeyNode_NoShardAntiAffinityByDefault(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
@@ -640,8 +645,25 @@ func TestBuildClusterValkeyNode_DefaultShardAntiAffinityWithoutUserAffinity(t *t
 
 	node := buildClusterValkeyNode(cluster, 2, 1)
 
+	assert.Nil(t, node.Spec.Affinity, "Affinity should remain nil when no user affinity or shard anti-affinity policy is configured")
+}
+
+func TestBuildClusterValkeyNode_RequiredShardAntiAffinityWithoutUserAffinity(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			ShardAntiAffinity: &valkeyv1.ShardAntiAffinitySpec{
+				Type: valkeyv1.ShardAntiAffinityTypeRequired,
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 2, 1)
+
 	require.NotNil(t, node.Spec.Affinity, "Affinity must be populated")
-	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity, "Default shard PodAntiAffinity must be added")
+	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity, "Required shard PodAntiAffinity must be added")
 	require.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
 	term := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
 	require.NotNil(t, term.LabelSelector, "Default shard anti-affinity selector must be present")
@@ -652,12 +674,15 @@ func TestBuildClusterValkeyNode_DefaultShardAntiAffinityWithoutUserAffinity(t *t
 	assert.Equal(t, corev1.LabelHostname, term.TopologyKey, "Default shard anti-affinity must separate pods by hostname")
 }
 
-func TestBuildClusterValkeyNode_MergesDefaultShardAntiAffinityWithUserPodAntiAffinity(t *testing.T) {
+func TestBuildClusterValkeyNode_MergesPreferredShardAntiAffinityWithUserPodAntiAffinity(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
 			Shards:   3,
 			Replicas: 1,
+			ShardAntiAffinity: &valkeyv1.ShardAntiAffinitySpec{
+				Type: valkeyv1.ShardAntiAffinityTypePreferred,
+			},
 			Affinity: &corev1.Affinity{
 				PodAntiAffinity: &corev1.PodAntiAffinity{
 					RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -679,20 +704,45 @@ func TestBuildClusterValkeyNode_MergesDefaultShardAntiAffinityWithUserPodAntiAff
 
 	require.NotNil(t, node.Spec.Affinity, "Affinity must be populated")
 	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity, "PodAntiAffinity must be populated")
-	require.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 2)
+	require.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+	require.Len(t, node.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution, 1)
 
 	customTerm := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
 	require.NotNil(t, customTerm.LabelSelector, "Custom anti-affinity selector must be preserved")
 	assert.Equal(t, map[string]string{"custom": "rule"}, customTerm.LabelSelector.MatchLabels, "Custom anti-affinity must be preserved")
 	assert.Equal(t, "topology.kubernetes.io/zone", customTerm.TopologyKey, "Custom anti-affinity topology must be preserved")
 
-	defaultTerm := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[1]
+	defaultWeightedTerm := node.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
+	assert.Equal(t, int32(100), defaultWeightedTerm.Weight, "Preferred shard anti-affinity should use a strong weight")
+	defaultTerm := defaultWeightedTerm.PodAffinityTerm
 	require.NotNil(t, defaultTerm.LabelSelector, "Default shard anti-affinity selector must be present")
 	assert.Equal(t, map[string]string{
 		LabelCluster:    cluster.Name,
 		LabelShardIndex: "0",
 	}, defaultTerm.LabelSelector.MatchLabels, "Default shard anti-affinity must be appended")
 	assert.Equal(t, corev1.LabelHostname, defaultTerm.TopologyKey, "Default shard anti-affinity must separate pods by hostname")
+}
+
+func TestBuildClusterValkeyNode_UsesCustomShardAntiAffinityTopologyKey(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			ShardAntiAffinity: &valkeyv1.ShardAntiAffinitySpec{
+				Type:        valkeyv1.ShardAntiAffinityTypeRequired,
+				TopologyKey: "topology.kubernetes.io/zone",
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+
+	require.NotNil(t, node.Spec.Affinity)
+	require.NotNil(t, node.Spec.Affinity.PodAntiAffinity)
+	require.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+	term := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+	assert.Equal(t, "topology.kubernetes.io/zone", term.TopologyKey)
 }
 
 func runProbeScript(t *testing.T, scriptPath, response string) error {

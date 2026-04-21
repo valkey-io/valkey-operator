@@ -532,7 +532,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			WorkloadType:         cluster.Spec.WorkloadType,
 			Resources:            cluster.Spec.Resources,
 			NodeSelector:         cluster.Spec.NodeSelector,
-			Affinity:             buildDefaultShardAffinity(cluster, shardIndex),
+			Affinity:             buildShardAntiAffinity(cluster, shardIndex),
 			Tolerations:          cluster.Spec.Tolerations,
 			Exporter:             cluster.Spec.Exporter,
 			Containers:           cluster.Spec.Containers,
@@ -543,7 +543,12 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-func buildDefaultShardAffinity(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int) *corev1.Affinity {
+func buildShardAntiAffinity(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int) *corev1.Affinity {
+	policy := cluster.Spec.ShardAntiAffinity
+	if cluster.Spec.Affinity == nil && policy == nil {
+		return nil
+	}
+
 	var affinity *corev1.Affinity
 	if cluster.Spec.Affinity != nil {
 		affinity = cluster.Spec.Affinity.DeepCopy()
@@ -551,22 +556,44 @@ func buildDefaultShardAffinity(cluster *valkeyiov1alpha1.ValkeyCluster, shardInd
 		affinity = &corev1.Affinity{}
 	}
 
+	if policy == nil || policy.Type == valkeyiov1alpha1.ShardAntiAffinityTypeDisabled {
+		return affinity
+	}
+
+	topologyKey := policy.TopologyKey
+	if topologyKey == "" {
+		topologyKey = corev1.LabelHostname
+	}
+
+	term := corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				LabelCluster:    cluster.Name,
+				LabelShardIndex: strconv.Itoa(shardIndex),
+			},
+		},
+		TopologyKey: topologyKey,
+	}
+
 	if affinity.PodAntiAffinity == nil {
 		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
 	}
 
-	affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
-		affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
-		corev1.PodAffinityTerm{
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					LabelCluster:    cluster.Name,
-					LabelShardIndex: strconv.Itoa(shardIndex),
-				},
+	switch policy.Type {
+	case "", valkeyiov1alpha1.ShardAntiAffinityTypePreferred:
+		affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+			corev1.WeightedPodAffinityTerm{
+				Weight:          100,
+				PodAffinityTerm: term,
 			},
-			TopologyKey: corev1.LabelHostname,
-		},
-	)
+		)
+	case valkeyiov1alpha1.ShardAntiAffinityTypeRequired:
+		affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+			affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+			term,
+		)
+	}
 
 	return affinity
 }

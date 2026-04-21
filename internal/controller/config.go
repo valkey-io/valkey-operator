@@ -103,8 +103,9 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
 	// Add base config
 	writeConfigLine(&configBuilder, "#", "Base Config")
-	for param, val := range baseConfig {
-		writeConfigLine(&configBuilder, param, val)
+	sortedBaseKeys := slices.Sorted(maps.Keys(baseConfig))
+	for _, param := range sortedBaseKeys {
+		writeConfigLine(&configBuilder, param, baseConfig[param])
 	}
 
 	return configBuilder.String()

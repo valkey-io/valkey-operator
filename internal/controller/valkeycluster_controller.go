@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"fmt"
@@ -141,7 +142,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
@@ -159,7 +159,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	}
-	state := r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
+	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
@@ -403,11 +403,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		cm.Data = map[string]string{
 			"readiness-check.sh": string(readiness),
 			"liveness-check.sh":  string(liveness),
-			"valkey.conf": `
-cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000
-aclfile /config/users/users.acl`,
+			"valkey.conf":        generateValkeyConfig(cluster),
 		}
 		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
 	})
@@ -452,9 +448,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// re-scraping fresh state.
 	var clusterState *valkey.ClusterState
 	if anyNodeRequiresRoll(cluster, nodes) {
-		clusterState = r.getValkeyClusterState(ctx, nodes, username, password)
+		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, username, password)
 		defer clusterState.CloseClients()
 	}
+
 
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
@@ -603,11 +600,12 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Containers:           cluster.Spec.Containers,
 			ScriptsConfigMapName: cluster.Name,
 			UsersACLSecretName:   getInternalSecretName(cluster.Name),
+			TLS:                  cluster.Spec.TLS,
 		},
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -615,7 +613,15 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, nod
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password)
+	var tlsConfig *tls.Config
+	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
+		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
+		cfg, err := GetTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
+		if err == nil {
+			tlsConfig = cfg
+		}
+	}
+	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.

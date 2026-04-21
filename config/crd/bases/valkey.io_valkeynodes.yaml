@@ -2648,6 +2648,23 @@ spec:
                 description: ScriptsConfigMapName specifies the name of the ConfigMap
                   that contains the scripts for the ValkeyNode.
                 type: string
+              tls:
+                description: TLS configuration for the node
+                properties:
+                  certificate:
+                    description: |-
+                      Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
+                      The referenced secret should contain the following:
+
+                      - `ca.crt`: The certificate authority.
+                      - `tls.crt`: The certificate (or a chain).
+                      - `tls.key`: The private key to the first certificate in the certificate chain.
+                    properties:
+                      secretName:
+                        description: SecretName is the name of the secret.
+                        type: string
+                    type: object
+                type: object
               tolerations:
                 description: Tolerations defines the pod tolerations.
                 items:

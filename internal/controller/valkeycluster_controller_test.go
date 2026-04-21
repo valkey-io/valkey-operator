@@ -503,6 +503,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "", "")
 	}
 
+
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.
 	// On first reconcile every position is Created so the loop completes without
 	// triggering an early-exit requeue.

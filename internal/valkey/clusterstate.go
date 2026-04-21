@@ -49,7 +49,7 @@ type ShardState struct {
 	Nodes     []*NodeState
 }
 
-// ShardState represents the current state of a cluster.
+// ClusterState represents the current state of a cluster.
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
@@ -139,6 +139,19 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	return remaining
 }
 
+// FindShardForAddress returns the shard containing a node with the given IP
+// address, or nil if no shard contains that address.
+func (s *ClusterState) FindShardForAddress(address string) *ShardState {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Address == address {
+				return shard
+			}
+		}
+	}
+	return nil
+}
+
 // GetPrimaryNode returns the primary NodeState object
 func (s *ShardState) GetPrimaryNode() *NodeState {
 	idx := slices.IndexFunc(s.Nodes, func(n *NodeState) bool { return n.Id == s.PrimaryId })
@@ -146,6 +159,26 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 		return s.Nodes[idx]
 	}
 	return nil
+}
+
+// GetSyncedReplicas returns replica nodes that are connected and have their
+// replication link up (master_link_status:up). Nodes with fail/pfail flags
+// are excluded.
+func (s *ShardState) GetSyncedReplicas() []*NodeState {
+	var replicas []*NodeState
+	for _, node := range s.Nodes {
+		if node.Id == s.PrimaryId {
+			continue
+		}
+		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+			continue
+		}
+		if node.Info["master_link_status"] != "up" {
+			continue
+		}
+		replicas = append(replicas, node)
+	}
+	return replicas
 }
 
 // GetSlots returns slots assigned to myself, same format as in CLUSTER NODES.

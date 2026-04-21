@@ -134,7 +134,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster); err != nil {
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		log.Error(err, "failed to list ValkeyNodes")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeListError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -143,14 +151,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
-
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		log.Error(err, "failed to list ValkeyNodes")
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeListError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
 	}
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
@@ -423,16 +423,32 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
+	// Scrape cluster state once for proactive failover decisions, but only
+	// when at least one node actually needs a roll. During initial bootstrap
+	// no nodes exist, so state stays nil. The snapshot is safe to reuse
+	// across the loop because nodes are iterated replicas-first (the primary
+	// is last in each shard), and after an update we requeue immediately,
+	// re-scraping fresh state.
+	var clusterState *valkey.ClusterState
+	if anyNodeRequiresRoll(cluster, nodes) {
+		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+		if err != nil {
+			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
+		}
+		clusterState = r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
+		defer clusterState.CloseClients()
+	}
+
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex)
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState)
 			if err != nil {
 				return false, err
 			}
@@ -454,7 +470,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState) (bool, bool, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
@@ -464,6 +480,27 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			Namespace: desired.Namespace,
 		},
 	}
+
+	// Check if proactive failover is needed before updating.
+	if clusterState != nil {
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
+					"name", node.Name, "err", err)
+			}
+		} else if nodeRequiresRoll(current, desired) {
+			if shard, replicas := findFailoverShard(clusterState, current.Status.PodIP); shard != nil {
+				log.Info("proactive failover before rolling primary",
+					"name", node.Name, "address", current.Status.PodIP)
+				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+					log.Info("proactive failover did not complete, proceeding with roll",
+						"name", node.Name, "err", err)
+				}
+			}
+		}
+	}
+
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
 		node.Labels = desired.Labels
 		node.Spec = desired.Spec

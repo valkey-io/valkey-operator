@@ -452,7 +452,6 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		defer clusterState.CloseClients()
 	}
 
-
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {

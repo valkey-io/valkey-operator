@@ -128,6 +128,8 @@ const (
 	ValkeyNodeConditionReady = "Ready"
 	// ValkeyNodeConditionPersistentVolumeClaimReady indicates the managed PVC is ready.
 	ValkeyNodeConditionPersistentVolumeClaimReady = "PersistentVolumeClaimReady"
+	// ValkeyNodeConditionPersistentVolumeClaimSizeReady indicates the managed PVC has satisfied the requested size.
+	ValkeyNodeConditionPersistentVolumeClaimSizeReady = "PersistentVolumeClaimSizeReady"
 )
 
 const (
@@ -139,6 +141,14 @@ const (
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.
 	ValkeyNodeReasonPersistentVolumeClaimBound = "PersistentVolumeClaimBound"
+	// ValkeyNodeReasonPersistentVolumeClaimSizeSatisfied indicates the PVC capacity matches the requested size.
+	ValkeyNodeReasonPersistentVolumeClaimSizeSatisfied = "PersistentVolumeClaimSizeSatisfied"
+	// ValkeyNodeReasonPersistentVolumeClaimResizePending indicates the PVC is waiting for filesystem or controller-side expansion to finish.
+	ValkeyNodeReasonPersistentVolumeClaimResizePending = "PersistentVolumeClaimResizePending"
+	// ValkeyNodeReasonPersistentVolumeClaimResizeInProgress indicates the PVC is actively expanding.
+	ValkeyNodeReasonPersistentVolumeClaimResizeInProgress = "PersistentVolumeClaimResizeInProgress"
+	// ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible indicates the PVC resize cannot complete without operator action.
+	ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible = "PersistentVolumeClaimResizeInfeasible"
 )
 
 // +kubebuilder:object:root=true

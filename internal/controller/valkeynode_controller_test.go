@@ -58,6 +58,20 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      getInternalSecretName(resourceName),
 			Namespace: "default",
 		}
+		cleanupManagedPVC := func() {
+			pvcName := types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := k8sClient.Get(ctx, pvcName, pvc); err == nil {
+				if len(pvc.Finalizers) > 0 {
+					pvc.Finalizers = nil
+					Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+				}
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, pvc))).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, pvcName, &corev1.PersistentVolumeClaim{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			}
+		}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind ValkeyNode")
@@ -98,23 +112,36 @@ var _ = Describe("ValkeyNode Controller", func() {
 			cm := &corev1.ConfigMap{}
 			if err := k8sClient.Get(ctx, configName, cm); err == nil {
 				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
-			}
-			pvc := &corev1.PersistentVolumeClaim{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc); err == nil {
-				Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, childName, &corev1.ConfigMap{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 			sts := &appsv1.StatefulSet{}
 			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
 				Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, childName, &appsv1.StatefulSet{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
+			cleanupManagedPVC()
 
 			node := &valkeyiov1alpha1.ValkeyNode{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+			if err := k8sClient.Get(ctx, typeNamespacedName, node); err == nil {
+				node.Finalizers = nil
+				Expect(k8sClient.Update(ctx, node)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &valkeyiov1alpha1.ValkeyNode{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			}
 
 			secret := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, secretName, secret)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+			if err := k8sClient.Get(ctx, secretName, secret); err == nil {
+				Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, secretName, &corev1.Secret{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			}
 		})
 
 		It("should create a ConfigMap and StatefulSet on first reconcile", func() {
@@ -262,6 +289,96 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(pvc.OwnerReferences).To(BeEmpty(), "PVCs should not be tied to ValkeyNode garbage collection")
 		})
 
+		It("should add a finalizer when persistence reclaim policy is Delete", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size:          resource.MustParse("10Gi"),
+				ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Finalizers).To(ContainElement("valkey.io/persistent-volume-cleanup"))
+		})
+
+		It("should delete the managed PVC before allowing ValkeyNode deletion when reclaim policy is Delete", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size:          resource.MustParse("10Gi"),
+				ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: childName.Name, Namespace: childName.Namespace},
+			}
+			Expect(k8sClient.Get(ctx, childName, sts)).To(Succeed())
+
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+
+			Eventually(func() bool {
+				pvc := &corev1.PersistentVolumeClaim{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)
+				if apierrors.IsNotFound(err) {
+					return true
+				}
+				return err == nil && pvc.DeletionTimestamp != nil
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+			Eventually(func() bool {
+				deletedSTS := &appsv1.StatefulSet{}
+				return apierrors.IsNotFound(k8sClient.Get(ctx, childName, deletedSTS))
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+			nodeDuringDelete := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, nodeDuringDelete)).To(Succeed())
+			Expect(nodeDuringDelete.Finalizers).To(ContainElement(persistentVolumeCleanupFinalizer))
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc); err == nil {
+				pvc.Finalizers = nil
+				Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, pvc))).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, &corev1.PersistentVolumeClaim{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			}
+
+			Eventually(func() bool {
+				_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				deletedNode := &valkeyiov1alpha1.ValkeyNode{}
+				return apierrors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, deletedNode))
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+		})
+
 		It("should not fail when persistence size changes before the PVC is bound", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
@@ -290,6 +407,84 @@ var _ = Describe("ValkeyNode Controller", func() {
 			pvc := &corev1.PersistentVolumeClaim{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)).To(Succeed())
 			Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+		})
+
+		It("should surface resize progress when the PVC is still expanding", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("20Gi"),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			pvc := buildValkeyNodePVC(node)
+			cleanupManagedPVC()
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, pvc)).To(Succeed())
+			pvc.Status.Phase = corev1.ClaimBound
+			pvc.Status.Capacity = corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			}
+			pvc.Status.AllocatedResourceStatuses = map[corev1.ResourceName]corev1.ClaimResourceStatus{
+				corev1.ResourceStorage: corev1.PersistentVolumeClaimNodeResizePending,
+			}
+			Expect(k8sClient.Status().Update(ctx, pvc)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			sizeCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
+			Expect(sizeCond).NotTo(BeNil())
+			Expect(sizeCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(sizeCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending))
+			Expect(sizeCond.Message).To(ContainSubstring("filesystem resize"))
+		})
+
+		It("should surface resize failures when the PVC cannot expand further", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("20Gi"),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			pvc := buildValkeyNodePVC(node)
+			cleanupManagedPVC()
+			Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, pvc)).To(Succeed())
+			pvc.Status.Phase = corev1.ClaimBound
+			pvc.Status.Capacity = corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			}
+			pvc.Status.AllocatedResourceStatuses = map[corev1.ResourceName]corev1.ClaimResourceStatus{
+				corev1.ResourceStorage: corev1.PersistentVolumeClaimControllerResizeInfeasible,
+			}
+			Expect(k8sClient.Status().Update(ctx, pvc)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			sizeCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
+			Expect(sizeCond).NotTo(BeNil())
+			Expect(sizeCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(sizeCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible))
+			Expect(sizeCond.Message).To(ContainSubstring("cannot be satisfied"))
 		})
 	})
 

@@ -34,6 +34,8 @@ import (
 var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "Persistence"), func() {
 	const persistentClusterName = "cluster-persistent-sample"
 	const manifestPath = "config/samples/v1alpha1_valkeycluster-persistent.yaml"
+	const deletePersistentClusterName = "cluster-persistent-delete-sample"
+	const deleteManifestPath = "config/samples/v1alpha1_valkeycluster-persistent-delete.yaml"
 
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
@@ -152,11 +154,66 @@ var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "P
 		Eventually(verifyRetainedPVCs).Should(Succeed())
 	})
 
+	It("deletes managed PVCs when reclaimPolicy is Delete", func() {
+		By("creating the delete-policy persistent cluster")
+		cmd := exec.Command("kubectl", "delete", "-f", deleteManifestPath, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "create", "-f", deleteManifestPath)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create delete-policy persistent ValkeyCluster CR")
+
+		By("verifying the cluster reaches Ready")
+		verifyDeletePolicyClusterReady := func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(deletePersistentClusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+		}
+		Eventually(verifyDeletePolicyClusterReady).Should(Succeed())
+
+		By("verifying the managed PVCs are created and bound")
+		verifyDeletePVCs := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pvc",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", deletePersistentClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}:{.status.phase}:{.spec.resources.requests.storage}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			lines := utils.GetNonEmptyLines(output)
+			g.Expect(lines).To(HaveLen(2))
+			for _, line := range lines {
+				g.Expect(line).To(ContainSubstring(":Bound:1Gi"))
+			}
+		}
+		Eventually(verifyDeletePVCs).Should(Succeed())
+
+		By("deleting the delete-policy cluster")
+		cmd = exec.Command("kubectl", "delete", "-f", deleteManifestPath, "--ignore-not-found=true", "--wait=false")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete delete-policy persistent ValkeyCluster CR")
+
+		By("verifying the managed PVCs are removed")
+		verifyDeletedPVCs := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pvc",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", deletePersistentClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(utils.GetNonEmptyLines(output)).To(BeEmpty())
+		}
+		Eventually(verifyDeletedPVCs).Should(Succeed())
+	})
+
 	AfterAll(func() {
 		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true", "--wait=false")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "pvc",
 			"-l", fmt.Sprintf("valkey.io/cluster=%s", persistentClusterName),
+			"--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "-f", deleteManifestPath, "--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "pvc",
+			"-l", fmt.Sprintf("valkey.io/cluster=%s", deletePersistentClusterName),
 			"--ignore-not-found=true", "--wait=false")
 		_, _ = utils.Run(cmd)
 	})

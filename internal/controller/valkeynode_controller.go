@@ -42,7 +42,8 @@ import (
 
 const (
 	// valkeyInfoRolePrefix is the key prefix in the INFO replication output.
-	valkeyInfoRolePrefix = "role:"
+	valkeyInfoRolePrefix             = "role:"
+	persistentVolumeCleanupFinalizer = "valkey.io/persistent-volume-cleanup"
 )
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -72,6 +73,14 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !node.DeletionTimestamp.IsZero() {
+		return r.reconcileDeletion(ctx, node)
+	}
+	if requeue, err := r.reconcilePersistenceFinalizer(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	} else if requeue {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -95,6 +104,68 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	log.V(1).Info("ValkeyNode reconciliation complete")
 	// Requeue after 60 seconds to check on the ValkeyNode role.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+func persistenceReclaimPolicy(node *valkeyiov1alpha1.ValkeyNode) valkeyiov1alpha1.PersistenceReclaimPolicy {
+	if node.Spec.Persistence == nil || node.Spec.Persistence.ReclaimPolicy == "" {
+		return valkeyiov1alpha1.PersistenceReclaimPolicyRetain
+	}
+	return node.Spec.Persistence.ReclaimPolicy
+}
+
+func (r *ValkeyNodeReconciler) reconcilePersistenceFinalizer(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	shouldHaveFinalizer := node.Spec.Persistence != nil && persistenceReclaimPolicy(node) == valkeyiov1alpha1.PersistenceReclaimPolicyDelete
+	hasFinalizer := controllerutil.ContainsFinalizer(node, persistentVolumeCleanupFinalizer)
+
+	switch {
+	case shouldHaveFinalizer && !hasFinalizer:
+		controllerutil.AddFinalizer(node, persistentVolumeCleanupFinalizer)
+		return true, r.Update(ctx, node)
+	case !shouldHaveFinalizer && hasFinalizer:
+		controllerutil.RemoveFinalizer(node, persistentVolumeCleanupFinalizer)
+		return true, r.Update(ctx, node)
+	default:
+		return false, nil
+	}
+}
+
+func (r *ValkeyNodeReconciler) reconcileDeletion(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(node, persistentVolumeCleanupFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	if node.Spec.Persistence == nil || persistenceReclaimPolicy(node) != valkeyiov1alpha1.PersistenceReclaimPolicyDelete {
+		controllerutil.RemoveFinalizer(node, persistentVolumeCleanupFinalizer)
+		return ctrl.Result{}, r.Update(ctx, node)
+	}
+
+	if err := r.deleteWorkload(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	pod, err := r.getPod(ctx, node)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pod != nil {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	pvc, err := r.getPersistentVolumeClaim(ctx, node)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pvc != nil {
+		if pvc.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	controllerutil.RemoveFinalizer(node, persistentVolumeCleanupFinalizer)
+	return ctrl.Result{}, r.Update(ctx, node)
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -187,6 +258,100 @@ func pvcStatusCondition(pvc *corev1.PersistentVolumeClaim) (metav1.ConditionStat
 	return metav1.ConditionTrue,
 		valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimBound,
 		fmt.Sprintf("PersistentVolumeClaim %s is bound", pvc.Name)
+}
+
+func pvcSizeStatusCondition(node *valkeyiov1alpha1.ValkeyNode, pvc *corev1.PersistentVolumeClaim) (metav1.ConditionStatus, string, string) {
+	if node.Spec.Persistence == nil {
+		return metav1.ConditionTrue, "", ""
+	}
+	if pvc == nil {
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,
+			"PersistentVolumeClaim does not exist yet"
+	}
+	if pvc.Status.Phase != corev1.ClaimBound {
+		phase := pvc.Status.Phase
+		if phase == "" {
+			phase = corev1.ClaimPending
+		}
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,
+			fmt.Sprintf("PersistentVolumeClaim %s is %s before size reconciliation can complete", pvc.Name, phase)
+	}
+
+	for _, cond := range pvc.Status.Conditions {
+		switch cond.Type {
+		case corev1.PersistentVolumeClaimControllerResizeError, corev1.PersistentVolumeClaimNodeResizeError:
+			msg := cond.Message
+			if msg == "" {
+				msg = fmt.Sprintf("PersistentVolumeClaim %s resize failed", pvc.Name)
+			}
+			return metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible, msg
+		case corev1.PersistentVolumeClaimResizing:
+			msg := cond.Message
+			if msg == "" {
+				msg = fmt.Sprintf("PersistentVolumeClaim %s resize is in progress", pvc.Name)
+			}
+			return metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizeInProgress, msg
+		case corev1.PersistentVolumeClaimFileSystemResizePending:
+			msg := cond.Message
+			if msg == "" {
+				msg = fmt.Sprintf("PersistentVolumeClaim %s is waiting for filesystem resize", pvc.Name)
+			}
+			return metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending, msg
+		}
+	}
+
+	switch pvc.Status.AllocatedResourceStatuses[corev1.ResourceStorage] {
+	case corev1.PersistentVolumeClaimControllerResizeInfeasible, corev1.PersistentVolumeClaimNodeResizeInfeasible:
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible,
+			fmt.Sprintf("PersistentVolumeClaim %s resize cannot be satisfied", pvc.Name)
+	case corev1.PersistentVolumeClaimControllerResizeInProgress, corev1.PersistentVolumeClaimNodeResizeInProgress:
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizeInProgress,
+			fmt.Sprintf("PersistentVolumeClaim %s resize is in progress", pvc.Name)
+	case corev1.PersistentVolumeClaimNodeResizePending:
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,
+			fmt.Sprintf("PersistentVolumeClaim %s is waiting for node-side filesystem resize", pvc.Name)
+	}
+
+	currentCapacity, ok := pvc.Status.Capacity[corev1.ResourceStorage]
+	if !ok {
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,
+			fmt.Sprintf("PersistentVolumeClaim %s has no reported storage capacity yet", pvc.Name)
+	}
+	if currentCapacity.Cmp(node.Spec.Persistence.Size) < 0 {
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,
+			fmt.Sprintf("PersistentVolumeClaim %s requested %s but current capacity is %s", pvc.Name, node.Spec.Persistence.Size.String(), currentCapacity.String())
+	}
+
+	return metav1.ConditionTrue,
+		valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimSizeSatisfied,
+		fmt.Sprintf("PersistentVolumeClaim %s satisfies the requested size %s", pvc.Name, node.Spec.Persistence.Size.String())
+}
+
+func (r *ValkeyNodeReconciler) deleteWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
+	switch node.Spec.WorkloadType {
+	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
+		sts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, key, sts); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, sts))
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		dep := &appsv1.Deployment{}
+		if err := r.Get(ctx, key, dep); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, dep))
+	default:
+		return nil
+	}
 }
 
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
@@ -326,8 +491,17 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			Message:            pvcMessage,
 			ObservedGeneration: current.Generation,
 		})
+		pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(current, pvc)
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
+			Status:             pvcSizeStatus,
+			Reason:             pvcSizeReason,
+			Message:            pvcSizeMessage,
+			ObservedGeneration: current.Generation,
+		})
 	} else {
 		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
 	}
 
 	pod, err := r.getPod(ctx, node)

@@ -2584,6 +2584,15 @@ spec:
                 description: Persistence defines durable storage that is propagated
                   to each ValkeyNode.
                 properties:
+                  reclaimPolicy:
+                    default: Retain
+                    description: |-
+                      ReclaimPolicy controls whether the managed PVC is retained or deleted when
+                      the ValkeyNode is deleted. Defaults to Retain.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
                   size:
                     anyOf:
                     - type: integer

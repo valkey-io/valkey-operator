@@ -52,6 +52,7 @@ Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
 - `UsersACLError` – failed to reconcile ACL users/secrets
+- `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `Reconciling` – controller is making changes
@@ -206,6 +207,17 @@ These events are emitted during scale-in operations.
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain slots from excess shards |
+
+### Proactive failover events
+
+These events are emitted during proactive primary failovers (e.g., when a primary pod is being replaced due to a rolling update).
+
+| Event Type | Type | Description |
+|---|---|---|
+| `FailoverInitiated` | Normal | A `CLUSTER FAILOVER` command was sent to a replica to take over as primary |
+| `FailoverFailed` | Warning | The `CLUSTER FAILOVER` command returned an error |
+| `FailoverTimeout` | Warning | The failover did not complete within the allowed timeout |
+| `FailoverCompleted` | Normal | The replica has successfully become the new primary |
 
 ### Maintenance events
 

@@ -26,6 +26,7 @@ import (
 	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -153,6 +154,41 @@ func (r *ValkeyNodeReconciler) ensurePersistentVolumeClaim(ctx context.Context, 
 	return nil
 }
 
+func (r *ValkeyNodeReconciler) getPersistentVolumeClaim(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (*corev1.PersistentVolumeClaim, error) {
+	if node.Spec.Persistence == nil {
+		return nil, nil
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: valkeyNodePVCName(node), Namespace: node.Namespace}, pvc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return pvc, nil
+}
+
+func pvcStatusCondition(pvc *corev1.PersistentVolumeClaim) (metav1.ConditionStatus, string, string) {
+	if pvc == nil {
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimPending,
+			"PersistentVolumeClaim does not exist yet"
+	}
+	if pvc.Status.Phase != corev1.ClaimBound {
+		phase := pvc.Status.Phase
+		if phase == "" {
+			phase = corev1.ClaimPending
+		}
+		return metav1.ConditionFalse,
+			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimPending,
+			fmt.Sprintf("PersistentVolumeClaim %s is %s", pvc.Name, phase)
+	}
+	return metav1.ConditionTrue,
+		valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimBound,
+		fmt.Sprintf("PersistentVolumeClaim %s is bound", pvc.Name)
+}
+
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
@@ -277,6 +313,23 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	// whether the controller has processed the latest spec.
 	current.Status.ObservedGeneration = current.Generation
 
+	pvc, err := r.getPersistentVolumeClaim(ctx, node)
+	if err != nil {
+		return err
+	}
+	if node.Spec.Persistence != nil {
+		pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady,
+			Status:             pvcStatus,
+			Reason:             pvcReason,
+			Message:            pvcMessage,
+			ObservedGeneration: current.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+	}
+
 	pod, err := r.getPod(ctx, node)
 	if err != nil {
 		return err
@@ -286,11 +339,16 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		current.Status.Ready = false
 		current.Status.PodName = ""
 		current.Status.PodIP = ""
+		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+		message := "Pod does not exist yet"
+		if node.Spec.Persistence != nil {
+			_, reason, message = pvcStatusCondition(pvc)
+		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
-			Message:            "Pod does not exist yet",
+			Reason:             reason,
+			Message:            message,
 			ObservedGeneration: current.Generation,
 		})
 	} else {
@@ -328,11 +386,19 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				ObservedGeneration: current.Generation,
 			})
 		} else {
+			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+			message := "Pod is not ready"
+			if node.Spec.Persistence != nil {
+				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
+					reason = pvcReason
+					message = pvcMessage
+				}
+			}
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
-				Message:            "Pod is not ready",
+				Reason:             reason,
+				Message:            message,
 				ObservedGeneration: current.Generation,
 			})
 		}

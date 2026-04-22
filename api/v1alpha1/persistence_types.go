@@ -19,6 +19,8 @@ package v1alpha1
 import "k8s.io/apimachinery/pkg/api/resource"
 
 // PersistenceSpec defines persistent storage for a Valkey node.
+// Managed PVCs are retained by default when ValkeyNodes or ValkeyClusters are
+// deleted so data is preserved until explicit reclaim-policy support is added.
 type PersistenceSpec struct {
 	// Size is the requested PVC size.
 	Size resource.Quantity `json:"size"`

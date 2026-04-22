@@ -166,6 +166,40 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 		})
 
+		It("should surface pending PVC status before the pod is ready when persistence is enabled", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("10Gi"),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimPending))
+			Expect(readyCond.Message).To(ContainSubstring("PersistentVolumeClaim"))
+
+			pvcCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+			Expect(pvcCond).NotTo(BeNil())
+			Expect(pvcCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(pvcCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimPending))
+			Expect(pvcCond.Message).To(ContainSubstring("PersistentVolumeClaim"))
+		})
+
 		It("should requeue after 10 seconds when node is not ready", func() {
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,

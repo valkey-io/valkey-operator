@@ -126,6 +126,8 @@ type ValkeyNodeStatus struct {
 const (
 	// ValkeyNodeConditionReady indicates the ValkeyNode is ready.
 	ValkeyNodeConditionReady = "Ready"
+	// ValkeyNodeConditionPersistentVolumeClaimReady indicates the managed PVC is ready.
+	ValkeyNodeConditionPersistentVolumeClaimReady = "PersistentVolumeClaimReady"
 )
 
 const (
@@ -133,6 +135,10 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
+	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
+	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.
+	ValkeyNodeReasonPersistentVolumeClaimBound = "PersistentVolumeClaimBound"
 )
 
 // +kubebuilder:object:root=true

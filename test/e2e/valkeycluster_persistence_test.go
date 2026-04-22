@@ -111,8 +111,53 @@ var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "P
 		Eventually(verifyPodMount).Should(Succeed())
 	})
 
+	It("retains managed PVCs when the cluster is deleted", func() {
+		By("deleting the persistent cluster")
+		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true", "--wait=false")
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete persistent ValkeyCluster CR")
+
+		By("verifying the ValkeyCluster is removed")
+		verifyClusterDeleted := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "valkeycluster", persistentClusterName)
+			_, err := utils.Run(cmd)
+			g.Expect(err).To(HaveOccurred())
+		}
+		Eventually(verifyClusterDeleted).Should(Succeed())
+
+		By("verifying the managed ValkeyNodes are removed")
+		verifyValkeyNodesDeleted := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "valkeynodes",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", persistentClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(utils.GetNonEmptyLines(output)).To(BeEmpty())
+		}
+		Eventually(verifyValkeyNodesDeleted).Should(Succeed())
+
+		By("verifying the managed PVCs are retained by default")
+		verifyRetainedPVCs := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pvc",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", persistentClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}:{.status.phase}:{.spec.resources.requests.storage}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			lines := utils.GetNonEmptyLines(output)
+			g.Expect(lines).To(HaveLen(2))
+			for _, line := range lines {
+				g.Expect(line).To(ContainSubstring(":Bound:1Gi"))
+			}
+		}
+		Eventually(verifyRetainedPVCs).Should(Succeed())
+	})
+
 	AfterAll(func() {
 		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "pvc",
+			"-l", fmt.Sprintf("valkey.io/cluster=%s", persistentClusterName),
+			"--ignore-not-found=true", "--wait=false")
 		_, _ = utils.Run(cmd)
 	})
 })

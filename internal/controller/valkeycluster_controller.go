@@ -696,10 +696,14 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	//    MEET'd yet and must go through Phase 1 first. Without this guard
 	//    a single pod that starts before its peers would get slots while
 	//    isolated, creating a disconnected shard primary.
+	//    Exception: when the entire expected cluster is a single node
+	//    (1 shard, 0 replicas), isolation is the permanent correct state,
+	//    there is nobody to MEET, so the guard is skipped.
 	//  - post-failover replacements whose shard already has a live primary.
+	isSingleNodeCluster := shardsRequired == 1 && cluster.Spec.Replicas == 0
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
-		if node.IsIsolated() {
+		if node.IsIsolated() && !isSingleNodeCluster {
 			continue
 		}
 		role, shardIndex := nodeRoleAndShard(node.Address, nodes)

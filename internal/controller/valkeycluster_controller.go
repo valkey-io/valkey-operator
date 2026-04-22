@@ -601,13 +601,14 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
-// Priority: (1) a non-isolated shard primary — already has slots, so gossip
-// will propagate slot info; (2) a non-isolated pending node from a previous
-// MEET batch; (3) the first isolated node as a bootstrap seed when every
-// single node is isolated (fresh bootstrap, first reconcile).
+// Priority: (1) a shard primary, it owns slots and is an established cluster
+// member even if cluster_known_nodes is 1 (e.g. a single-node cluster being
+// scaled up); (2) a non-isolated pending node from a previous MEET batch;
+// (3) the first isolated node as a bootstrap seed when every single node is
+// isolated (fresh bootstrap, first reconcile).
 func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
 	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil && !p.IsIsolated() {
+		if p := shard.GetPrimaryNode(); p != nil {
 			return p
 		}
 	}

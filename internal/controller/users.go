@@ -177,8 +177,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
-			log.Error(err, "failed to fetch password", "username", user.Name)
-			continue
+			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
 
 		// Build ACL string for this user with found password(s)
@@ -260,8 +259,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 
 	log := logf.FromContext(ctx)
 
-	// If this user doesn't have a password, return empty
-	if user.NoPassword {
+	// If this user doesn't have a password or is disabled, return empty
+	if user.NoPassword || !user.Enabled {
 		return []string{}, nil
 	}
 	// Look for a Secret matching the user-provided name, or clusterName-users

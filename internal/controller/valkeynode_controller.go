@@ -214,7 +214,13 @@ func (r *ValkeyNodeReconciler) ensurePersistentVolumeClaim(ctx context.Context, 
 			pvc.Spec.Resources.Requests = corev1.ResourceList{}
 		}
 
-		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = desired.Spec.Resources.Requests[corev1.ResourceStorage]
+		currentRequest, hasCurrent := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		desiredRequest := desired.Spec.Resources.Requests[corev1.ResourceStorage]
+		if hasCurrent && desiredRequest.Cmp(currentRequest) < 0 {
+			log.V(1).Info("ignoring PVC shrink request", "name", pvc.Name, "current", currentRequest.String(), "desired", desiredRequest.String())
+			return nil
+		}
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = desiredRequest
 		return nil
 	})
 	if err != nil {

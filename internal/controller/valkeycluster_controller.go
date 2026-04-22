@@ -442,7 +442,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
 		}
-		clusterState = r.getValkeyClusterState(ctx, nodes, operatorUser, operatorPassword)
+		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 		defer clusterState.CloseClients()
 	}
 

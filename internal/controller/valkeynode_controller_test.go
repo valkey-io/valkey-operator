@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -97,6 +98,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			cm := &corev1.ConfigMap{}
 			if err := k8sClient.Get(ctx, configName, cm); err == nil {
 				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+			}
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc); err == nil {
+				Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
 			}
 			sts := &appsv1.StatefulSet{}
 			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
@@ -197,6 +202,60 @@ var _ = Describe("ValkeyNode Controller", func() {
 			sts2 := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
 			Expect(sts2.ResourceVersion).To(Equal(rvAfterFirst), "StatefulSet should not be updated when nothing changed")
+		})
+
+		It("should create a PVC before reconciling the StatefulSet when persistence is enabled", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("10Gi"),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.Resources.Requests).To(HaveKey(corev1.ResourceStorage))
+			Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+			Expect(pvc.OwnerReferences).To(BeEmpty(), "PVCs should not be tied to ValkeyNode garbage collection")
+		})
+
+		It("should not fail when persistence size changes before the PVC is bound", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("10Gi"),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			node = &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Persistence.Size = resource.MustParse("20Gi")
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
 		})
 	})
 
@@ -332,6 +391,25 @@ var _ = Describe("ValkeyNode Controller", func() {
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: "DaemonSet"},
 			}
 			Expect(r.ensureWorkload(context.Background(), node)).To(MatchError(ContainSubstring("unsupported workload type")))
+		})
+	})
+
+	Context("When persistence is used with Deployment", func() {
+		It("should return an error", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+			node := &valkeyiov1alpha1.ValkeyNode{
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+					WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+					Persistence: &valkeyiov1alpha1.PersistenceSpec{
+						Size: resource.MustParse("1Gi"),
+					},
+				},
+			}
+			Expect(r.ensureWorkload(context.Background(), node)).To(MatchError(ContainSubstring("persistence requires workloadType StatefulSet")))
 		})
 	})
 })

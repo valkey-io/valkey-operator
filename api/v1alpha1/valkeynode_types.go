@@ -33,6 +33,7 @@ const (
 )
 
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
 	// +optional
@@ -44,6 +45,10 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
+
+	// Persistence defines durable storage for the ValkeyNode.
+	// +optional
+	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// Resources defines the resource requirements for the Valkey container.
 	// +optional

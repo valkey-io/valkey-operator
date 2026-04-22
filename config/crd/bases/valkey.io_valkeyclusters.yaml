@@ -2580,6 +2580,24 @@ spec:
                   type: string
                 description: NodeSelector to apply to the pods
                 type: object
+              persistence:
+                description: Persistence defines durable storage that is propagated
+                  to each ValkeyNode.
+                properties:
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the requested PVC size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: StorageClassName is the storage class to use for
+                      the PVC.
+                    type: string
+                required:
+                - size
+                type: object
               replicas:
                 description: The number of replicas for each shard group.
                 format: int32
@@ -2814,6 +2832,9 @@ spec:
                 - message: workloadType is immutable
                   rule: self == oldSelf
             type: object
+            x-kubernetes-validations:
+            - message: persistence requires workloadType StatefulSet
+              rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
           status:
             default:
               readyShards: 0

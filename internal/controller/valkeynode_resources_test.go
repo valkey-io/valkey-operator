@@ -173,6 +173,25 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
 }
 
+func TestBuildValkeyNodePVC(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	storageClassName := "gp3"
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{
+		Size:             resource.MustParse("10Gi"),
+		StorageClassName: &storageClassName,
+	}
+
+	pvc := buildValkeyNodePVC(node)
+	require.NotNil(t, pvc)
+	assert.Equal(t, "valkey-mynode-data", pvc.Name)
+	assert.Equal(t, "test-ns", pvc.Namespace)
+	assert.Equal(t, resource.MustParse("10Gi"), pvc.Spec.Resources.Requests[corev1.ResourceStorage])
+	require.NotNil(t, pvc.Spec.StorageClassName)
+	assert.Equal(t, "gp3", *pvc.Spec.StorageClassName)
+	require.Len(t, pvc.Spec.AccessModes, 1)
+	assert.Equal(t, corev1.ReadWriteOnce, pvc.Spec.AccessModes[0])
+}
+
 func TestBuildValkeyNodePodTemplateSpec_WithExporter(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Exporter = valkeyv1.ExporterSpec{
@@ -293,6 +312,16 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Contains(t, cm.Data, "readiness-check.sh")
 }
 
+func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+
+	cm, err := buildValkeyNodeConfigMap(node)
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data["valkey.conf"], "dir /data")
+	assert.Contains(t, cm.Data["valkey.conf"], "cluster-config-file /data/nodes.conf")
+}
+
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"
@@ -310,6 +339,24 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
 		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.Volumes, 3)
+	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
+	require.NotNil(t, pts.Spec.Volumes[2].PersistentVolumeClaim)
+	assert.Equal(t, "valkey-mynode-data", pts.Spec.Volumes[2].PersistentVolumeClaim.ClaimName)
+
+	server := pts.Spec.Containers[0]
+	require.Len(t, server.VolumeMounts, 3)
+	assert.Equal(t, dataVolumeName, server.VolumeMounts[2].Name)
+	assert.Equal(t, dataMountPath, server.VolumeMounts[2].MountPath)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
@@ -569,6 +616,7 @@ func TestReadinessCheckScript(t *testing.T) {
 }
 
 func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
+	storageClassName := "gp3"
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
@@ -576,6 +624,10 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Replicas:     1,
 			Image:        "valkey/valkey:9.1.0",
 			WorkloadType: valkeyv1.WorkloadTypeStatefulSet,
+			Persistence: &valkeyv1.PersistenceSpec{
+				Size:             resource.MustParse("10Gi"),
+				StorageClassName: &storageClassName,
+			},
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceMemory: resource.MustParse("512Mi"),
@@ -608,6 +660,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 
 	assert.Equal(t, cluster.Spec.Image, node.Spec.Image, "Image must be propagated")
 	assert.Equal(t, cluster.Spec.WorkloadType, node.Spec.WorkloadType, "WorkloadType must be propagated")
+	assert.Equal(t, cluster.Spec.Persistence, node.Spec.Persistence, "Persistence must be propagated")
 	assert.Equal(t, cluster.Spec.Resources, node.Spec.Resources, "Resources must be propagated")
 	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
 	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")

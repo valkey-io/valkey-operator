@@ -64,6 +64,11 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 		"aclfile":              "/config/users/users.acl",
 	}
 
+	if cluster.Spec.Persistence != nil {
+		baseConfig["dir"] = dataMountPath
+		baseConfig["cluster-config-file"] = dataMountPath + "/nodes.conf"
+	}
+
 	if cluster.Spec.TLS != nil {
 		baseConfig["tls-port"] = fmt.Sprintf("%d", DefaultPort)
 		baseConfig["port"] = "0"

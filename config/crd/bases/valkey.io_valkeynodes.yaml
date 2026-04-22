@@ -2579,6 +2579,23 @@ spec:
                   type: string
                 description: NodeSelector defines the node selection constraints.
                 type: object
+              persistence:
+                description: Persistence defines durable storage for the ValkeyNode.
+                properties:
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the requested PVC size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: StorageClassName is the storage class to use for
+                      the PVC.
+                    type: string
+                required:
+                - size
+                type: object
               resources:
                 description: Resources defines the resource requirements for the Valkey
                   container.
@@ -2720,6 +2737,9 @@ spec:
                 - message: workloadType is immutable
                   rule: self == oldSelf
             type: object
+            x-kubernetes-validations:
+            - message: persistence requires workloadType StatefulSet
+              rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
           status:
             description: ValkeyNodeStatus defines the observed state of ValkeyNode.
             properties:

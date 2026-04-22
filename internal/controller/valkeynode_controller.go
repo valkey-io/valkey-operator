@@ -56,6 +56,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -71,6 +72,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -93,6 +97,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	if node.Spec.Persistence != nil && node.Spec.WorkloadType == valkeyiov1alpha1.WorkloadTypeDeployment {
+		return fmt.Errorf("persistence requires workloadType StatefulSet")
+	}
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
 		return r.ensureStatefulSet(ctx, node)
@@ -101,6 +108,49 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 	default:
 		return fmt.Errorf("unsupported workload type: %q", node.Spec.WorkloadType)
 	}
+}
+
+func (r *ValkeyNodeReconciler) ensurePersistentVolumeClaim(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	log := logf.FromContext(ctx)
+	if node.Spec.Persistence == nil {
+		return nil
+	}
+
+	desired := buildValkeyNodePVC(node)
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      desired.Name,
+			Namespace: desired.Namespace,
+		},
+	}
+
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+		pvc.Labels = desired.Labels
+
+		if pvc.CreationTimestamp.IsZero() {
+			pvc.Spec = desired.Spec
+			return nil
+		}
+
+		// Only patch storage requests after the claim is bound. Kubernetes
+		// rejects storage request mutations on pending/unbound claims.
+		if pvc.Status.Phase != corev1.ClaimBound {
+			return nil
+		}
+
+		if pvc.Spec.Resources.Requests == nil {
+			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = desired.Spec.Resources.Requests[corev1.ResourceStorage]
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	log.V(1).Info("reconciled PersistentVolumeClaim", "result", result, "name", pvc.Name)
+	return nil
 }
 
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.

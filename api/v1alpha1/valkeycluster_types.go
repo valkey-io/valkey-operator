@@ -39,6 +39,7 @@ const (
 )
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -79,6 +80,10 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
+
+	// Persistence defines durable storage that is propagated to each ValkeyNode.
+	// +optional
+	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// Users, and ACL-related configuration; see valkeyacls_types.go
 	// +listType=map

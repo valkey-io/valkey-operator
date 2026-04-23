@@ -121,7 +121,7 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 }
 
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
-// and a map of annotations to add to, or replace existing, within the object.
+// and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated
 func upsertAnnotation(o metav1.Object, key string, val string) bool {
 
@@ -243,34 +243,8 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }
 
-// generateValkeyConfig generates the Valkey configuration for a ValkeyCluster.
-func generateValkeyConfig(cluster *valkeyv1.ValkeyCluster) string {
-	config := `cluster-enabled yes
-protected-mode no
-cluster-node-timeout 2000
-aclfile /config/users/users.acl`
-
-	if cluster.Spec.TLS != nil {
-		config += fmt.Sprintf(`
-tls-port %d
-port 0
-tls-cluster yes
-tls-replication yes
-tls-cert-file %s
-tls-key-file %s
-tls-ca-cert-file %s
-tls-auth-clients optional`, // allow clients to connect without client certificate
-			DefaultPort,
-			tlsCertMountPath+"/"+tlsSecretKeyCert,
-			tlsCertMountPath+"/"+tlsSecretKeyKey,
-			tlsCertMountPath+"/"+tlsSecretKeyCA,
-		)
-	}
-	return config
-}
-
-// GetTLSConfig returns the TLS configuration for a ValkeyCluster.
-func GetTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+// getTLSConfig returns the TLS configuration for a ValkeyCluster.
+func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {

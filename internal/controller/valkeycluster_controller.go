@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"crypto/tls"
-	"embed"
 	"errors"
 	"fmt"
 	"slices"
@@ -64,9 +63,6 @@ type ValkeyClusterReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
 }
-
-//go:embed scripts/*
-var scripts embed.FS
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
@@ -371,42 +367,6 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
-// Create or update a basic valkey.conf
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
-	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
-	if err != nil {
-		return err
-	}
-	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
-	if err != nil {
-		return err
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
-			Namespace: cluster.Namespace,
-		},
-	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Labels = labels(cluster)
-		cm.Data = map[string]string{
-			"readiness-check.sh": string(readiness),
-			"liveness-check.sh":  string(liveness),
-			"valkey.conf":        generateValkeyConfig(cluster),
-		}
-		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
-	})
-	if err != nil {
-		r.Recorder.Eventf(cluster, cm, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpdateConfigMap", "Failed to upsert ConfigMap: %v", err)
-		return err
-	}
-	if result == controllerutil.OperationResultCreated {
-		r.Recorder.Eventf(cluster, cm, corev1.EventTypeNormal, "ConfigMapCreated", "CreateConfigMap", "Created ConfigMap with configuration")
-	}
-	return nil
-}
-
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
@@ -566,17 +526,17 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Labels:    l,
 		},
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-			Image:                cluster.Spec.Image,
-			WorkloadType:         cluster.Spec.WorkloadType,
-			Resources:            cluster.Spec.Resources,
-			NodeSelector:         cluster.Spec.NodeSelector,
-			Affinity:             cluster.Spec.Affinity,
-			Tolerations:          cluster.Spec.Tolerations,
-			Exporter:             cluster.Spec.Exporter,
-			Containers:           cluster.Spec.Containers,
-			ScriptsConfigMapName: cluster.Name,
-			UsersACLSecretName:   getInternalSecretName(cluster.Name),
-			TLS:                  cluster.Spec.TLS,
+			Image:               cluster.Spec.Image,
+			WorkloadType:        cluster.Spec.WorkloadType,
+			Resources:           cluster.Spec.Resources,
+			NodeSelector:        cluster.Spec.NodeSelector,
+			Affinity:            cluster.Spec.Affinity,
+			Tolerations:         cluster.Spec.Tolerations,
+			Exporter:            cluster.Spec.Exporter,
+			Containers:          cluster.Spec.Containers,
+			ServerConfigMapName: GetServerConfigMapName(cluster.Name),
+			UsersACLSecretName:  getInternalSecretName(cluster.Name),
+			TLS:                 cluster.Spec.TLS,
 		},
 	}
 }
@@ -592,7 +552,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	var tlsConfig *tls.Config
 	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
-		cfg, err := GetTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg
 		}

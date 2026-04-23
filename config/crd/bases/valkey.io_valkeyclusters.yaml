@@ -971,6 +971,11 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              config:
+                additionalProperties:
+                  type: string
+                description: Additional Valkey configuration parameters
+                type: object
               containers:
                 description: Additional containers or overrides for existing containers,
                   applied using strategic merge patch

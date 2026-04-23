@@ -265,3 +265,7 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+.PHONY: print-version-ldflags
+print-version-ldflags:
+	@echo "$(VERSION_LDFLAGS)"

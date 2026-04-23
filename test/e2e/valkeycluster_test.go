@@ -336,6 +336,86 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			Eventually(verifyPodRoll, 5*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
+		It("creates a single-shard zero-replica cluster", Label("single-node"), func() {
+			const singleNodeClusterName = "cluster-single-node"
+
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", singleNodeClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating the CR with 1 shard and 0 replicas")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+`, singleNodeClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create single-node ValkeyCluster CR")
+
+			By("validating ValkeyNodes")
+			verifyValkeyNodesExist := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", singleNodeClusterName),
+					"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				nodes := utils.GetNonEmptyLines(output)
+				g.Expect(nodes).To(HaveLen(1), "Expected 1 ValkeyNode")
+			}
+			Eventually(verifyValkeyNodesExist).Should(Succeed())
+
+			By("validating the ValkeyCluster CR reaches Ready state")
+			verifyCrStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(singleNodeClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.Shards).To(Equal(int32(1)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+
+				slotsAssignedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
+				g.Expect(slotsAssignedCond).NotTo(BeNil(), "SlotsAssigned condition not found")
+				g.Expect(slotsAssignedCond.Status).To(Equal(metav1.ConditionTrue))
+			}
+			Eventually(verifyCrStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("validating cluster access")
+			verifyClusterAccess := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", singleNodeClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
+				g.Expect(output).To(ContainSubstring("cluster_slots_assigned:16384"))
+				g.Expect(output).To(ContainSubstring("cluster_size:1"))
+			}
+			Eventually(verifyClusterAccess).Should(Succeed())
+		})
+
 		It("creates a cluster with custom users", func() {
 			const withUserClusterName = "cluster-sample-with-users"
 			const withUserSampleFile = "config/samples/v1alpha1_valkeycluster-with-user.yaml"

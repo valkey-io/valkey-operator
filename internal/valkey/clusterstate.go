@@ -18,6 +18,7 @@ package valkey
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"slices"
 	"strconv"
@@ -48,7 +49,7 @@ type ShardState struct {
 	Nodes     []*NodeState
 }
 
-// ShardState represents the current state of a cluster.
+// ClusterState represents the current state of a cluster.
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
@@ -64,7 +65,7 @@ type SlotsRange struct {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int, username, password string) *ClusterState {
+func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -72,7 +73,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, username, password)
+		node := getNodeState(ctx, address, port, username, password, tlsCfg)
 		if node != nil {
 			// Check if node is pending to be added.
 			if node.IsPrimary() && len(node.GetSlots()) == 0 {
@@ -138,6 +139,19 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	return remaining
 }
 
+// FindShardForAddress returns the shard containing a node with the given IP
+// address, or nil if no shard contains that address.
+func (s *ClusterState) FindShardForAddress(address string) *ShardState {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Address == address {
+				return shard
+			}
+		}
+	}
+	return nil
+}
+
 // GetPrimaryNode returns the primary NodeState object
 func (s *ShardState) GetPrimaryNode() *NodeState {
 	idx := slices.IndexFunc(s.Nodes, func(n *NodeState) bool { return n.Id == s.PrimaryId })
@@ -145,6 +159,26 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 		return s.Nodes[idx]
 	}
 	return nil
+}
+
+// GetSyncedReplicas returns replica nodes that are connected and have their
+// replication link up (master_link_status:up). Nodes with fail/pfail flags
+// are excluded.
+func (s *ShardState) GetSyncedReplicas() []*NodeState {
+	var replicas []*NodeState
+	for _, node := range s.Nodes {
+		if node.Id == s.PrimaryId {
+			continue
+		}
+		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+			continue
+		}
+		if node.Info["master_link_status"] != "up" {
+			continue
+		}
+		replicas = append(replicas, node)
+	}
+	return replicas
 }
 
 // GetSlots returns slots assigned to myself, same format as in CLUSTER NODES.
@@ -247,7 +281,7 @@ func (n *NodeState) GetFailingNodes() []NodeState {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, username string, password string) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
 	log := logf.FromContext(ctx)
 
 	opt := vclient.ClientOption{
@@ -255,6 +289,7 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		ForceSingleClient: true, // Don't connect to another cluster node.
 		Username:          username,
 		Password:          password,
+		TLSConfig:         tlsConfig,
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,8 +38,8 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 			Namespace: namespace,
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
-			Image:                "valkey/valkey:9.0.0",
-			ScriptsConfigMapName: "valkey-scripts",
+			Image:               "valkey/valkey:9.0.0",
+			ServerConfigMapName: "valkey-config",
 		},
 	}
 }
@@ -119,10 +120,10 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Volumes
 	require.Len(t, pts.Spec.Volumes, 2)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -282,7 +283,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	cm, err := buildValkeyNodeConfigMap(node)
 
 	require.NoError(t, err)
-	assert.Equal(t, "valkey-mynode", cm.Name)
+	assert.Equal(t, GetServerConfigMapName("mynode"), cm.Name)
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
@@ -293,21 +294,21 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
-	t.Run("uses ScriptsConfigMapName when set", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns") // ScriptsConfigMapName = "valkey-scripts"
+	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 
-	t.Run("falls back to resource name when ScriptsConfigMapName is empty", func(t *testing.T) {
+	t.Run("falls back to resource name when ServerConfigMapName is empty", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns")
-		node.Spec.ScriptsConfigMapName = ""
+		node.Spec.ServerConfigMapName = ""
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 }
 
@@ -422,14 +423,14 @@ func TestParseValkeyRole(t *testing.T) {
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, DefaultExporterImage, c.Image)
 		assert.Equal(t, "metrics-exporter", c.Name)
 	})
 
 	t.Run("custom image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Image: "custom:1.0"}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, "custom:1.0", c.Image)
 	})
 
@@ -440,15 +441,28 @@ func TestBuildExporterContainer(t *testing.T) {
 			},
 		}
 		exporter := valkeyv1.ExporterSpec{Enabled: true, Resources: resources}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, resources, c.Resources)
 	})
 
 	t.Run("args contain redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		c := generateMetricsExporterContainerDef(exporter, "")
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=localhost:6379")
+		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		assert.Empty(t, c.VolumeMounts)
+	})
+
+	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+
+		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
+		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
+		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		assert.Len(t, c.VolumeMounts, 1)
+		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
+		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
 	})
 }
 
@@ -600,7 +614,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, cluster.Name, node.Spec.ScriptsConfigMapName, "ScriptsConfigMapName must be the cluster name")
+	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 

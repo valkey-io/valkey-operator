@@ -17,12 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -67,6 +72,16 @@ const (
 	LabelNodeIndex = "valkey.io/node-index"
 )
 
+const (
+	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
+	tlsVolumeName = "tls-certs"
+	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
+	tlsCertMountPath = "/tls"
+	tlsSecretKeyCA   = "ca.crt"
+	tlsSecretKeyCert = "tls.crt"
+	tlsSecretKeyKey  = "tls.key"
+)
+
 // Role label values.
 const (
 	RolePrimary = "primary"
@@ -106,7 +121,7 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 }
 
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
-// and a map of annotations to add to, or replace existing, within the object.
+// and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated
 func upsertAnnotation(o metav1.Object, key string, val string) bool {
 
@@ -226,4 +241,31 @@ func countSlots(ranges []valkey.SlotsRange) int {
 // replicas.
 func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
+}
+
+// getTLSConfig returns the TLS configuration for a ValkeyCluster.
+func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+	secret := &corev1.Secret{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	caData, caOk := secret.Data[tlsSecretKeyCA]
+
+	if !caOk {
+		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
+	}
+
+	tlsCfg := &tls.Config{
+		RootCAs:    caCertPool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	}
+	return tlsCfg, nil
 }

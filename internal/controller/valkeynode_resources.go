@@ -51,7 +51,7 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
 // and readiness probe scripts, plus an empty valkey.conf.
-// The ConfigMap is named after valkeyNodeResourceName(node).
+// The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
 	if err != nil {
@@ -64,7 +64,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      valkeyNodeResourceName(node),
+			Name:      GetServerConfigMapName(node.Name),
 			Namespace: node.Namespace,
 			Labels:    valkeyNodeLabels(node),
 		},
@@ -214,9 +214,25 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
+	if node.Spec.TLS != nil {
+		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      tlsVolumeName,
+			MountPath: tlsCertMountPath,
+			ReadOnly:  true,
+		})
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCA},
+			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
+			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
+			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: fmt.Sprintf("--tls --cacert %s --cert %s --key %s",
+				tlsCertMountPath+"/"+tlsSecretKeyCA, tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)},
+		)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
-		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster]))
+		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))
 	}
 
 	return mergePatchContainers(containers, node.Spec.Containers)
@@ -232,9 +248,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	// Use the explicitly provided ConfigMap name, or fall back to the default
 	// resource name (which the controller creates automatically).
-	configMapName := node.Spec.ScriptsConfigMapName
+	configMapName := node.Spec.ServerConfigMapName
 	if configMapName == "" {
-		configMapName = valkeyNodeResourceName(node)
+		configMapName = GetServerConfigMapName(node.Name)
 	}
 
 	podSpec := corev1.PodSpec{
@@ -281,6 +297,17 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name:      "users-acl",
 			MountPath: "/config/users",
 			ReadOnly:  true,
+		})
+	}
+
+	if node.Spec.TLS != nil {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: node.Spec.TLS.Certificate.SecretName,
+				},
+			},
 		})
 	}
 

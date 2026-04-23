@@ -88,6 +88,31 @@ type ValkeyClusterSpec struct {
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
+
+	// Additional Valkey configuration parameters
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
+
+	// TLS configuration for the cluster
+	// +optional
+	TLS *TLSConfig `json:"tls,omitempty"`
+}
+
+// TLSConfig defines the TLS configuration for ValkeyCluster.
+type TLSConfig struct {
+	// Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
+	// The referenced secret should contain the following:
+	//
+	// - `ca.crt`: The certificate authority.
+	// - `tls.crt`: The certificate (or a chain).
+	// - `tls.key`: The private key to the first certificate in the certificate chain.
+	Certificate CertificateRef `json:"certificate,omitempty"`
+}
+
+// CertificateRef defines the certificate reference for ValkeyCluster.
+type CertificateRef struct {
+	// SecretName is the name of the secret.
+	SecretName string `json:"secretName,omitempty"`
 }
 
 type ExporterSpec struct {

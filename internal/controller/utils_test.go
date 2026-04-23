@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -141,4 +142,32 @@ func TestBuildClusterValkeyNodeLabels(t *testing.T) {
 
 	// Recommended labels cannot be overridden by user-defined cluster labels.
 	assert.Equal(t, appName, node.Labels["app.kubernetes.io/name"])
+}
+
+func TestGenerateValkeyConfig_WithStorage(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Storage: &valkeyv1.StorageSpec{
+				Size: resource.MustParse("1Gi"),
+			},
+		},
+	}
+
+	config := generateValkeyConfig(cluster)
+	assert.Contains(t, config, "dir /data")
+	assert.Contains(t, config, "appendonly yes")
+}
+
+func TestGenerateValkeyNodeConfig_WithStorage(t *testing.T) {
+	node := &valkeyv1.ValkeyNode{
+		Spec: valkeyv1.ValkeyNodeSpec{
+			Storage: &valkeyv1.StorageSpec{
+				Size: resource.MustParse("1Gi"),
+			},
+		},
+	}
+
+	config := generateValkeyNodeConfig(node)
+	assert.Contains(t, config, "dir /data")
+	assert.Contains(t, config, "appendonly yes")
 }

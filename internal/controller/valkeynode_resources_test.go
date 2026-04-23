@@ -173,6 +173,57 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
 }
 
+func TestBuildValkeyNodeStatefulSet_WithStorage(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Storage = &valkeyv1.StorageSpec{
+		Size: resource.MustParse("1Gi"),
+	}
+
+	ss, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+
+	require.Len(t, ss.Spec.VolumeClaimTemplates, 1)
+	claim := ss.Spec.VolumeClaimTemplates[0]
+	assert.Equal(t, dataVolumeName, claim.Name)
+	assert.Equal(t, resource.MustParse("1Gi"), claim.Spec.Resources.Requests[corev1.ResourceStorage])
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, claim.Spec.AccessModes)
+
+	server := ss.Spec.Template.Spec.Containers[0]
+	require.Len(t, server.VolumeMounts, 3)
+	assert.Equal(t, dataVolumeName, server.VolumeMounts[2].Name)
+	assert.Equal(t, dataMountPath, server.VolumeMounts[2].MountPath)
+}
+
+func TestBuildValkeyNodeStatefulSet_WithCustomStorageClassAndAccessModes(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Storage = &valkeyv1.StorageSpec{
+		Size:             resource.MustParse("5Gi"),
+		AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod},
+		StorageClassName: "fast-ssd",
+	}
+
+	ss, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+
+	require.Len(t, ss.Spec.VolumeClaimTemplates, 1)
+	claim := ss.Spec.VolumeClaimTemplates[0]
+	assert.Equal(t, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}, claim.Spec.AccessModes)
+	require.NotNil(t, claim.Spec.StorageClassName)
+	assert.Equal(t, "fast-ssd", *claim.Spec.StorageClassName)
+	assert.Equal(t, resource.MustParse("5Gi"), claim.Spec.Resources.Requests[corev1.ResourceStorage])
+}
+
+func TestBuildValkeyNodeDeployment_WithStorageReturnsError(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Storage = &valkeyv1.StorageSpec{
+		Size: resource.MustParse("1Gi"),
+	}
+
+	_, err := buildValkeyNodeDeployment(node)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "persistent storage is only supported for StatefulSet workloads")
+}
+
 func TestBuildValkeyNodePodTemplateSpec_WithExporter(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Exporter = valkeyv1.ExporterSpec{
@@ -291,6 +342,18 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
+}
+
+func TestBuildValkeyNodeConfigMap_WithStorage(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Storage = &valkeyv1.StorageSpec{
+		Size: resource.MustParse("1Gi"),
+	}
+
+	cm, err := buildValkeyNodeConfigMap(node)
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data["valkey.conf"], "dir /data")
+	assert.Contains(t, cm.Data["valkey.conf"], "appendonly yes")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
@@ -522,6 +585,19 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 2, "should only have scripts and valkey-conf mounts")
 }
 
+func TestBuildValkeyNodePodTemplateSpec_WithStorage(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Storage = &valkeyv1.StorageSpec{
+		Size: resource.MustParse("1Gi"),
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 3)
+	assert.Equal(t, dataVolumeName, pts.Spec.Containers[0].VolumeMounts[2].Name)
+	assert.Equal(t, dataMountPath, pts.Spec.Containers[0].VolumeMounts[2].MountPath)
+}
+
 func TestLivenessCheckScript(t *testing.T) {
 	scriptPath := filepath.Join("scripts", "liveness-check.sh")
 
@@ -597,6 +673,9 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
 			},
+			Storage: &valkeyv1.StorageSpec{
+				Size: resource.MustParse("2Gi"),
+			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
@@ -612,6 +691,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
 	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
+	assert.Equal(t, cluster.Spec.Storage, node.Spec.Storage, "Storage must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, cluster.Name, node.Spec.ScriptsConfigMapName, "ScriptsConfigMapName must be the cluster name")

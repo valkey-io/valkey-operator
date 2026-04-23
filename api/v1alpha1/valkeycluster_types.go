@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,6 +70,11 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Storage configures durable storage for each Valkey node. When omitted,
+	// Valkey uses ephemeral container storage.
+	// +optional
+	Storage *StorageSpec `json:"storage,omitempty"`
+
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
 	// +optional
@@ -109,6 +115,22 @@ type TLSConfig struct {
 type CertificateRef struct {
 	// SecretName is the name of the secret.
 	SecretName string `json:"secretName,omitempty"`
+}
+
+// StorageSpec defines durable storage configuration for Valkey data.
+type StorageSpec struct {
+	// Size is the requested persistent volume size for each Valkey node.
+	Size resource.Quantity `json:"size"`
+
+	// AccessModes are the desired access modes for the persistent volume.
+	// Defaults to ReadWriteOnce when omitted.
+	// +optional
+	// +listType=atomic
+	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
+
+	// StorageClassName is the StorageClass used for dynamically provisioned volumes.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
 type ExporterSpec struct {

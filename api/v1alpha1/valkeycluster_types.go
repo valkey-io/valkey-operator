@@ -64,10 +64,15 @@ type ValkeyClusterSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// Affinity to apply to the pods, overrides NodeSelector if set
-	// Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
+	// Affinity to apply to the pods, overrides NodeSelector if set.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// ShardAntiAffinity controls how pods from the same shard are spread across
+	// topology domains. When omitted, the operator does not add shard-specific
+	// anti-affinity rules beyond any user-supplied affinity.
+	// +optional
+	ShardAntiAffinity *ShardAntiAffinitySpec `json:"shardAntiAffinity,omitempty"`
 
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
@@ -109,6 +114,32 @@ type TLSConfig struct {
 type CertificateRef struct {
 	// SecretName is the name of the secret.
 	SecretName string `json:"secretName,omitempty"`
+}
+
+// ShardAntiAffinityType controls how strongly the scheduler should avoid
+// placing pods from the same shard into the same topology domain.
+// +kubebuilder:validation:Enum=Disabled;Preferred;Required
+type ShardAntiAffinityType string
+
+const (
+	// ShardAntiAffinityTypeDisabled disables operator-managed shard anti-affinity.
+	ShardAntiAffinityTypeDisabled ShardAntiAffinityType = "Disabled"
+	// ShardAntiAffinityTypePreferred adds a soft scheduling preference.
+	ShardAntiAffinityTypePreferred ShardAntiAffinityType = "Preferred"
+	// ShardAntiAffinityTypeRequired adds a hard scheduling requirement.
+	ShardAntiAffinityTypeRequired ShardAntiAffinityType = "Required"
+)
+
+// ShardAntiAffinitySpec defines shard-aware anti-affinity behavior.
+type ShardAntiAffinitySpec struct {
+	// Type controls whether same-shard anti-affinity is disabled, preferred,
+	// or strictly required.
+	Type ShardAntiAffinityType `json:"type,omitempty"`
+
+	// TopologyKey selects the topology domain used for shard spreading.
+	// Defaults to kubernetes.io/hostname.
+	// +optional
+	TopologyKey string `json:"topologyKey,omitempty"`
 }
 
 type ExporterSpec struct {

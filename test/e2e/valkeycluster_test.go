@@ -124,6 +124,36 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyPodStatuses).Should(Succeed())
 
+			By("verifying each shard's primary and replica land on different Kubernetes nodes")
+			verifyShardNodeSeparation := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "go-template={{ range .items }}{{ index .metadata.labels \"valkey.io/shard-index\" }} {{ .spec.nodeName }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				shardNodes := map[string]map[string]struct{}{}
+				shardPodCounts := map[string]int{}
+				for _, line := range utils.GetNonEmptyLines(output) {
+					fields := strings.Fields(line)
+					g.Expect(fields).To(HaveLen(2), "expected '<shard> <node>' line, got %q", line)
+					shardIndex := fields[0]
+					nodeName := fields[1]
+					if _, ok := shardNodes[shardIndex]; !ok {
+						shardNodes[shardIndex] = map[string]struct{}{}
+					}
+					shardNodes[shardIndex][nodeName] = struct{}{}
+					shardPodCounts[shardIndex]++
+				}
+
+				g.Expect(shardNodes).To(HaveLen(3), "expected 3 shard groups")
+				for shardIndex, nodes := range shardNodes {
+					g.Expect(shardPodCounts[shardIndex]).To(Equal(2), "expected shard %s to have one primary and one replica", shardIndex)
+					g.Expect(nodes).To(HaveLen(2), "expected shard %s members to land on different Kubernetes nodes", shardIndex)
+				}
+			}
+			Eventually(verifyShardNodeSeparation).Should(Succeed())
+
 			By("validating server containers have resources configuration")
 			cmd = exec.Command("kubectl", "get", "pods",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),

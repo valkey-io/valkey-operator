@@ -47,8 +47,20 @@ var (
 	exporterUser    = "_exporter"
 	systemUsers     = []string{operatorUser, exporterUser}
 	systemUsersAcls = map[string]string{
-		// TODO: tighten the permission for the operator user
-		operatorUser: "+@all",
+		operatorUser: strings.Join([]string{
+			"+@connection",               // client handshake (CLIENT TRACKING, SETINFO, AUTH, PING)
+			"+cluster|myid",              // get node ID
+			"+cluster|myshardid",         // get shard ID
+			"+cluster|info",              // cluster state
+			"+cluster|nodes",             // cluster topology
+			"+cluster|meet",              // introduce nodes
+			"+cluster|addslotsrange",     // assign slots
+			"+cluster|replicate",         // set up replication
+			"+cluster|forget",            // remove stale nodes
+			"+cluster|getslotmigrations", // check migration status
+			"+cluster|migrateslots",      // migrate slots between shards
+			"+info",                      // node info and replication status
+		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 	}
@@ -165,8 +177,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
-			log.Error(err, "failed to fetch password", "username", user.Name)
-			continue
+			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
 
 		// Build ACL string for this user with found password(s)
@@ -248,8 +259,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 
 	log := logf.FromContext(ctx)
 
-	// If this user doesn't have a password, return empty
-	if user.NoPassword {
+	// If this user doesn't have a password or is disabled, return empty
+	if user.NoPassword || !user.Enabled {
 		return []string{}, nil
 	}
 	// Look for a Secret matching the user-provided name, or clusterName-users

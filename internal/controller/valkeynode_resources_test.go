@@ -38,8 +38,8 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 			Namespace: namespace,
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
-			Image:                "valkey/valkey:9.0.0",
-			ScriptsConfigMapName: "valkey-scripts",
+			Image:               "valkey/valkey:9.0.0",
+			ServerConfigMapName: "valkey-config",
 		},
 	}
 }
@@ -120,10 +120,10 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Volumes
 	require.Len(t, pts.Spec.Volumes, 2)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -283,7 +283,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	cm, err := buildValkeyNodeConfigMap(node)
 
 	require.NoError(t, err)
-	assert.Equal(t, "valkey-mynode", cm.Name)
+	assert.Equal(t, GetServerConfigMapName("mynode"), cm.Name)
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
@@ -294,21 +294,21 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
-	t.Run("uses ScriptsConfigMapName when set", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns") // ScriptsConfigMapName = "valkey-scripts"
+	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-scripts", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 
-	t.Run("falls back to resource name when ScriptsConfigMapName is empty", func(t *testing.T) {
+	t.Run("falls back to resource name when ServerConfigMapName is empty", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns")
-		node.Spec.ScriptsConfigMapName = ""
+		node.Spec.ServerConfigMapName = ""
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-mynode", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
+		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 }
 
@@ -623,7 +623,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, cluster.Name, node.Spec.ScriptsConfigMapName, "ScriptsConfigMapName must be the cluster name")
+	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 

@@ -2644,9 +2644,10 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              scriptsConfigMapName:
-                description: ScriptsConfigMapName specifies the name of the ConfigMap
-                  that contains the scripts for the ValkeyNode.
+              serverConfigMapName:
+                description: |-
+                  ServerConfigMapName specifies the name of the ConfigMap that contains the
+                  scripts, and Valkey config for the ValkeyNode.
                 type: string
               tls:
                 description: TLS configuration for the node

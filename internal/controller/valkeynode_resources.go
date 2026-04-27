@@ -51,7 +51,7 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
 // and readiness probe scripts, plus an empty valkey.conf.
-// The ConfigMap is named after valkeyNodeResourceName(node).
+// The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
 	if err != nil {
@@ -64,7 +64,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      valkeyNodeResourceName(node),
+			Name:      GetServerConfigMapName(node.Name),
 			Namespace: node.Namespace,
 			Labels:    valkeyNodeLabels(node),
 		},
@@ -248,9 +248,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	// Use the explicitly provided ConfigMap name, or fall back to the default
 	// resource name (which the controller creates automatically).
-	configMapName := node.Spec.ScriptsConfigMapName
+	configMapName := node.Spec.ServerConfigMapName
 	if configMapName == "" {
-		configMapName = valkeyNodeResourceName(node)
+		configMapName = GetServerConfigMapName(node.Name)
 	}
 
 	podSpec := corev1.PodSpec{

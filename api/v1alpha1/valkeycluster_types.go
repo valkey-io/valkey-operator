@@ -89,6 +89,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
 
+	// Additional Valkey configuration parameters
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
+
 	// TLS configuration for the cluster
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`

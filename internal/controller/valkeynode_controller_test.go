@@ -59,7 +59,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Namespace: "default",
 		}
 		cleanupManagedPVC := func() {
-			pvcName := types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}
+			pvcName := types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}
 			pvc := &corev1.PersistentVolumeClaim{}
 			if err := k8sClient.Get(ctx, pvcName, pvc); err == nil {
 				if len(pvc.Finalizers) > 0 {
@@ -135,14 +135,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 			if err := k8sClient.Get(ctx, configName, cm); err == nil {
 				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
 				Eventually(func() bool {
-					return apierrors.IsNotFound(k8sClient.Get(ctx, childName, &corev1.ConfigMap{}))
+					return apierrors.IsNotFound(k8sClient.Get(ctx, configName, &corev1.ConfigMap{}))
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 			sts := &appsv1.StatefulSet{}
 			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
 				Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
 				Eventually(func() bool {
-					return apierrors.IsNotFound(k8sClient.Get(ctx, childName, &appsv1.StatefulSet{}))
+					return apierrors.IsNotFound(k8sClient.Get(ctx, statefulSetName, &appsv1.StatefulSet{}))
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 			cleanupManagedPVC()
@@ -317,7 +317,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			pvc := &corev1.PersistentVolumeClaim{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}, pvc)).To(Succeed())
 			Expect(pvc.Spec.Resources.Requests).To(HaveKey(corev1.ResourceStorage))
 			Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
 			Expect(pvc.OwnerReferences).To(BeEmpty(), "PVCs should not be tied to ValkeyNode garbage collection")
@@ -367,9 +367,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			sts := &appsv1.StatefulSet{
-				ObjectMeta: metav1.ObjectMeta{Name: childName.Name, Namespace: childName.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
 			}
-			Expect(k8sClient.Get(ctx, childName, sts)).To(Succeed())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
@@ -381,7 +381,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			Eventually(func() bool {
 				pvc := &corev1.PersistentVolumeClaim{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}, pvc)
 				if apierrors.IsNotFound(err) {
 					return true
 				}
@@ -390,7 +390,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			Eventually(func() bool {
 				deletedSTS := &appsv1.StatefulSet{}
-				return apierrors.IsNotFound(k8sClient.Get(ctx, childName, deletedSTS))
+				return apierrors.IsNotFound(k8sClient.Get(ctx, statefulSetName, deletedSTS))
 			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 
 			nodeDuringDelete := &valkeyiov1alpha1.ValkeyNode{}
@@ -398,12 +398,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(nodeDuringDelete.Finalizers).To(ContainElement(persistentVolumeCleanupFinalizer))
 
 			pvc := &corev1.PersistentVolumeClaim{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc); err == nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}, pvc); err == nil {
 				pvc.Finalizers = nil
 				Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, pvc))).To(Succeed())
 				Eventually(func() bool {
-					return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, &corev1.PersistentVolumeClaim{}))
+					return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}, &corev1.PersistentVolumeClaim{}))
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 
@@ -441,7 +441,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			pvc := &corev1.PersistentVolumeClaim{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: childName.Name + "-data", Namespace: childName.Namespace}, pvc)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: statefulSetName.Name + "-data", Namespace: statefulSetName.Namespace}, pvc)).To(Succeed())
 			Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
 		})
 

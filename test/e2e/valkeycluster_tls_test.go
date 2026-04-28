@@ -75,7 +75,11 @@ spec:
 		err = os.WriteFile(cmManifestFile, []byte(cmManifest), 0644)
 		Expect(err).NotTo(HaveOccurred())
 
-		utils.Run(exec.Command("kubectl", "apply", "-f", cmManifestFile))
+		By("applying Cert-Manager Issuer and Certificate (retry until webhook is serving)")
+		Eventually(func() error {
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", cmManifestFile))
+			return err
+		}).Should(Succeed())
 
 		By("waiting for the certificate secret to be created")
 		Eventually(func() error {

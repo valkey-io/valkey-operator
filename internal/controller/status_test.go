@@ -170,4 +170,11 @@ func TestNodeStatusChanged(t *testing.T) {
 		new.Conditions[0].LastTransitionTime = metav1.Now()
 		g.Expect(nodeStatusChanged(old, new)).To(BeFalse())
 	})
+
+	t.Run("returns true when Running differs", func(t *testing.T) {
+		old := base()
+		new := base()
+		new.Running = true
+		g.Expect(nodeStatusChanged(old, new)).To(BeTrue())
+	})
 }

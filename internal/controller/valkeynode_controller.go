@@ -211,6 +211,22 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 	return nil
 }
 
+// podRunning returns true if the "server" container in the pod is in the Running state.
+// This is set as soon as the container process starts, before readiness probes
+// fire, and is used as the bootstrap gate so the ValkeyCluster controller can
+// proceed with cluster initialization before cluster_state:ok is achievable.
+func podRunning(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == ValkeyContainerName {
+			return cs.State.Running != nil
+		}
+	}
+	return false
+}
+
 // updateStatus updates the ValkeyNode status based on workload and Pod state.
 func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
@@ -288,6 +304,9 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		}
 	}
 
+	// Set Running based on whether the Valkey server container is alive, regardless of readiness probe state.
+	current.Status.Running = podRunning(pod)
+
 	if nodeStatusChanged(*previous, current.Status) {
 		if err := r.Status().Update(ctx, current); err != nil {
 			log.Error(err, "failed to update ValkeyNode status")
@@ -298,9 +317,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		log.V(2).Info("status unchanged, skipping update")
 	}
 
-	// Sync Ready back to the caller's object so the requeue check in Reconcile
-	// reflects the status we just wrote.
+	// Sync status fields back to the caller's object so the requeue check in
+	// Reconcile reflects the values we just wrote, without a fresh Get.
 	node.Status.Ready = current.Status.Ready
+	node.Status.Running = current.Status.Running
 
 	return nil
 }

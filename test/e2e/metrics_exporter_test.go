@@ -158,20 +158,16 @@ spec:
 				g.Expect(out).To(Equal("Running"), "Pod should be running")
 			}).Should(Succeed())
 
-			By("Verifying both containers are ready")
+			By("Verifying metrics-exporter container is ready")
 			Eventually(func(g Gomega) {
 				args := []string{
 					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
-					"-o", "jsonpath={.items[0].status.containerStatuses[*].ready}",
+					"-o", "jsonpath={.items[0].status.containerStatuses[?(@.name=='metrics-exporter')].ready}",
 				}
 				cmd := exec.Command("kubectl", args...)
 				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to get container ready statuses")
-				readyStatuses := strings.Fields(out)
-				g.Expect(readyStatuses).To(HaveLen(2), "Should have 2 container statuses")
-				for _, status := range readyStatuses {
-					g.Expect(status).To(Equal("true"), "All containers should be ready")
-				}
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get metrics-exporter container ready status")
+				g.Expect(out).To(Equal("true"), "metrics-exporter container should be ready")
 			}).Should(Succeed())
 
 			By("Getting pod name for metrics verification")

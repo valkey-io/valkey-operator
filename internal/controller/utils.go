@@ -90,6 +90,11 @@ const (
 	RoleSlave   = "slave"
 )
 
+// Container name constants.
+const (
+	ValkeyContainerName = "server"
+)
+
 // baseLabels returns the standard Kubernetes recommended labels for a Valkey
 // resource with the given instance name and component type.
 func baseLabels(name, component string) map[string]string {

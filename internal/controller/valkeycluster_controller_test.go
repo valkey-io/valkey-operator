@@ -495,6 +495,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		GinkgoHelper()
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+		node.Status.Running = true
 		node.Status.Ready = true
 		node.Status.ObservedGeneration = node.Generation
 		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
@@ -504,6 +505,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		GinkgoHelper()
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+		node.Status.Running = false
 		node.Status.Ready = false
 		// Deliberately does not update ObservedGeneration: simulates the pod
 		// becoming not-ready while ObservedGeneration may already be stale (from
@@ -533,7 +535,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList)
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "", "")
 	}
 
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.
@@ -727,6 +729,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 		nodeName := valkeyNodeName(clusterName, shardIndex, nodeIndex)
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: nodeName, Namespace: "default"}, node)).To(Succeed())
+		node.Status.Running = ready
 		node.Status.Ready = ready
 		node.Status.ObservedGeneration = node.Generation
 		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
@@ -793,6 +796,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 		nodeName := valkeyNodeName(clusterName, shardIndex, nodeIndex)
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: nodeName, Namespace: "default"}, node)).To(Succeed())
+		node.Status.Running = true
 		node.Status.Ready = true
 		// deliberately NOT setting ObservedGeneration
 		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
@@ -826,5 +830,46 @@ var _ = Describe("reconcileValkeyNode", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "should requeue while ObservedGeneration is stale")
 		Expect(created).To(BeFalse())
+	})
+
+	setClusterFormed := func() {
+		GinkgoHelper()
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ConditionClusterFormed,
+			Status: metav1.ConditionTrue,
+			Reason: "Formed",
+		})
+		Expect(k8sClient.Status().Update(testCtx, cluster)).To(Succeed())
+	}
+
+	It("during rolling update (clusterFormed), waits when Running but not Ready", func() {
+		// Create the node, then mark the cluster as already formed.
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
+		Expect(err).NotTo(HaveOccurred())
+		setClusterFormed()
+
+		// Simulate the replacement pod: container is up but readiness probe hasn't passed yet.
+		nodeName := valkeyNodeName(clusterName, shardIndex, nodeIndex)
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: nodeName, Namespace: "default"}, node)).To(Succeed())
+		node.Status.Running = true
+		node.Status.Ready = false
+		node.Status.ObservedGeneration = node.Generation
+		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
+
+		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "should wait for Ready when cluster is already formed")
+	})
+
+	It("during rolling update (clusterFormed), proceeds when Ready", func() {
+		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
+		Expect(err).NotTo(HaveOccurred())
+		setClusterFormed()
+		setNodeReady(true)
+
+		requeue, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "should proceed when Ready and cluster is formed")
 	})
 })

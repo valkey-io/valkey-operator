@@ -322,6 +322,26 @@ func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
 	assert.Contains(t, cm.Data["valkey.conf"], "cluster-config-file /data/nodes.conf")
 }
 
+func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	node.Spec.UsersACLSecretName = "mynode-users"
+	node.Spec.TLS = &valkeyv1.TLSConfig{
+		Certificate: valkeyv1.CertificateRef{SecretName: "tls-secret"},
+	}
+
+	cm, err := buildValkeyNodeConfigMap(node)
+	require.NoError(t, err)
+
+	conf := cm.Data["valkey.conf"]
+	assert.Contains(t, conf, "aclfile /config/users/users.acl")
+	assert.Contains(t, conf, "dir /data")
+	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
+	assert.Contains(t, conf, "tls-port 6379")
+	assert.Contains(t, conf, "port 0")
+	assert.Contains(t, conf, "tls-auth-clients optional")
+}
+
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
 		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"

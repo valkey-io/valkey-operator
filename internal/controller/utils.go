@@ -24,7 +24,6 @@ import (
 	"maps"
 	"slices"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -271,40 +270,4 @@ func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, 
 		MinVersion: tls.VersionTLS12,
 	}
 	return tlsCfg, nil
-}
-
-func generateValkeyNodeConfig(node *valkeyv1.ValkeyNode) string {
-	lines := []string{}
-
-	if node.Spec.UsersACLSecretName != "" {
-		lines = append(lines, "aclfile /config/users/users.acl")
-	}
-
-	if node.Spec.Persistence != nil {
-		lines = append(lines,
-			fmt.Sprintf("dir %s", dataMountPath),
-			fmt.Sprintf("cluster-config-file %s/nodes.conf", dataMountPath),
-		)
-	}
-
-	config := strings.Join(lines, "\n")
-	if node.Spec.TLS != nil {
-		if config != "" {
-			config += "\n"
-		}
-		config += fmt.Sprintf(`tls-port %d
-port 0
-tls-cluster yes
-tls-replication yes
-tls-cert-file %s
-tls-key-file %s
-tls-ca-cert-file %s
-tls-auth-clients optional`,
-			DefaultPort,
-			tlsCertMountPath+"/"+tlsSecretKeyCert,
-			tlsCertMountPath+"/"+tlsSecretKeyKey,
-			tlsCertMountPath+"/"+tlsSecretKeyCA,
-		)
-	}
-	return config
 }

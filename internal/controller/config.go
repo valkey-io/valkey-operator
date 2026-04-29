@@ -54,31 +54,59 @@ func GetServerConfigMapName(clusterName string) string {
 	return "valkey-" + clusterName + "-config"
 }
 
+// buildManagedConfig returns the operator-managed directives shared by the
+// cluster and standalone ValkeyNode config paths.
+func buildManagedConfig(includeACL bool, persistence *valkeyiov1alpha1.PersistenceSpec, tls *valkeyiov1alpha1.TLSConfig) map[string]string {
+	config := map[string]string{}
+
+	if includeACL {
+		config["aclfile"] = "/config/users/users.acl"
+	}
+
+	if persistence != nil {
+		config["dir"] = dataMountPath
+		config["cluster-config-file"] = dataMountPath + "/nodes.conf"
+	}
+
+	if tls != nil {
+		config["tls-port"] = fmt.Sprintf("%d", DefaultPort)
+		config["port"] = "0"
+		config["tls-cluster"] = "yes"
+		config["tls-replication"] = "yes"
+		config["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
+		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
+		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
+		config["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
+	}
+
+	return config
+}
+
+func writeSortedConfig(builder *strings.Builder, config map[string]string) {
+	for _, param := range slices.Sorted(maps.Keys(config)) {
+		writeConfigLine(builder, param, config[param])
+	}
+}
+
+func renderConfig(config map[string]string) string {
+	var builder strings.Builder
+	builder.Grow(len(config) * averageParameterLength)
+	writeSortedConfig(&builder, config)
+	return builder.String()
+}
+
+func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
+	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.Persistence, node.Spec.TLS))
+}
+
 // Return a base config of parameters that users shouldn't be able to override
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
-
-	baseConfig := map[string]string{
+	baseConfig := buildManagedConfig(true, cluster.Spec.Persistence, cluster.Spec.TLS)
+	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":      "yes",
 		"protected-mode":       "no",
 		"cluster-node-timeout": "2000",
-		"aclfile":              "/config/users/users.acl",
-	}
-
-	if cluster.Spec.Persistence != nil {
-		baseConfig["dir"] = dataMountPath
-		baseConfig["cluster-config-file"] = dataMountPath + "/nodes.conf"
-	}
-
-	if cluster.Spec.TLS != nil {
-		baseConfig["tls-port"] = fmt.Sprintf("%d", DefaultPort)
-		baseConfig["port"] = "0"
-		baseConfig["tls-cluster"] = "yes"
-		baseConfig["tls-replication"] = "yes"
-		baseConfig["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
-		baseConfig["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
-		baseConfig["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
-		baseConfig["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
-	}
+	})
 
 	return baseConfig
 }
@@ -108,10 +136,7 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
 	// Add base config
 	writeConfigLine(&configBuilder, "#", "Base Config")
-	sortedBaseKeys := slices.Sorted(maps.Keys(baseConfig))
-	for _, param := range sortedBaseKeys {
-		writeConfigLine(&configBuilder, param, baseConfig[param])
-	}
+	writeSortedConfig(&configBuilder, baseConfig)
 
 	return configBuilder.String()
 }

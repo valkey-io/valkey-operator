@@ -33,6 +33,11 @@ const (
 )
 
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
 	// +optional
@@ -44,6 +49,10 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
+
+	// Persistence defines durable storage for the ValkeyNode.
+	// +optional
+	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// Resources defines the resource requirements for the Valkey container.
 	// +optional
@@ -121,6 +130,10 @@ type ValkeyNodeStatus struct {
 const (
 	// ValkeyNodeConditionReady indicates the ValkeyNode is ready.
 	ValkeyNodeConditionReady = "Ready"
+	// ValkeyNodeConditionPersistentVolumeClaimReady indicates the managed PVC is ready.
+	ValkeyNodeConditionPersistentVolumeClaimReady = "PersistentVolumeClaimReady"
+	// ValkeyNodeConditionPersistentVolumeClaimSizeReady indicates the managed PVC has satisfied the requested size.
+	ValkeyNodeConditionPersistentVolumeClaimSizeReady = "PersistentVolumeClaimSizeReady"
 )
 
 const (
@@ -128,6 +141,18 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
+	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
+	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.
+	ValkeyNodeReasonPersistentVolumeClaimBound = "PersistentVolumeClaimBound"
+	// ValkeyNodeReasonPersistentVolumeClaimSizeSatisfied indicates the PVC capacity matches the requested size.
+	ValkeyNodeReasonPersistentVolumeClaimSizeSatisfied = "PersistentVolumeClaimSizeSatisfied"
+	// ValkeyNodeReasonPersistentVolumeClaimResizePending indicates the PVC is waiting for filesystem or controller-side expansion to finish.
+	ValkeyNodeReasonPersistentVolumeClaimResizePending = "PersistentVolumeClaimResizePending"
+	// ValkeyNodeReasonPersistentVolumeClaimResizeInProgress indicates the PVC is actively expanding.
+	ValkeyNodeReasonPersistentVolumeClaimResizeInProgress = "PersistentVolumeClaimResizeInProgress"
+	// ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible indicates the PVC resize cannot complete without operator action.
+	ValkeyNodeReasonPersistentVolumeClaimResizeInfeasible = "PersistentVolumeClaimResizeInfeasible"
 )
 
 // +kubebuilder:object:root=true

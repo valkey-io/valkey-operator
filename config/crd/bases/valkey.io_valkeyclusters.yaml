@@ -2580,6 +2580,33 @@ spec:
                   type: string
                 description: NodeSelector to apply to the pods
                 type: object
+              persistence:
+                description: Persistence defines durable storage that is propagated
+                  to each ValkeyNode.
+                properties:
+                  reclaimPolicy:
+                    default: Retain
+                    description: |-
+                      ReclaimPolicy controls whether the managed PVC is retained or deleted when
+                      the ValkeyNode is deleted. Defaults to Retain.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the requested PVC size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: StorageClassName is the storage class to use for
+                      the PVC.
+                    type: string
+                required:
+                - size
+                type: object
               replicas:
                 description: The number of replicas for each shard group.
                 format: int32
@@ -2814,6 +2841,21 @@ spec:
                 - message: workloadType is immutable
                   rule: self == oldSelf
             type: object
+            x-kubernetes-validations:
+            - message: persistence requires workloadType StatefulSet
+              rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
+            - message: persistence cannot be removed once set
+              rule: '!has(oldSelf.persistence) || has(self.persistence)'
+            - message: persistence cannot be added after creation
+              rule: has(oldSelf.persistence) || !has(self.persistence)
+            - message: persistence.size may only be expanded
+              rule: '!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size))
+                >= 0'
+            - message: persistence.storageClassName is immutable
+              rule: '!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName)
+                && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
+                && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
+                == oldSelf.persistence.storageClassName))'
           status:
             default:
               readyShards: 0

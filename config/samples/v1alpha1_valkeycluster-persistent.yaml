@@ -1,0 +1,9 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-persistent-sample
+spec:
+  shards: 1
+  replicas: 1
+  persistence:
+    size: 1Gi

@@ -69,11 +69,39 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			Labels:    valkeyNodeLabels(node),
 		},
 		Data: map[string]string{
-			"valkey.conf":        "",
+			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
 		},
 	}, nil
+}
+
+func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
+	return valkeyNodeResourceName(node) + "-data"
+}
+
+func buildValkeyNodePVC(node *valkeyiov1alpha1.ValkeyNode) *corev1.PersistentVolumeClaim {
+	if node.Spec.Persistence == nil {
+		return nil
+	}
+
+	labels := valkeyNodeLabels(node)
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      valkeyNodePVCName(node),
+			Namespace: node.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: node.Spec.Persistence.Size,
+				},
+			},
+			StorageClassName: node.Spec.Persistence.StorageClassName,
+		},
+	}
 }
 
 // mergePatchContainers applies a strategic merge patch to base containers using
@@ -214,6 +242,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
+	if node.Spec.Persistence != nil {
+		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      dataVolumeName,
+			MountPath: dataMountPath,
+		})
+	}
+
 	if node.Spec.TLS != nil {
 		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
 			Name:      tlsVolumeName,
@@ -306,6 +341,17 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: node.Spec.TLS.Certificate.SecretName,
+				},
+			},
+		})
+	}
+
+	if node.Spec.Persistence != nil {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: dataVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: valkeyNodePVCName(node),
 				},
 			},
 		})

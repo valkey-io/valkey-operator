@@ -1,5 +1,68 @@
 # Developer guide
 
+## Prerequisites
+
+- Go v1.25.0+.
+- Docker or Podman.
+- kubectl v1.31+.
+- Access to a Kubernetes v1.31+ cluster.
+
+## Build and deploy from source
+
+**Build and push the operator image:**
+
+```sh
+make docker-build docker-push IMG=<some-registry>/valkey-operator:tag
+```
+
+**Install the CRDs into the cluster:**
+
+```sh
+make install
+```
+
+**Deploy the operator to the cluster:**
+
+```sh
+make deploy IMG=<some-registry>/valkey-operator:tag
+```
+
+**Create a sample ValkeyCluster:**
+
+```sh
+kubectl apply -f config/samples/v1alpha1_valkeycluster.yaml
+```
+
+## Uninstall
+
+**Delete the instances (CRs) from the cluster:**
+
+```sh
+kubectl delete -f config/samples/v1alpha1_valkeycluster.yaml
+```
+
+**Undeploy the controller from the cluster:**
+
+```sh
+make undeploy
+```
+
+**Delete the CRDs from the cluster:**
+
+```sh
+make uninstall
+```
+
+## Build the install bundle
+
+Generate a single YAML file containing all resources (CRDs, RBAC, deployment):
+
+```sh
+make build-installer IMG=<some-registry>/valkey-operator:tag
+```
+
+This produces `dist/install.yaml` which can be applied with `kubectl apply -f`.
+
 ## Run the operator locally
 
 The kubebuilder scaffolding gives a build target `make run` which runs the operator process locally, but towards a K8s cluster.

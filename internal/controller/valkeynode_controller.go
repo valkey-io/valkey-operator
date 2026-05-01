@@ -105,9 +105,6 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	if node.Spec.Persistence != nil && node.Spec.WorkloadType == valkeyiov1alpha1.WorkloadTypeDeployment {
-		return fmt.Errorf("persistence requires workloadType StatefulSet")
-	}
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
 		return r.ensureStatefulSet(ctx, node)

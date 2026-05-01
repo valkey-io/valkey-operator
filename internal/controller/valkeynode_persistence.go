@@ -184,9 +184,6 @@ func pvcStatusCondition(pvc *corev1.PersistentVolumeClaim) (metav1.ConditionStat
 }
 
 func pvcSizeStatusCondition(node *valkeyiov1alpha1.ValkeyNode, pvc *corev1.PersistentVolumeClaim) (metav1.ConditionStatus, string, string) {
-	if node.Spec.Persistence == nil {
-		return metav1.ConditionTrue, "", ""
-	}
 	if pvc == nil {
 		return metav1.ConditionFalse,
 			valkeyiov1alpha1.ValkeyNodeReasonPersistentVolumeClaimResizePending,

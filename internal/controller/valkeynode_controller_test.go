@@ -737,24 +737,6 @@ var _ = Describe("ValkeyNode Controller", func() {
 		})
 	})
 
-	Context("When persistence is used with Deployment", func() {
-		It("should return an error", func() {
-			r := &ValkeyNodeReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
-			}
-			node := &valkeyiov1alpha1.ValkeyNode{
-				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-					WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
-					Persistence: &valkeyiov1alpha1.PersistenceSpec{
-						Size: resource.MustParse("1Gi"),
-					},
-				},
-			}
-			Expect(r.ensureWorkload(context.Background(), node)).To(MatchError(ContainSubstring("persistence requires workloadType StatefulSet")))
-		})
-	})
 })
 
 var _ = Describe("isWorkloadRolledOut", func() {

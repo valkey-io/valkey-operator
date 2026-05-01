@@ -1,6 +1,6 @@
-# ValkeyCluster status conditions
+# Valkey status conditions
 
-The `ValkeyCluster` custom resource uses its `status` field to provide detailed feedback about the current state of the Valkey cluster. This document explains the different fields and conditions you can use to monitor and understand the health of cluster.
+The `ValkeyCluster` and `ValkeyNode` custom resources use their `status` fields to provide detailed feedback about the current state of the Valkey cluster and its managed nodes. This document explains the different fields and conditions you can use to monitor and understand cluster and node health.
 
 ## Status fields
 
@@ -119,6 +119,64 @@ Indicates whether all **16384** hash slots are assigned to primaries.
 Common reasons:
 - `AllSlotsAssigned` – all 16384 slots are assigned
 - `SlotsUnassigned` – waiting for slots to be assigned
+
+---
+
+### ValkeyNode conditions
+
+`ValkeyNode` resources are internal resources created by the operator for each Valkey cluster member. Their conditions are useful when debugging why a cluster is still reconciling, especially when persistence is enabled.
+
+#### `Ready`
+Indicates whether the ValkeyNode pod is ready and the backing workload has completed rollout.
+
+| Status | Meaning |
+|---|---|
+| `True` | The pod is running, ready, and the workload is rolled out to the current spec. |
+| `False` | The pod is missing, not ready, rolling out, or blocked by an infrastructure dependency such as a PVC. |
+
+Common reasons when `Ready=False`:
+- `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
+- `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
+
+Common reasons when `Ready=True`:
+- `PodRunning` – pod is running, ready, and the workload is rolled out.
+
+#### `PersistentVolumeClaimReady`
+Indicates whether the managed PVC for a persistent ValkeyNode exists and is bound.
+
+| Status | Meaning |
+|---|---|
+| `True` | The managed PVC is `Bound` and can be mounted by the pod. |
+| `False` | The managed PVC does not exist yet or is not bound. |
+
+Common reasons:
+- `PersistentVolumeClaimPending` – PVC is missing or still pending.
+- `PersistentVolumeClaimBound` – PVC is bound.
+
+#### `PersistentVolumeClaimSizeReady`
+Indicates whether the managed PVC has satisfied the requested storage size.
+
+| Status | Meaning |
+|---|---|
+| `True` | The PVC capacity is at least the requested `spec.persistence.size`. |
+| `False` | The PVC is not bound, expansion is still running, expansion is pending, or expansion cannot be satisfied. |
+
+Common reasons:
+- `PersistentVolumeClaimSizeSatisfied` – PVC capacity satisfies the requested size.
+- `PersistentVolumeClaimResizePending` – PVC is waiting for binding, controller expansion, or node-side filesystem resize.
+- `PersistentVolumeClaimResizeInProgress` – PVC expansion is actively in progress.
+- `PersistentVolumeClaimResizeInfeasible` – PVC expansion failed or cannot be completed without operator action.
+
+Example commands:
+
+```bash
+# View internal nodes and their readiness
+kubectl get valkeynodes
+
+# Inspect PVC-related conditions for a node
+kubectl get valkeynode my-cluster-0-0 -o jsonpath='{.status.conditions[?(@.type=="PersistentVolumeClaimReady")]}'
+kubectl get valkeynode my-cluster-0-0 -o jsonpath='{.status.conditions[?(@.type=="PersistentVolumeClaimSizeReady")]}'
+```
 
 ---
 
@@ -566,4 +624,3 @@ default     valkeycluster-sample   Ready          ClusterHealthy   3            
 
 - **Ready (ClusterHealthy)**
   - Once `READYSHARDS` reaches the desired shard count and the cluster is healthy, the summary switches to `Ready / ClusterHealthy`.
-

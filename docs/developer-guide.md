@@ -41,16 +41,18 @@ kubectl apply -f config/samples/v1alpha1_valkeycluster.yaml
 kubectl delete -f config/samples/v1alpha1_valkeycluster.yaml
 ```
 
-**Undeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
 **Delete the CRDs from the cluster:**
 
 ```sh
 make uninstall
+```
+
+**Undeploy the controller from the cluster:**
+
+> **⚠️ Warning:** `make undeploy` removes all resources in the operator's namespace. Always deploy the operator in a dedicated namespace to avoid accidentally deleting unrelated workloads.
+
+```sh
+make undeploy
 ```
 
 ## Build the install bundle

@@ -29,13 +29,14 @@ Valkey Operator is a Kubernetes operator that automates the deployment and manag
 
 ## Getting Started
 
+- **Users:** [Quickstart](./docs/quickstart.md)
 - **Contributors:** [Developer Guide](./docs/developer-guide.md)
 
 ## Community & Support
 
 ### Getting Help
 
-- 📖 **[Documentation](./docs/)** - Developer guides and architecture docs
+- 📖 **[Documentation](./docs/)** - Guides and architecture docs
 - 🙏 **[Ask Questions](https://github.com/valkey-io/valkey-operator/discussions/categories/q-a)** - GitHub Discussions Q&A
 - 💬 **[Slack Channel](https://valkey.io/slack)** - Join `#valkey-k8s-operator` to discuss and connect with the community
 - 📝 **[Support Guide](./SUPPORT.md)** - How to get help

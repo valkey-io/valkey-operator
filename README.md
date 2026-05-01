@@ -6,7 +6,7 @@ A Kubernetes operator for deploying Valkey Clusters and managing their lifecycle
 
 ## Description
 
-Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey, a high-performance data structure server that primarily serves key/value workloads.
+Valkey Operator is a Kubernetes operator that automates the deployment and management of [Valkey](https://valkey.io/), a high-performance data structure server that primarily serves key/value workloads.
 The operator simplifies deploying Valkey Clusters on Kubernetes, handling scaling, rolling upgrades, failover, TLS, and access control automatically.
 
 > **⚠️ EARLY DEVELOPMENT NOTICE**

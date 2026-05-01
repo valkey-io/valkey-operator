@@ -104,12 +104,16 @@ make undeploy
 
 ## Current limitations
 
-- Config changes trigger a rolling restart (no live reload yet)
-- No persistent storage — data is lost on pod restart
-- Cluster mode only (no standalone or sentinel)
-- No external access from outside Kubernetes
+- Requires Valkey 9.0+ for scale-out/in support
+- No persistent storage
 - No cert-manager integration (manual TLS Secret only)
+- Config changes trigger a rolling restart (no live reload yet)
+- No module support
+- No backup/restore
+- No default shard-aware anti-affinity (user-configurable via Kubernetes affinity rules)
+- No operator-managed external access (LoadBalancer/Ingress)
 - API is `v1alpha1` and may change in future releases
+- Cluster mode only (no standalone or sentinel)
 
 ## Next steps
 

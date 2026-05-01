@@ -2,19 +2,17 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-A Kubernetes operator for deploying Valkey, Valkey Clusters and managing its lifecycle.
+A Kubernetes operator for deploying Valkey Clusters and managing their lifecycle.
 
 ## Description
 
-Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey, a secure and scalable key management solution. The operator simplifies the process of deploying Valkey on Kubernetes clusters, ensuring that it is configured correctly and operates efficiently. It provides features such as automated installation, configuration management, and lifecycle management of Valkey instances.
+Valkey Operator is a Kubernetes operator that automates the deployment and management of Valkey, a high-performance data structure server that primarily serves key/value workloads.
+The operator simplifies deploying Valkey Clusters on Kubernetes, handling scaling, rolling upgrades, failover, TLS, and access control automatically.
 
 > **⚠️ EARLY DEVELOPMENT NOTICE**
 >
-> This operator is in active development and **not ready for production use**. We're actively working on:
->
-> - Core cluster management features
-> - API stability and design
-> - Testing and validation
+> This operator is in active development and **not ready for production use**.
+> The `v1alpha1` API may change in future releases.
 >
 > **We welcome your feedback!**
 >
@@ -22,10 +20,8 @@ Valkey Operator is a Kubernetes operator that automates the deployment and manag
 > - 🏗️ [Participate in design discussions](https://github.com/valkey-io/valkey-operator/discussions/categories/design)
 > - 🙏 [Ask questions](https://github.com/valkey-io/valkey-operator/discussions/categories/q-a)
 > - 🐛 [Report bugs](https://github.com/valkey-io/valkey-operator/issues)
-> 
-> Want to discuss the operator development? Join the [tech call every Friday at 11:00-11:30 US Eastern](https://zoom-lfx.platform.linuxfoundation.org/meeting/99658320446?password=2eae4006-633e-4fed-aa93-631ab2101421
-).
-
+>
+> Want to discuss the operator development? Join the [tech call every Friday at 11:00-11:30 US Eastern](https://zoom-lfx.platform.linuxfoundation.org/meeting/99658320446?password=2eae4006-633e-4fed-aa93-631ab2101421).
 
 ## Getting Started
 
@@ -51,10 +47,6 @@ We welcome contributions from the community! Whether you're fixing bugs, adding 
 - 🐛 **[Report Issues](https://github.com/valkey-io/valkey-operator/issues)** - Bug reports
 
 **All contributors must sign off commits (DCO).** See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
 ## License
 

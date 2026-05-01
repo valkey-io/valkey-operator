@@ -11,7 +11,7 @@ Deploy a Valkey Cluster on Kubernetes in under 5 minutes.
 
 <!-- TODO: Replace with Helm once https://github.com/valkey-io/valkey-helm/pull/162 is merged:
 ```sh
-helm repo add valkey https://valkey-io.github.io/valkey-helm
+helm repo add valkey https://valkey.io/valkey-helm/
 helm repo update
 helm install valkey-operator valkey/valkey-operator -n valkey-operator-system --create-namespace
 ```

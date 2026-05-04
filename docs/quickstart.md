@@ -6,21 +6,14 @@ Deploy a Valkey Cluster on Kubernetes in under 5 minutes.
 
 - Kubernetes cluster v1.31+
 - kubectl v1.31+
+- Helm 3
 
 ## 1. Install the operator
 
-<!-- TODO: Replace with Helm once https://github.com/valkey-io/valkey-helm/pull/162 is merged:
 ```sh
-helm repo add valkey https://valkey.io/valkey-helm/
+helm repo add valkey https://valkey.io/valkey-helm
 helm repo update
-helm install valkey-operator valkey/valkey-operator -n valkey-operator-system --create-namespace
-```
--->
-```sh
-git clone https://github.com/valkey-io/valkey-operator.git
-cd valkey-operator
-make install
-make deploy IMG=ghcr.io/valkey-io/valkey-operator:main
+helm install valkey-operator valkey/valkey-operator -n valkey-operator-system --create-namespace --set image.tag=main
 ```
 
 Verify the operator is running:
@@ -86,20 +79,9 @@ OK
 
 ## 5. Clean up
 
-<!-- TODO: Replace with Helm once available:
 ```sh
 kubectl delete valkeycluster my-cluster
 helm uninstall valkey-operator -n valkey-operator-system
-```
--->
-```sh
-kubectl delete valkeycluster my-cluster
-```
-
-> **⚠️ Warning:** `make undeploy` removes all resources in the operator's namespace. Always deploy the operator in a dedicated namespace to avoid accidentally deleting unrelated workloads.
-
-```sh
-make undeploy
 ```
 
 ## Current limitations

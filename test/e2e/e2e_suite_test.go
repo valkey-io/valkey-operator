@@ -1,6 +1,8 @@
 //go:build e2e
 // +build e2e
 
+<<<<<<< HEAD
+=======
 /*
 Copyright 2025 Valkey Contributors.
 
@@ -17,6 +19,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+>>>>>>> tmp-original-05-05-26-00-40
 package e2e
 
 import (
@@ -57,6 +60,8 @@ var (
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
 //
+// To enable kubectl kuberc (use custom kubectl configurations), set: KUBECTL_KUBERC=true
+// By default, kuberc is disabled to ensure consistent test behavior across different environments.
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -79,6 +84,7 @@ var _ = BeforeSuite(func() {
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
+	configureKubectlKubeRC()
 	setupCertManager()
 
 	SetDefaultEventuallyTimeout(2 * time.Minute)
@@ -134,6 +140,21 @@ var _ = AfterSuite(func() {
 	cmd = exec.Command("kubectl", "delete", "ns", namespace)
 	_, _ = utils.Run(cmd)
 })
+
+// Disable kubectl kuberc by default for test isolation.
+// This prevents local kubectl configurations from affecting test behavior.
+// To enable kuberc, set: KUBECTL_KUBERC=true
+func configureKubectlKubeRC() {
+	if os.Getenv("KUBECTL_KUBERC") != "true" {
+		By("disabling kubectl kuberc for test isolation")
+		err := os.Setenv("KUBECTL_KUBERC", "false")
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to disable kubectl kuberc")
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"kubectl kuberc disabled for consistent test behavior (override with KUBECTL_KUBERC=true)\n")
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "kubectl kuberc enabled (KUBECTL_KUBERC=true)\n")
+	}
+}
 
 // setupCertManager installs CertManager if needed for webhook tests.
 // Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.

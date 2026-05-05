@@ -89,7 +89,7 @@ helm uninstall valkey-operator -n valkey-operator-system
 - Requires Valkey 9.0+ for scale-out/in support
 - No persistent storage
 - No cert-manager integration (manual TLS Secret only)
-- Config changes trigger a rolling restart (no live reload yet)
+- Config changes via the CRD are not automatically applied to running pods; pods must be manually restarted to pick up changes
 - No module support
 - No backup/restore
 - No default shard-aware anti-affinity (user-configurable via Kubernetes affinity rules)

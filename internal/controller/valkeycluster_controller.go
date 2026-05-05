@@ -884,6 +884,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		cluster.Status.Message = readyCondition.Message
 	}
 
+	// Update Prometheus metrics
+	updateClusterMetrics(cluster)
+
 	// Only update if status has changed
 	if statusChanged(current.Status, cluster.Status) {
 		if err := r.Status().Update(ctx, cluster); err != nil {
@@ -963,6 +966,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		}
 		return false, err
 	}
+	slotMigrationsTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
 }
 

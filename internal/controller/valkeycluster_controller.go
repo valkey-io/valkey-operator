@@ -131,6 +131,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	nodeTransitioning := false
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		log.Error(err, "failed to list ValkeyNodes")
@@ -138,23 +139,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	} else if requeue {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, nil
+	}
+
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, operatorUser, operatorPassword); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	} else if requeue {
+		nodeTransitioning = true
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	}
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
@@ -226,6 +226,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+	}
+
+	// While a node is transitioning (Running but not yet Ready), skip
+	// downstream health checks, scale-in, and rebalancing. The cluster
+	// topology is transient and those checks would either make incorrect
+	// decisions or prematurely mark the cluster as healthy with a 30s
+	// requeue, delaying recovery. Requeue quickly so the phases above
+	// can continue integrating the node on the next pass.
+	if nodeTransitioning {
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	// Build the effective shard list: state.Shards plus any pending primaries
@@ -384,7 +395,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -398,11 +409,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// re-scraping fresh state.
 	var clusterState *valkey.ClusterState
 	if anyNodeRequiresRoll(cluster, nodes) {
-		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-		if err != nil {
-			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
-		}
-		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, username, password)
 		defer clusterState.CloseClients()
 	}
 
@@ -426,6 +433,23 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		log.V(1).Info("created ValkeyNodes", "count", totalCreated)
 	}
 	return false, nil
+}
+
+// shouldWaitForNode returns true when the reconciler should pause and requeue
+// rather than advancing to the next ValkeyNode. The gate is lifecycle-aware:
+//
+//   - Bootstrap (clusterFormed=false): wait until the pod's Valkey container is
+//     Running. Waiting for Ready here deadlocks: cluster_state:ok (readiness)
+//     requires MEET+slots, but MEET+slots require this gate to pass first.
+//
+//   - Rolling update (clusterFormed=true): wait until the pod is Ready
+//     (cluster_state:ok confirmed), ensuring the cluster converges before the
+//     next pod is rolled.
+func shouldWaitForNode(clusterFormed bool, status valkeyiov1alpha1.ValkeyNodeStatus) bool {
+	if clusterFormed {
+		return !status.Ready
+	}
+	return !status.Running
 }
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
@@ -490,12 +514,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 				"observedGeneration", node.Status.ObservedGeneration)
 			return true, false, nil
 		}
-		if !node.Status.Ready {
-			// No spec change, but the node hasn't reached Ready yet (e.g.
-			// still starting after a prior update). Unlike Updated above, we
-			// only wait when not-ready; a ready unchanged node is safe to
-			// advance past.
-			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
+		clusterFormed := meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		if shouldWaitForNode(clusterFormed, node.Status) {
+			log.V(1).Info("waiting for node", "name", node.Name,
+				"clusterFormed", clusterFormed,
+				"running", node.Status.Running,
+				"ready", node.Status.Ready)
 			return true, false, nil
 		}
 	default:

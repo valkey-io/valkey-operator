@@ -605,7 +605,7 @@ func TestLivenessCheckScript(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+			if err := runProbeScript(t, scriptPath, test.response, ""); (err != nil) != test.wantErr {
 				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
 			}
 		})
@@ -616,19 +616,28 @@ func TestReadinessCheckScript(t *testing.T) {
 	scriptPath := filepath.Join("scripts", "readiness-check.sh")
 
 	tests := []struct {
-		name     string
-		response string
-		wantErr  bool
+		name        string
+		pingResp    string
+		clusterResp string
+		wantErr     bool
 	}{
-		{name: "pong", response: "PONG", wantErr: false},
-		{name: "loading", response: "LOADING 123", wantErr: true},
-		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: true},
-		{name: "error", response: "ERR something bad", wantErr: true},
+		// PING failures short-circuit before cluster state check
+		{name: "loading", pingResp: "LOADING 123", clusterResp: "", wantErr: true},
+		{name: "masterdown", pingResp: "MASTERDOWN Link with MASTER is down", clusterResp: "", wantErr: true},
+		{name: "error", pingResp: "ERR something bad", clusterResp: "", wantErr: true},
+		// Cluster state checks
+		{name: "cluster state ok", pingResp: "PONG", clusterResp: "cluster_state:ok", wantErr: false},
+		{name: "cluster state fail", pingResp: "PONG", clusterResp: "cluster_state:fail", wantErr: true},
+		// Verifies anchored grep extracts "cluster_state:fail" regardless of other fields.
+		{name: "cluster state fail uninitialized", pingResp: "PONG", clusterResp: "cluster_state:fail\ncluster_slots_assigned:0", wantErr: true},
+		// Standalone mode: CLUSTER INFO returns an ERR or empty — no cluster_state line → skip check → pass.
+		{name: "standalone mode cluster support disabled", pingResp: "PONG", clusterResp: "ERR This instance has cluster support disabled", wantErr: false},
+		{name: "standalone mode empty response", pingResp: "PONG", clusterResp: "", wantErr: false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+			if err := runReadinessProbeScript(t, scriptPath, test.pingResp, test.clusterResp); (err != nil) != test.wantErr {
 				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
 			}
 		})
@@ -691,22 +700,198 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 
-func runProbeScript(t *testing.T, scriptPath, response string) error {
+func TestPodRunning(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "nil pod",
+			pod:  nil,
+			want: false,
+		},
+		{
+			name: "pod with no container statuses",
+			pod:  &corev1.Pod{},
+			want: false,
+		},
+		{
+			name: "container in Waiting state",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "container in Terminated state",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "server container in Running state",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "server", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "sidecar running but server not running",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "exporter", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+						{Name: "server", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "server running alongside sidecar",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "exporter", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{}}},
+						{Name: "server", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					},
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podRunning(tt.pod); got != tt.want {
+				t.Errorf("podRunning() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldWaitForNode(t *testing.T) {
+	tests := []struct {
+		name          string
+		clusterFormed bool
+		status        valkeyv1.ValkeyNodeStatus
+		want          bool
+	}{
+		// Bootstrap (clusterFormed=false): gate on Running
+		{
+			name:          "bootstrap: not running → wait",
+			clusterFormed: false,
+			status:        valkeyv1.ValkeyNodeStatus{Running: false},
+			want:          true,
+		},
+		{
+			name:          "bootstrap: running → proceed",
+			clusterFormed: false,
+			status:        valkeyv1.ValkeyNodeStatus{Running: true},
+			want:          false,
+		},
+		{
+			name:          "bootstrap: running but not ready → proceed (key bootstrap case)",
+			clusterFormed: false,
+			status:        valkeyv1.ValkeyNodeStatus{Running: true, Ready: false},
+			want:          false,
+		},
+		// Rolling update (clusterFormed=true): gate on Ready
+		{
+			name:          "rolling update: not ready → wait",
+			clusterFormed: true,
+			status:        valkeyv1.ValkeyNodeStatus{Ready: false},
+			want:          true,
+		},
+		{
+			name:          "rolling update: ready → proceed",
+			clusterFormed: true,
+			status:        valkeyv1.ValkeyNodeStatus{Ready: true},
+			want:          false,
+		},
+		{
+			name:          "rolling update: running but not ready → wait",
+			clusterFormed: true,
+			status:        valkeyv1.ValkeyNodeStatus{Running: true, Ready: false},
+			want:          true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldWaitForNode(tt.clusterFormed, tt.status); got != tt.want {
+				t.Errorf("shouldWaitForNode(%v, %v) = %v, want %v", tt.clusterFormed, tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// runProbeScript runs the probe script at scriptPath with a fake valkey-cli
+// that returns pingResponse for PING calls and clusterInfoResponse for CLUSTER INFO calls.
+// Pass clusterInfoResponse="" to leave VALKEY_CLUSTER_INFO_RESPONSE empty in the environment;
+// the liveness script never calls CLUSTER INFO so the value is irrelevant for liveness tests.
+func runProbeScript(t *testing.T, scriptPath, pingResponse, clusterInfoResponse string) error {
 	t.Helper()
 
-	// Stub valkey-cli so the script uses the response we provide.
 	binDir := t.TempDir()
 	valkeyCli := filepath.Join(binDir, "valkey-cli")
-	script := []byte("#!/bin/sh\n" +
-		"echo \"${VALKEY_RESPONSE:-PONG}\"\n")
-	if err := os.WriteFile(valkeyCli, script, 0o755); err != nil {
+	stub := []byte(`#!/bin/sh
+case "$*" in
+  *CLUSTER\ INFO*) echo "${VALKEY_CLUSTER_INFO_RESPONSE}" ;;
+  *)               echo "${VALKEY_RESPONSE:-PONG}" ;;
+esac
+`)
+	if err := os.WriteFile(valkeyCli, stub, 0o755); err != nil {
 		t.Fatalf("write valkey-cli stub: %v", err)
 	}
 
 	cmd := exec.Command(scriptPath)
 	cmd.Env = append(os.Environ(),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"VALKEY_RESPONSE="+response,
+		"VALKEY_RESPONSE="+pingResponse,
+		"VALKEY_CLUSTER_INFO_RESPONSE="+clusterInfoResponse,
+	)
+	return cmd.Run()
+}
+
+// runReadinessProbeScript runs the readiness-check.sh script with a two-response
+// stub valkey-cli that dispatches PING and CLUSTER INFO calls separately.
+func runReadinessProbeScript(t *testing.T, scriptPath, pingResp, clusterInfoResp string) error {
+	t.Helper()
+
+	binDir := t.TempDir()
+	valkeyCli := filepath.Join(binDir, "valkey-cli")
+	// The stub dispatches based on whether any argument is "PING".
+	stub := []byte("#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    PING) echo \"$PING_RESP\"; exit 0 ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"printf '%s\\n' \"$CLUSTER_INFO_RESP\"\n")
+	if err := os.WriteFile(valkeyCli, stub, 0o755); err != nil {
+		t.Fatalf("write valkey-cli stub: %v", err)
+	}
+
+	cmd := exec.Command(scriptPath)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PING_RESP="+pingResp,
+		"CLUSTER_INFO_RESP="+clusterInfoResp,
 	)
 	return cmd.Run()
 }

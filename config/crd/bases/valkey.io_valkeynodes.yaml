@@ -19,6 +19,11 @@ spec:
       jsonPath: .status.ready
       name: Ready
       type: boolean
+    - description: Whether the Valkey container is running (precedes readiness)
+      jsonPath: .status.running
+      name: Running
+      priority: 1
+      type: boolean
     - description: Valkey replication role
       jsonPath: .status.role
       name: Role
@@ -2845,6 +2850,13 @@ spec:
                 description: Role is the Valkey replication role of this node (primary
                   or replica).
                 type: string
+              running:
+                description: |-
+                  Running is true when the Valkey container is in the Running state.
+                  This precedes readiness (cluster_state:ok) and allows ValkeyCluster to
+                  proceed with cluster initialization during bootstrap without waiting for
+                  readiness probes to pass.
+                type: boolean
             type: object
         required:
         - metadata

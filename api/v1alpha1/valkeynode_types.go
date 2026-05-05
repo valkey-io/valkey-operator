@@ -108,6 +108,13 @@ type ValkeyNodeStatus struct {
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 
+	// Running is true when the Valkey container is in the Running state.
+	// This precedes readiness (cluster_state:ok) and allows ValkeyCluster to
+	// proceed with cluster initialization during bootstrap without waiting for
+	// readiness probes to pass.
+	// +optional
+	Running bool `json:"running,omitempty"`
+
 	// PodName is the name of the pod created by the workload.
 	// +optional
 	PodName string `json:"podName,omitempty"`
@@ -161,6 +168,7 @@ const (
 // ValkeyNode is the Schema for the valkeynodes API.
 // ValkeyNode is an internal CRD. Users should not create ValkeyNodes directly.
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready",description="Whether the node is ready"
+// +kubebuilder:printcolumn:name="Running",type="boolean",JSONPath=".status.running",description="Whether the Valkey container is running (precedes readiness)",priority=1
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role",description="Valkey replication role"
 // +kubebuilder:printcolumn:name="Pod",type="string",JSONPath=".status.podName",description="Pod name"
 // +kubebuilder:printcolumn:name="IP",type="string",JSONPath=".status.podIP",description="Pod IP",priority=1

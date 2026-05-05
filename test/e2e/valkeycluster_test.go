@@ -1134,14 +1134,15 @@ spec:
 		const clusterName = "valkeycluster-rolling-e2e"
 
 		It("propagates spec changes one node at a time and returns to Ready", func() {
-			By("creating a ValkeyCluster with 2 shards and 1 replica")
+			By("creating a ValkeyCluster with 3 shards and 1 replica")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
   name: %s
 spec:
-  shards: 2
+  shards: 3
   replicas: 1
+  image: valkey/valkey:9.0.0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1157,13 +1158,13 @@ spec:
 				cr, err := utils.GetValkeyClusterStatus(clusterName)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
-				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("patching the cluster with new memory requests to trigger a rolling update")
+			By("patching the cluster with new image to trigger a rolling update")
 			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
 				"--type=merge", "-p",
-				`{"spec":{"resources":{"requests":{"cpu":"100m","memory":"384Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}}`)
+				`{"spec":{"image":"valkey/valkey:9.0.1"}}`)
 			_, err = utils.Run(patchCmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster resources")
 
@@ -1177,17 +1178,17 @@ spec:
 				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
 			}, 2*time.Minute, time.Second).Should(Succeed())
 
-			By("waiting for all ValkeyNodes to reflect the updated memory request")
+			By("waiting for all ValkeyNodes to reflect the updated image")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "valkeynodes",
 					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-					"-o", "jsonpath={.items[*].spec.resources.requests.memory}")
+					"-o", "jsonpath={.items[*].spec.image}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				fields := strings.Fields(output)
-				g.Expect(fields).To(HaveLen(4), "expected 4 ValkeyNodes (2 shards × 2 nodes each)")
-				for _, mem := range fields {
-					g.Expect(mem).To(Equal("384Mi"), "each ValkeyNode should have the updated memory request")
+				g.Expect(fields).To(HaveLen(6), "expected 6 ValkeyNodes (3 shards × 2 nodes each)")
+				for _, image := range fields {
+					g.Expect(image).To(Equal("valkey/valkey:9.0.1"), "each ValkeyNode should have the updated image")
 				}
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
 

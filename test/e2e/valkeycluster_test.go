@@ -1067,6 +1067,69 @@ spec:
 		})
 	})
 
+	Context("persistence mutation rules", func() {
+		const addClusterName = "valkeycluster-persistence-add-e2e"
+		const shrinkClusterName = "valkeycluster-persistence-shrink-e2e"
+
+		It("rejects adding persistence after creation", func() {
+			By("creating a ValkeyCluster without persistence")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+`, addClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", addClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("attempting to add persistence after creation")
+			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", addClusterName,
+				"--type=merge", "-p", `{"spec":{"persistence":{"size":"1Gi"}}}`)
+			output, err := utils.Run(patchCmd)
+			Expect(err).To(HaveOccurred(), "patch should be rejected")
+			Expect(output).To(ContainSubstring("persistence cannot be added after creation"),
+				"error should mention that persistence cannot be added after creation")
+		})
+
+		It("rejects shrinking persistence size after creation", func() {
+			By("creating a ValkeyCluster with persistence")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  persistence:
+    size: 1Gi
+`, shrinkClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create persistent ValkeyCluster")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", shrinkClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("attempting to shrink persistence size")
+			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", shrinkClusterName,
+				"--type=merge", "-p", `{"spec":{"persistence":{"size":"512Mi"}}}`)
+			output, err := utils.Run(patchCmd)
+			Expect(err).To(HaveOccurred(), "patch should be rejected")
+			Expect(output).To(ContainSubstring("persistence.size may only be expanded"),
+				"error should mention that persistence.size may only be expanded")
+		})
+	})
+
 	Context("rolling update", func() {
 		const clusterName = "valkeycluster-rolling-e2e"
 

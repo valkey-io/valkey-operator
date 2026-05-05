@@ -528,6 +528,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 			Image:               cluster.Spec.Image,
 			WorkloadType:        cluster.Spec.WorkloadType,
+			Persistence:         cluster.Spec.Persistence,
 			Resources:           cluster.Spec.Resources,
 			NodeSelector:        cluster.Spec.NodeSelector,
 			Affinity:            cluster.Spec.Affinity,

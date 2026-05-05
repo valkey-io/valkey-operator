@@ -77,6 +77,8 @@ const (
 	tlsVolumeName = "tls-certs"
 	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
 	tlsCertMountPath = "/tls"
+	dataVolumeName   = "data"
+	dataMountPath    = "/data"
 	tlsSecretKeyCA   = "ca.crt"
 	tlsSecretKeyCert = "tls.crt"
 	tlsSecretKeyKey  = "tls.key"

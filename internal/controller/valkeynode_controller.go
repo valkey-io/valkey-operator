@@ -56,6 +56,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -70,7 +71,18 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !node.DeletionTimestamp.IsZero() {
+		return r.reconcileDeletion(ctx, node)
+	}
+	if requeue, err := r.reconcilePersistenceFinalizer(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	} else if requeue {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -227,6 +239,32 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	// whether the controller has processed the latest spec.
 	current.Status.ObservedGeneration = current.Generation
 
+	pvc, err := r.getPersistentVolumeClaim(ctx, node)
+	if err != nil {
+		return err
+	}
+	if node.Spec.Persistence != nil {
+		pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady,
+			Status:             pvcStatus,
+			Reason:             pvcReason,
+			Message:            pvcMessage,
+			ObservedGeneration: current.Generation,
+		})
+		pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(current, pvc)
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
+			Status:             pvcSizeStatus,
+			Reason:             pvcSizeReason,
+			Message:            pvcSizeMessage,
+			ObservedGeneration: current.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
+	}
+
 	pod, err := r.getPod(ctx, node)
 	if err != nil {
 		return err
@@ -236,11 +274,16 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		current.Status.Ready = false
 		current.Status.PodName = ""
 		current.Status.PodIP = ""
+		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+		message := "Pod does not exist yet"
+		if node.Spec.Persistence != nil {
+			_, reason, message = pvcStatusCondition(pvc)
+		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
-			Message:            "Pod does not exist yet",
+			Reason:             reason,
+			Message:            message,
 			ObservedGeneration: current.Generation,
 		})
 	} else {
@@ -278,11 +321,19 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				ObservedGeneration: current.Generation,
 			})
 		} else {
+			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+			message := "Pod is not ready"
+			if node.Spec.Persistence != nil {
+				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
+					reason = pvcReason
+					message = pvcMessage
+				}
+			}
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodNotReady,
-				Message:            "Pod is not ready",
+				Reason:             reason,
+				Message:            message,
 				ObservedGeneration: current.Generation,
 			})
 		}

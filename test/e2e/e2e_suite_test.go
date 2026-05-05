@@ -1,8 +1,6 @@
 //go:build e2e
 // +build e2e
 
-<<<<<<< HEAD
-=======
 /*
 Copyright 2025 Valkey Contributors.
 
@@ -19,7 +17,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
->>>>>>> tmp-original-05-05-26-00-40
 package e2e
 
 import (

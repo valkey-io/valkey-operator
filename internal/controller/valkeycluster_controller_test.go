@@ -1,9 +1,3 @@
-<<<<<<< HEAD
-package controller
-
-import (
-	. "github.com/onsi/ginkgo/v2"
-=======
 /*
 Copyright 2025 Valkey Contributors.
 
@@ -40,18 +34,12 @@ import (
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	testutils "valkey.io/valkey-operator/test/utils"
->>>>>>> tmp-original-05-05-26-00-40
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {
 	Context("When reconciling a resource", func() {
+		const resourceName = "test-resource"
 
-<<<<<<< HEAD
-		It("should successfully reconcile the resource", func() {
-
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-=======
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
@@ -124,7 +112,6 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("ValkeyNodeCreated")))
 
->>>>>>> tmp-original-05-05-26-00-40
 		})
 	})
 })

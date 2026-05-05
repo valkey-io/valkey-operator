@@ -20,7 +20,7 @@ repos:
       - id: make-lint
         name: run golangci-lint
         language: system
-        entry: bash -c "GOTOOLCHAIN=go1.25.0+auto make lint"
+        entry: bash -c "GOTOOLCHAIN=go1.26.2 make lint"
         types: [go]
         pass_filenames: false
 

@@ -70,6 +70,12 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
+	// TopologySpreadConstraints defines pod topology spread constraints applied
+	// to the ValkeyNode workload. The operator augments these constraints with
+	// shard-aware selectors derived from node labels.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
 	// Exporter defines the metrics exporter sidecar configuration.
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`

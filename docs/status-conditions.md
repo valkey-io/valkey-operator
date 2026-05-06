@@ -59,6 +59,7 @@ Common reasons when `Ready=False`:
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
+- `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy
@@ -90,6 +91,7 @@ Indicates whether the cluster is impaired but may still be partially functional.
 Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
+- `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 
 ---
 

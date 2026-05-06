@@ -32,6 +32,13 @@ func setCondition(cluster *valkeyiov1alpha1.ValkeyCluster, condType, reason, mes
 	})
 }
 
+func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason string) {
+	condition := meta.FindStatusCondition(*conditions, condType)
+	if condition != nil && condition.Reason == reason {
+		meta.RemoveStatusCondition(conditions, condType)
+	}
+}
+
 // conditionsChanged returns true if two condition slices differ, ignoring LastTransitionTime.
 func conditionsChanged(old, new []metav1.Condition) bool {
 	if len(old) != len(new) {

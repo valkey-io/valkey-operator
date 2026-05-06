@@ -2665,6 +2665,13 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              serverConfigHash:
+                description: |-
+                  ServerConfigHash is a hash of the server ConfigMap contents. When set by
+                  the ValkeyCluster controller it bumps the spec Generation, which triggers
+                  the ValkeyNode controller to reconcile and update the pod template
+                  annotation — causing a rolling restart when the cluster config changes.
+                type: string
               serverConfigMapName:
                 description: |-
                   ServerConfigMapName specifies the name of the ConfigMap that contains the

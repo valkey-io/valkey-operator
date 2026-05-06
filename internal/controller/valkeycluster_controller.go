@@ -130,6 +130,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	configHash := func() string {
+		cm := &corev1.ConfigMap{}
+		if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
+			return ""
+		}
+		return cm.Annotations[configHashKey]
+	}()
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -139,7 +146,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -384,7 +391,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -409,7 +416,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState)
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
 			if err != nil {
 				return false, err
 			}
@@ -431,10 +438,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (bool, bool, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	desired.Spec.ServerConfigHash = configHash
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,

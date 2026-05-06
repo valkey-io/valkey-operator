@@ -131,36 +131,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		log.Error(err, "failed to list ValkeyNodes")
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeListError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
+	nodes, result, handled, err := r.reconcileNodesAndScheduling(ctx, cluster)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	} else if requeue {
-		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
-			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-			_ = r.updateStatus(ctx, cluster, nil)
-			return ctrl.Result{}, err
-		} else if handled {
-			return result, nil
-		}
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
-	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	} else if handled {
+	if handled {
 		return result, nil
 	}
 
@@ -351,6 +326,44 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	log.V(1).Info("reconcile done")
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *ValkeyClusterReconciler) reconcileNodesAndScheduling(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*valkeyiov1alpha1.ValkeyNodeList, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		log.Error(err, "failed to list ValkeyNodes")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeListError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return nil, ctrl.Result{}, false, err
+	}
+
+	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes)
+	if err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return nil, ctrl.Result{}, false, err
+	}
+
+	result, handled, err := r.handlePodSchedulingIssues(ctx, cluster)
+	if err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return nil, ctrl.Result{}, false, err
+	}
+	if handled {
+		return nil, result, true, nil
+	}
+
+	if requeue {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return nil, ctrl.Result{RequeueAfter: 2 * time.Second}, true, nil
+	}
+
+	return nodes, ctrl.Result{}, false, nil
 }
 
 type podSchedulingIssue struct {

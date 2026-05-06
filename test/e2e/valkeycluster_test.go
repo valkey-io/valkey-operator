@@ -993,7 +993,7 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 			}
-			Eventually(verifyCrStatus).Should(Succeed())
+			Eventually(verifyCrStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
@@ -1127,6 +1127,133 @@ spec:
 			Expect(err).To(HaveOccurred(), "patch should be rejected")
 			Expect(output).To(ContainSubstring("persistence.size may only be expanded"),
 				"error should mention that persistence.size may only be expanded")
+		})
+	})
+
+	Context("topology spread constraints", Label("topology-spread"), func() {
+		const clusterName = "valkeycluster-topology-spread-e2e"
+
+		It("spreads pods from the same shard across different nodes", func() {
+			By("creating a ValkeyCluster with host-level topology spread constraints")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+`, clusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster with topology spread constraints")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready")
+			verifyCrStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}
+			Eventually(verifyCrStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying each shard is spread across two different nodes")
+			verifyShardPlacement := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+					"-o", "go-template={{ range .items }}{{ index .metadata.labels \"valkey.io/shard-index\" }} {{ .spec.nodeName }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				shardNodes := map[string]map[string]struct{}{}
+				for _, line := range utils.GetNonEmptyLines(output) {
+					fields := strings.Fields(line)
+					g.Expect(fields).To(HaveLen(2), "expected shard-index and node-name")
+					if _, exists := shardNodes[fields[0]]; !exists {
+						shardNodes[fields[0]] = map[string]struct{}{}
+					}
+					shardNodes[fields[0]][fields[1]] = struct{}{}
+				}
+
+				g.Expect(shardNodes).To(HaveLen(3), "expected placement data for 3 shards")
+				for shardIndex, nodes := range shardNodes {
+					g.Expect(nodes).To(HaveLen(2), "expected shard %s to span two Kubernetes nodes", shardIndex)
+				}
+			}
+			Eventually(verifyShardPlacement).Should(Succeed())
+		})
+
+		It("surfaces scheduler failures when strict topology spread cannot be satisfied", func() {
+			const (
+				unschedulableClusterName = "vkc-tspread-unsched"
+				eligibleNodeLabelKey     = "valkey.io/e2e-topology-spread-node"
+				eligibleNodeLabelValue   = "true"
+			)
+
+			By("labeling one worker node as the only eligible node")
+			cmd := exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			eligibleNode, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node: %s", eligibleNode))
+			Expect(eligibleNode).NotTo(BeEmpty(), "expected at least one worker node")
+
+			cmd = exec.Command("kubectl", "label", "node", eligibleNode,
+				fmt.Sprintf("%s=%s", eligibleNodeLabelKey, eligibleNodeLabelValue), "--overwrite=true")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label worker node: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "label", "node", eligibleNode, eligibleNodeLabelKey+"-", "--overwrite=true")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating a ValkeyCluster whose shard requires at least two topology domains")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  nodeSelector:
+    %s: "%s"
+  topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 2
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+`, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create unschedulable ValkeyCluster: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", unschedulableClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster status to report PodUnschedulable")
+			verifyUnschedulableStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(unschedulableClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateDegraded))
+				g.Expect(cr.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+				g.Expect(cr.Status.Message).To(ContainSubstring("unschedulable"))
+
+				degradedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+				g.Expect(degradedCond).NotTo(BeNil(), "Degraded condition not found")
+				g.Expect(degradedCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+			}
+			Eventually(verifyUnschedulableStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
 		})
 	})
 

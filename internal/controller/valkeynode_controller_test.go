@@ -762,6 +762,66 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:8.0.0"))
 		})
+
+		It("should propagate ServerConfigHash spec field to Deployment pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, node); err == nil {
+				node.Finalizers = nil
+				Expect(k8sClient.Update(ctx, node)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &valkeyiov1alpha1.ValkeyNode{}))
+				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			}
+			Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+					Labels: map[string]string{
+						LabelCluster: resourceName,
+					},
+				},
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
+					ServerConfigMapName: "ext-config",
+					ServerConfigHash:    "hash-v1",
+				},
+			})).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("reconciling to create the Deployment")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the Deployment pod template carries the config hash annotation")
+			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
+			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
+				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+
+			By("simulating a config change by updating ServerConfigHash in the spec")
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			updated.Spec.ServerConfigHash = "hash-v2"
+			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
+
+			By("reconciling after the config change")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the Deployment pod template annotation was updated, causing a rolling update")
+			dep2 := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
+			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+				"updated config hash must be propagated to trigger pod restart")
+		})
 	})
 
 	Context("When WorkloadType is unsupported", func() {

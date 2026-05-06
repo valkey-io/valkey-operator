@@ -115,7 +115,6 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 	}
 }
 
-// ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
 // buildPodTemplateAnnotations assembles the annotations that must be present on
 // the pod template spec to trigger rolling updates when the ACL secret or the
 // server config changes.
@@ -129,6 +128,7 @@ func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode, aclSecret *c
 	return annotations
 }
 
+// ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
 	desired, err := buildValkeyNodeStatefulSet(node)

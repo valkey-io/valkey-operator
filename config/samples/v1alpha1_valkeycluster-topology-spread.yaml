@@ -1,0 +1,14 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: valkey-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: cluster-sample-topology-spread
+spec:
+  shards: 3
+  replicas: 1
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule

@@ -116,6 +116,19 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 }
 
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
+// buildPodTemplateAnnotations assembles the annotations that must be present on
+// the pod template spec to trigger rolling updates when the ACL secret or the
+// server config changes.
+func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) map[string]string {
+	annotations := map[string]string{
+		hashAnnotationKey: aclSecret.Annotations[hashAnnotationKey],
+	}
+	if node.Spec.ServerConfigHash != "" {
+		annotations[configHashKey] = node.Spec.ServerConfigHash
+	}
+	return annotations
+}
+
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
 	desired, err := buildValkeyNodeStatefulSet(node)
@@ -141,9 +154,7 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		sts.Labels = desired.Labels
 		sts.Spec = desired.Spec
-		sts.Spec.Template.Annotations = map[string]string{
-			hashAnnotationKey: aclSecret.Annotations[hashAnnotationKey],
-		}
+		sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
 		return controllerutil.SetControllerReference(node, sts, r.Scheme)
 	})
 	if err != nil {
@@ -180,9 +191,7 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
 		dep.Labels = desired.Labels
 		dep.Spec = desired.Spec
-		dep.Spec.Template.Annotations = map[string]string{
-			hashAnnotationKey: aclSecret.Annotations[hashAnnotationKey],
-		}
+		dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
 		return controllerutil.SetControllerReference(node, dep, r.Scheme)
 	})
 	if err != nil {

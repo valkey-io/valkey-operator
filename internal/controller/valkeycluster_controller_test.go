@@ -116,6 +116,91 @@ var _ = Describe("ValkeyCluster Controller", func() {
 	})
 })
 
+var _ = Describe("ValkeyCluster config hash propagation", func() {
+	ctx := context.Background()
+
+	It("should set configHashKey annotation on ValkeyNodes and update it when cluster config changes", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "config-hash-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+				Config:   map[string]string{"maxmemory": "100mb"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		defer func() {
+			nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+			_ = k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})
+			for i := range nodeList.Items {
+				_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+			}
+			_ = k8sClient.Delete(ctx, cluster)
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+			secret := &corev1.Secret{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err == nil {
+				_ = k8sClient.Delete(ctx, secret)
+			}
+		}()
+
+		r := &ValkeyClusterReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+
+		By("reconciling to create the ConfigMap and ValkeyNodes")
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("reading the config hash from the cluster ConfigMap")
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		initialHash := cm.Annotations[configHashKey]
+		Expect(initialHash).NotTo(BeEmpty())
+
+		By("verifying each ValkeyNode carries the config hash in its spec")
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
+		Expect(nodeList.Items).NotTo(BeEmpty())
+		for _, n := range nodeList.Items {
+			Expect(n.Spec.ServerConfigHash).To(Equal(initialHash),
+				"ValkeyNode %s must have ServerConfigHash set so a spec change triggers ValkeyNode controller reconciliation", n.Name)
+		}
+
+		By("updating the cluster config")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Config["maxmemory"] = "200mb"
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		By("reconciling after the config change")
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("verifying the ConfigMap has a new hash")
+		updatedCM := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
+		newHash := updatedCM.Annotations[configHashKey]
+		Expect(newHash).NotTo(BeEmpty())
+		Expect(newHash).NotTo(Equal(initialHash), "config hash should change when cluster config changes")
+
+		By("verifying each ValkeyNode spec was updated with the new hash")
+		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(ctx, updatedNodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
+		Expect(updatedNodeList.Items).NotTo(BeEmpty())
+		for _, n := range updatedNodeList.Items {
+			Expect(n.Spec.ServerConfigHash).To(Equal(newHash),
+				"ValkeyNode %s ServerConfigHash must be updated to bump Generation and trigger ValkeyNode controller reconciliation", n.Name)
+		}
+	})
+})
+
 var _ = Describe("reconcileUsersAcl", func() {
 	Context("When reconciling ACL secrets", func() {
 		It("should return an error when a user references a missing password secret", func() {

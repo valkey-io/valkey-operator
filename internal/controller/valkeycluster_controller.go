@@ -428,6 +428,19 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	return false, nil
 }
 
+// getServerConfigHash returns the config hash annotation from the cluster's
+// ConfigMap. Propagating this to ValkeyNode annotations triggers the ValkeyNode
+// controller to reconcile and update the pod template, causing a rolling restart
+// when the cluster config changes.
+func (r *ValkeyClusterReconciler) getServerConfigHash(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) string {
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
+		return ""
+	}
+	return cm.Annotations[configHashKey]
+}
+
+
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
@@ -465,6 +478,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
 		node.Labels = desired.Labels
 		node.Spec = desired.Spec
+		node.Spec.ServerConfigHash = r.getServerConfigHash(ctx, cluster)
 		return controllerutil.SetControllerReference(cluster, node, r.Scheme)
 	})
 	if err != nil {

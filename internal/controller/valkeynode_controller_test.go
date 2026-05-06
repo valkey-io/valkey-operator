@@ -600,6 +600,47 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
 		})
+
+		It("should propagate ServerConfigHash spec field to StatefulSet pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set (simulating a cluster-managed node)")
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				ServerConfigMapName: "ext-config",
+				ServerConfigHash:    "hash-v1",
+			})
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("reconciling to create the StatefulSet")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the StatefulSet pod template carries the config hash annotation")
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
+				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+
+			By("simulating a config change by updating ServerConfigHash in the spec")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.ServerConfigHash = "hash-v2"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			By("reconciling after the config change")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the StatefulSet pod template annotation was updated, causing a rolling update")
+			sts2 := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
+			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+				"updated config hash must be propagated to trigger pod restart")
+		})
 	})
 
 	Context("When WorkloadType is Deployment", func() {

@@ -2795,6 +2795,10 @@ spec:
                       description: Raw ACL for (additional) permissions. Appended
                         to anything generated.
                       type: string
+                    resetpass:
+                      default: false
+                      description: Apply the resetpass flag to this user
+                      type: boolean
                   required:
                   - name
                   type: object

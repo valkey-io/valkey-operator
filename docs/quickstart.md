@@ -87,9 +87,7 @@ helm uninstall valkey-operator -n valkey-operator-system
 ## Current limitations
 
 - Requires Valkey 9.0+ for scale-out/in support
-- No persistent storage
 - No cert-manager integration (manual TLS Secret only)
-- Config changes via the CRD are not automatically applied to running pods; pods must be manually restarted to pick up changes
 - No module support
 - No backup/restore
 - No default shard-aware anti-affinity (user-configurable via Kubernetes affinity rules)
@@ -99,4 +97,5 @@ helm uninstall valkey-operator -n valkey-operator-system
 
 ## Next steps
 
+- [ValkeyCluster](./valkeycluster.md) — CRD reference and configuration options
 - [Status conditions](./status-conditions.md) — understanding cluster health

@@ -50,6 +50,11 @@ spec:
           - davidnew
       commands:
         allow: ["@admin"]
+    - name: edward
+      enabled: true
+      resetpass: true
+      nopass: true
+      permissions: "+@admin"
 
   resources:
     requests:

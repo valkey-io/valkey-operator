@@ -41,6 +41,7 @@ func TestBuildAclFileContents(t *testing.T) {
 		"bob":     "user bob on nopass +@all -@admin ~* &*",
 		"charlie": "user charlie off nopass +@admin",
 		"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
+		"edward":  "user edward on +@admin",
 	}
 
 	// UsersAcl
@@ -87,6 +88,15 @@ func TestBuildAclFileContents(t *testing.T) {
 			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
 				Keys: []string{"davidold", "davidnew"},
 			},
+			Commands: valkeyiov1alpha1.CommandsAclSpec{
+				Allow: []string{"@admin"},
+			},
+		},
+		{
+			Name:       "edward",
+			Enabled:    true,
+			ResetPass:  true,
+			NoPassword: true,
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},

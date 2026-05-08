@@ -476,6 +476,7 @@ spec:
 					ContainSubstring("user alice on"),
 					ContainSubstring("user bob on nopass"),
 					ContainSubstring("user david on"),
+					ContainSubstring("user edward on"),
 					ContainSubstring("user _exporter on"),
 					ContainSubstring("user _operator on"),
 				))

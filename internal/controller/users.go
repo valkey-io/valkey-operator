@@ -226,11 +226,14 @@ func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string 
 		acl.WriteString("off")
 	}
 
-	// If enabled, append password(s), which should already be prefix-hashed
-	if user.NoPassword {
-		fmt.Fprintf(&acl, " nopass")
-	} else {
-		appendAcl(&acl, passwords, "#")
+	// If resetpass flag is false, then add password(s)/nopass flag to the ACL
+	if !user.ResetPass {
+		// If enabled, append password(s), which should already be prefix-hashed
+		if user.NoPassword {
+			fmt.Fprintf(&acl, " nopass")
+		} else {
+			appendAcl(&acl, passwords, "#")
+		}
 	}
 
 	// Add key restrictions

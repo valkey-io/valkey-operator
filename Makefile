@@ -1,7 +1,5 @@
 # Image URL to use all building/pushing image targets
 IMG                  ?= controller:latest
-# YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
-YEAR                 ?= $(shell date +%Y)
 VERSION              ?= $(if $(findstring :,$(IMG)),$(lastword $(subst :, ,$(IMG))),latest)
 CONTAINER_IMAGE_NAME ?= $(IMG)
 

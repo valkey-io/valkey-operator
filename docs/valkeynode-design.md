@@ -67,14 +67,20 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 **Parents write to spec:**
 
 - `workloadType` — Deployment or StatefulSet
-- `podTemplate` — image, resources, scheduling constraints
+- fields for pod definitions
+  - `image`
+  - `resources`
+  - scheduling constraints
+    - `tolerations`
+    - `nodeSelector`
+    - `affinity`
 - `persistence` — storage mode and size
 - `config` — all Valkey configuration values (e.g. `cluster-enabled`, `maxmemory`); ValkeyNode applies these as-is without interpretation
 
 **Parents read from status:**
 
 - `ready` — whether the pod is running and Valkey is responding
-- `observedRole` / `observedReplicaOf` — replication topology observed from `INFO replication`
+- `role` - current reported replication role from node
 - `podIP` — used by the parent to connect and issue Valkey commands
 - `podName` — name of the managed pod
 

@@ -32,7 +32,7 @@ Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf
 #### Constraints
 
 - Config changes require a manual restart
-- Cluster management settings owned by the operator should not be overwritten
+- Cluster management settings owned by the operator cannot be overwritten
 
 #### Future plans
 

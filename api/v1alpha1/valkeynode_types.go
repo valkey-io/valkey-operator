@@ -79,6 +79,13 @@ type ValkeyNodeSpec struct {
 	// +optional
 	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
 
+	// ServerConfigHash is a hash of the server ConfigMap contents. When set by
+	// the ValkeyCluster controller it bumps the spec Generation, which triggers
+	// the ValkeyNode controller to reconcile and update the pod template
+	// annotation — causing a rolling restart when the cluster config changes.
+	// +optional
+	ServerConfigHash string `json:"serverConfigHash,omitempty"`
+
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the
 	// container can load aclfile /config/users/users.acl.

@@ -68,7 +68,7 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	By("purging old events")
-	cmd := exec.Command("kubectl", "delete", "events", "--field-selector", "involvedObject.name=valkeycluster-sample")
+	cmd := exec.Command("kubectl", "delete", "events", "--all")
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to purge old events")
 

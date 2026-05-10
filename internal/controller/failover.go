@@ -104,6 +104,7 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 			if role == RolePrimary {
 				recorder.Eventf(cluster, nil, corev1.EventTypeNormal, eventReasonFailoverCompleted, eventActionProactiveFailover, "Failover completed: %s is now primary in shard %s", target.Address, shard.Id)
 				log.Info("proactive failover completed", "newPrimary", target.Address, "shard", shard.Id)
+				failoversTotal.WithLabelValues(cluster.Name, cluster.Namespace, "proactive").Inc()
 				return nil
 			}
 		}

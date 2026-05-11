@@ -31,6 +31,30 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
+// getWorkerNodeWithoutManager returns a worker node that does NOT host the controller manager pod.
+// This prevents NoExecute taints from evicting the operator during tests.
+func getWorkerNodeWithoutManager() string {
+	// Find which node the controller manager is on
+	cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+		"-n", namespace, "-o", "jsonpath={.items[0].spec.nodeName}")
+	managerNode, _ := utils.Run(cmd)
+
+	// Get all worker nodes
+	cmd = exec.Command("kubectl", "get", "nodes",
+		"--selector=!node-role.kubernetes.io/control-plane",
+		"-o", "jsonpath={.items[*].metadata.name}")
+	output, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to get worker nodes")
+
+	nodes := strings.Fields(output)
+	for _, node := range nodes {
+		if node != managerNode {
+			return node
+		}
+	}
+	return nodes[0]
+}
+
 var _ = Describe("Valkey Tolerations", Label("toleration"), func() {
 	var taintedNode string
 	AfterEach(func() {
@@ -60,12 +84,7 @@ var _ = Describe("Valkey Tolerations", Label("toleration"), func() {
 	Context("Deployment have tolerations", Label("toleration-enabled"), func() {
 		It("should works with single toleration", Label("single-toleration"), func() {
 			By("getting a worker node to taint")
-			cmd := exec.Command("kubectl", "get", "nodes",
-				"--selector=!node-role.kubernetes.io/control-plane",
-				"-o", "jsonpath={.items[1].metadata.name}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node to taint: %s", output))
-			taintedNode = output
+			taintedNode = getWorkerNodeWithoutManager()
 
 			By("tainting the worker node")
 			taint := "dedicated=valkey:NoSchedule"
@@ -89,14 +108,14 @@ spec:
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
-			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
+			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
 				Expect(os.Remove(manifestFile)).To(Succeed())
 			}()
 
 			By("applying the CR")
-			cmd = exec.Command("kubectl", "create", "-f", manifestFile)
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
@@ -112,7 +131,7 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
-			output, err = getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
+			output, err := getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
 			Expect(output).To(MatchJSON(`[
 			{"effect":"NoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
@@ -136,12 +155,7 @@ spec:
 
 		It("should works with multiple tolerations", Label("multi-tolerations"), func() {
 			By("getting a worker node to taint")
-			cmd := exec.Command("kubectl", "get", "nodes",
-				"--selector=!node-role.kubernetes.io/control-plane",
-				"-o", "jsonpath={.items[1].metadata.name}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node to taint: %s", output))
-			taintedNode = output
+			taintedNode = getWorkerNodeWithoutManager()
 
 			By("tainting the worker node")
 			taints := [2]string{"dedicated=valkey:PreferNoSchedule", "high-memory=valkey:NoExecute"}
@@ -170,14 +184,14 @@ spec:
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
-			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
+			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
 				Expect(os.Remove(manifestFile)).To(Succeed())
 			}()
 
 			By("applying the CR")
-			cmd = exec.Command("kubectl", "create", "-f", manifestFile)
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
@@ -193,7 +207,7 @@ spec:
 			}).Should(Succeed())
 
 			By("verifying the pods' have toleration")
-			output, err = getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
+			output, err := getPodToleration(fmt.Sprintf("valkey.io/cluster=%s", valkeyName))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get pod toleration: %s", output))
 			Expect(output).To(MatchJSON(`[
 			{"effect":"PreferNoSchedule","key":"dedicated","operator":"Equal","value":"valkey"},
@@ -221,12 +235,7 @@ spec:
 	Context("Deployment do not have tolerations", Label("toleration-disabled"), func() {
 		It("should not schedule on tainted node", func() {
 			By("getting a worker node to taint")
-			cmd := exec.Command("kubectl", "get", "nodes",
-				"--selector=!node-role.kubernetes.io/control-plane",
-				"-o", "jsonpath={.items[1].metadata.name}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node to taint: %s", output))
-			taintedNode = output
+			taintedNode = getWorkerNodeWithoutManager()
 
 			By("tainting the worker node")
 			taint := "dedicated=valkey:NoSchedule"
@@ -246,14 +255,14 @@ spec:
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
-			err = os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
+			err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
 			defer func() {
 				Expect(os.Remove(manifestFile)).To(Succeed())
 			}()
 
 			By("applying the CR")
-			cmd = exec.Command("kubectl", "create", "-f", manifestFile)
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
 
@@ -275,7 +284,8 @@ spec:
 					"-o", "go-template={{ range .items}}{{ .spec.nodeName }} | {{ end }}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pods' node placement")
-				g.Expect(output).NotTo(ContainSubstring(taintedNode), fmt.Sprintf("Pod got scheduled on the tainted node: %s", output))
+				// Use " |" suffix to match the go-template delimiter and avoid partial matches (e.g. "worker" matching "worker2")
+				g.Expect(output).NotTo(ContainSubstring(taintedNode+" |"), fmt.Sprintf("Pod got scheduled on the tainted node: %s", output))
 			}).Should(Succeed())
 
 			By("Cleaning up test resources")

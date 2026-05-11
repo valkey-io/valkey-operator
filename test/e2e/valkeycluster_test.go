@@ -484,6 +484,96 @@ spec:
 			Eventually(verifyCreatedUsers).Should(Succeed())
 		})
 
+		It("skips authentication configs if user is created with resetpass flag", Label("authentication", "resetpass"), func() {
+			valkeyClusterName = "cluster-sample-resetpass"
+
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "secret", valkeyClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+			By("creating the CR")
+			manifest := fmt.Sprintf(`
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+data:
+  bob: M21wdHlQQHNzdzByZA==
+---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec: 
+  shards: 1
+  replicas: 0
+  users: 
+    - name: alice
+      enabled: true
+      resetpass: true
+      nopass: true
+    - name: bob
+      enabled: true
+      resetpass: true
+      passwordSecret:
+        name: %s
+        keys:
+          - bob
+      commands:
+        allow: ["@admin"]`, valkeyClusterName, valkeyClusterName, valkeyClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create resetpass ValkeyCluster CR")
+
+			By("validating the ValkeyCluster is Ready")
+			verifyCrStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.Shards).To(Equal(int32(1)))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+
+			}
+			Eventually(verifyCrStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying created usuers")
+			verifyCreatedUsers := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+
+				cmd := exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
+					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).To(SatisfyAll(
+					ContainSubstring("user alice on"),
+					ContainSubstring("user bob on"),
+				))
+			}
+			Eventually(verifyCreatedUsers).Should(Succeed())
+
+		})
+
 		It("rebalances slots on scale out", func() {
 			const baseShards = 2
 			const scaleOutShards = 3

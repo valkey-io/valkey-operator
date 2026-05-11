@@ -204,6 +204,8 @@ spec:
 
 			By("Creating a curl pod to test metrics")
 			curlPodName := "curl-metrics-" + valkeyName
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName,
+				"-n", namespace, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 			cmd = exec.Command("kubectl", "run", curlPodName, "--image=curlimages/curl:latest", "--restart=Never",
 				"--overrides",
 				`{
@@ -378,23 +380,25 @@ spec:
 			By("verifying created users")
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyName)
-
-				cmd := exec.Command("kubectl", "run", "client",
+				curlPodName := "curl-metrics-" + valkeyName
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName,
+					"-n", namespace, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+				cmd := exec.Command("kubectl", "run", curlPodName,
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
 					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "wait", "pod/client",
+				cmd = exec.Command("kubectl", "wait", "pod/"+curlPodName,
 					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "logs", "client")
+				cmd = exec.Command("kubectl", "logs", curlPodName)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "delete", "pod", "client",
+				cmd = exec.Command("kubectl", "delete", "pod", curlPodName,
 					"--wait=true", "--timeout=30s")
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())

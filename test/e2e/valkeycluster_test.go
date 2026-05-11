@@ -262,6 +262,8 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				// Start a Valkey client pod to access the cluster and execute commands
 				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
 
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+
 				// Append the client command to the overall kubectl run command
 				cmd := exec.Command("kubectl", append([]string{"run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",

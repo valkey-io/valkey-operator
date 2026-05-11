@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -130,6 +131,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	configHash := func() string {
+		cm := &corev1.ConfigMap{}
+		if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
+			return ""
+		}
+		return cm.Annotations[configHashKey]
+	}()
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -139,7 +147,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -384,7 +392,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -409,7 +417,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState)
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
 			if err != nil {
 				return false, err
 			}
@@ -431,10 +439,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (bool, bool, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	desired.Spec.ServerConfigHash = configHash
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -850,50 +859,62 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 // updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
-	// Fetch current status to compare
+	// Fetch the latest version to avoid conflicts from stale resourceVersion
 	current := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
+
+	// Snapshot for patch base and comparison
+	patchBase := current.DeepCopy()
+	patch := client.MergeFrom(patchBase)
+
 	// Update shard counts
 	if state != nil {
-		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
-		cluster.Status.Shards = int32(len(state.Shards))
+		current.Status.ReadyShards = r.countReadyShards(state, cluster)
+		current.Status.Shards = int32(len(state.Shards))
 	}
+
+	// Apply conditions from the in-memory cluster object
+	current.Status.Conditions = cluster.Status.Conditions
+
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
-	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
-	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
-	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	degradedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 
 	switch {
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateDegraded
-		cluster.Status.Reason = degradedCondition.Reason
-		cluster.Status.Message = degradedCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateDegraded
+		current.Status.Reason = degradedCondition.Reason
+		current.Status.Message = degradedCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReady
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	case progressingCondition != nil && progressingCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
-		cluster.Status.Reason = progressingCondition.Reason
-		cluster.Status.Message = progressingCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReconciling
+		current.Status.Reason = progressingCondition.Reason
+		current.Status.Message = progressingCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionFalse:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateFailed
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateFailed
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	}
 
-	// Only update if status has changed
-	if statusChanged(current.Status, cluster.Status) {
-		if err := r.Status().Update(ctx, cluster); err != nil {
+	if !reflect.DeepEqual(patchBase.Status, current.Status) {
+		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}
-		log.V(1).Info("status updated", "state", cluster.Status.State, "reason", cluster.Status.Reason)
+		log.V(1).Info("status updated", "state", current.Status.State, "reason", current.Status.Reason)
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
+
+	// Sync back to caller so subsequent logic sees the latest state
+	cluster.Status = current.Status
+	cluster.ResourceVersion = current.ResourceVersion
 	return nil
 }
 

@@ -28,6 +28,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/test/utils"
 )
 
@@ -174,28 +176,18 @@ spec:
 				}
 			}).Should(Succeed())
 
-			By("Getting pod name for metrics verification")
-			var podName string
+			By("Waiting for the ValkeyCluster to reach Ready state")
 			Eventually(func(g Gomega) {
-				args := []string{
-					"get", "pods", "-l", "valkey.io/cluster=" + valkeyName,
-					"-o", "jsonpath={.items[0].metadata.name}",
-				}
-				cmd := exec.Command("kubectl", args...)
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod name")
-				g.Expect(out).NotTo(BeEmpty(), "Pod name should not be empty")
-				podName = out
+				cr, err := utils.GetValkeyClusterStatus(valkeyName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 			}).Should(Succeed())
 
 			By("Getting pod IP for metrics verification")
 			var podIP string
 			Eventually(func(g Gomega) {
-				args := []string{
-					"get", "pods", podName,
-					"-o", "jsonpath={.status.podIP}",
-				}
-				cmd := exec.Command("kubectl", args...)
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "valkey.io/cluster="+valkeyName,
+					"-o", "jsonpath={.items[0].status.podIP}")
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod IP")
 				g.Expect(out).NotTo(BeEmpty(), "Pod IP should not be empty")

@@ -262,8 +262,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 
 	log := logf.FromContext(ctx)
 
-	// If this user doesn't have a password or is disabled, return empty
-	if user.NoPassword || !user.Enabled {
+	// If this user have resetpass flag, doesn't have a password, or is disabled, return empty
+	if user.NoPassword || !user.Enabled || user.ResetPass {
 		return []string{}, nil
 	}
 	// Look for a Secret matching the user-provided name, or clusterName-users

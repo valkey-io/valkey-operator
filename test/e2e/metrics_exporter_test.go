@@ -232,10 +232,6 @@ spec:
 				}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl pod")
-			defer func() {
-				cmd := exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
-			}()
 
 			By("Waiting for the curl pod to be running")
 			Eventually(func(g Gomega) {
@@ -280,6 +276,11 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Health endpoint should be accessible")
 				g.Expect(out).NotTo(BeEmpty(), "Health endpoint should return a response")
 			}).Should(Succeed())
+
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
 
 			By("Cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")

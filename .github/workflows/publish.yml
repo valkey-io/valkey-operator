@@ -56,6 +56,8 @@ jobs:
             # Tag with semver from git tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
             # Tag with short SHA
             type=sha,prefix=
 

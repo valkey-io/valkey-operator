@@ -52,7 +52,7 @@ spec:
         allow: ["@admin"]
     - name: edward
       enabled: true
-      resetpass: true
+      resetpass: true # if resetpass flag is enabled, it will ignore other authentication-related configs (passwordSecret, nopass)
       nopass: true
       permissions: "+@admin"
 

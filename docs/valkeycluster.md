@@ -31,13 +31,12 @@ Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf
 
 #### Constraints
 
-- Config changes require a manual restart
+- All config changes cause pods to be rolled
 - Cluster management settings owned by the operator cannot be overwritten
 
 #### Future plans
 
-- Config changes are automatically rolled out
-  - Pods are not rolled for configs that can be applied live
+- Pods are not rolled for configs that can be applied live
 
 ### Containers
 

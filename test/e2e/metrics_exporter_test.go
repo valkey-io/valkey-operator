@@ -204,8 +204,7 @@ spec:
 
 			By("Creating a curl pod to test metrics")
 			curlPodName := "curl-metrics-" + valkeyName
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName,
-				"-n", namespace, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 			cmd = exec.Command("kubectl", "run", curlPodName, "--image=curlimages/curl:latest", "--restart=Never",
 				"--overrides",
 				`{
@@ -232,6 +231,10 @@ spec:
 				}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl pod")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
 
 			By("Waiting for the curl pod to be running")
 			Eventually(func(g Gomega) {
@@ -276,11 +279,6 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "Health endpoint should be accessible")
 				g.Expect(out).NotTo(BeEmpty(), "Health endpoint should return a response")
 			}).Should(Succeed())
-
-			defer func() {
-				cmd := exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
-			}()
 
 			By("Cleaning up test resources")
 			cmd = exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
@@ -382,8 +380,7 @@ spec:
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyName)
 				curlPodName := "curl-metrics-" + valkeyName
-				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName,
-					"-n", namespace, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 				cmd := exec.Command("kubectl", "run", curlPodName,
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
 					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")

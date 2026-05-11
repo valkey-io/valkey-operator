@@ -146,8 +146,7 @@ spec:
 		It("allows cluster access via TLS", func() {
 			clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
 
-			utils.Run(exec.Command("kubectl", "delete", "pod", "client-tls",
-				"--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+			utils.Run(exec.Command("kubectl", "delete", "pod", "client-tls", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 			cmd := exec.Command("kubectl", "run", "client-tls",
 				fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--overrides",
 				fmt.Sprintf(`{
@@ -228,8 +227,7 @@ spec:
 
 			By("running curl pod to verify metrics endpoint")
 			curlPodName := "curl-tls-metrics"
-			utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName,
-				"--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+			utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 			cmd := exec.Command("kubectl", "run", curlPodName, "--image=curlimages/curl:latest", "--restart=Never", "--overrides", `{
 				"spec": {
 					"containers": [{

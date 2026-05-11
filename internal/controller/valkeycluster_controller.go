@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -858,50 +859,62 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 // updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
-	// Fetch current status to compare
+	// Fetch the latest version to avoid conflicts from stale resourceVersion
 	current := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
+
+	// Snapshot for patch base and comparison
+	patchBase := current.DeepCopy()
+	patch := client.MergeFrom(patchBase)
+
 	// Update shard counts
 	if state != nil {
-		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
-		cluster.Status.Shards = int32(len(state.Shards))
+		current.Status.ReadyShards = r.countReadyShards(state, cluster)
+		current.Status.Shards = int32(len(state.Shards))
 	}
+
+	// Apply conditions from the in-memory cluster object
+	current.Status.Conditions = cluster.Status.Conditions
+
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
-	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
-	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
-	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	degradedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 
 	switch {
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateDegraded
-		cluster.Status.Reason = degradedCondition.Reason
-		cluster.Status.Message = degradedCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateDegraded
+		current.Status.Reason = degradedCondition.Reason
+		current.Status.Message = degradedCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReady
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	case progressingCondition != nil && progressingCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
-		cluster.Status.Reason = progressingCondition.Reason
-		cluster.Status.Message = progressingCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReconciling
+		current.Status.Reason = progressingCondition.Reason
+		current.Status.Message = progressingCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionFalse:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateFailed
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateFailed
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	}
 
-	// Only update if status has changed
-	if statusChanged(current.Status, cluster.Status) {
-		if err := r.Status().Update(ctx, cluster); err != nil {
+	if !reflect.DeepEqual(patchBase.Status, current.Status) {
+		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}
-		log.V(1).Info("status updated", "state", cluster.Status.State, "reason", cluster.Status.Reason)
+		log.V(1).Info("status updated", "state", current.Status.State, "reason", current.Status.Reason)
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
+
+	// Sync back to caller so subsequent logic sees the latest state
+	cluster.Status = current.Status
+	cluster.ResourceVersion = current.ResourceVersion
 	return nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -241,8 +242,9 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		return err
 	}
 
-	// Snapshot status before mutations so we can skip the write if nothing changed.
-	previous := current.Status.DeepCopy()
+	// Snapshot for patch base before mutations.
+	patchBase := current.DeepCopy()
+	patch := client.MergeFrom(patchBase)
 
 	// Always stamp the observed generation so ValkeyCluster can detect
 	// whether the controller has processed the latest spec.
@@ -348,8 +350,8 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		}
 	}
 
-	if nodeStatusChanged(*previous, current.Status) {
-		if err := r.Status().Update(ctx, current); err != nil {
+	if !reflect.DeepEqual(patchBase.Status, current.Status) {
+		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			log.Error(err, "failed to update ValkeyNode status")
 			return err
 		}

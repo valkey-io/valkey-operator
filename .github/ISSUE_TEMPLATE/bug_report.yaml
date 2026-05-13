@@ -1,42 +1,132 @@
-name: Bug report
-description: Help us improve by reporting a bug
+name: Bug Report
+description: Report a reproducible bug or regression in the Valkey Operator
 title: "[BUG]: "
 labels:
   - bug
   - needs-triage
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in as much
+        of the template below as you can - the more detail you provide, the
+        faster we can investigate.
+
+        Before opening, please:
+        - Search [existing issues](https://github.com/valkey-io/valkey-operator/issues?q=is%3Aissue) and [discussions](https://github.com/valkey-io/valkey-operator/discussions) to avoid duplicates
+        - Review the [docs](https://github.com/valkey-io/valkey-operator/tree/main/docs) and [samples](https://github.com/valkey-io/valkey-operator/tree/main/config/samples)
+        - For questions, please use [GitHub Discussions Q&A](https://github.com/valkey-io/valkey-operator/discussions/categories/q-a) instead
+
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and discussions and could not find a duplicate.
+          required: true
+        - label: I am running a recent version of the operator (latest release or `main`) and the issue still reproduces.
+          required: true
+
   - type: textarea
     id: description
     attributes:
       label: Bug Description
-      description: A short description of the bug in 1-2 sentences.
-      validations:
-        required: true
+      description: A clear and concise description of the bug.
+      placeholder: When I scale a ValkeyCluster from 3 to 5 shards, the operator...
+    validations:
+      required: true
 
   - type: textarea
     id: steps-to-reproduce
     attributes:
-      label: Steps to reproduce
-      description: How can we reproduce this behavior?
-      validations:
-        required: true
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the behaviour.
+    validations:
+      required: true
 
   - type: textarea
-    id: behaviors
+    id: expected
     attributes:
-      label: Expected vs actual behavior
-      description: A detailed description of what you expected to happen vs. what actually happened.
-      validations:
-        required: true
+      label: Expected Behaviour
+      description: What did you expect to happen?
+    validations:
+      required: true
 
   - type: textarea
-    id: additional-information
+    id: actual
     attributes:
-      label: Additional information
-      description: Any additional information that is relevant to the problem
-      placeholder: |
-        - K8s version
-        - Operator version
-        - Relevant logs and configuration (santize secrets!)
-      validations:
-        required: false
+      label: Actual Behaviour
+      description: What actually happened? Include error messages and stack traces if available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: cr
+    attributes:
+      label: ValkeyCluster / ValkeyNode resource
+      description: The CR(s) used to reproduce the issue.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: operator-logs
+    attributes:
+      label: Operator logs
+      description: Relevant operator (controller-manager) logs around the time of the issue.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: valkey-logs
+    attributes:
+      label: Valkey pod logs
+      description: Relevant Valkey pod logs (a few lines before/after the failure).
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: operator-version
+    attributes:
+      label: Operator version
+      description: Output of `kubectl -n valkey-operator-system get deploy valkey-operator-controller-manager -o jsonpath='{.spec.template.spec.containers[0].image}'` or version.
+      placeholder: e.g. main, v0.1.0, ghcr.io/valkey-io/valkey-operator:abcd1234
+    validations:
+      required: true
+
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes version
+      description: Output of `kubectl version --short` (server version is what matters).
+      placeholder: e.g. v1.31.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: k8s-distro
+    attributes:
+      label: Kubernetes distribution / environment
+      multiple: false
+      options:
+        - kind
+        - minikube
+        - k3s / k3d
+        - Amazon EKS
+        - Google GKE
+        - Azure AKS
+        - OpenShift
+        - Self-managed (kubeadm/RKE/etc.)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other context (related issues, screenshots, recent changes, suspected root cause, etc.).
+    validations:
+      required: false

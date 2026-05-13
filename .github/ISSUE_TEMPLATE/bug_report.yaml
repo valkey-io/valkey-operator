@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a reproducible bug or regression in the Valkey Operator
+description: Help us improve by reporting a bug
 title: "[BUG]: "
 labels:
   - bug

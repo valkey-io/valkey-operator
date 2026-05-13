@@ -117,8 +117,6 @@ body:
         - Amazon EKS
         - Google GKE
         - Azure AKS
-        - OpenShift
-        - Self-managed (kubeadm/RKE/etc.)
         - Other
     validations:
       required: true

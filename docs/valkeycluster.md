@@ -14,6 +14,7 @@
 - [Containers](#containers)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
+- [Pod disruption budget](#pod-disruption-budget)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
 - [Users](#users)
@@ -96,6 +97,19 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 - Live volume expansion
 - Automated volume expansion
+
+### Pod disruption budget
+
+```yaml
+podDisruptionBudget: Managed  # default
+```
+
+The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting all pods in the cluster. Set to `Disabled` when the PDB is managed externally or is not required.
+
+| Value | Behaviour |
+|---|---|
+| `Managed` | Operator creates and owns the PDB |
+| `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
 
 ### Scheduling
 

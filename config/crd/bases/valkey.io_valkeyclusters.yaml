@@ -2607,6 +2607,16 @@ spec:
                 required:
                 - size
                 type: object
+              podDisruptionBudget:
+                default: Managed
+                description: |-
+                  PodDisruptionBudget controls operator management of a PodDisruptionBudget for this cluster.
+                  When Managed (default), the operator creates a PDB with maxUnavailable: 1 selecting all
+                  pods in the cluster. When Disabled, any PDB named valkey-<cluster> is deleted.
+                enum:
+                - Managed
+                - Disabled
+                type: string
               replicas:
                 description: The number of replicas for each shard group.
                 format: int32

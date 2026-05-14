@@ -38,6 +38,16 @@ const (
 	ClusterStateFailed ClusterState = "Failed"
 )
 
+// PDBPolicy controls whether the operator manages a PodDisruptionBudget for the cluster.
+// Values may be added in future versions; clients MUST handle unknown values gracefully.
+// +kubebuilder:validation:Enum=Managed;Disabled
+type PDBPolicy string
+
+const (
+	PDBPolicyManaged  PDBPolicy = "Managed"
+	PDBPolicyDisabled PDBPolicy = "Disabled"
+)
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
@@ -105,6 +115,12 @@ type ValkeyClusterSpec struct {
 	// TLS configuration for the cluster
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
+
+	// PodDisruptionBudget controls whether the operator manages a PodDisruptionBudget for this cluster.
+	// Set to Disabled when the PDB is managed externally or must be suppressed during maintenance.
+	// +kubebuilder:default=Managed
+	// +optional
+	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
@@ -186,28 +202,29 @@ const (
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing        = "Initializing"
-	ReasonReconciling         = "Reconciling"
-	ReasonClusterHealthy      = "ClusterHealthy"
-	ReasonServiceError        = "ServiceError"
-	ReasonConfigMapError      = "ConfigMapError"
-	ReasonValkeyNodeError     = "ValkeyNodeError"
-	ReasonValkeyNodeListError = "ValkeyNodeListError"
-	ReasonAddingNodes         = "AddingNodes"
-	ReasonNodeAddFailed       = "NodeAddFailed"
-	ReasonMissingShards       = "MissingShards"
-	ReasonMissingReplicas     = "MissingReplicas"
-	ReasonReconcileComplete   = "ReconcileComplete"
-	ReasonTopologyComplete    = "TopologyComplete"
-	ReasonAllSlotsAssigned    = "AllSlotsAssigned"
-	ReasonSlotsUnassigned     = "SlotsUnassigned"
-	ReasonPrimaryLost         = "PrimaryLost"
-	ReasonNoSlots             = "NoSlotsAvailable"
-	ReasonRebalancingSlots    = "RebalancingSlots"
-	ReasonRebalanceFailed     = "RebalanceFailed"
-	ReasonUsersAclError       = "UsersACLError"
-	ReasonUpdatingNodes       = "UpdatingNodes"
-	ReasonSystemUsersAclError = "SystemUsersACLError"
+	ReasonInitializing             = "Initializing"
+	ReasonReconciling              = "Reconciling"
+	ReasonClusterHealthy           = "ClusterHealthy"
+	ReasonServiceError             = "ServiceError"
+	ReasonConfigMapError           = "ConfigMapError"
+	ReasonValkeyNodeError          = "ValkeyNodeError"
+	ReasonValkeyNodeListError      = "ValkeyNodeListError"
+	ReasonAddingNodes              = "AddingNodes"
+	ReasonNodeAddFailed            = "NodeAddFailed"
+	ReasonMissingShards            = "MissingShards"
+	ReasonMissingReplicas          = "MissingReplicas"
+	ReasonReconcileComplete        = "ReconcileComplete"
+	ReasonTopologyComplete         = "TopologyComplete"
+	ReasonAllSlotsAssigned         = "AllSlotsAssigned"
+	ReasonSlotsUnassigned          = "SlotsUnassigned"
+	ReasonPrimaryLost              = "PrimaryLost"
+	ReasonNoSlots                  = "NoSlotsAvailable"
+	ReasonRebalancingSlots         = "RebalancingSlots"
+	ReasonRebalanceFailed          = "RebalanceFailed"
+	ReasonUsersAclError            = "UsersACLError"
+	ReasonUpdatingNodes            = "UpdatingNodes"
+	ReasonSystemUsersAclError      = "SystemUsersACLError"
+	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
 )
 
 // +kubebuilder:object:root=true

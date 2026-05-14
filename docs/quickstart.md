@@ -13,7 +13,7 @@ Deploy a Valkey Cluster on Kubernetes in under 5 minutes.
 ```sh
 helm repo add valkey https://valkey.io/valkey-helm
 helm repo update
-helm install valkey-operator valkey/valkey-operator -n valkey-operator-system --create-namespace --set image.tag=main
+helm install valkey-operator valkey/valkey-operator -n valkey-operator-system --create-namespace
 ```
 
 Verify the operator is running:

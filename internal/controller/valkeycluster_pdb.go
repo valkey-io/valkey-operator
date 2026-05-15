@@ -62,6 +62,7 @@ func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Conte
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
 		existing.Labels = labels(cluster)
 		existing.Spec.MaxUnavailable = &maxUnavailable
+		existing.Spec.MinAvailable = nil
 		existing.Spec.Selector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
 				LabelCluster: cluster.Name,

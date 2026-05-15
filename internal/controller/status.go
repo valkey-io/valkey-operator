@@ -31,3 +31,10 @@ func setCondition(cluster *valkeyiov1alpha1.ValkeyCluster, condType, reason, mes
 		ObservedGeneration: cluster.Generation,
 	})
 }
+
+func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason string) {
+	condition := meta.FindStatusCondition(*conditions, condType)
+	if condition != nil && condition.Reason == reason {
+		meta.RemoveStatusCondition(conditions, condType)
+	}
+}

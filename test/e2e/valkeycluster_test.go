@@ -472,11 +472,18 @@ spec:
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
+				// the output of ACL LIST displays users' password(s) as a
+				// "#" followed by a 64-character lowercase alphanumeric (from a-f and 0-9) string
+				// https://github.com/valkey-io/valkey/blob/unstable/src/acl.c#L219
+				passwordHashRegexp := "#[a-f0-9]{64}"
+
 				g.Expect(output).To(SatisfyAll(
 					ContainSubstring("user alice on"),
 					ContainSubstring("user bob on nopass"),
-					ContainSubstring("user david on"),
-					ContainSubstring("user edward on"),
+					// user david is created with 2 passwords
+					MatchRegexp("user david on .* %s %s", passwordHashRegexp, passwordHashRegexp),
+					// user edward is created with resetpass flag, so its ACL entry should not contain a '#' character
+					MatchRegexp("user edward on [^#]+"),
 					ContainSubstring("user _exporter on"),
 					ContainSubstring("user _operator on"),
 				))

@@ -36,6 +36,10 @@ type UserAclSpec struct {
 	// +kubebuilder:default=false
 	NoPassword bool `json:"nopass,omitempty"`
 
+	// Apply the resetpass flag to this user
+	// +kubebuilder:default=false
+	ResetPass bool `json:"resetpass,omitempty"`
+
 	// Valkey command categories, commands, and subcommands restrictions for this user
 	// +optional
 	Commands CommandsAclSpec `json:"commands,omitempty"`

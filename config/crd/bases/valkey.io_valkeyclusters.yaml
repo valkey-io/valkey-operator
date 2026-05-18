@@ -2607,6 +2607,15 @@ spec:
                 required:
                 - size
                 type: object
+              podDisruptionBudget:
+                default: Managed
+                description: |-
+                  PodDisruptionBudget controls whether the operator manages a PodDisruptionBudget for this cluster.
+                  Set to Disabled when the PDB is managed externally or must be suppressed during maintenance.
+                enum:
+                - Managed
+                - Disabled
+                type: string
               replicas:
                 description: The number of replicas for each shard group.
                 format: int32

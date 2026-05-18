@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -29,8 +31,10 @@ import (
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -65,6 +69,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var watchNamespaces []string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -82,6 +87,21 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	seenNamespaces := make(map[string]struct{})
+	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
+		if s == "" {
+			return fmt.Errorf("watch-namespace value must not be empty")
+		}
+		if errs := validation.IsDNS1123Label(s); len(errs) > 0 {
+			return fmt.Errorf("watch-namespace %q is not a valid namespace name: %s", s, strings.Join(errs, "; "))
+		}
+		if _, dup := seenNamespaces[s]; dup {
+			return fmt.Errorf("watch-namespace %q specified more than once", s)
+		}
+		seenNamespaces[s] = struct{}{}
+		watchNamespaces = append(watchNamespaces, s)
+		return nil
+	})
 	opts := zap.Options{
 		Development:     true,
 		StacktraceLevel: zapcore.FatalLevel,
@@ -106,6 +126,15 @@ func main() {
 
 	if !enableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
+	}
+
+	var cacheOpts cache.Options
+	if len(watchNamespaces) > 0 {
+		setupLog.Info("Restricting cache to namespaces", "namespaces", watchNamespaces)
+		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			cacheOpts.DefaultNamespaces[ns] = cache.Config{}
+		}
 	}
 
 	// Initial webhook TLS options
@@ -167,6 +196,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "73d40801.valkey.io",
+		Cache:                  cacheOpts,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

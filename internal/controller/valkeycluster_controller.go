@@ -355,7 +355,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 func headlessServiceName(clusterName string) string {
-	return ResourcePrefix + clusterName
+	return resourcePrefix + clusterName
 }
 
 // Create or update a headless service (client connects to pods directly)

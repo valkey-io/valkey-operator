@@ -34,7 +34,7 @@ import (
 
 const (
 	appName        = "valkey"
-	ResourcePrefix = "valkey-"
+	resourcePrefix = "valkey-"
 )
 
 // Naming and labelling scheme

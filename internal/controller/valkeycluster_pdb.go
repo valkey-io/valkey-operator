@@ -32,7 +32,7 @@ import (
 )
 
 func pdbName(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	return ResourcePrefix + cluster.Name
+	return resourcePrefix + cluster.Name
 }
 
 func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {

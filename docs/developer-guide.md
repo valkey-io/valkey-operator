@@ -1,5 +1,43 @@
 # Developer guide
 
+## Contributing
+
+Any changes to the CRD API (`api/v1alpha1/`) must be agreed with the core team before implementation.
+
+## Development commands
+
+```sh
+make test          # Run unit/integration tests (no cluster needed)
+make lint          # Run golangci-lint
+make lint-fix      # Run golangci-lint with auto-fix
+make fmt           # Run go fmt
+make vet           # Run go vet
+make build         # Build the manager binary (runs manifests, generate, fmt, vet, lint)
+make manifests     # Regenerate CRD manifests and RBAC from controller-runtime markers
+make generate      # Regenerate DeepCopy methods
+make test-e2e      # Run end-to-end tests in a Kind cluster (creates one if needed, tears it down after)
+```
+
+After modifying types in `api/v1alpha1/`, always run `make manifests generate` before testing.
+
+Run a single test package (requires `make test` or `make setup-envtest` to have been run first):
+
+```sh
+KUBEBUILDER_ASSETS="$(./bin/setup-envtest use --bin-dir ./bin -p path)" go test ./internal/controller/... -v
+```
+
+Filter to a specific Ginkgo spec with `--ginkgo.focus`:
+
+```sh
+KUBEBUILDER_ASSETS="$(./bin/setup-envtest use --bin-dir ./bin -p path)" go test ./internal/controller/... -v --ginkgo.focus "spec name"
+```
+
+Run a specific e2e test by label:
+
+```sh
+TEST_LABELS="<label>" make test-e2e
+```
+
 ## Prerequisites
 
 - Go v1.25.0+.

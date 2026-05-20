@@ -32,7 +32,10 @@ import (
 	"valkey.io/valkey-operator/internal/valkey"
 )
 
-const appName = "valkey"
+const (
+	appName        = "valkey"
+	ResourcePrefix = "valkey-"
+)
 
 // Naming and labelling scheme
 //

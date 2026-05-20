@@ -354,11 +354,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+func headlessServiceName(clusterName string) string {
+	return ResourcePrefix + clusterName
+}
+
 // Create or update a headless service (client connects to pods directly)
 func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
+			Name:      headlessServiceName(cluster.Name),
 			Namespace: cluster.Namespace,
 		},
 	}
@@ -569,7 +573,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	}
 	var tlsConfig *tls.Config
 	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
-		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
+		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
 		cfg, err := getTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg

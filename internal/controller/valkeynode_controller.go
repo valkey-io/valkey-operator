@@ -441,7 +441,7 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 		secretName := node.Spec.TLS.Certificate.SecretName
 		serverName := ""
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
-			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", clusterName, node.Namespace)
+			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
 		}
 
 		cfg, err := getTLSConfig(ctx, r.Client, secretName, serverName, node.Namespace)

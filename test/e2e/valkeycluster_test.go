@@ -69,7 +69,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating the Service")
 			verifyServiceExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "service", "valkey-"+valkeyClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -260,7 +260,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			By("validating client commands")
 			verifyClusterAccess := func(g Gomega, expected string, command ...string) {
 				// Start a Valkey client pod to access the cluster and execute commands
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", valkeyClusterName)
 
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
@@ -389,7 +389,7 @@ spec:
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", singleNodeClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", singleNodeClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -452,7 +452,7 @@ spec:
 
 			By("verifying created users")
 			verifyCreatedUsers := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", withUserClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -696,7 +696,7 @@ spec:
 
 			By("validating that the Service does not exist")
 			verifyServiceRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "service", "valkey-"+valkeyClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -1007,7 +1007,7 @@ spec:
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", deploymentClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", deploymentClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",

@@ -30,7 +30,7 @@ import (
 // valkeyNodeResourceName returns the name used for resources
 // owned by the given ValkeyNode.
 func valkeyNodeResourceName(node *valkeyiov1alpha1.ValkeyNode) string {
-	return "valkey-" + node.Name
+	return resourcePrefix + node.Name
 }
 
 // valkeyNodeLabels returns the standard Kubernetes recommended labels for

@@ -199,6 +199,10 @@ If you need to modify the ValkeyCluster CRD:
 4. Update the sample CR in `config/samples/`
 5. Test with `make install` to apply the updated CRD
 
+### Updating RBAC permissions
+
+If you add or modify `//+kubebuilder:rbac` markers in any controller file, `make manifests` will regenerate `config/rbac/role.yaml`. You must **also manually apply the same changes** to the Helm chart ClusterRole at [`valkey-operator/templates/clusterrole.yaml`](https://github.com/valkey-io/valkey-helm/blob/main/valkey-operator/templates/clusterrole.yaml) in the [valkey-helm](https://github.com/valkey-io/valkey-helm) repository. Failing to do so means Helm-installed deployments will be missing the new permissions.
+
 ## Development Workflow
 
 ```bash

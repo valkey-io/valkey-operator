@@ -704,7 +704,7 @@ spec:
 
 			By("validating that the ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}

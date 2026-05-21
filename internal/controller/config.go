@@ -51,7 +51,7 @@ var scripts embed.FS
 var scriptsHash string
 
 func GetServerConfigMapName(clusterName string) string {
-	return resourcePrefix + clusterName + "-config"
+	return resourcePrefix + clusterName
 }
 
 // buildManagedConfig returns the operator-managed directives shared by the

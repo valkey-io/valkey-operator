@@ -68,75 +68,131 @@ This produces `dist/install.yaml` which can be applied with `kubectl apply -f`.
 ## Run the operator locally
 
 The kubebuilder scaffolding gives a build target `make run` which runs the operator process locally, but towards a K8s cluster.
-Since neither Pod IPs are routable, nor Pod FQDNs are resolvable outside the cluster, any attempt by the operator to connect to a Valkey pod will fail.
+Since Pod IPs are not routable outside the cluster, any attempt by the operator to connect to a Valkey pod will fail.
 
-Here is a procedure to make it work, but you might need to adapt depending on your setup.
+Below are procedures for Linux and macOS.
 
-### Prerequisites
+### Linux
 
-* Linux and a distro using `systemd-resolved` for DNS (like Ubuntu >= 22.04, Fedora >= 36).
-* K8s cluster via `minikube`, with the [Docker driver](https://minikube.sigs.k8s.io/docs/drivers/docker/) (default on Linux).
-* The domain name for your cluster is `cluster.local`.
+#### Prerequisites
 
-### Steps
+* [kind](https://kind.sigs.k8s.io/).
 
-#### 1. Start the K8s cluster and install the operator CRD.
+#### Steps
+
+##### 1. Create a kind cluster and install the operator CRD.
 
 ```bash
-minikube start
+kind create cluster --name valkey-dev --config - <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+EOF
+
+# Install the operator CRD.
 make install
 ```
 
-#### 2. Setup local access to the services in the minikube cluster.
+##### 2. Setup local access to the pods in the kind cluster.
+
+kind uses a Docker network. Add routes so your host can reach Pod CIDRs directly:
 
 ```bash
-minikube tunnel
+# Route Pod CIDRs to their respective nodes
+for node_info in $(kubectl get nodes -o jsonpath='{range .items[*]}{@.metadata.name}={@.spec.podCIDR}{"\n"}{end}'); do
+  node_name="${node_info%=*}"
+  pod_cidr="${node_info#*=}"
+  node_ip=$(docker inspect "$node_name" -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  sudo ip route add "$pod_cidr" via "$node_ip"
+done
 ```
 
-This creates a network route on the host for the service CIDR using the minikube IP address as a gateway.
-We will be able to connect to services locally.
-See `ip route` showing `10.96.0.0/12 via 192.168.49.2 dev br-ea36a389b2f9`.
+##### 3. Start the operator locally and create a CR to trigger the reconciler.
 
-#### 3. Setup local access to the pods in the minikube cluster.
-
-```bash
-for name cidr in $(kubectl get nodes -Ao jsonpath='{range .items[*]}{@.metadata.name}{" "}{@.spec.podCIDR}{"\n"}{end}'); do echo sudo ip route add $cidr via $(minikube ip -n $name); done
-```
-
-This adds a similar route as in the previous step, but for Pod CIDR ranges.
-We get the podCIDR range for each node using kubectl, then route the range to the node IP.
-
-Now the operator running outside the K8s cluster should be able to connect to a listener using the Pod IP.
-Since we probably also want to access it using FQDN, like when accessing a pod in a headless service using
-`<pod-name>.<service-name>.<namespace>.svc.cluster.local`, we also need to setup the DNS.
-
-
-#### 4. Setup DNS to be able to resolve `cluster.local` domain names.
-
-```bash
-# Add kube-dns to the list of DNS servers
-sudo resolvectl dns $(ip route | grep $(minikube ip) | awk '{print $NF}' | uniq) $(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
-
-# Forward request for cluster.local to the kube-dns
-sudo resolvectl domain $(ip route | grep $(minikube ip) | awk '{print $NF}' | uniq) cluster.local
-
-# Test
-# Optionally run `resolvectl` to check the status.
-dig kubernetes.default.svc.cluster.local
-```
-
-Since we want the `kube-dns` in the cluster to resolve all queries ending with `cluster.local` we need to
-configure our local DNS service to forward these request.
-We first need to get the network bridge towards minikube, using `ip route | grep $(minikube ip) | awk '{print $NF}'`,
-then we also need the ServiceIP for the `kube-dns` service in the K8s cluster,
-we get this using `kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'`.
-With this information we can configure the local DNS service using `resolvectl`.
-
-#### 5. Start the operator locally and create a CR to trigger the reconciler.
+In one terminal, start the operator:
 
 ```bash
 make run
-kubectl create -f config/samples/v1alpha1_valkeycluster.yaml
 ```
 
-The operator should now be able to connect to Valkey containers in the minikube cluster.
+In another terminal, create the CR:
+
+```bash
+kubectl create -f config/samples/v1alpha1_valkeycluster.yaml
+kubectl get valkeycluster -w
+```
+
+### macOS (Podman)
+
+On macOS, Pod IPs are not directly routable from the host because containers run inside a Podman VM.
+This procedure uses [podman-mac-net-connect](https://github.com/jasonmadigan/podman-mac-net-connect) to bridge that gap.
+
+#### Prerequisites
+
+* [Podman](https://podman.io/) for macOS (v5.0.0+).
+* [kind](https://kind.sigs.k8s.io/).
+* [podman-mac-net-connect](https://github.com/jasonmadigan/podman-mac-net-connect) — creates a WireGuard tunnel between macOS and the Podman VM.
+
+#### Steps
+
+##### 1. Set up a rootful Podman machine and install podman-mac-net-connect.
+
+A rootful machine is required to get a bridge network, giving containers routable IPs
+that `podman-mac-net-connect` can route to from macOS.
+
+```bash
+podman machine init --rootful
+podman machine start
+
+brew install jasonmadigan/tap/podman-mac-net-connect
+sudo brew services start jasonmadigan/tap/podman-mac-net-connect
+```
+
+##### 2. Create a kind cluster and install the operator CRD.
+
+```bash
+KIND_EXPERIMENTAL_PROVIDER=podman kind create cluster --name valkey-dev --config - <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+EOF
+
+# Install the operator CRD.
+make install
+```
+
+##### 3. Add routes for Pod CIDRs.
+
+`podman-mac-net-connect` makes container IPs (kind nodes) reachable from macOS, but Pod CIDRs
+are internal to the kind nodes. Add routes both in the Podman VM and on macOS:
+
+```bash
+kubectl get nodes -o jsonpath='{range .items[*]}{@.metadata.name}={@.spec.podCIDR}{"\n"}{end}' | while IFS='=' read -r node_name pod_cidr; do
+  node_ip=$(podman inspect "$node_name" -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  podman machine ssh sudo ip route add "$pod_cidr" via "$node_ip" < /dev/null
+  sudo route -n add -net "$pod_cidr" "$node_ip" < /dev/null
+done
+```
+
+##### 4. Start the operator locally and create a CR to trigger the reconciler.
+
+In one terminal, start the operator:
+
+```bash
+make run
+```
+
+In another terminal, create the CR:
+
+```bash
+kubectl create -f config/samples/v1alpha1_valkeycluster.yaml
+kubectl get valkeycluster -w
+```
+
+The operator should now be able to connect to Valkey containers in the kind cluster.

@@ -370,7 +370,7 @@ spec:
 
 			By("verifying created users")
 			verifyCreatedUsers := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", valkeyName)
 				curlPodName := "curl-metrics-" + valkeyName
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", curlPodName, "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 				cmd := exec.Command("kubectl", "run", curlPodName,

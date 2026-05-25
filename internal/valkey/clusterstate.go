@@ -206,6 +206,15 @@ func (n *NodeState) IsPrimary() bool {
 	return slices.Contains(n.Flags, "master")
 }
 
+// CurrentEpoch returns the cluster's current epoch as reported by this node's
+// CLUSTER INFO output.
+func (n *NodeState) CurrentEpoch() int64 {
+	if v, err := strconv.ParseInt(n.ClusterInfo["cluster_current_epoch"], 10, 64); err == nil {
+		return v
+	}
+	return 0
+}
+
 // IsIsolated returns true if the node's cluster_known_nodes is <= 1,
 // meaning it hasn't been introduced to any other cluster member yet.
 func (n *NodeState) IsIsolated() bool {

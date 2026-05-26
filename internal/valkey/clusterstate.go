@@ -209,8 +209,8 @@ func (n *NodeState) IsPrimary() bool {
 // CurrentEpoch returns the cluster's current epoch as reported by this node's
 // CLUSTER INFO output.
 func (n *NodeState) CurrentEpoch() int64 {
-	if v, err := strconv.ParseInt(n.ClusterInfo["cluster_current_epoch"], 10, 64); err == nil {
-		return v
+	if epoch, err := strconv.ParseInt(n.ClusterInfo["cluster_current_epoch"], 10, 64); err == nil {
+		return epoch
 	}
 	return 0
 }

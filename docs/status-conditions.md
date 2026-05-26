@@ -55,6 +55,7 @@ Common reasons when `Ready=False`:
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
+- `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `MissingShards` – waiting for all shards to be created
@@ -230,6 +231,9 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ValkeyNodeCreated` | Normal | ValkeyNode CR is created for a shard/replica position |
 | `ValkeyNodeUpdated` | Normal | ValkeyNode CR spec is updated (rolling update) |
 | `ValkeyNodeFailed` | Warning | Failed to create or update a ValkeyNode CR |
+| `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
+| `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
+| `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |
 
 ### Cluster topology events
 

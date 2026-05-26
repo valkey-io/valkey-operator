@@ -69,7 +69,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("validating the Service")
 			verifyServiceExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "service", "valkey-"+valkeyClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -260,7 +260,9 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			By("validating client commands")
 			verifyClusterAccess := func(g Gomega, expected string, command ...string) {
 				// Start a Valkey client pod to access the cluster and execute commands
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", valkeyClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", valkeyClusterName)
+
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
 				// Append the client command to the overall kubectl run command
 				cmd := exec.Command("kubectl", append([]string{"run", "client",
@@ -387,7 +389,7 @@ spec:
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", singleNodeClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", singleNodeClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -450,7 +452,7 @@ spec:
 
 			By("verifying created users")
 			verifyCreatedUsers := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", withUserClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -472,10 +474,18 @@ spec:
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
+				// the output of ACL LIST displays users' password(s) as a
+				// "#" followed by a 64-character lowercase alphanumeric (from a-f and 0-9) string
+				// https://github.com/valkey-io/valkey/blob/unstable/src/acl.c#L219
+				passwordHashRegexp := "#[a-f0-9]{64}"
+
 				g.Expect(output).To(SatisfyAll(
 					ContainSubstring("user alice on"),
 					ContainSubstring("user bob on nopass"),
-					ContainSubstring("user david on"),
+					// user david is created with 2 passwords
+					MatchRegexp("user david on .* %s %s", passwordHashRegexp, passwordHashRegexp),
+					// user edward is created with resetpass flag, so its ACL entry should not contain a '#' character
+					MatchRegexp("user edward on [^#]+"),
 					ContainSubstring("user _exporter on"),
 					ContainSubstring("user _operator on"),
 				))
@@ -686,7 +696,7 @@ spec:
 
 			By("validating that the Service does not exist")
 			verifyServiceRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "service", "valkey-"+valkeyClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -694,7 +704,7 @@ spec:
 
 			By("validating that the ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -997,7 +1007,7 @@ spec:
 
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
-				clusterFqdn := fmt.Sprintf("%s.default.svc.cluster.local", deploymentClusterName)
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", deploymentClusterName)
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",

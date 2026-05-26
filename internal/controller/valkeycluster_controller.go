@@ -21,12 +21,14 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,6 +76,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconciliation loop. On each invocation it drives the
 // cluster one step closer to the desired state described by the ValkeyCluster
@@ -104,7 +107,7 @@ type ValkeyClusterReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
-func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
 
@@ -115,6 +118,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcilePodDisruptionBudget(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodDisruptionBudgetError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
@@ -130,6 +139,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	configHash := func() string {
+		cm := &corev1.ConfigMap{}
+		if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
+			return ""
+		}
+		return cm.Annotations[configHashKey]
+	}()
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -139,7 +155,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -338,11 +354,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+func headlessServiceName(clusterName string) string {
+	return resourcePrefix + clusterName
+}
+
 // Create or update a headless service (client connects to pods directly)
 func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
+			Name:      headlessServiceName(cluster.Name),
 			Namespace: cluster.Namespace,
 		},
 	}
@@ -384,7 +404,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -409,7 +429,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// Iterate nodeIndex in reverse order (replicas before primary)
 		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState)
+			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
 			if err != nil {
 				return false, err
 			}
@@ -431,10 +451,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (bool, bool, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	desired.Spec.ServerConfigHash = configHash
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -552,7 +573,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	}
 	var tlsConfig *tls.Config
 	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
-		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace)
+		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
 		cfg, err := getTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg
@@ -651,7 +672,6 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 // first in Phase 1.
 func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (int, error) {
 	log := logf.FromContext(ctx)
-	shardsRequired := int(cluster.Spec.Shards)
 
 	// Collect primary pending nodes (node index 0 = primary), skipping:
 	//  - isolated nodes (cluster_known_nodes <= 1): they haven't been
@@ -662,7 +682,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	//    (1 shard, 0 replicas), isolation is the permanent correct state,
 	//    there is nobody to MEET, so the guard is skipped.
 	//  - post-failover replacements whose shard already has a live primary.
-	isSingleNodeCluster := shardsRequired == 1 && cluster.Spec.Replicas == 0
+	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
 		if node.IsIsolated() && !isSingleNodeCluster {
@@ -692,39 +712,55 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
+	unassignedSlots := 0
+	for _, s := range slots {
+		unassignedSlots += s.End - s.Start + 1
+	}
+
 	assigned := 0
-	shardsExists := len(state.Shards)
 	for _, node := range primaries {
 		if len(slots) == 0 {
 			break
 		}
 
-		slotStart := slots[0].Start
-		numSlotsPerShard := valkey.TotalSlots / shardsRequired
-		shardIdx := shardsExists + assigned
-		// Distribute the remainder evenly: the first (TotalSlots % shardsRequired)
-		// shards each get one extra slot.
-		if shardIdx < valkey.TotalSlots%shardsRequired {
-			numSlotsPerShard++
-		}
-		slotEnd := slotStart + numSlotsPerShard - 1
+		remainingPrimaries := len(primaries) - assigned
+		// Ceiling division to ensure all slots are distributed without remainder.
+		numSlotsForNode := (unassignedSlots + remainingPrimaries - 1) / remainingPrimaries
 
-		log.V(1).Info("assign slots to primary", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
-		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER ADDSLOTSRANGE failed", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %d-%d to %v: %v", slotStart, slotEnd, node.Address, err)
+		// Collect ranges for this node
+		var nodeRanges []valkey.SlotsRange
+		remaining := numSlotsForNode
+		for remaining > 0 && len(slots) > 0 {
+			slotStart := slots[0].Start
+			take := min(slots[0].End-slots[0].Start+1, remaining)
+			slotEnd := slotStart + take - 1
+
+			nodeRanges = append(nodeRanges, valkey.SlotsRange{Start: slotStart, End: slotEnd})
+			remaining -= take
+			unassignedSlots -= take
+			// Advance the slots list: either consume the entire first range
+			// or trim its start. This avoids rebuilding the slice each iteration.
+			if take == slots[0].End-slots[0].Start+1 {
+				slots = slots[1:]
+			} else {
+				slots[0].Start = slotEnd + 1
+			}
+		}
+
+		// Issue a single CLUSTER ADDSLOTSRANGE with all ranges for this node
+		cmd := node.Client.B().ClusterAddslotsrange().StartSlotEndSlot()
+		for _, sr := range nodeRanges {
+			cmd = cmd.StartSlotEndSlot(int64(sr.Start), int64(sr.End))
+		}
+		log.V(1).Info("assign slots to primary", "node", node.Address, "ranges", nodeRanges)
+		if err := node.Client.Do(ctx, cmd.Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER ADDSLOTSRANGE failed", "node", node.Address, "ranges", nodeRanges)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %s to %v: %v", valkey.FormatSlotsRanges(nodeRanges), node.Address, err)
 			return assigned, err
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %d-%d", node.Address, slotStart, slotEnd)
-		assigned++
 
-		// Update the unassigned slots for the next iteration by removing
-		// the range we just assigned.
-		var remainingSlots []valkey.SlotsRange
-		for _, s := range slots {
-			remainingSlots = append(remainingSlots, valkey.SubtractSlotsRange(s, valkey.SlotsRange{Start: slotStart, End: slotEnd})...)
-		}
-		slots = remainingSlots
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %s", node.Address, valkey.FormatSlotsRanges(nodeRanges))
+		assigned++
 	}
 	return assigned, nil
 }
@@ -850,50 +886,62 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 // updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
-	// Fetch current status to compare
+	// Fetch the latest version to avoid conflicts from stale resourceVersion
 	current := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
+
+	// Snapshot for patch base and comparison
+	patchBase := current.DeepCopy()
+	patch := client.MergeFrom(patchBase)
+
 	// Update shard counts
 	if state != nil {
-		cluster.Status.ReadyShards = r.countReadyShards(state, cluster)
-		cluster.Status.Shards = int32(len(state.Shards))
+		current.Status.ReadyShards = r.countReadyShards(state, cluster)
+		current.Status.Shards = int32(len(state.Shards))
 	}
+
+	// Apply conditions from the in-memory cluster object
+	current.Status.Conditions = cluster.Status.Conditions
+
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
-	readyCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
-	progressingCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
-	degradedCondition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	degradedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 
 	switch {
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateDegraded
-		cluster.Status.Reason = degradedCondition.Reason
-		cluster.Status.Message = degradedCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateDegraded
+		current.Status.Reason = degradedCondition.Reason
+		current.Status.Message = degradedCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReady
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	case progressingCondition != nil && progressingCondition.Status == metav1.ConditionTrue:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateReconciling
-		cluster.Status.Reason = progressingCondition.Reason
-		cluster.Status.Message = progressingCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateReconciling
+		current.Status.Reason = progressingCondition.Reason
+		current.Status.Message = progressingCondition.Message
 	case readyCondition != nil && readyCondition.Status == metav1.ConditionFalse:
-		cluster.Status.State = valkeyiov1alpha1.ClusterStateFailed
-		cluster.Status.Reason = readyCondition.Reason
-		cluster.Status.Message = readyCondition.Message
+		current.Status.State = valkeyiov1alpha1.ClusterStateFailed
+		current.Status.Reason = readyCondition.Reason
+		current.Status.Message = readyCondition.Message
 	}
 
-	// Only update if status has changed
-	if statusChanged(current.Status, cluster.Status) {
-		if err := r.Status().Update(ctx, cluster); err != nil {
+	if !reflect.DeepEqual(patchBase.Status, current.Status) {
+		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}
-		log.V(1).Info("status updated", "state", cluster.Status.State, "reason", cluster.Status.Reason)
+		log.V(1).Info("status updated", "state", current.Status.State, "reason", current.Status.Reason)
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
+
+	// Sync back to caller so subsequent logic sees the latest state
+	cluster.Status = current.Status
+	cluster.ResourceVersion = current.ResourceVersion
 	return nil
 }
 
@@ -1162,6 +1210,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),

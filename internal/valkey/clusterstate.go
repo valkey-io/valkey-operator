@@ -64,6 +64,22 @@ type SlotsRange struct {
 	End   int
 }
 
+func (s SlotsRange) String() string {
+	if s.Start == s.End {
+		return fmt.Sprintf("%d", s.Start)
+	}
+	return fmt.Sprintf("%d-%d", s.Start, s.End)
+}
+
+// FormatSlotsRanges formats a slice of SlotsRange as "0-100,500-600".
+func FormatSlotsRanges(ranges []SlotsRange) string {
+	parts := make([]string, len(ranges))
+	for i, r := range ranges {
+		parts[i] = r.String()
+	}
+	return strings.Join(parts, ",")
+}
+
 // GetClusterState connects to Valkey nodes and scrapes the current state.
 func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
 	state := ClusterState{

@@ -672,7 +672,6 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 // first in Phase 1.
 func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (int, error) {
 	log := logf.FromContext(ctx)
-	shardsRequired := int(cluster.Spec.Shards)
 
 	// Collect primary pending nodes (node index 0 = primary), skipping:
 	//  - isolated nodes (cluster_known_nodes <= 1): they haven't been
@@ -683,7 +682,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	//    (1 shard, 0 replicas), isolation is the permanent correct state,
 	//    there is nobody to MEET, so the guard is skipped.
 	//  - post-failover replacements whose shard already has a live primary.
-	isSingleNodeCluster := shardsRequired == 1 && cluster.Spec.Replicas == 0
+	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
 		if node.IsIsolated() && !isSingleNodeCluster {
@@ -713,39 +712,55 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
+	unassignedSlots := 0
+	for _, s := range slots {
+		unassignedSlots += s.End - s.Start + 1
+	}
+
 	assigned := 0
-	shardsExists := len(state.Shards)
 	for _, node := range primaries {
 		if len(slots) == 0 {
 			break
 		}
 
-		slotStart := slots[0].Start
-		numSlotsPerShard := valkey.TotalSlots / shardsRequired
-		shardIdx := shardsExists + assigned
-		// Distribute the remainder evenly: the first (TotalSlots % shardsRequired)
-		// shards each get one extra slot.
-		if shardIdx < valkey.TotalSlots%shardsRequired {
-			numSlotsPerShard++
-		}
-		slotEnd := slotStart + numSlotsPerShard - 1
+		remainingPrimaries := len(primaries) - assigned
+		// Ceiling division to ensure all slots are distributed without remainder.
+		numSlotsForNode := (unassignedSlots + remainingPrimaries - 1) / remainingPrimaries
 
-		log.V(1).Info("assign slots to primary", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
-		if err := node.Client.Do(ctx, node.Client.B().ClusterAddslotsrange().StartSlotEndSlot().StartSlotEndSlot(int64(slotStart), int64(slotEnd)).Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER ADDSLOTSRANGE failed", "node", node.Address, "slotStart", slotStart, "slotEnd", slotEnd)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %d-%d to %v: %v", slotStart, slotEnd, node.Address, err)
+		// Collect ranges for this node
+		var nodeRanges []valkey.SlotsRange
+		remaining := numSlotsForNode
+		for remaining > 0 && len(slots) > 0 {
+			slotStart := slots[0].Start
+			take := min(slots[0].End-slots[0].Start+1, remaining)
+			slotEnd := slotStart + take - 1
+
+			nodeRanges = append(nodeRanges, valkey.SlotsRange{Start: slotStart, End: slotEnd})
+			remaining -= take
+			unassignedSlots -= take
+			// Advance the slots list: either consume the entire first range
+			// or trim its start. This avoids rebuilding the slice each iteration.
+			if take == slots[0].End-slots[0].Start+1 {
+				slots = slots[1:]
+			} else {
+				slots[0].Start = slotEnd + 1
+			}
+		}
+
+		// Issue a single CLUSTER ADDSLOTSRANGE with all ranges for this node
+		cmd := node.Client.B().ClusterAddslotsrange().StartSlotEndSlot()
+		for _, sr := range nodeRanges {
+			cmd = cmd.StartSlotEndSlot(int64(sr.Start), int64(sr.End))
+		}
+		log.V(1).Info("assign slots to primary", "node", node.Address, "ranges", nodeRanges)
+		if err := node.Client.Do(ctx, cmd.Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER ADDSLOTSRANGE failed", "node", node.Address, "ranges", nodeRanges)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %s to %v: %v", valkey.FormatSlotsRanges(nodeRanges), node.Address, err)
 			return assigned, err
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %d-%d", node.Address, slotStart, slotEnd)
-		assigned++
 
-		// Update the unassigned slots for the next iteration by removing
-		// the range we just assigned.
-		var remainingSlots []valkey.SlotsRange
-		for _, s := range slots {
-			remainingSlots = append(remainingSlots, valkey.SubtractSlotsRange(s, valkey.SlotsRange{Start: slotStart, End: slotEnd})...)
-		}
-		slots = remainingSlots
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %s", node.Address, valkey.FormatSlotsRanges(nodeRanges))
+		assigned++
 	}
 	return assigned, nil
 }

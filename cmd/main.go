@@ -27,10 +27,16 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -160,9 +166,30 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// Only cache Kubernetes resources managed by this operator to reduce memory
+	// usage in large clusters. Secrets are left unfiltered because the operator
+	// reads user-provided password Secrets that don't carry the managed-by label.
+	managedBySelector := labels.SelectorFromSet(labels.Set{
+		"app.kubernetes.io/managed-by": "valkey-operator",
+	})
+	cacheOpts := cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Service{}:               {Label: managedBySelector},
+			&appsv1.StatefulSet{}:           {Label: managedBySelector},
+			&appsv1.Deployment{}:            {Label: managedBySelector},
+			&corev1.ConfigMap{}:             {Label: managedBySelector},
+			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
+			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
+			// Pod is not explicitly watched but is cached due to r.List calls
+			// in the ValkeyNode controller.
+			&corev1.Pod{}: {Label: managedBySelector},
+		},
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
+		Cache:                  cacheOpts,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,

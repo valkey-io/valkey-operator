@@ -281,3 +281,33 @@ func TestGetUnassignedSlots(t *testing.T) {
 		t.Errorf("Expected %v, got %v", expect, result)
 	}
 }
+
+func TestCurrentEpoch(t *testing.T) {
+	t.Run("parses valid epoch", func(t *testing.T) {
+		n := &NodeState{ClusterInfo: map[string]string{"cluster_current_epoch": "42"}}
+		if n.CurrentEpoch() != 42 {
+			t.Errorf("expected 42, got %d", n.CurrentEpoch())
+		}
+	})
+
+	t.Run("returns 0 for missing key", func(t *testing.T) {
+		n := &NodeState{ClusterInfo: map[string]string{}}
+		if n.CurrentEpoch() != 0 {
+			t.Errorf("expected 0, got %d", n.CurrentEpoch())
+		}
+	})
+
+	t.Run("returns 0 for nil map", func(t *testing.T) {
+		n := &NodeState{}
+		if n.CurrentEpoch() != 0 {
+			t.Errorf("expected 0, got %d", n.CurrentEpoch())
+		}
+	})
+
+	t.Run("returns 0 for non-numeric value", func(t *testing.T) {
+		n := &NodeState{ClusterInfo: map[string]string{"cluster_current_epoch": "abc"}}
+		if n.CurrentEpoch() != 0 {
+			t.Errorf("expected 0, got %d", n.CurrentEpoch())
+		}
+	})
+}

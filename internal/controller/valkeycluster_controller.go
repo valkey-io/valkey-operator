@@ -607,6 +607,9 @@ func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *v
 // refuses to assign slots to isolated nodes, so every node is guaranteed
 // to pass through this function before receiving slots or replicating.
 //
+// Before issuing MEET, we set each node's config epoch above the cluster's
+// current epoch.
+//
 // MEET is idempotent and has no ordering dependencies, so all isolated nodes
 // can be introduced in a single pass. We pick a single "meet target" node
 // and MEET all others against it:
@@ -636,6 +639,20 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	// Falls back to an isolated node as a bootstrap seed if every node
 	// is isolated (fresh bootstrap).
 	meetTarget := findMeetTarget(state, isolated)
+
+	// Set config epochs on isolated nodes before MEET. Fresh nodes have
+	// epoch 0; setting a higher epoch ensures they enter the cluster with
+	// authority above any dead nodes they replace, preventing gossip from
+	// overriding their future slot claims.
+	currentEpoch := meetTarget.CurrentEpoch()
+	for i, node := range isolated {
+		epoch := currentEpoch + int64(i) + 1
+		if err := node.Client.Do(ctx, node.Client.B().ClusterSetConfigEpoch().ConfigEpoch(epoch).Build()).Error(); err != nil {
+			log.V(1).Info("CLUSTER SETCONFIGEPOCH skipped", "node", node.Address, "err", err)
+		}
+	}
+
+	// Exclude the meet target from the MEET loop during bootstrap.
 	if meetTarget == isolated[0] {
 		isolated = isolated[1:]
 	}

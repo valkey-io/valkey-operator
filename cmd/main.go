@@ -133,33 +133,6 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Only cache Kubernetes resources managed by this operator to reduce memory
-	// usage in large clusters. Secrets are left unfiltered because the operator
-	// reads user-provided password Secrets that don't carry the managed-by label.
-	managedBySelector := labels.SelectorFromSet(labels.Set{
-		"app.kubernetes.io/managed-by": "valkey-operator",
-	})
-	cacheOpts := cache.Options{
-		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Service{}:               {Label: managedBySelector},
-			&appsv1.StatefulSet{}:           {Label: managedBySelector},
-			&appsv1.Deployment{}:            {Label: managedBySelector},
-			&corev1.ConfigMap{}:             {Label: managedBySelector},
-			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
-			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
-			// Pod is not explicitly watched but is cached due to r.List calls
-			// in the ValkeyNode controller.
-			&corev1.Pod{}: {Label: managedBySelector},
-		},
-	}
-	if len(watchNamespaces) > 0 {
-		setupLog.Info("Restricting cache to namespaces", "namespaces", watchNamespaces)
-		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))
-		for _, ns := range watchNamespaces {
-			cacheOpts.DefaultNamespaces[ns] = cache.Config{}
-		}
-	}
-
 	// Initial webhook TLS options
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
@@ -210,6 +183,33 @@ func main() {
 		metricsServerOptions.CertDir = metricsCertPath
 		metricsServerOptions.CertName = metricsCertName
 		metricsServerOptions.KeyName = metricsCertKey
+	}
+
+	// Only cache Kubernetes resources managed by this operator to reduce memory
+	// usage in large clusters. Secrets are left unfiltered because the operator
+	// reads user-provided password Secrets that don't carry the managed-by label.
+	managedBySelector := labels.SelectorFromSet(labels.Set{
+		"app.kubernetes.io/managed-by": "valkey-operator",
+	})
+	cacheOpts := cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Service{}:               {Label: managedBySelector},
+			&appsv1.StatefulSet{}:           {Label: managedBySelector},
+			&appsv1.Deployment{}:            {Label: managedBySelector},
+			&corev1.ConfigMap{}:             {Label: managedBySelector},
+			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
+			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
+			// Pod is not explicitly watched but is cached due to r.List calls
+			// in the ValkeyNode controller.
+			&corev1.Pod{}: {Label: managedBySelector},
+		},
+	}
+	if len(watchNamespaces) > 0 {
+		setupLog.Info("Restricting cache to namespaces", "namespaces", watchNamespaces)
+		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			cacheOpts.DefaultNamespaces[ns] = cache.Config{}
+		}
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

@@ -113,7 +113,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			deleteClusterMetrics(req.Name, req.Namespace)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	if err := r.upsertService(ctx, cluster); err != nil {

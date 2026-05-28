@@ -27,7 +27,7 @@ var (
 	clusterInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_info",
-			Help: "Information about a ValkeyCluster. Value is always 1, state is in the label.",
+			Help: "Information about a ValkeyCluster. Value is 1 for the current state, 0 for all others.",
 		},
 		[]string{"valkey_cluster", "namespace", "state"},
 	)
@@ -100,4 +100,13 @@ func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
 
 	clusterShards.WithLabelValues(name, ns).Set(float64(cluster.Status.Shards))
 	clusterShardsReady.WithLabelValues(name, ns).Set(float64(cluster.Status.ReadyShards))
+}
+
+// deleteClusterMetrics removes all gauge metrics for a deleted ValkeyCluster.
+func deleteClusterMetrics(name, namespace string) {
+	for _, s := range clusterStates {
+		clusterInfo.DeleteLabelValues(name, namespace, string(s))
+	}
+	clusterShards.DeleteLabelValues(name, namespace)
+	clusterShardsReady.DeleteLabelValues(name, namespace)
 }

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "main"
+  pull_request:
 
 jobs:
   test:
@@ -37,7 +38,7 @@ jobs:
         if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'
         uses: mikefarah/yq@master
         with:
-          cmd: yq '.rules' ./valkey-operator/config/rbac/role.yaml
+          cmd: yq '.rules' ../valkey-operator/config/rbac/role.yaml
 
       - name: Update cluster-role
         if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'

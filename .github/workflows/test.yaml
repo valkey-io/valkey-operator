@@ -20,6 +20,7 @@ jobs:
       - name: Check that RBAC permissions are changed
         id: check-rbac-update
         run: |
+          cd valkey-operator
           CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}"|tr '\n' ' ')"
           if [[ "${CHANGED_FILES}" == *""* ]];then
             echo "is_rbac_changed=true" >> $GITHUB_OUTPUT

@@ -1,0 +1,59 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check variables
+        run: echo "${{ github.repository_owner }}; this commit ID :${GITHUB_SHA}"
+      - name: Checkout valkey-operator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ github.repository_owner }}/valkey-operator
+          path: valkey-operator
+
+      - name: Check that RBAC permissions are changed
+        id: check-rbac-update
+        run: |
+          CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}"|tr '\n' ' ')"
+          if [[ "${CHANGED_FILES}" == *""* ]];then
+            echo "is_rbac_changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      # - name: Checkout valkey-helm
+      #   if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'
+      #   uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      #   with:
+      #     repository: ${{ github.repository_owner }}/valkey-helm
+
+      # - name: Get changed RBAC rules
+      #   id: get-rbac-rules
+      #   if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'
+      #   uses: mikefarah/yq@master
+      #   with:
+      #     cmd: yq '.rules' ./valkey-operator/config/rbac/role.yaml
+
+      # - name: Update cluster-role
+      #   if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'
+      #   run: bash ../valkey-operator/script/update-helm-template.sh "${steps.get-rbac-rules.outputs.result}"
+
+      # - name: Create Pull Request
+      #   if: steps.check-rbac-update.outputs.is_rbac_changed == 'true'
+      #   uses: peter-evans/create-pull-request@v7
+      #   with:
+      #     token: "${{ secrets.PAT_TOKEN }}"
+      #     path: valkey-helm
+      #     branch: update-operator-helm-chart
+      #     commit-message: "Update valkey-operator helm chart"
+      #     committer: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+      #     delete-branch: true
+      #     signoff: true
+      #     author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+      #     title: "Update valkey-operator Helm chart"
+      #     body: |
+      #       Update valkey-operator/templates/clusterrole.yaml due to changes by "${GITHUB_SHA}"

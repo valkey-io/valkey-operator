@@ -29,7 +29,7 @@ var (
 			Name: "valkey_operator_cluster_info",
 			Help: "Information about a ValkeyCluster. Value is always 1, state is in the label.",
 		},
-		[]string{"cluster", "namespace", "state"},
+		[]string{"valkey_cluster", "namespace", "state"},
 	)
 
 	clusterShards = prometheus.NewGaugeVec(
@@ -37,7 +37,7 @@ var (
 			Name: "valkey_operator_cluster_shards",
 			Help: "Total number of shards in a ValkeyCluster.",
 		},
-		[]string{"cluster", "namespace"},
+		[]string{"valkey_cluster", "namespace"},
 	)
 
 	clusterShardsReady = prometheus.NewGaugeVec(
@@ -45,7 +45,7 @@ var (
 			Name: "valkey_operator_cluster_shards_ready",
 			Help: "Number of ready shards in a ValkeyCluster.",
 		},
-		[]string{"cluster", "namespace"},
+		[]string{"valkey_cluster", "namespace"},
 	)
 
 	failoversTotal = prometheus.NewCounterVec(
@@ -53,7 +53,7 @@ var (
 			Name: "valkey_operator_failovers_total",
 			Help: "Total number of failover events.",
 		},
-		[]string{"cluster", "namespace", "type"},
+		[]string{"valkey_cluster", "namespace", "type"},
 	)
 
 	slotMigrationsTotal = prometheus.NewCounterVec(
@@ -61,7 +61,7 @@ var (
 			Name: "valkey_operator_slot_migrations_total",
 			Help: "Total number of slot migration batches completed.",
 		},
-		[]string{"cluster", "namespace"},
+		[]string{"valkey_cluster", "namespace"},
 	)
 )
 
@@ -76,7 +76,13 @@ func init() {
 }
 
 // clusterStates lists all possible ValkeyCluster states for metric cleanup.
-var clusterStates = []string{"Ready", "Reconciling", "Degraded", "Failed"}
+var clusterStates = []valkeyiov1alpha1.ClusterState{
+	valkeyiov1alpha1.ClusterStateInitializing,
+	valkeyiov1alpha1.ClusterStateReconciling,
+	valkeyiov1alpha1.ClusterStateReady,
+	valkeyiov1alpha1.ClusterStateDegraded,
+	valkeyiov1alpha1.ClusterStateFailed,
+}
 
 // updateClusterMetrics sets the Prometheus gauges for a ValkeyCluster.
 func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
@@ -86,10 +92,10 @@ func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
 	// Set info gauge: 1 for current state, 0 for all others
 	for _, s := range clusterStates {
 		val := float64(0)
-		if string(cluster.Status.State) == s {
+		if cluster.Status.State == s {
 			val = 1
 		}
-		clusterInfo.WithLabelValues(name, ns, s).Set(val)
+		clusterInfo.WithLabelValues(name, ns, string(s)).Set(val)
 	}
 
 	clusterShards.WithLabelValues(name, ns).Set(float64(cluster.Status.Shards))

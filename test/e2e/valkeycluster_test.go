@@ -416,6 +416,28 @@ spec:
 				g.Expect(output).To(ContainSubstring("cluster_size:1"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+
+			By("validating CLUSTER SLOTS reports the pod IP")
+			verifyClusterSlotsIP := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", singleNodeClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}={.items[0].status.podIP}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "failed to list pods")
+				parts := strings.SplitN(strings.TrimSpace(out), "=", 2)
+				g.Expect(parts).To(HaveLen(2), "expected pod=ip output, got %q", out)
+				podName, podIP := parts[0], parts[1]
+				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
+
+				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
+					"valkey-cli", "CLUSTER", "SLOTS")
+				slotsOut, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
+				g.Expect(slotsOut).To(ContainSubstring(podIP),
+					"regression: CLUSTER SLOTS did not report podIP %s\noutput:\n%s",
+					podIP, slotsOut)
+			}
+			Eventually(verifyClusterSlotsIP).Should(Succeed())
 		})
 
 		It("creates a cluster with custom users", func() {

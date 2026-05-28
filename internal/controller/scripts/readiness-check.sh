@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 #
-# Readiness check of a Valkey node (Bash only).
+# Readiness check of a Valkey node (POSIX sh, works with bash, dash & busybox ash).
 #
 # Usage: readiness-check.sh [timeout] [port]
 #        Default timeout is 1s, and default Valkey port is 6379.
@@ -9,13 +9,13 @@ set -e
 timeout=${1:-"1"}
 port=${2:-"6379"}
 
-# timeout DURATION COMMAND [ARG]...
-function timeout {
-    local duration=$1; shift
+# timeout_cmd DURATION COMMAND [ARG]...
+timeout_cmd() {
+    duration=$1; shift
 
     # Run command and get its pid.
     "$@" &
-    local cmdpid=$!
+    cmdpid=$!
 
     # Start the timeout supervisor (subshell in parallell).
     (
@@ -27,10 +27,10 @@ function timeout {
         done
 
         echo "Command timed out"
-        # First try a SIGTERM, then force terminate using SIGKILL.
-        kill -s SIGTERM $cmdpid && sleep 0.1 && kill -0 $cmdpid || exit 0
+        # First try SIGTERM, then force terminate using SIGKILL.
+        kill -TERM $cmdpid && sleep 0.1 && kill -0 $cmdpid || exit 0
         sleep 1
-        kill -s SIGKILL $cmdpid
+        kill -KILL $cmdpid
     ) 2>/dev/null &
 
     # Wait for jobs (avoiding <defunct>)
@@ -45,7 +45,7 @@ fi
 
 # Perform checks
 response=$(
-    timeout $timeout \
+    timeout_cmd $timeout \
     valkey-cli -h localhost -p $port $tls_args PING)
 
 if [ "$response" != "PONG" ]; then

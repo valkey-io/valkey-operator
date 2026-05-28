@@ -76,7 +76,12 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
 	// Command
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf"}, c.Command)
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)"}, c.Command)
+
+	// Env
+	require.Len(t, c.Env, 1)
+	assert.Equal(t, "POD_IP", c.Env[0].Name)
+	assert.Equal(t, "status.podIP", c.Env[0].ValueFrom.FieldRef.FieldPath)
 
 	// Ports
 	require.Len(t, c.Ports, 2)

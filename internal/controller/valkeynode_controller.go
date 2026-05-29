@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,12 +47,50 @@ const (
 	valkeyInfoRolePrefix = "role:"
 )
 
+// valkeyConfigClient is the subset of Valkey operations the ValkeyNode
+// controller needs to apply config live. An interface so tests can inject a
+// fake (envtest has no running Valkey server).
+type valkeyConfigClient interface {
+	SetConfig(ctx context.Context, params map[string]string) error
+	Close()
+}
+
+// realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
+type realValkeyConfigClient struct {
+	client vclient.Client
+}
+
+func (rc *realValkeyConfigClient) SetConfig(ctx context.Context, params map[string]string) error {
+	cmd := rc.client.B().ConfigSet().ParameterValue()
+	for _, param := range slices.Sorted(maps.Keys(params)) {
+		cmd = cmd.ParameterValue(param, params[param])
+	}
+	if err := rc.client.Do(ctx, cmd.Build()).Error(); err != nil {
+		return fmt.Errorf("CONFIG SET: %w", err)
+	}
+	return nil
+}
+
+func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
+
+// realConfigClient opens a real Valkey connection to the node's pod.
+func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	if err != nil {
+		return nil, err
+	}
+	return &realValkeyConfigClient{client: c}, nil
+}
+
 // ValkeyNodeReconciler reconciles a ValkeyNode object
 type ValkeyNodeReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
+	// newConfigClient opens a Valkey client to a node's pod for live config
+	// application. Defaults to realConfigClient; overridable in tests.
+	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes,verbs=get;list;watch;create;update;patch;delete
@@ -100,9 +140,33 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	if err := r.applyLiveConfig(ctx, node); err != nil {
+		log.Error(err, "failed to apply live config")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
+		r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error())
+		return ctrl.Result{}, err
+	}
+	r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")
+
 	log.V(1).Info("ValkeyNode reconciliation complete")
 	// Requeue after 60 seconds to check on the ValkeyNode role.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return
+	}
+	patchBase := current.DeepCopy()
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: current.Generation,
+	})
+	_ = r.Status().Patch(ctx, current, client.MergeFrom(patchBase))
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -360,9 +424,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		log.V(2).Info("status unchanged, skipping update")
 	}
 
-	// Sync Ready back to the caller's object so the requeue check in Reconcile
-	// reflects the status we just wrote.
+	// Sync status fields back to the caller's object so Reconcile uses the
+	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
 	node.Status.Ready = current.Status.Ready
+	node.Status.PodIP = current.Status.PodIP
 
 	return nil
 }
@@ -433,9 +498,10 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 	return nil, nil
 }
 
-// getValkeyRole connects to a Valkey pod and returns its replication role
-// ("primary" or "replica"). Returns an empty string if the role cannot be determined.
-func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string {
+// buildNodeClientOption builds the valkey-go client option for connecting to a
+// node's pod, on a best-effort basis (TLS and operator credentials are applied
+// when available). Shared by getValkeyRole and the live-config client.
+func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
 	var tlsConfig *tls.Config
 	if node.Spec.TLS != nil && node.Spec.TLS.Certificate.SecretName != "" {
 		secretName := node.Spec.TLS.Certificate.SecretName
@@ -443,16 +509,11 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
 			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
 		}
-
-		cfg, err := getTLSConfig(ctx, r.Client, secretName, serverName, node.Namespace)
-		if err == nil {
+		if cfg, err := getTLSConfig(ctx, r.Client, secretName, serverName, node.Namespace); err == nil {
 			tlsConfig = cfg
 		}
 	}
 
-	// Use _operator credentials when available (cluster-managed nodes).
-	// Standalone ValkeyNodes have no cluster label and no system password
-	// secret, so we skip the lookup entirely and connect unauthenticated.
 	var username, operatorPassword string
 	if clusterName, ok := node.Labels[LabelCluster]; ok {
 		operatorPassword, _ = fetchSystemUserPassword(ctx, operatorUser, r.Client, clusterName, node.Namespace)
@@ -461,15 +522,19 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 		}
 	}
 
-	opt := vclient.ClientOption{
+	return vclient.ClientOption{
 		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
-		ForceSingleClient: true, // Don't connect to another cluster node.
+		ForceSingleClient: true,
 		TLSConfig:         tlsConfig,
 		Username:          username,
 		Password:          operatorPassword,
 	}
+}
 
-	c, err := vclient.NewClient(opt)
+// getValkeyRole connects to a Valkey pod and returns its replication role
+// ("primary" or "replica"). Returns an empty string if the role cannot be determined.
+func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string {
+	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
 	if err != nil {
 		return ""
 	}
@@ -481,6 +546,29 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 	}
 
 	return parseValkeyRole(info)
+}
+
+// applyLiveConfig applies the live-settable subset of the node's desired config
+// via CONFIG SET. Called only when the pod is ready. A no-op (no connection)
+// when there is nothing live to apply.
+func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	params := liveConfigToApply(node.Spec.Config)
+	if len(params) == 0 {
+		return nil
+	}
+
+	factory := r.newConfigClient
+	if factory == nil {
+		factory = realConfigClient
+	}
+
+	c, err := factory(ctx, r, node)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	return c.SetConfig(ctx, params)
 }
 
 // parseValkeyRole extracts the replication role from the output of INFO replication,

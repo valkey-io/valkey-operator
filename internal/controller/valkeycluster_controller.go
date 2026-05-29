@@ -139,13 +139,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	configHash := func() string {
-		cm := &corev1.ConfigMap{}
-		if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
-			return ""
-		}
-		return cm.Annotations[configHashKey]
-	}()
+	// Roll hash ignores live-settable keys, so a change confined to those keys
+	// does not roll the pods (they are applied live by the ValkeyNode controller).
+	configHash := serverConfigRollHash(cluster)
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -519,6 +515,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
 			return true, false, nil
 		}
+		if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
+			log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
+			return true, false, nil
+		}
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
@@ -559,6 +559,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			ServerConfigMapName: GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:  getInternalSecretName(cluster.Name),
 			TLS:                 cluster.Spec.TLS,
+			Config:              cluster.Spec.Config,
 		},
 	}
 }

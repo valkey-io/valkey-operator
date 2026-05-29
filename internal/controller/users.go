@@ -59,6 +59,7 @@ var (
 			"+cluster|forget",            // remove stale nodes
 			"+cluster|getslotmigrations", // check migration status
 			"+cluster|migrateslots",      // migrate slots between shards
+			"+config|set",                // apply live config changes
 			"+info",                      // node info and replication status
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis

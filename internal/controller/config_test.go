@@ -48,3 +48,48 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
 	})
 })
+
+var _ = Describe("Live config", Label("liveconfig"), func() {
+	newCluster := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{Config: cfg},
+		}
+	}
+
+	It("excludes allowlisted keys from the roll config but keeps others and base", func() {
+		cluster := newCluster(map[string]string{
+			"maxmemory-policy": "allkeys-lru", // allowlisted
+			"appendonly":       "yes",         // not allowlisted
+		})
+		rollConfig := buildRollServerConfig(cluster)
+		Expect(rollConfig).NotTo(ContainSubstring("maxmemory-policy"))
+		Expect(rollConfig).To(ContainSubstring("appendonly"))
+		Expect(rollConfig).To(ContainSubstring("cluster-enabled")) // base retained
+	})
+
+	It("keeps the roll hash stable when only an allowlisted key changes", func() {
+		before := serverConfigRollHash(newCluster(map[string]string{
+			"maxmemory-policy": "allkeys-lru",
+			"appendonly":       "yes",
+		}))
+		after := serverConfigRollHash(newCluster(map[string]string{
+			"maxmemory-policy": "volatile-lru",
+			"appendonly":       "yes",
+		}))
+		Expect(after).To(Equal(before))
+	})
+
+	It("changes the roll hash when a non-allowlisted key changes", func() {
+		before := serverConfigRollHash(newCluster(map[string]string{"appendonly": "yes"}))
+		after := serverConfigRollHash(newCluster(map[string]string{"appendonly": "no"}))
+		Expect(after).NotTo(Equal(before))
+	})
+
+	It("liveConfigToApply returns only allowlisted keys present in config", func() {
+		out := liveConfigToApply(map[string]string{
+			"maxmemory-policy": "allkeys-lru",
+			"appendonly":       "yes",
+		})
+		Expect(out).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+	})
+})

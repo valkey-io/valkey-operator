@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1078,5 +1079,67 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 		updated2 := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated2)).To(Succeed())
 		Expect(updated2.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when nothing changed")
+	})
+})
+
+type fakeConfigClient struct {
+	params map[string]string
+	err    error
+	closed bool
+}
+
+func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string) error {
+	f.params = params
+	return f.err
+}
+
+func (f *fakeConfigClient) Close() { f.closed = true }
+
+var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
+	nodeWith := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: cfg}}
+	}
+
+	ctx := context.Background()
+
+	It("applies only allowlisted keys and closes the client", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{
+			"maxmemory-policy": "allkeys-lru",
+			"appendonly":       "yes",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("returns an error when CONFIG SET fails", func() {
+		fake := &fakeConfigClient{err: fmt.Errorf("boom")}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		Expect(err).To(HaveOccurred())
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("does not open a client when no allowlisted keys are present", func() {
+		called := false
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				called = true
+				return nil, nil
+			},
+		}
+		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(called).To(BeFalse())
 	})
 })

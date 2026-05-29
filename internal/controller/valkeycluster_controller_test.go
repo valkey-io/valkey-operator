@@ -162,19 +162,23 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		By("reading the config hash from the cluster ConfigMap")
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
-		initialHash := cm.Annotations[configHashKey]
-		Expect(initialHash).NotTo(BeEmpty())
+		initialCMHash := cm.Annotations[configHashKey]
+		Expect(initialCMHash).NotTo(BeEmpty())
 
-		By("verifying each ValkeyNode carries the config hash in its spec")
+		By("verifying each ValkeyNode carries the roll hash (not the CM full hash) in its spec")
+		// ServerConfigHash is the roll hash: it excludes live-settable keys so that
+		// changes to those keys do not trigger a pod roll.
+		initialRollHash := serverConfigRollHash(cluster)
+		Expect(initialRollHash).NotTo(BeEmpty())
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
 		for _, n := range nodeList.Items {
-			Expect(n.Spec.ServerConfigHash).To(Equal(initialHash),
-				"ValkeyNode %s must have ServerConfigHash set so a spec change triggers ValkeyNode controller reconciliation", n.Name)
+			Expect(n.Spec.ServerConfigHash).To(Equal(initialRollHash),
+				"ValkeyNode %s must have ServerConfigHash set to the roll hash", n.Name)
 		}
 
-		By("updating the cluster config")
+		By("updating the cluster config with a live-settable key (maxmemory)")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
 		cluster.Spec.Config["maxmemory"] = "200mb"
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
@@ -183,20 +187,22 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the ConfigMap has a new hash")
+		By("verifying the ConfigMap has a new full hash (all keys changed)")
 		updatedCM := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
-		newHash := updatedCM.Annotations[configHashKey]
-		Expect(newHash).NotTo(BeEmpty())
-		Expect(newHash).NotTo(Equal(initialHash), "config hash should change when cluster config changes")
+		newCMHash := updatedCM.Annotations[configHashKey]
+		Expect(newCMHash).NotTo(BeEmpty())
+		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
-		By("verifying each ValkeyNode spec was updated with the new hash")
+		By("verifying ValkeyNode ServerConfigHash is unchanged (maxmemory is live-settable, no pod roll)")
+		newRollHash := serverConfigRollHash(cluster)
+		Expect(newRollHash).To(Equal(initialRollHash), "roll hash must not change for live-settable key changes")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, updatedNodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(updatedNodeList.Items).NotTo(BeEmpty())
 		for _, n := range updatedNodeList.Items {
-			Expect(n.Spec.ServerConfigHash).To(Equal(newHash),
-				"ValkeyNode %s ServerConfigHash must be updated to bump Generation and trigger ValkeyNode controller reconciliation", n.Name)
+			Expect(n.Spec.ServerConfigHash).To(Equal(newRollHash),
+				"ValkeyNode %s ServerConfigHash must remain the roll hash after a live-settable key change", n.Name)
 		}
 	})
 })
@@ -911,5 +917,20 @@ var _ = Describe("reconcileValkeyNode", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "should requeue while ObservedGeneration is stale")
 		Expect(created).To(BeFalse())
+	})
+})
+
+var _ = Describe("buildClusterValkeyNode config passthrough", Label("liveconfig"), func() {
+	It("copies cluster Spec.Config into the built ValkeyNode spec", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+				Config:   map[string]string{"maxmemory-policy": "allkeys-lru"},
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.Config).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 })

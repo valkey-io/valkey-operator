@@ -30,14 +30,22 @@ config:
 
 Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf/) to all nodes in the cluster.
 
+Listed below are configurations can be applied live without rolling pods. We are adopting configs that can be applied live on a case-by-case basis. For any requests please [raise an issue](https://github.com/valkey-io/valkey-operator/issues/new).
+
+```
+maxclients
+maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
+maxmemory-policy
+```
+
 #### Constraints
 
-- All config changes cause pods to be rolled
 - Cluster management settings owned by the operator cannot be overwritten
 
 #### Future plans
 
-- Pods are not rolled for configs that can be applied live
+- Operator validates configs before they are applied to the server
+  - https://github.com/valkey-io/valkey-operator/issues/141#issuecomment-4269559003
 
 ### Containers
 

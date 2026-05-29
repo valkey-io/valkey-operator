@@ -59,6 +59,7 @@ var (
 			"+cluster|forget",            // remove stale nodes
 			"+cluster|getslotmigrations", // check migration status
 			"+cluster|migrateslots",      // migrate slots between shards
+			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
 			"+info",                      // node info and replication status
 		}, " "),

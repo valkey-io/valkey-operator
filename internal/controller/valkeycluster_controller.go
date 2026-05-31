@@ -1207,9 +1207,16 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 	return deleted, nil
 }
 
-// shardIndexFromState determines the pod shard-index for a given Valkey shard
-// by matching any of its nodes' addresses to ValkeyNode labels.
+// shardIndexFromState determines the shard index for a given Valkey Cluster
+// shard by matching its node addresses to ValkeyNode shard-index labels. It checks
+// the primary first, falling back to any node if unavailable.
 func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.ValkeyNodeList) int {
+	if primary := shard.GetPrimaryNode(); primary != nil {
+		_, shardIndex := nodeRoleAndShard(primary.Address, nodes)
+		if shardIndex >= 0 {
+			return shardIndex
+		}
+	}
 	for _, node := range shard.Nodes {
 		_, shardIndex := nodeRoleAndShard(node.Address, nodes)
 		if shardIndex >= 0 {

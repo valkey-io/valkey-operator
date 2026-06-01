@@ -19,6 +19,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -273,6 +274,55 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	return mergePatchContainers(containers, node.Spec.Containers)
 }
 
+func buildShardTopologySpreadConstraints(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) []corev1.TopologySpreadConstraint {
+	if len(node.Spec.TopologySpreadConstraints) == 0 {
+		return nil
+	}
+
+	constraints := make([]corev1.TopologySpreadConstraint, len(node.Spec.TopologySpreadConstraints))
+	clusterName := labels[LabelCluster]
+	shardIndex := labels[LabelShardIndex]
+
+	for i := range node.Spec.TopologySpreadConstraints {
+		constraint := *node.Spec.TopologySpreadConstraints[i].DeepCopy()
+		if constraint.LabelSelector == nil {
+			constraint.LabelSelector = &metav1.LabelSelector{}
+		}
+		if constraint.LabelSelector.MatchLabels == nil {
+			constraint.LabelSelector.MatchLabels = map[string]string{}
+		}
+		if clusterName != "" && !topologySpreadConstraintUsesKey(constraint, LabelCluster) {
+			constraint.LabelSelector.MatchLabels[LabelCluster] = clusterName
+		}
+		if shardIndex != "" && !topologySpreadConstraintUsesKey(constraint, LabelShardIndex) {
+			constraint.MatchLabelKeys = append(constraint.MatchLabelKeys, LabelShardIndex)
+		}
+		constraints[i] = constraint
+	}
+
+	return constraints
+}
+
+func topologySpreadConstraintUsesKey(constraint corev1.TopologySpreadConstraint, key string) bool {
+	return labelSelectorUsesKey(constraint.LabelSelector, key) ||
+		slices.Contains(constraint.MatchLabelKeys, key)
+}
+
+func labelSelectorUsesKey(selector *metav1.LabelSelector, key string) bool {
+	if selector == nil {
+		return false
+	}
+	if _, exists := selector.MatchLabels[key]; exists {
+		return true
+	}
+	for _, expr := range selector.MatchExpressions {
+		if expr.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
@@ -289,10 +339,11 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	podSpec := corev1.PodSpec{
-		Containers:   containers,
-		NodeSelector: node.Spec.NodeSelector,
-		Affinity:     node.Spec.Affinity,
-		Tolerations:  node.Spec.Tolerations,
+		Containers:                containers,
+		NodeSelector:              node.Spec.NodeSelector,
+		Affinity:                  node.Spec.Affinity,
+		Tolerations:               node.Spec.Tolerations,
+		TopologySpreadConstraints: buildShardTopologySpreadConstraints(node, labels),
 		Volumes: []corev1.Volume{
 			{
 				Name: "scripts",

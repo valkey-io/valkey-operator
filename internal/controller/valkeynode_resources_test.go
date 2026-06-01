@@ -274,6 +274,126 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	assert.Equal(t, tolerations, pts.Spec.Tolerations, "tolerations should pass through")
 }
 
+func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraints(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-0", "test-ns")
+	node.Labels = map[string]string{
+		LabelCluster:    "mycluster",
+		LabelShardIndex: "1",
+		LabelNodeIndex:  "0",
+	}
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+		},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
+
+	constraint := pts.Spec.TopologySpreadConstraints[0]
+	require.NotNil(t, constraint.LabelSelector)
+	assert.Equal(t, "mycluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should be injected")
+	assert.Contains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard label key should scope the spread group")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsPreservesUserSelector(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-0", "test-ns")
+	node.Labels = map[string]string{
+		LabelCluster:    "mycluster",
+		LabelShardIndex: "1",
+		LabelNodeIndex:  "0",
+	}
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "topology.kubernetes.io/zone",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"role":          "server",
+					LabelShardIndex: "1",
+				},
+			},
+		},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
+
+	constraint := pts.Spec.TopologySpreadConstraints[0]
+	require.NotNil(t, constraint.LabelSelector)
+	assert.Equal(t, "server", constraint.LabelSelector.MatchLabels["role"], "user selector labels should be preserved")
+	assert.Equal(t, "1", constraint.LabelSelector.MatchLabels[LabelShardIndex], "existing shard selector should be preserved")
+	assert.Equal(t, "mycluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected")
+	assert.NotContains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard key should not be duplicated when already selected")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsAvoidsDuplicateReservedKeys(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-0", "test-ns")
+	node.Labels = map[string]string{
+		LabelCluster:    "mycluster",
+		LabelShardIndex: "1",
+		LabelNodeIndex:  "0",
+	}
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+			MatchLabelKeys:    []string{LabelCluster},
+		},
+		{
+			MaxSkew:           1,
+			TopologyKey:       "topology.kubernetes.io/zone",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			MatchLabelKeys:    []string{LabelShardIndex},
+		},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.TopologySpreadConstraints, 2)
+
+	clusterConstraint := pts.Spec.TopologySpreadConstraints[0]
+	require.NotNil(t, clusterConstraint.LabelSelector)
+	assert.NotContains(t, clusterConstraint.LabelSelector.MatchLabels, LabelCluster, "cluster label should not be injected when matchLabelKeys already uses it")
+	assert.Contains(t, clusterConstraint.MatchLabelKeys, LabelCluster, "user-provided cluster matchLabelKey should be preserved")
+	assert.Contains(t, clusterConstraint.MatchLabelKeys, LabelShardIndex, "shard key should still be injected when unused")
+
+	shardConstraint := pts.Spec.TopologySpreadConstraints[1]
+	require.NotNil(t, shardConstraint.LabelSelector)
+	assert.Equal(t, "mycluster", shardConstraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected when unused")
+	assert.Contains(t, shardConstraint.MatchLabelKeys, LabelShardIndex, "user-provided shard matchLabelKey should be preserved")
+	assert.Len(t, shardConstraint.MatchLabelKeys, 1, "shard matchLabelKey should not be duplicated")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsSkipsShardScopingWithoutShardLabel(t *testing.T) {
+	node := newTestValkeyNode("standalone-node", "test-ns")
+	node.Labels = map[string]string{
+		LabelCluster: "standalone-cluster",
+	}
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+		},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
+
+	constraint := pts.Spec.TopologySpreadConstraints[0]
+	require.NotNil(t, constraint.LabelSelector)
+	assert.Equal(t, "standalone-cluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected")
+	assert.NotContains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard label key should only be injected when the pod carries a shard label")
+}
+
 func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	resources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
@@ -669,6 +789,13 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Tolerations: []corev1.Toleration{
 				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
 			},
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+				{
+					MaxSkew:           1,
+					TopologyKey:       "kubernetes.io/hostname",
+					WhenUnsatisfiable: corev1.DoNotSchedule,
+				},
+			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
@@ -685,6 +812,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
 	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")
 	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
+	assert.Equal(t, cluster.Spec.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")

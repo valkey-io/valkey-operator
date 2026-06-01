@@ -79,10 +79,16 @@ type ValkeyClusterSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// Affinity to apply to the pods, overrides NodeSelector if set
-	// Some basic anti-affinity rules will be applied by default to spread pods across nodes and zones
+	// Affinity to apply to the pods, overrides NodeSelector if set.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// TopologySpreadConstraints defines pod topology spread constraints applied
+	// to the ValkeyNode workloads. The operator augments these constraints with
+	// shard-aware selectors so pods from the same shard can be spread across the
+	// configured topology domain.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
@@ -225,6 +231,7 @@ const (
 	ReasonUpdatingNodes            = "UpdatingNodes"
 	ReasonSystemUsersAclError      = "SystemUsersACLError"
 	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
+	ReasonPodUnschedulable         = "PodUnschedulable"
 )
 
 // +kubebuilder:object:root=true

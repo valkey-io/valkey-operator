@@ -272,6 +272,34 @@ var _ = Describe("pod scheduling issue handling", func() {
 		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 	})
 
+	It("clears stale unschedulable Ready and Degraded conditions when scheduling resolves", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-scheduling-resolved-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 1,
+			},
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionTrue)
+
+		reconciler := &ValkeyClusterReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(handled).To(BeFalse())
+		Expect(result).To(Equal(reconcile.Result{}))
+		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeNil())
+		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+	})
+
 	It("ignores pods that are already scheduled", func() {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "scheduled-pod"},

@@ -381,6 +381,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	}
 	if issue == nil {
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable)
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable)
 		return ctrl.Result{}, false, nil
 	}
 

@@ -99,4 +99,4 @@ helm uninstall valkey-operator -n valkey-operator-system
 
 - [ValkeyCluster](./valkeycluster.md) — CRD reference and configuration options
 - [Status conditions](./status-conditions.md) — understanding cluster health
-- [Using modules](./docs/using-modules.md) - workaround to deploy a Valkey Cluster with module
+- [Using modules](./using-modules.md) - workaround to deploy a Valkey Cluster with module

@@ -4,10 +4,10 @@ Currently, valkey-operator does not natively support using modules, but you can 
 
 ## 1. Creating a customized Valkey Docker image
 
-Below is an example Dockerfile to build the iamge with [valkey-json](https://github.com/valkey-io/valkey-json) module
+Below is an example Dockerfile to build the image with [valkey-json](https://github.com/valkey-io/valkey-json) module
 
 ```Dockerfile
-FROM docker.io/valkey/valkey:9.1.0-alpine AS build
+FROM docker.io/valkey/valkey:9.1.0-alpine
 
 RUN set -eux; \
     apk add --no-cache            \

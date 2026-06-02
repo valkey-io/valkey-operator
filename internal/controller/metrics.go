@@ -26,7 +26,7 @@ import (
 var (
 	clusterInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "valkey_operator_cluster_info",
+			Name: "valkey_operator_cluster_state_info",
 			Help: "Information about a ValkeyCluster. Value is 1 for the current state, 0 for all others.",
 		},
 		[]string{"valkey_cluster", "namespace", "state"},
@@ -56,9 +56,9 @@ var (
 		[]string{"valkey_cluster", "namespace", "type"},
 	)
 
-	slotMigrationsTotal = prometheus.NewCounterVec(
+	slotMigrationBatchesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "valkey_operator_slot_migrations_total",
+			Name: "valkey_operator_slot_migration_batches_total",
 			Help: "Total number of slot migration batches completed.",
 		},
 		[]string{"valkey_cluster", "namespace"},
@@ -71,7 +71,7 @@ func init() {
 		clusterShards,
 		clusterShardsReady,
 		failoversTotal,
-		slotMigrationsTotal,
+		slotMigrationBatchesTotal,
 	)
 }
 

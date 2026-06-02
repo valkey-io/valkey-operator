@@ -1018,7 +1018,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		}
 		return false, err
 	}
-	slotMigrationsTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
+	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
 }
 
@@ -1132,6 +1132,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			}
 			return false, err
 		}
+		slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 		return true, nil
 	}
 

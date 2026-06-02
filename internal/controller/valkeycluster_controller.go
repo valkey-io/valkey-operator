@@ -472,12 +472,28 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 					"name", node.Name, "err", err)
 			}
 		} else if nodeRequiresRoll(current, desired) {
-			if shard, replicas := findFailoverShard(clusterState, current.Status.PodIP); shard != nil {
+			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+			if shard != nil {
 				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP)
+					"name", node.Name, "address", current.Status.PodIP,
+					"syncedReplicas", len(replicas))
 				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
 					log.Info("proactive failover did not complete, proceeding with roll",
 						"name", node.Name, "err", err)
+				}
+			} else if cluster.Spec.Replicas > 0 {
+				// findFailoverShard returned nil for one of three reasons:
+				// 1. Node is the shard primary but has no synced replicas: skip roll, would lose data
+				// 2. Node is in a shard but is a replica: safe to roll
+				// 3. Node isn't in any shard (isolated): safe to roll
+				// Only case 1 requires skipping; identify it's the actual primary of its shard.
+				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+					log.Info("primary has no synced replicas, deferring roll",
+						"name", node.Name, "address", current.Status.PodIP,
+						"shardNodes", len(shardInState.Nodes),
+						"shardId", shardInState.Id)
+					return false, false, nil
 				}
 			}
 		}

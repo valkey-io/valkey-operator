@@ -49,6 +49,12 @@ docker build . -t valkey-customized:1.0
 
 ## 2. Create a ValkeyCluster using the customized image
 
+Update the `server` container configuration, so that:
+- `image` references the Docker image built in the previous step,
+- `args` include the `loadmodule` setting, as well as other configurations required for the module.
+
+The value provided will be applied using strategic merge patch
+
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: valkey.io/v1alpha1

@@ -169,6 +169,18 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			Command: []string{
 				"valkey-server",
 				"/config/valkey.conf",
+				"--cluster-announce-ip",
+				"$(POD_IP)",
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name: "POD_IP",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "status.podIP",
+						},
+					},
+				},
 			},
 			Ports: []corev1.ContainerPort{
 				{

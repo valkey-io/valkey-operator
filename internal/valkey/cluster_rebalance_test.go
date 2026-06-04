@@ -161,6 +161,7 @@ func TestPlanDrainMove_PicksFirstDst(t *testing.T) {
 }
 
 func TestPlanDrainMove_EmptySrc(t *testing.T) {
+	// Shard with no slots has nothing to move.
 	src := newPrimaryShard("10.0.0.3", "node-3", nil)
 	dsts := []*ShardState{
 		newPrimaryShard("10.0.0.1", "node-1", []SlotsRange{{Start: 0, End: 16383}}),

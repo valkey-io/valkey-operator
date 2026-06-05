@@ -154,6 +154,16 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
 		}
+	} else {
+		// Nothing to apply (no allowlisted keys in spec.config). Clear any
+		// stale condition so it reverts to absent, which the cluster
+		// controller treats the same as True. Without this, a prior False
+		// (e.g. from a CONFIG SET failure) would persist after the offending
+		// key is removed and block cluster progress indefinitely.
+		if condErr := r.clearLiveConfigCondition(ctx, node); condErr != nil {
+			log.Error(condErr, "failed to clear LiveConfigApplied condition")
+			return ctrl.Result{}, condErr
+		}
 	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
@@ -174,6 +184,25 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		Message:            message,
 		ObservedGeneration: current.Generation,
 	})
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
+	}
+	return nil
+}
+
+// clearLiveConfigCondition removes the LiveConfigApplied condition if present.
+// An absent condition is treated as True by the cluster controller, so this is
+// the correct resting state when there are no allowlisted keys to apply. It
+// no-ops (no patch) when the condition is already absent.
+func (r *ValkeyNodeReconciler) clearLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	patchBase := current.DeepCopy()
+	if !meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied) {
+		return nil
+	}
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}

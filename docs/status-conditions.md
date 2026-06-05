@@ -184,7 +184,7 @@ Common reasons when `LiveConfigApplied=False`:
 Common reasons when `LiveConfigApplied=True`:
 - `Applied` – Live config applied successfully.
 
-> **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. Once `CONFIG SET` succeeds the condition transitions to `True` and the cluster advances.
+> **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 Example commands:
 

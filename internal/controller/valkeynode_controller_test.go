@@ -1109,11 +1109,12 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 				return fake, nil
 			},
 		}
-		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{
 			"maxmemory-policy": "allkeys-lru",
 			"appendonly":       "yes",
 		}))
 		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(fake.closed).To(BeTrue())
 	})
@@ -1125,8 +1126,9 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 				return fake, nil
 			},
 		}
-		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
+		Expect(applied).To(BeFalse())
 		Expect(fake.closed).To(BeTrue())
 	})
 
@@ -1138,8 +1140,9 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 				return nil, nil
 			},
 		}
-		err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
 		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeFalse())
 		Expect(called).To(BeFalse())
 	})
 })

@@ -140,23 +140,31 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	if err := r.applyLiveConfig(ctx, node); err != nil {
+	applied, err := r.applyLiveConfig(ctx, node)
+	if err != nil {
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error())
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+			log.Error(condErr, "failed to set LiveConfigApplied condition")
+		}
 		return ctrl.Result{}, err
 	}
-	r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")
+	if applied {
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied"); condErr != nil {
+			log.Error(condErr, "failed to set LiveConfigApplied condition")
+			return ctrl.Result{}, condErr
+		}
+	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
 	// Requeue after 60 seconds to check on the ValkeyNode role.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 }
 
-func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) {
+func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return
+		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
 	patchBase := current.DeepCopy()
 	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
@@ -166,7 +174,10 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		Message:            message,
 		ObservedGeneration: current.Generation,
 	})
-	_ = r.Status().Patch(ctx, current, client.MergeFrom(patchBase))
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
+	}
+	return nil
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -549,12 +560,12 @@ func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyio
 }
 
 // applyLiveConfig applies the live-settable subset of the node's desired config
-// via CONFIG SET. Called only when the pod is ready. A no-op (no connection)
-// when there is nothing live to apply.
-func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+// via CONFIG SET. Returns (true, nil) when CONFIG SET succeeds, (false, nil)
+// when there is nothing to apply, and (false, err) on failure.
+func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
 	params := liveConfigToApply(node.Spec.Config)
 	if len(params) == 0 {
-		return nil
+		return false, nil
 	}
 
 	factory := r.newConfigClient
@@ -564,11 +575,14 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 
 	c, err := factory(ctx, r, node)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer c.Close()
 
-	return c.SetConfig(ctx, params)
+	if err := c.SetConfig(ctx, params); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // parseValkeyRole extracts the replication role from the output of INFO replication,

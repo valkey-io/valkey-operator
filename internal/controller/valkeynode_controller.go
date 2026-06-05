@@ -177,13 +177,15 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
 	patchBase := current.DeepCopy()
-	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: current.Generation,
-	})
+	}) {
+		return nil
+	}
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}

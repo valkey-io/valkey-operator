@@ -1136,6 +1136,52 @@ var _ = Describe("clearLiveConfigCondition", func() {
 	})
 })
 
+var _ = Describe("setLiveConfigCondition", func() {
+	var (
+		node *valkeyiov1alpha1.ValkeyNode
+		r    *ValkeyNodeReconciler
+		ctx  context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "setcond-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		r = &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+	})
+
+	It("does not write status when the condition is unchanged", func() {
+		By("setting LiveConfigApplied=True for the first time")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("setting the identical condition again")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
+	})
+})
+
 type fakeConfigClient struct {
 	params map[string]string
 	err    error

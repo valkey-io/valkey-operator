@@ -1,6 +1,6 @@
 # Using modules
 
-Currently, valkey-operator does not natively support using modules, but you can workaround that by using a customized Valkey Docker image.
+Currently, valkey-operator does not directly support using modules, but you can workaround that by using a customized Valkey Docker image.
 
 ## 1. Creating a customized Valkey Docker image
 

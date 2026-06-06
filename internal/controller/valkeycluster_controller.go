@@ -389,6 +389,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	if issue.message != "" {
 		message = fmt.Sprintf("%s: %s", message, issue.message)
 	}
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PodUnschedulable", "SchedulePod", "%s", message)
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)

@@ -249,10 +249,11 @@ var _ = Describe("pod scheduling issue handling", func() {
 		}}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
+		fakeRecorder := events.NewFakeRecorder(100)
 		reconciler := &ValkeyClusterReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Recorder: fakeRecorder,
 		}
 
 		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
@@ -270,6 +271,11 @@ var _ = Describe("pod scheduling issue handling", func() {
 		Expect(degraded).NotTo(BeNil())
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+
+		events := collectEvents(fakeRecorder)
+		Expect(events).To(ContainElement(ContainSubstring("Warning")))
+		Expect(events).To(ContainElement(ContainSubstring(valkeyiov1alpha1.ReasonPodUnschedulable)))
+		Expect(events).To(ContainElement(ContainSubstring("pod topology spread constraints not satisfied")))
 	})
 
 	It("clears stale unschedulable Ready and Degraded conditions when scheduling resolves", func() {

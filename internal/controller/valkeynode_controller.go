@@ -89,7 +89,8 @@ type ValkeyNodeReconciler struct {
 	Recorder  events.EventRecorder
 	APIReader client.Reader
 	// newConfigClient opens a Valkey client to a node's pod for live config
-	// application. Defaults to realConfigClient; overridable in tests.
+	// application. SetupWithManager defaults it to realConfigClient; tests
+	// override it with a fake.
 	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
 }
 
@@ -599,12 +600,7 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 		return false, nil
 	}
 
-	factory := r.newConfigClient
-	if factory == nil {
-		factory = realConfigClient
-	}
-
-	c, err := factory(ctx, r, node)
+	c, err := r.newConfigClient(ctx, r, node)
 	if err != nil {
 		return false, err
 	}
@@ -636,6 +632,9 @@ func parseValkeyRole(info string) string {
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.APIReader = mgr.GetAPIReader()
+	if r.newConfigClient == nil {
+		r.newConfigClient = realConfigClient
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.ConfigMap{}).

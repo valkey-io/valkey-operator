@@ -394,8 +394,8 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	<cluster>-<N>-<M>
 //
 // where N is the shard index and M is the node index (0 = initial primary,
-// 1+ = replicas). It iterates shards in ascending order and nodes in descending order within each
-// shard (replicas before primary). At most one spec update is issued per reconcile.
+// 1+ = replicas). It iterates shards in ascending order and nodes replica-first within each
+// shard, using live cluster state to identify the actual primary. At most one spec update is issued per reconcile.
 // Once a node is updated or found not-ready after a prior update,
 // the function returns (true, nil) so the caller requeues before advancing to the next node.
 //
@@ -413,9 +413,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// Scrape cluster state once for proactive failover decisions, but only
 	// when at least one node actually needs a roll. During initial bootstrap
 	// no nodes exist, so state stays nil. The snapshot is safe to reuse
-	// across the loop because nodes are iterated replicas-first (the primary
-	// is last in each shard), and after an update we requeue immediately,
-	// re-scraping fresh state.
+	// across the loop: replicaFirstNodeOrder uses it to place the actual
+	// primary last within each shard, and after an update we requeue
+	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
 	if anyNodeRequiresRoll(cluster, nodes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
@@ -427,8 +427,18 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	}
 
 	for shardIndex := range int(cluster.Spec.Shards) {
-		// Iterate nodeIndex in reverse order (replicas before primary)
-		for nodeIndex := nodesPerShard - 1; nodeIndex >= 0; nodeIndex-- {
+		// If rolls are in progress but the primary of an active shard cannot be
+		// identified from cluster state, defer rather than roll in an unknown order.
+		// New shards (not yet in the topology) are exempt — they need creation, not rolling.
+		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
+			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 {
+			log.Info("cannot identify primary for shard, deferring roll", "shardIndex", shardIndex)
+			return true, nil
+		}
+		// Iterate nodes replica-first: use live cluster state to identify the
+		// actual primary (which may differ from node-index=0 after a failover)
+		// and place it last.
+		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
 			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
 			if err != nil {
 				return false, err

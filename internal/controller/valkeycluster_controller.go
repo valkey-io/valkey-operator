@@ -652,7 +652,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:        getInternalSecretName(cluster.Name),
 			TLS:                       cluster.Spec.TLS,
-      Config:                    cluster.Spec.Config,
+			Config:                    cluster.Spec.Config,
 		},
 	}
 }

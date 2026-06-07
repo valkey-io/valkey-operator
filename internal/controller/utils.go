@@ -181,8 +181,8 @@ func nodeRoleAndShard(address string, nodes *valkeyv1.ValkeyNodeList) (string, i
 	if err != nil {
 		return "", -1
 	}
-	nodeIndex := nodeIndexForAddress(address, nodes)
-	if nodeIndex < 0 {
+	nodeIndex, err := strconv.Atoi(node.Labels[LabelNodeIndex])
+	if err != nil || nodeIndex < 0 {
 		return "", -1
 	}
 	if nodeIndex == 0 {

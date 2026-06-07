@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -198,6 +199,125 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 			Expect(n.Spec.ServerConfigHash).To(Equal(newHash),
 				"ValkeyNode %s ServerConfigHash must be updated to bump Generation and trigger ValkeyNode controller reconciliation", n.Name)
 		}
+	})
+})
+
+var _ = Describe("pod scheduling issue handling", func() {
+	ctx := context.Background()
+
+	It("sets the cluster degraded when a Valkey pod is unschedulable", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-unschedulable-status-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 1,
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, cluster)
+		})
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-unschedulable-status-test-0",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster: cluster.Name,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "server",
+					Image: DefaultImage,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, pod)
+		})
+
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:    corev1.PodScheduled,
+			Status:  corev1.ConditionFalse,
+			Reason:  corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available: pod topology spread constraints not satisfied",
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+		fakeRecorder := events.NewFakeRecorder(100)
+		reconciler := &ValkeyClusterReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(result.RequeueAfter).To(Equal(10 * time.Second))
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateDegraded))
+		Expect(updated.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+		Expect(updated.Status.Message).To(ContainSubstring("pod topology spread constraints not satisfied"))
+
+		degraded := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+
+		events := collectEvents(fakeRecorder)
+		Expect(events).To(ContainElement(ContainSubstring("Warning")))
+		Expect(events).To(ContainElement(ContainSubstring(valkeyiov1alpha1.ReasonPodUnschedulable)))
+		Expect(events).To(ContainElement(ContainSubstring("pod topology spread constraints not satisfied")))
+	})
+
+	It("clears stale unschedulable Ready and Degraded conditions when scheduling resolves", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod-scheduling-resolved-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 1,
+			},
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionTrue)
+
+		reconciler := &ValkeyClusterReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(handled).To(BeFalse())
+		Expect(result).To(Equal(reconcile.Result{}))
+		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeNil())
+		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+	})
+
+	It("ignores pods that are already scheduled", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "scheduled-pod"},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodScheduled,
+					Status: corev1.ConditionTrue,
+				}},
+			},
+		}
+
+		Expect(podSchedulingIssueForPod(pod)).To(BeNil())
 	})
 })
 

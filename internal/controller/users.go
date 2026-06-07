@@ -57,6 +57,7 @@ var (
 			"+cluster|addslotsrange",     // assign slots
 			"+cluster|replicate",         // set up replication
 			"+cluster|forget",            // remove stale nodes
+			"+cluster|failover",          // proactive failover before rolling primary
 			"+cluster|getslotmigrations", // check migration status
 			"+cluster|migrateslots",      // migrate slots between shards
 			"+cluster|set-config-epoch",  // set epoch on new nodes

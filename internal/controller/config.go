@@ -103,9 +103,11 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	baseConfig := buildManagedConfig(true, cluster.Spec.Persistence, cluster.Spec.TLS)
 	maps.Copy(baseConfig, map[string]string{
-		"cluster-enabled":      "yes",
-		"protected-mode":       "no",
-		"cluster-node-timeout": "2000",
+		"cluster-enabled":                 "yes",
+		"protected-mode":                  "no",
+		"cluster-node-timeout":            "2000",
+		"cluster-allow-replica-migration": "no",
+		"cluster-replica-validity-factor": "0",
 	})
 
 	return baseConfig

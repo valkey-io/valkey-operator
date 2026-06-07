@@ -98,16 +98,16 @@ func PlanDrainMove(src *ShardState, dsts []*ShardState, maxSlots int) (*SlotMove
 	if maxSlots <= 0 || len(dsts) == 0 {
 		return nil, nil
 	}
-	srcPrimary := src.GetPrimaryNode()
-	if srcPrimary == nil {
-		return nil, fmt.Errorf("primary missing for draining shard %s", src.Id)
-	}
 	srcCount := 0
 	for _, slot := range src.Slots {
 		srcCount += slot.End - slot.Start + 1
 	}
 	if srcCount == 0 {
-		return nil, nil
+		return nil, nil // Nothing to drain
+	}
+	srcPrimary := src.GetPrimaryNode()
+	if srcPrimary == nil {
+		return nil, fmt.Errorf("primary missing for draining shard %s", src.Id)
 	}
 
 	var dstPrimary *NodeState

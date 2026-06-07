@@ -69,13 +69,15 @@ Have an idea? Start a discussion in [GitHub Discussions](https://github.com/valk
 
 ### Submitting Pull Requests
 
-1. **Fork the repository** and create a branch from `main`
+1. **Fork the repository** and create a branch from `main`. Never push directly to `valkey-io/valkey-operator`.
 2. **Make your changes** following our coding standards (below)
 3. **Add tests** for new functionality
 4. **Run tests and linting**: `make test lint`
 5. **Update documentation** if needed
 6. **Commit with clear messages** describing what and why
-7. **Open a Pull Request** with a clear description
+7. **Open a Pull Request** using the [PR template](.github/pull_request_template.md), which requires a linked issue, summary, implementation details, limitations, testing notes, and a completed checklist
+
+Stack PRs for larger changes — break work into a sequence of focused, reviewable PRs rather than one large change. For example: add new primitives in one PR, then wire them into existing controllers in a follow-up.
 
 We'll review your PR as soon as possible. Be patient and responsive to feedback.
 
@@ -158,10 +160,11 @@ git rebase --continue
 ## Coding Standards
 
 - Follow standard Go conventions and idiomatic Go code
+- Keep changes minimal; match the style of surrounding code rather than introducing new patterns
+- Avoid unrelated refactors in the same PR
 - Run `go fmt` before committing (or use `make fmt`)
 - Add comments for exported functions and types
 - Write unit tests for new code
-- Keep PRs focused - one feature/fix per PR
 - Update CRDs by modifying `api/v1alpha1/*_types.go` then run `make manifests generate`
 
 ## Project Structure
@@ -210,7 +213,7 @@ If you add or modify `//+kubebuilder:rbac` markers in any controller file, `make
 vim internal/controller/valkeycluster_controller.go
 
 # 2. Update generated code and manifests
-make generate manifests
+make manifests generate
 
 # 3. Run tests
 make test

@@ -140,6 +140,58 @@ affinity:
 
 `tolerations`, `nodeSelector`, and `affinity` are passed through to every pod in the cluster.
 
+#### Topology spread constraints
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+```
+
+`topologySpreadConstraints` uses Kubernetes' native pod topology spread constraints and applies them to every Valkey pod in the cluster.
+
+By default, the operator does not add any topology spread constraints. If `topologySpreadConstraints` is omitted or empty, pods are scheduled normally using the other scheduling fields such as `nodeSelector`, `affinity`, `tolerations`, and resource requests.
+
+For `ValkeyCluster`, when a topology spread constraint is configured, the operator makes it shard-aware. It scopes the constraint to the current cluster and shard, so pods from the same shard, for example a primary and its replica, are spread across the configured topology domain.
+
+Each constraint must include:
+
+| Field | Meaning |
+|---|---|
+| `maxSkew` | Maximum allowed difference in matching pod count between topology domains. `1` means Kubernetes keeps the matching pods as evenly spread as possible. |
+| `topologyKey` | Node label used as the spread domain. Use `kubernetes.io/hostname` for worker-node spreading, or labels such as `topology.kubernetes.io/zone` for zone spreading. |
+| `whenUnsatisfiable` | What Kubernetes should do when the constraint cannot be satisfied. |
+
+`whenUnsatisfiable` supports:
+
+| Value | Behaviour | Impact |
+|---|---|---|
+| `DoNotSchedule` | Hard rule. Kubernetes will not schedule the pod if placement would violate the constraint. | Stronger HA placement, but pods may remain `Pending` when there are not enough eligible nodes or topology domains. The operator reports `PodUnschedulable` on the ValkeyCluster. |
+| `ScheduleAnyway` | Soft rule. Kubernetes prefers satisfying the constraint, but can still schedule the pod if it cannot. | Better scheduling availability in constrained clusters, but pods from the same shard may still land in the same topology domain. |
+
+Example strict node-level spreading:
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+```
+
+This tries to keep pods from the same shard on different worker nodes. If the cluster does not have enough eligible worker nodes, affected pods stay `Pending`.
+
+Example preferred node-level spreading:
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+```
+
+This still prefers spreading pods from the same shard across worker nodes, but allows scheduling to continue if the constraint cannot be satisfied.
+
 ### TLS
 
 ```yaml

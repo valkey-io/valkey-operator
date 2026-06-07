@@ -156,11 +156,26 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	} else if requeue {
+		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		} else if handled {
+			return result, nil
+		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
+
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
@@ -350,6 +365,67 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+type podSchedulingIssue struct {
+	podName string
+	message string
+}
+
+func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (ctrl.Result, bool, error) {
+	issue, err := r.findPodSchedulingIssue(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if issue == nil {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable)
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable)
+		return ctrl.Result{}, false, nil
+	}
+
+	message := fmt.Sprintf("Pod %s is unschedulable", issue.podName)
+	if issue.message != "" {
+		message = fmt.Sprintf("%s: %s", message, issue.message)
+	}
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PodUnschedulable", "SchedulePod", "%s", message)
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
+	if err := r.updateStatus(ctx, cluster, nil); err != nil {
+		return ctrl.Result{}, false, err
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, true, nil
+}
+
+func (r *ValkeyClusterReconciler) findPodSchedulingIssue(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*podSchedulingIssue, error) {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		return nil, fmt.Errorf("list Valkey pods: %w", err)
+	}
+
+	for i := range pods.Items {
+		if issue := podSchedulingIssueForPod(&pods.Items[i]); issue != nil {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func podSchedulingIssueForPod(pod *corev1.Pod) *podSchedulingIssue {
+	if pod.DeletionTimestamp != nil {
+		return nil
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == corev1.PodReasonUnschedulable {
+			return &podSchedulingIssue{
+				podName: pod.Name,
+				message: condition.Message,
+			}
+		}
+	}
+	return nil
+}
+
 func headlessServiceName(clusterName string) string {
 	return resourcePrefix + clusterName
 }
@@ -468,12 +544,28 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 					"name", node.Name, "err", err)
 			}
 		} else if nodeRequiresRoll(current, desired) {
-			if shard, replicas := findFailoverShard(clusterState, current.Status.PodIP); shard != nil {
+			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+			if shard != nil {
 				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP)
+					"name", node.Name, "address", current.Status.PodIP,
+					"syncedReplicas", len(replicas))
 				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
 					log.Info("proactive failover did not complete, proceeding with roll",
 						"name", node.Name, "err", err)
+				}
+			} else if cluster.Spec.Replicas > 0 {
+				// findFailoverShard returned nil for one of three reasons:
+				// 1. Node is the shard primary but has no synced replicas: skip roll, would lose data
+				// 2. Node is in a shard but is a replica: safe to roll
+				// 3. Node isn't in any shard (isolated): safe to roll
+				// Only case 1 requires skipping; identify it's the actual primary of its shard.
+				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+					log.Info("primary has no synced replicas, deferring roll",
+						"name", node.Name, "address", current.Status.PodIP,
+						"shardNodes", len(shardInState.Nodes),
+						"shardId", shardInState.Id)
+					return false, false, nil
 				}
 			}
 		}
@@ -547,19 +639,20 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Labels:    l,
 		},
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-			Image:               cluster.Spec.Image,
-			WorkloadType:        cluster.Spec.WorkloadType,
-			Persistence:         cluster.Spec.Persistence,
-			Resources:           cluster.Spec.Resources,
-			NodeSelector:        cluster.Spec.NodeSelector,
-			Affinity:            cluster.Spec.Affinity,
-			Tolerations:         cluster.Spec.Tolerations,
-			Exporter:            cluster.Spec.Exporter,
-			Containers:          cluster.Spec.Containers,
-			ServerConfigMapName: GetServerConfigMapName(cluster.Name),
-			UsersACLSecretName:  getInternalSecretName(cluster.Name),
-			TLS:                 cluster.Spec.TLS,
-			Config:              cluster.Spec.Config,
+			Image:                     cluster.Spec.Image,
+			WorkloadType:              cluster.Spec.WorkloadType,
+			Persistence:               cluster.Spec.Persistence,
+			Resources:                 cluster.Spec.Resources,
+			NodeSelector:              cluster.Spec.NodeSelector,
+			Affinity:                  cluster.Spec.Affinity,
+			Tolerations:               cluster.Spec.Tolerations,
+			TopologySpreadConstraints: cluster.Spec.TopologySpreadConstraints,
+			Exporter:                  cluster.Spec.Exporter,
+			Containers:                cluster.Spec.Containers,
+			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),
+			UsersACLSecretName:        getInternalSecretName(cluster.Name),
+			TLS:                       cluster.Spec.TLS,
+      Config:                    cluster.Spec.Config,
 		},
 	}
 }
@@ -1208,9 +1301,16 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 	return deleted, nil
 }
 
-// shardIndexFromState determines the pod shard-index for a given Valkey shard
-// by matching any of its nodes' addresses to ValkeyNode labels.
+// shardIndexFromState determines the shard index for a given Valkey Cluster
+// shard by matching its node addresses to ValkeyNode shard-index labels. It checks
+// the primary first, falling back to any node if unavailable.
 func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.ValkeyNodeList) int {
+	if primary := shard.GetPrimaryNode(); primary != nil {
+		_, shardIndex := nodeRoleAndShard(primary.Address, nodes)
+		if shardIndex >= 0 {
+			return shardIndex
+		}
+	}
 	for _, node := range shard.Nodes {
 		_, shardIndex := nodeRoleAndShard(node.Address, nodes)
 		if shardIndex >= 0 {

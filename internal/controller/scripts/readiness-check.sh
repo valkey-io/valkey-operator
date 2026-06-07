@@ -9,32 +9,31 @@ set -e
 timeout=${1:-"1"}
 port=${2:-"6379"}
 
-# timeout_cmd DURATION COMMAND [ARG]...
+# Run a command with a DURATION (seconds) timeout. Polls every 0.1s; on timeout
+# sends SIGTERM then SIGKILL. Returns the command's exit code, or 124 on timeout.
 timeout_cmd() {
     duration=$1; shift
-
-    # Run command and get its pid.
     "$@" &
     cmdpid=$!
 
-    # Start the timeout supervisor (subshell in parallell).
-    (
-        remaining=$((duration * 1000)) # Use millisec
-        while [ "$remaining" -gt "0" ]; do
-            kill -0 $cmdpid || exit 0 # exit subshell if cmd finished.
-            sleep 0.1
-            remaining=$((remaining - 100))
-        done
+	# Poll every 0.1 seconds
+    count=0
+    max_count=$((duration * 10))
+    while [ $count -lt $max_count ]; do
+        if ! kill -0 $cmdpid 2>/dev/null; then
+            wait $cmdpid
+            return $?
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
 
-        echo "Command timed out"
-        # First try SIGTERM, then force terminate using SIGKILL.
-        kill -TERM $cmdpid && sleep 0.1 && kill -0 $cmdpid || exit 0
-        sleep 1
-        kill -KILL $cmdpid
-    ) 2>/dev/null &
-
-    # Wait for jobs (avoiding <defunct>)
-    wait
+    # Timeout reached
+    kill -TERM $cmdpid 2>/dev/null
+    sleep 0.1
+    kill -0 $cmdpid 2>/dev/null && sleep 1 && kill -KILL $cmdpid 2>/dev/null
+    wait $cmdpid 2>/dev/null
+    return 124
 }
 
 # Build TLS args from environment variables if set

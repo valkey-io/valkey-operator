@@ -134,18 +134,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.upsertConfigMap(ctx, cluster); err != nil {
+	// Use the hash returned by upsertConfigMap directly. Reading it back from the
+	// ConfigMap via the cached client is unsafe: right after the ConfigMap is
+	// created the informer cache may not have observed it, so the read misses and
+	// yields an empty hash. ValkeyNodes created with an empty hash start without
+	// the config-hash pod-template annotation, and the later non-empty hash rolls
+	// the freshly created pods.
+	configHash, err := r.upsertConfigMap(ctx, cluster)
+	if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	configHash := func() string {
-		cm := &corev1.ConfigMap{}
-		if err := r.Get(ctx, client.ObjectKey{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err != nil {
-			return ""
-		}
-		return cm.Annotations[configHashKey]
-	}()
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -417,7 +417,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// is last in each shard), and after an update we requeue immediately,
 	// re-scraping fresh state.
 	var clusterState *valkey.ClusterState
-	if anyNodeRequiresRoll(cluster, nodes) {
+	if anyNodeRequiresRoll(cluster, nodes, configHash) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)

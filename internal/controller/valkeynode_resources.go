@@ -202,7 +202,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/bash",
+							"/bin/sh",
 							"-c",
 							"/scripts/liveness-check.sh",
 						},
@@ -218,7 +218,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/bash",
+							"/bin/sh",
 							"-c",
 							"/scripts/liveness-check.sh",
 						},
@@ -234,7 +234,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/bash",
+							"/bin/sh",
 							"-c",
 							"/scripts/readiness-check.sh",
 						},

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -139,5 +140,34 @@ func TestNodeRequiresRoll(t *testing.T) {
 		desired := &valkeyiov1alpha1.ValkeyNode{}
 		desired.Spec.Image = "valkey:8.2"
 		assert.False(t, nodeRequiresRoll(current, desired))
+	})
+}
+
+func TestAnyNodeRequiresRoll(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+	}
+	const configHash = "abc123"
+
+	// steadyStateNode returns the node the cluster would build for (0,0) in a
+	// settled cluster: matching spec, the current config hash, and a pod IP.
+	steadyStateNode := func() valkeyiov1alpha1.ValkeyNode {
+		n := buildClusterValkeyNode(cluster, 0, 0)
+		n.Spec.ServerConfigHash = configHash
+		n.Status.PodIP = "10.0.0.1"
+		return *n
+	}
+
+	t.Run("settled node with matching config hash does not require roll", func(t *testing.T) {
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{steadyStateNode()}}
+		assert.False(t, anyNodeRequiresRoll(cluster, nodes, configHash))
+	})
+
+	t.Run("node with stale config hash requires roll", func(t *testing.T) {
+		n := steadyStateNode()
+		n.Spec.ServerConfigHash = "stale"
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
+		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash))
 	})
 }

@@ -202,6 +202,82 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 	})
 })
 
+// staleConfigMapClient wraps a client.Client and always reports ConfigMaps as
+// NotFound on Get, simulating the read-after-write staleness of the cached
+// controller-runtime client used in production (mgr.GetClient()): immediately
+// after a ConfigMap is created, the informer cache has not yet observed it, so
+// a Get returns NotFound. Writes and all non-ConfigMap reads pass through.
+type staleConfigMapClient struct {
+	client.Client
+}
+
+func (c staleConfigMapClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok {
+		return errors.NewNotFound(corev1.Resource("configmaps"), key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
+	ctx := context.Background()
+
+	It("creates ValkeyNodes with the config hash even when the ConfigMap is not yet visible to the client cache", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "config-hash-stale-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+				Config:   map[string]string{"maxmemory": "100mb"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		defer func() {
+			nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+			_ = k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})
+			for i := range nodeList.Items {
+				_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+			}
+			_ = k8sClient.Delete(ctx, cluster)
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+			secret := &corev1.Secret{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err == nil {
+				_ = k8sClient.Delete(ctx, secret)
+			}
+		}()
+
+		r := &ValkeyClusterReconciler{
+			Client:   staleConfigMapClient{Client: k8sClient},
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+
+		By("reconciling with a client that cannot yet see the freshly created ConfigMap")
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("reading the config hash the operator persisted to the ConfigMap")
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		persistedHash := cm.Annotations[configHashKey]
+		Expect(persistedHash).NotTo(BeEmpty())
+
+		By("verifying every ValkeyNode was created with that same hash, not an empty one")
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
+		Expect(nodeList.Items).NotTo(BeEmpty())
+		for _, n := range nodeList.Items {
+			Expect(n.Spec.ServerConfigHash).To(Equal(persistedHash),
+				"ValkeyNode %s must be created with the config hash; an empty hash means the pod starts without the config-hash annotation and rolls as soon as the hash is later populated", n.Name)
+		}
+	})
+})
+
 var _ = Describe("pod scheduling issue handling", func() {
 	ctx := context.Background()
 
@@ -560,8 +636,9 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			err := r.upsertConfigMap(ctx, cluster)
+			hash, err := r.upsertConfigMap(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(hash).NotTo(BeEmpty())
 
 			events := collectEvents(fakeRecorder)
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))

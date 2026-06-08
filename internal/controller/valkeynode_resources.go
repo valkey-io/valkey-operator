@@ -444,6 +444,9 @@ func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Deplo
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: func(i int32) *int32 { return &i }(1),
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},

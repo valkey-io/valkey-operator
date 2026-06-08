@@ -134,21 +134,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Use the hash returned by upsertConfigMap directly. Reading it back from the
-	// ConfigMap via the cached client is unsafe: right after the ConfigMap is
-	// created the informer cache may not have observed it, so the read misses and
-	// yields an empty hash. ValkeyNodes created with an empty hash start without
-	// the config-hash pod-template annotation, and the later non-empty hash rolls
-	// the freshly created pods.
-	configHash, err := r.upsertConfigMap(ctx, cluster)
-	if err != nil {
+	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
 	// Roll hash ignores live-settable keys, so a change confined to those keys
 	// does not roll the pods (they are applied live by the ValkeyNode controller).
-	configHash = serverConfigRollHash(cluster)
+	// Computed directly from cluster.Spec rather than reading back from the
+	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
+	configHash := serverConfigRollHash(cluster)
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {

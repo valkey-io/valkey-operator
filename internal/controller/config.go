@@ -189,27 +189,20 @@ func serverConfigRollHash(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
-//
-// Returns the hash of the rendered server config. Callers MUST use this
-// returned hash rather than reading it back from the ConfigMap: the operator's
-// cached client does not observe a freshly created ConfigMap immediately, so a
-// read-back can miss and yield an empty hash. An empty hash propagated to a
-// ValkeyNode omits the config-hash pod-template annotation, and the later
-// non-empty hash then rolls the just-created pods.
-func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
+func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
 	// Embed readiness check script
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
-		return "", fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+		return fmt.Errorf("reading embedded readiness-check.sh: %w", err)
 	}
 
 	// Embed liveness check script
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
 	if err != nil {
-		return "", fmt.Errorf("reading embedded liveness-check.sh: %w", err)
+		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
 	// Get the new server config
@@ -227,7 +220,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	}, serverConfigMap); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to fetch server configmap")
-			return "", err
+			return err
 		}
 
 		// ConfigMap not found; This happens on cluster init
@@ -253,20 +246,18 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		if err := controllerutil.SetControllerReference(cluster, serverConfigMap, r.Scheme); err != nil {
 			log.Error(err, "Failed to grab ownership of server configMap")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapCreationFailed", "UpsertConfigMap", "Failed to grab ownership of server configMap: %v", err)
-			return "", err
+			return err
 		}
 
 		// Create the configMap
 		if err := r.Create(ctx, serverConfigMap); err != nil {
 			log.Error(err, "Failed to create server configMap")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapCreationFailed", "UpsertConfigMap", "Failed to create server configMap: %v", err)
-			return "", err
+			return err
 		}
 
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ConfigMapCreated", "UpsertConfigMap", "Created server configMap")
-
-		// All good; new configMap with contents created
-		return newServerConfigHash, nil
+		return nil
 	}
 
 	// ConfigMap exists
@@ -288,7 +279,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// config contents, and we did not update the scripts contents, exit early
 	if !updatedScripts && !updatedConfig {
 		log.V(1).Info("server config unchanged")
-		return newServerConfigHash, nil
+		return nil
 	}
 
 	// Update the configMap with the generated config contents
@@ -298,13 +289,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	if err := r.Update(ctx, serverConfigMap); err != nil {
 		log.Error(err, "Failed to update server configMap")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ConfigMapUpdateFailed", "UpsertConfigMap", "Failed to update server configMap: %v", err)
-		return "", err
+		return err
 	}
 
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ConfigMapUpdated", "UpsertConfigMap", "Synchronized server configMap")
-
-	// All is good. configMap was updated with new contents.
-	return newServerConfigHash, nil
+	return nil
 }
 
 // Helper function to write a config line in the form of "parameter value\n" to a strings.Builder

@@ -643,9 +643,7 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
-			hash, err := r.upsertConfigMap(ctx, cluster)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(hash).NotTo(BeEmpty())
+			Expect(r.upsertConfigMap(ctx, cluster)).To(Succeed())
 
 			events := collectEvents(fakeRecorder)
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))

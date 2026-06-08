@@ -127,7 +127,12 @@ func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1a
 // anyNodeRequiresRoll returns true if any existing ValkeyNode in the list has
 // a spec diff against what the cluster would build for it. Used as a cheap
 // pre-flight check to avoid opening Valkey connections on steady-state reconciles.
-func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList) bool {
+//
+// configHash must be the current server config hash so the desired spec matches
+// what reconcileValkeyNode actually applies; omitting it would make every
+// settled node (which carries the hash) report a spurious diff and defeat the
+// purpose of this pre-flight check.
+func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -136,6 +141,7 @@ func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valk
 	for shardIndex := range int(cluster.Spec.Shards) {
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+			desired.Spec.ServerConfigHash = configHash
 			if current, ok := byName[desired.Name]; ok && nodeRequiresRoll(current, desired) {
 				return true
 			}

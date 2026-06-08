@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 #
-# Liveness check of a Valkey node (Bash only).
+# Liveness check of a Valkey node (POSIX sh, works with bash, dash & busybox ash).
 #
 # Usage: liveness-check.sh [timeout] [port]
 #        Default timeout is 4s, and default Valkey port is 6379.
@@ -9,32 +9,31 @@ set -e
 timeout=${1:-"4"}
 port=${2:-"6379"}
 
-# timeout DURATION COMMAND [ARG]...
-function timeout {
-    local duration=$1; shift
-
-    # Run command and get its pid.
+# Run a command with a DURATION (seconds) timeout. Polls every 0.1s; on timeout
+# sends SIGTERM then SIGKILL. Returns the command's exit code, or 124 on timeout.
+timeout_cmd() {
+    duration=$1; shift
     "$@" &
-    local cmdpid=$!
+    cmdpid=$!
 
-    # Start the timeout supervisor (subshell in parallell).
-    (
-        remaining=$((duration * 1000)) # Use millisec
-        while [ "$remaining" -gt "0" ]; do
-            kill -0 $cmdpid || exit 0 # exit subshell if cmd finished.
-            sleep 0.1
-            remaining=$((remaining - 100))
-        done
+	# Poll every 0.1 seconds
+    count=0
+    max_count=$((duration * 10))
+    while [ $count -lt $max_count ]; do
+        if ! kill -0 $cmdpid 2>/dev/null; then
+            wait $cmdpid
+            return $?
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
 
-        echo "Command timed out"
-        # First try a SIGTERM, then force terminate using SIGKILL.
-        kill -s SIGTERM $cmdpid && sleep 0.1 && kill -0 $cmdpid || exit 0
-        sleep 1
-        kill -s SIGKILL $cmdpid
-    ) 2>/dev/null &
-
-    # Wait for jobs (avoiding <defunct>)
-    wait
+    # Timeout reached
+    kill -TERM $cmdpid 2>/dev/null
+    sleep 0.1
+    kill -0 $cmdpid 2>/dev/null && sleep 1 && kill -KILL $cmdpid 2>/dev/null
+    wait $cmdpid 2>/dev/null
+    return 124
 }
 
 # Build TLS args from environment variables if set
@@ -45,7 +44,7 @@ fi
 
 # Perform check
 response=$(
-    timeout $timeout \
+    timeout_cmd $timeout \
     valkey-cli -h localhost -p $port $tls_args PING)
 
 responseFirstWord=$(echo "$response" | head -n1 | awk '{print $1;}')

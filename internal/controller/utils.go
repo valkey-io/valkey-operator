@@ -147,6 +147,23 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	return true
 }
 
+// nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address
+// and returns its node index from the LabelNodeIndex label.
+// Returns -1 if the node is not found or the label is missing or invalid.
+func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
+	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
+		return n.Status.PodIP == address
+	})
+	if idx == -1 {
+		return -1
+	}
+	nodeIndex, err := strconv.Atoi(nodes.Items[idx].Labels[LabelNodeIndex])
+	if err != nil {
+		return -1
+	}
+	return nodeIndex
+}
+
 // nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
 // and reads its CR labels to determine the intended role and shard index.
 //
@@ -165,7 +182,7 @@ func nodeRoleAndShard(address string, nodes *valkeyv1.ValkeyNodeList) (string, i
 		return "", -1
 	}
 	nodeIndex, err := strconv.Atoi(node.Labels[LabelNodeIndex])
-	if err != nil {
+	if err != nil || nodeIndex < 0 {
 		return "", -1
 	}
 	if nodeIndex == 0 {
@@ -227,6 +244,53 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv
 		}
 	}
 	return "", ""
+}
+
+// primaryNodeIndexForShard returns the node index of the current slot-bearing
+// primary for the given shard, using clusterState as the source of truth.
+// Returns -1 if clusterState is nil, the shard has no primary in the topology,
+// or the primary's node index cannot be resolved or is out of range.
+func primaryNodeIndexForShard(shardIndex, nodesPerShard int, nodes *valkeyv1.ValkeyNodeList, clusterState *valkey.ClusterState) int {
+	if clusterState == nil {
+		return -1
+	}
+	_, primaryIP := findShardPrimary(clusterState, shardIndex, nodes)
+	if primaryIP == "" {
+		return -1
+	}
+	idx := nodeIndexForAddress(primaryIP, nodes)
+	if idx < 0 || idx >= nodesPerShard {
+		return -1
+	}
+	return idx
+}
+
+// replicaFirstNodeOrder returns the node indices for a shard ordered so that
+// replicas are processed before the primary. The primary is identified via
+// clusterState — the live cluster topology — rather than by node-index convention,
+// which may be stale after a failover.
+//
+// When the primary cannot be identified, indices are returned in descending order
+// (nodesPerShard-1 … 0), keeping node-index=0 (the conventional primary) last.
+func replicaFirstNodeOrder(shardIndex, nodesPerShard int, nodes *valkeyv1.ValkeyNodeList, clusterState *valkey.ClusterState) []int {
+	primaryIdx := primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState)
+
+	order := make([]int, 0, nodesPerShard)
+	if primaryIdx < 0 {
+		// No live primary identified — fall back to descending order, keeping
+		// node-index=0 (the conventional primary) last.
+		for i := nodesPerShard - 1; i >= 0; i-- {
+			order = append(order, i)
+		}
+		return order
+	}
+	for i := range nodesPerShard {
+		if i != primaryIdx {
+			order = append(order, i)
+		}
+	}
+	order = append(order, primaryIdx)
+	return order
 }
 
 func countSlots(ranges []valkey.SlotsRange) int {

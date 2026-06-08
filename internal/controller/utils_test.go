@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/valkey"
 )
 
 func TestLabels(t *testing.T) {
@@ -115,6 +116,233 @@ func TestNodeRoleAndShard(t *testing.T) {
 	role, shard = nodeRoleAndShard("10.0.0.99", nodes)
 	assert.Equal(t, "", role)
 	assert.Equal(t, -1, shard)
+}
+
+func TestReplicaFirstNodeOrder(t *testing.T) {
+	nodes := &valkeyv1.ValkeyNodeList{
+		Items: []valkeyv1.ValkeyNode{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						LabelShardIndex: "0",
+						LabelNodeIndex:  "0",
+					},
+				},
+				Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						LabelShardIndex: "0",
+						LabelNodeIndex:  "1",
+					},
+				},
+				Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						LabelShardIndex: "0",
+						LabelNodeIndex:  "2",
+					},
+				},
+				Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.3"},
+			},
+		},
+	}
+
+	clusterStateWithPrimary := func(primaryID string) *valkey.ClusterState {
+		return &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: primaryID,
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "node-0"},
+						{Address: "10.0.0.2", Id: "node-1"},
+						{Address: "10.0.0.3", Id: "node-2"},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("nil clusterState returns descending order", func(t *testing.T) {
+		order := replicaFirstNodeOrder(0, 3, nodes, nil)
+		assert.Equal(t, []int{2, 1, 0}, order)
+	})
+
+	t.Run("primary at index 0 is placed last", func(t *testing.T) {
+		order := replicaFirstNodeOrder(0, 3, nodes, clusterStateWithPrimary("node-0"))
+		assert.Equal(t, []int{1, 2, 0}, order)
+	})
+
+	t.Run("primary at non-zero index is placed last (post-failover)", func(t *testing.T) {
+		order := replicaFirstNodeOrder(0, 3, nodes, clusterStateWithPrimary("node-1"))
+		assert.Equal(t, []int{0, 2, 1}, order)
+	})
+
+	t.Run("primary IP not in nodes list returns descending order", func(t *testing.T) {
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "node-x",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.9.9.9", Id: "node-x"},
+					},
+				},
+			},
+		}
+		order := replicaFirstNodeOrder(0, 3, nodes, state)
+		assert.Equal(t, []int{2, 1, 0}, order)
+	})
+
+	t.Run("correct shard is used when multiple shards present", func(t *testing.T) {
+		multiShardNodes := &valkeyv1.ValkeyNodeList{
+			Items: []valkeyv1.ValkeyNode{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							LabelShardIndex: "0",
+							LabelNodeIndex:  "0",
+						},
+					},
+					Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							LabelShardIndex: "0",
+							LabelNodeIndex:  "1",
+						},
+					},
+					Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							LabelShardIndex: "1",
+							LabelNodeIndex:  "0",
+						},
+					},
+					Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.1.0.1"},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							LabelShardIndex: "1",
+							LabelNodeIndex:  "1",
+						},
+					},
+					Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.1.0.2"},
+				},
+			},
+		}
+		// Shard 1's primary is at node-index 1 (post-failover on shard 1).
+		// Shard 0's primary is at node-index 0 — but we're asking about shard 1,
+		// so shard 0 nodes must not affect the result.
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "s0-node-0",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 8191}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "s0-node-0"},
+						{Address: "10.0.0.2", Id: "s0-node-1"},
+					},
+				},
+				{
+					Id:        "shard-1",
+					PrimaryId: "s1-node-1",
+					Slots:     []valkey.SlotsRange{{Start: 8192, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.1.0.1", Id: "s1-node-0"},
+						{Address: "10.1.0.2", Id: "s1-node-1"},
+					},
+				},
+			},
+		}
+		// Querying shard 1 with nodesPerShard=2: node-index 1 is the primary,
+		// so it is placed last → [0, 1].
+		order := replicaFirstNodeOrder(1, 2, multiShardNodes, state)
+		assert.Equal(t, []int{0, 1}, order)
+	})
+}
+
+func TestPrimaryNodeIndexForShard(t *testing.T) {
+	nodes := &valkeyv1.ValkeyNodeList{
+		Items: []valkeyv1.ValkeyNode{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "0"},
+				},
+				Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "1"},
+				},
+				Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"},
+			},
+		},
+	}
+
+	clusterStateWithPrimary := func(primaryID string) *valkey.ClusterState {
+		return &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: primaryID,
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "node-0"},
+						{Address: "10.0.0.2", Id: "node-1"},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("primary at index 0 returns 0", func(t *testing.T) {
+		assert.Equal(t, 0, primaryNodeIndexForShard(0, 2, nodes, clusterStateWithPrimary("node-0")))
+	})
+
+	t.Run("primary at index 1 returns 1 (post-failover)", func(t *testing.T) {
+		assert.Equal(t, 1, primaryNodeIndexForShard(0, 2, nodes, clusterStateWithPrimary("node-1")))
+	})
+
+	t.Run("nil clusterState returns -1", func(t *testing.T) {
+		assert.Equal(t, -1, primaryNodeIndexForShard(0, 2, nodes, nil))
+	})
+
+	t.Run("shard not in topology returns -1", func(t *testing.T) {
+		// clusterState has no shards with slots, so findShardPrimary returns ""
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{}}
+		assert.Equal(t, -1, primaryNodeIndexForShard(0, 2, nodes, state))
+	})
+
+	t.Run("primary IP not in nodes list returns -1", func(t *testing.T) {
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "node-x",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes:     []*valkey.NodeState{{Address: "10.9.9.9", Id: "node-x"}},
+				},
+			},
+		}
+		assert.Equal(t, -1, primaryNodeIndexForShard(0, 2, nodes, state))
+	})
+
+	t.Run("primary index out of range returns -1", func(t *testing.T) {
+		// nodesPerShard=1 but primary resolves to index 1 — out of range
+		assert.Equal(t, -1, primaryNodeIndexForShard(0, 1, nodes, clusterStateWithPrimary("node-1")))
+	})
 }
 
 func TestBuildClusterValkeyNodeLabels(t *testing.T) {

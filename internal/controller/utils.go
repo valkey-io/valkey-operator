@@ -313,7 +313,7 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 }
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
-func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {

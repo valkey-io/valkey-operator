@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -79,49 +78,6 @@ func getDefaultSecretName(clusterName string) string {
 
 func getSystemPasswordSecretName(clusterName string) string {
 	return "internal-" + clusterName + "-system-passwords"
-}
-
-// When a Secret is updated, Watch() calls this function to discover
-// which object should be reconciled. Because multiple secrets can be
-// used by the same cluster, and a single secret used by multiple clusters,
-// we grab a list of all Valkey clusters, and iterate through the ACLs
-// looking for the modified secret. We return a list of clusters that
-// need to be reconciled.
-func (r *ValkeyClusterReconciler) findReferencedClusters(ctx context.Context, secret client.Object) []reconcile.Request {
-
-	log := logf.FromContext(ctx)
-	secretName := secret.GetName() // the Secret that was updated
-
-	log.V(1).Info("findReferencedClusters", "modified", secretName)
-
-	// List all ValkeyClusters
-	valkeyClusterList := &valkeyiov1alpha1.ValkeyClusterList{}
-	if err := r.List(ctx, valkeyClusterList,
-		client.InNamespace(secret.GetNamespace()),
-	); err != nil {
-		log.Error(err, "failed to list valkey clusters")
-		return []reconcile.Request{}
-	}
-
-	requests := []reconcile.Request{}
-
-	// Take our list of clusters, and iterate through them, matching against
-	// spec.Users[].PasswordSecret.Name. Return a list of clusters to be reconciled.
-	for _, cluster := range valkeyClusterList.Items {
-		for _, user := range cluster.Spec.Users {
-			if user.PasswordSecret.Name == secretName {
-				log.V(1).Info("adding cluster to reconcile", "name", cluster.Name)
-				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Name:      cluster.Name,
-						Namespace: cluster.Namespace,
-					},
-				})
-			}
-		}
-	}
-
-	return requests
 }
 
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
@@ -178,7 +134,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	for _, user := range cluster.Spec.Users {
 
 		// Get passwords from Secret
-		passwords, err := fetchUserPasswords(ctx, user, r.Client, cluster.Name, cluster.Namespace)
+		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
@@ -261,7 +217,7 @@ func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string 
 }
 
 // Fetches a Secret, and looks for referenced passwords
-func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, apiClient client.Client, clusterName, clusterNamespace string) ([]string, error) {
+func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)
 

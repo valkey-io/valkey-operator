@@ -51,6 +51,8 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
 `, name)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = strings.NewReader(secretManifest)
@@ -302,6 +304,8 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
 `, nodeName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")

@@ -186,8 +186,8 @@ func main() {
 	}
 
 	// Only cache Kubernetes resources managed by this operator to reduce memory
-	// usage in large clusters. Secrets are left unfiltered because the operator
-	// reads user-provided password Secrets that don't carry the managed-by label.
+	// usage in large clusters. User-provided Secrets (passwords, TLS certs) are
+	// fetched directly from the API server via APIReader.
 	managedBySelector := labels.SelectorFromSet(labels.Set{
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	})
@@ -197,6 +197,7 @@ func main() {
 			&appsv1.StatefulSet{}:           {Label: managedBySelector},
 			&appsv1.Deployment{}:            {Label: managedBySelector},
 			&corev1.ConfigMap{}:             {Label: managedBySelector},
+			&corev1.Secret{}:                {Label: managedBySelector},
 			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
 			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
 			// Pod is not explicitly watched but is cached due to r.List calls

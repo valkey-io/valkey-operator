@@ -15,6 +15,7 @@
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
+- [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
 - [Users](#users)
@@ -110,6 +111,16 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 |---|---|
 | `Managed` | Operator creates and owns the PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
+
+### Private image registries
+
+```yaml
+image: registry.example.com/valkey/valkey:9.0.0
+imagePullSecrets:
+  - name: registrycredential
+```
+
+`imagePullSecrets` is a list of `Secret` references (in the cluster's namespace) used to pull images from private registries. It is applied at the pod level, so a single list covers every image in the pod - the Valkey server, the metrics exporter sidecar, and any additional containers. It is optional and has no default; omit it when the nodes already authenticate to the registry.
 
 ### Scheduling
 

@@ -59,6 +59,12 @@ type ValkeyClusterSpec struct {
 	// Override the default Valkey image
 	Image string `json:"image,omitempty"`
 
+	// ImagePullSecrets is a list of references to Secrets in the same namespace used for
+	// pulling any of the images (Valkey server, metrics exporter, and any additional
+	// containers) from private registries.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
 	// The number of shards groups. Each shard group contains one primary and N replicas.
 	// +kubebuilder:validation:Minimum=1
 	Shards int32 `json:"shards,omitempty"`

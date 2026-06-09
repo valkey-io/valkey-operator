@@ -170,6 +170,24 @@ Common reasons:
 - `PersistentVolumeClaimResizeInProgress` – PVC expansion is actively in progress.
 - `PersistentVolumeClaimResizeInfeasible` – PVC expansion failed or cannot be completed without operator action.
 
+#### `LiveConfigApplied`
+Indicates whether the live-settable subset of `spec.config` has been successfully applied to the running Valkey process via `CONFIG SET`.
+
+This condition is only set when the node is ready and there are allowlisted config keys present in `spec.config`. If `spec.config` contains no allowlisted keys the condition is absent, which is treated the same as `True` by the cluster controller.
+
+| Status | Meaning |
+|---|---|
+| `True` | All allowlisted config keys were applied successfully in the last reconcile. |
+| `False` | `CONFIG SET` failed; the running config may not match `spec.config`. The cluster controller will not advance past this node until the condition is `True`. |
+
+Common reasons when `LiveConfigApplied=False`:
+- `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the exact error.
+
+Common reasons when `LiveConfigApplied=True`:
+- `Applied` – Live config applied successfully.
+
+> **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
+
 Example commands:
 
 ```bash
@@ -301,6 +319,14 @@ These events provide high-level status information about the cluster.
 | `WaitingForShards` | Normal | Waiting for shards to be created |
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
+
+### Live config events
+
+These events are emitted during live configuration application on ValkeyNode resources.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
 
 ### Users/ACL events
 

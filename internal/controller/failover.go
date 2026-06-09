@@ -113,7 +113,15 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 // nodeRequiresRoll returns true when the node has a running pod whose spec
 // differs from the desired spec, meaning a spec update will trigger a pod roll.
 func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1alpha1.ValkeyNode) bool {
-	return current.Status.PodIP != "" && !equality.Semantic.DeepEqual(current.Spec, desired.Spec)
+	if current.Status.PodIP == "" {
+		return false
+	}
+	// Config changes are applied live via CONFIG SET (see applyLiveConfig) and
+	// must not trigger a roll; the roll-relevant config subset is already
+	// captured by Spec.ServerConfigHash.
+	currentSpec, desiredSpec := current.Spec, desired.Spec
+	currentSpec.Config, desiredSpec.Config = nil, nil
+	return !equality.Semantic.DeepEqual(currentSpec, desiredSpec)
 }
 
 // anyNodeRequiresRoll returns true if any existing ValkeyNode in the list has

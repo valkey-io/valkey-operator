@@ -134,18 +134,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// Use the hash returned by upsertConfigMap directly. Reading it back from the
-	// ConfigMap via the cached client is unsafe: right after the ConfigMap is
-	// created the informer cache may not have observed it, so the read misses and
-	// yields an empty hash. ValkeyNodes created with an empty hash start without
-	// the config-hash pod-template annotation, and the later non-empty hash rolls
-	// the freshly created pods.
-	configHash, err := r.upsertConfigMap(ctx, cluster)
-	if err != nil {
+	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	// Roll hash ignores live-settable keys, so a change confined to those keys
+	// does not roll the pods (they are applied live by the ValkeyNode controller).
+	// Computed directly from cluster.Spec rather than reading back from the
+	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
+	configHash := serverConfigRollHash(cluster)
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -621,6 +619,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
 			return true, false, nil
 		}
+		if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
+			log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
+			return true, false, nil
+		}
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
@@ -663,6 +665,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:        getInternalSecretName(cluster.Name),
 			TLS:                       cluster.Spec.TLS,
+			Config:                    cluster.Spec.Config,
 		},
 	}
 }

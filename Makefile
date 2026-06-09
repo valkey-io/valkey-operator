@@ -91,7 +91,13 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	}
 	@case "$$($(KIND) get clusters)" in \
 		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
+			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+			ACTUAL_WORKERS=$$($(KIND) get nodes --name $(KIND_CLUSTER) | grep -c worker); \
+			if [ "$$ACTUAL_WORKERS" != "$(KIND_WORKERS)" ]; then \
+				echo "ERROR: Cluster has $$ACTUAL_WORKERS worker(s) but KIND_WORKERS=$(KIND_WORKERS) was requested."; \
+				echo "       Delete the cluster first: kind delete cluster --name $(KIND_CLUSTER)"; \
+				exit 1; \
+			fi ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)' with $(KIND_WORKERS) workers..."; \
 			echo '{"kind":"Cluster","apiVersion":"kind.x-k8s.io/v1alpha4","nodes":[{"role":"control-plane"}' \

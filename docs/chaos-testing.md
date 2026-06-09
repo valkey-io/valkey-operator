@@ -53,7 +53,7 @@ All configuration is via environment variables:
 | `CHAOS_SCENARIOS` | all except disabled | Comma-separated list of scenarios to run |
 | `CHAOS_SEED` | current time | Random seed for reproducibility |
 | `CHAOS_MODE` | `random` | `random` or `sequential` scenario selection |
-| `CHAOS_TARGET_SHARD` | `random` | Shard index to target, or `random` |
+| `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random`, `all`, or comma-separated indices (e.g. `0,2`) |
 | `CHAOS_RECOVERY_TIMEOUT` | `5m` | Max time to wait for cluster recovery |
 | `CHAOS_TOLERATION_SECONDS` | `0` | Pod toleration seconds for not-ready/unreachable (0 = not set) |
 | `CHAOS_NUM_KEYS` | `100000` | Number of keys to seed |
@@ -66,10 +66,9 @@ All configuration is via environment variables:
 
 | Scenario | Description |
 |----------|-------------|
-| `delete-primary-pod` | Deletes the primary pod of a shard |
-| `delete-replica-pod` | Deletes a replica pod |
-| `delete-shard-pods` | Deletes all pods in a shard |
-| `delete-multiple-shard-pods` | Deletes pods across multiple shards |
+| `delete-primary-pod` | Deletes the primary pod of targeted shards |
+| `delete-replica-pod` | Deletes a replica pod of targeted shards |
+| `delete-shard-pods` | Deletes all pods in targeted shards |
 | `delete-primary-workload` | Deletes the primary's Deployment/StatefulSet |
 | `delete-replica-workload` | Deletes a replica's Deployment/StatefulSet |
 | `pause-primary-container` | Pauses the primary container |
@@ -137,4 +136,11 @@ CHAOS_SHARDS=7 CHAOS_REPLICAS=2 KIND_WORKERS=3 make test-chaos
 
 # Run scenarios in sequence instead of random
 CHAOS_SCENARIOS=delete-primary-pod,scale-shards CHAOS_MODE=sequential make test-chaos
+
+# Kill primaries on specific shards (triggers quorum loss + TAKEOVER)
+CHAOS_SHARDS=3 CHAOS_REPLICAS=1 CHAOS_TARGET_SHARDS=0,1 \
+  CHAOS_SCENARIOS=delete-primary-pod make test-chaos
+
+# Delete all pods in all shards
+CHAOS_TARGET_SHARDS=all CHAOS_SCENARIOS=delete-shard-pods make test-chaos
 ```

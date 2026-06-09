@@ -42,10 +42,21 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
+# Authenticate as the operator-managed user when configured. valkey-cli has
+# no env var for the username, so it is passed explicitly; the password is read
+# from REDISCLI_AUTH.
+auth_args=""
+if [ -n "${VALKEY_OPERATOR_USER:-}" ]; then
+    auth_args="--user $VALKEY_OPERATOR_USER"
+fi
+if [ -n "${REDISCLI_AUTH:-}" ]; then
+    auth_args="$auth_args --no-auth-warning"
+fi
+
 # Perform checks
 response=$(
     timeout_cmd $timeout \
-    valkey-cli -h localhost -p $port $tls_args PING)
+    valkey-cli -h localhost -p $port $tls_args $auth_args PING)
 
 if [ "$response" != "PONG" ]; then
     echo "$response" >&2

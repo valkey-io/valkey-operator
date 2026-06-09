@@ -278,6 +278,18 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
+	// Authenticate the probes as the operator-managed "_operator" system user.
+	// The operator generates this user's password and stores it in the cluster's
+	// system-passwords Secret. The username is passed to the probe scripts via VALKEY_OPERATOR_USER;
+	// the password is read natively by valkey-cli from REDISCLI_AUTH.
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		probeUserSecret := operatorUserPasswordSecret(clusterName)
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "VALKEY_OPERATOR_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "REDISCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: probeUserSecret}},
+		)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))

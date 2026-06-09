@@ -49,7 +49,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 	})
 
 	Context("when a ValkeyCluster CR is applied", func() {
-		It("creates a Valkey Cluster deployment", func() {
+		It("creates a Valkey Cluster deployment",Label("base-case"), func() {
 			valkeyClusterName = "cluster-sample"
 
 			By("creating the CR")
@@ -94,6 +94,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 				g.Expect(output).To(SatisfyAll(
 					ContainSubstring("_operator"),
 					ContainSubstring("_exporter"),
+					ContainSubstring("_replication"),
 				))
 			}
 			Eventually(verifySystemUserAcls).Should(Succeed())
@@ -294,6 +295,9 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			Eventually(verifyClusterAccess).
 				WithArguments("52428800", "CONFIG", "GET", "maxmemory").
 				Should(Succeed(), "Failed CONFIG GET maxmemory")
+			Eventually(verifyClusterAccess).
+				WithArguments("_replication", "CONFIG", "GET", "primaryuser").
+				Should(Succeed(), "Failed CONFIG GET primaryuser")
 
 			By("validating CLUSTER SLOTS reports the pod IP")
 			verifyClusterSlotsIP := func(g Gomega) {

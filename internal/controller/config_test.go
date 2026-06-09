@@ -39,13 +39,14 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 		By("verifying the rendered config")
 		cluster := getSampleCluster()
 
-		testConfigString := buildServerConfig(cluster)
+		testConfigString := buildServerConfig(cluster, "sup3rSecr3tP4ssw0rd")
 
 		// Check user-added parameter
 		Expect(testConfigString).To(ContainSubstring("maxmemory-policy"))
 
 		// Base, non-overridable parameter
 		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
+		Expect(testConfigString).To(ContainSubstring("primaryauth sup3rSecr3tP4ssw0rd"))
 	})
 })
 

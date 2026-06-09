@@ -172,6 +172,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				"/config/valkey.conf",
 				"--cluster-announce-ip",
 				"$(POD_IP)",
+				"--primaryuser",
+				replicationUser,
+				"--primaryauth",
+				"$(PRIMARY_AUTH)",
 			},
 			Env: []corev1.EnvVar{
 				{
@@ -179,6 +183,17 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 					ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{
 							FieldPath: "status.podIP",
+						},
+					},
+				},
+				{
+					Name: "PRIMARY_AUTH",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
+							},
+							Key: replicationUser,
 						},
 					},
 				},

@@ -49,6 +49,8 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 
 		// Primary fails over to a replica on SIGTERM (graceful shutdown)
 		Expect(testConfigString).To(ContainSubstring("shutdown-on-sigterm failover"))
+		
+		Expect(testConfigString).To(ContainSubstring("primaryauth sup3rSecr3tP4ssw0rd"))
 	})
 })
 

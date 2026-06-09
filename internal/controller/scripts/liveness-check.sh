@@ -42,12 +42,10 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
-# Authenticate as the operator-managed user when configured. valkey-cli has
-# no env var for the username, so it is passed explicitly; the password is read
-# from VALKEYCLI_AUTH.
+# Authenticate as the custom user when user and password are set.
 auth_args=""
-if [ -n "${VALKEY_OPERATOR_USER:-}" ]; then
-    auth_args="--user $VALKEY_OPERATOR_USER"
+if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
+    auth_args="--user $VALKEY_USER --no-auth-warning"
 fi
 
 # Perform check

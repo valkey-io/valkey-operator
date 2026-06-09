@@ -39,7 +39,7 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 		By("verifying the rendered config")
 		cluster := getSampleCluster()
 
-		testConfigString := buildServerConfig(cluster, "sup3rSecr3tP4ssw0rd")
+		testConfigString := buildServerConfig(cluster)
 
 		// Check user-added parameter
 		Expect(testConfigString).To(ContainSubstring("maxmemory-policy"))

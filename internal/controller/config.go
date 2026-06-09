@@ -100,7 +100,7 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 }
 
 // Return a base config of parameters that users shouldn't be able to override
-func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster, replicationPassword string) map[string]string {
+func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	baseConfig := buildManagedConfig(true, cluster.Spec.Persistence, cluster.Spec.TLS)
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
@@ -108,8 +108,6 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster, replicationPassword 
 		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
-		"primaryuser":                     replicationUser,
-		"primaryauth":                     replicationPassword,
 	})
 
 	return baseConfig
@@ -207,11 +205,8 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
-	// Get the replication password
-	replicationPassword, err := fetchSystemUserPassword(ctx, replicationUser, r.Client, cluster.Name, cluster.Namespace)
-
 	// Get the new server config
-	newServerConfig := buildServerConfig(cluster, replicationPassword)
+	newServerConfig := buildServerConfig(cluster)
 
 	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))

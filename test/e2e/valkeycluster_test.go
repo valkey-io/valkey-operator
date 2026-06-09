@@ -49,7 +49,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 	})
 
 	Context("when a ValkeyCluster CR is applied", func() {
-		It("creates a Valkey Cluster deployment",Label("base-case"), func() {
+		It("creates a Valkey Cluster deployment", func() {
 			valkeyClusterName = "cluster-sample"
 
 			By("creating the CR")

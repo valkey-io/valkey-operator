@@ -44,13 +44,10 @@ fi
 
 # Authenticate as the operator-managed user when configured. valkey-cli has
 # no env var for the username, so it is passed explicitly; the password is read
-# from REDISCLI_AUTH.
+# from VALKEYCLI_AUTH.
 auth_args=""
 if [ -n "${VALKEY_OPERATOR_USER:-}" ]; then
     auth_args="--user $VALKEY_OPERATOR_USER"
-fi
-if [ -n "${REDISCLI_AUTH:-}" ]; then
-    auth_args="$auth_args --no-auth-warning"
 fi
 
 # Perform checks

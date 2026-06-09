@@ -860,8 +860,8 @@ func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
 	require.True(t, ok, "VALKEY_OPERATOR_USER env should be set")
 	assert.Equal(t, "_operator", user.Value)
 
-	e, ok := envByName["REDISCLI_AUTH"]
-	require.True(t, ok, "REDISCLI_AUTH env should be set")
+	e, ok := envByName["VALKEYCLI_AUTH"]
+	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
 	require.NotNil(t, e.ValueFrom)
 	require.NotNil(t, e.ValueFrom.SecretKeyRef)
 	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
@@ -876,13 +876,12 @@ func TestBuildValkeyNodePodTemplateSpec_NoOperatorUserProbeEnv(t *testing.T) {
 	require.NoError(t, err)
 	for _, e := range pts.Spec.Containers[0].Env {
 		assert.NotEqual(t, "VALKEY_OPERATOR_USER", e.Name)
-		assert.NotEqual(t, "REDISCLI_AUTH", e.Name)
+		assert.NotEqual(t, "VALKEYCLI_AUTH", e.Name)
 	}
 }
 
 // TestProbeScriptOperatorUserArgs verifies the probe scripts pass --user for the
-// probe user and add --no-auth-warning when a password env is present, while the
-// password itself never appears on the command line.
+// probe user when set, while the password itself never appears on the command line.
 func TestProbeScriptOperatorUserArgs(t *testing.T) {
 	for _, name := range []string{"liveness-check.sh", "readiness-check.sh"} {
 		t.Run(name, func(t *testing.T) {
@@ -893,25 +892,22 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
 			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 
-			// With probe user + auth env: --user and --no-auth-warning present,
-			// password absent from argv.
+			// With probe user + auth env: --user present, password absent from argv.
 			cmd := exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_USER=_operator", "REDISCLI_AUTH=s3cr3t")
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_USER=_operator", "VALKEYCLI_AUTH=s3cr3t")
 			require.NoError(t, cmd.Run())
 			got, err := os.ReadFile(argsFile)
 			require.NoError(t, err)
 			assert.Contains(t, string(got), "-user _operator")
-			assert.Contains(t, string(got), "-no-auth-warning")
 			assert.NotContains(t, string(got), "s3cr3t", "password must not be passed on the command line")
 
-			// Without any probe env: neither --user nor --no-auth-warning.
+			// Without any probe env: no --user.
 			cmd = exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_USER=", "REDISCLI_AUTH=")
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_USER=", "VALKEYCLI_AUTH=")
 			require.NoError(t, cmd.Run())
 			got, err = os.ReadFile(argsFile)
 			require.NoError(t, err)
 			assert.NotContains(t, string(got), "-user")
-			assert.NotContains(t, string(got), "-no-auth-warning")
 		})
 	}
 }

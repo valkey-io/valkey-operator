@@ -43,6 +43,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// ImagePullSecrets is a list of references to Secrets used for pulling the pod's
+	// images from private registries.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.
 	// +kubebuilder:default=StatefulSet

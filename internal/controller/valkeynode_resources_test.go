@@ -805,12 +805,14 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
 			},
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registrycredential"}},
 		},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)
 
 	assert.Equal(t, cluster.Spec.Image, node.Spec.Image, "Image must be propagated")
+	assert.Equal(t, cluster.Spec.ImagePullSecrets, node.Spec.ImagePullSecrets, "ImagePullSecrets must be propagated")
 	assert.Equal(t, cluster.Spec.WorkloadType, node.Spec.WorkloadType, "WorkloadType must be propagated")
 	assert.Equal(t, cluster.Spec.Persistence, node.Spec.Persistence, "Persistence must be propagated")
 	assert.Equal(t, cluster.Spec.Resources, node.Spec.Resources, "Resources must be propagated")
@@ -822,6 +824,15 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_ImagePullSecrets(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "registrycredential"}}
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Equal(t, node.Spec.ImagePullSecrets, pts.Spec.ImagePullSecrets, "ImagePullSecrets should be set on pod spec")
 }
 
 func runProbeScript(t *testing.T, scriptPath, response string) error {

@@ -805,7 +805,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
 			},
-			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registrycredential"}},
 		},
 	}
 
@@ -828,7 +828,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 
 func TestBuildValkeyNodePodTemplateSpec_ImagePullSecrets(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
-	node.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "regcred"}}
+	node.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "registrycredential"}}
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 

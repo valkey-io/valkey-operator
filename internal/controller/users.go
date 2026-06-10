@@ -67,8 +67,11 @@ var (
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
-		// the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
-		replicationUser: "-@all +psync +replconf +ping +cluster|syncslots",
+
+		replicationUser: strings.Join([]string{
+			"-@all +psync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
+			"+cluster|syncslots",           // required for atomic slot migration
+		}, " "),
 	}
 )
 
@@ -117,7 +120,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 			log.Error(err, "failed to fetch system users secret")
 			return "", err
 		}
-		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
+		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
 		if err != nil {
 			log.Error(err, "failed to create system user secret")
 			return "", err
@@ -127,7 +130,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	err = validateSystemUserPasswordSecret(systemUserSecret.Data, cluster)
 	if err != nil {
 		if errors.Is(err, errMissingSystemUser) {
-			systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
+			systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
 			if err != nil {
 				log.Error(err, "failed to update system user secret")
 				return "", err
@@ -350,6 +353,9 @@ func generatePassword(length int) ([]byte, error) {
 	return ret, nil
 }
 
+// validateSystemUserPasswordSecret verifies that the system user password secret
+// contains exactly the expected system user entries. It rejects any unknown users
+// and ensures all required system users are present.
 func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	// list of users need to exists in the secret (with _exporter being optional)
 	u := make([]string, len(systemUsers))
@@ -370,7 +376,7 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 	return nil
 }
 
-func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, apiClient client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
+func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
 	log := logf.FromContext(ctx)
 	var createSecret bool
 	secretName := getSystemPasswordSecretName(cluster.Name)
@@ -420,9 +426,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 
 	var err error
 	if createSecret {
-		err = apiClient.Create(ctx, systemUsersSecret)
+		err = r.Create(ctx, systemUsersSecret)
 	} else {
-		err = apiClient.Update(ctx, systemUsersSecret)
+		err = r.Update(ctx, systemUsersSecret)
 	}
 	return systemUsersSecret, err
 }

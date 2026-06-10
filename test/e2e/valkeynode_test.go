@@ -38,6 +38,7 @@ const (
 	// Credentials the e2e provisions to stand in for the operator-managed
 	// "_operator" system user.
 	e2eOperatorPassword = "e2eOperatorPassw0rd"
+	e2eReplicationPassword = "e2eReplicationPassword"
 	e2eDefaultPassword  = "e2eDefaultPassword"
 )
 
@@ -80,7 +81,8 @@ metadata:
     app.kubernetes.io/managed-by: valkey-operator
 stringData:
   _operator: %s
-`, name, e2eOperatorPassword), "system-passwords secret for "+name)
+  _replication: %s
+`, name, e2eOperatorPassword, e2eReplicationPassword), "system-passwords secret for "+name)
 
 		applyManifest(fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -93,7 +95,8 @@ stringData:
   users.acl: |
     user default on >%s ~* &* +@all
     user _operator on >%s ~* &* +@all
-`, name, e2eDefaultPassword, e2eOperatorPassword), "ACL secret for "+name)
+	user _replication on >%s ~* &* +@all
+`, name, e2eDefaultPassword, e2eOperatorPassword, e2eReplicationPassword), "ACL secret for "+name)
 	}
 
 	deleteSystemUsersSecrets := func(name string) {
@@ -134,7 +137,7 @@ spec:
 		}).Should(Succeed())
 	}
 
-	Context("standalone StatefulSet", Label("valkeynode"), func() {
+	Context("standalone StatefulSet", Label("valkeynode", "standalone-sts"), func() {
 		const nodeName = "valkeynode-sts-e2e"
 		expectedConfigMapName := controller.GetServerConfigMapName(nodeName)
 
@@ -343,7 +346,28 @@ data:
 			defer deleteResource("configmap", cmName)
 
 			By("creating a ValkeyNode that references the external ConfigMap")
+<<<<<<< HEAD
 			applySystemUsersSecrets(nodeName)
+=======
+			secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-acl
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
+---
+apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-system-passwords
+data:
+  _exporter: aGVsbG8=
+  _operator: aGVsbG8=
+  _replication: aGVsbG8=
+`, nodeName, nodeName)
+>>>>>>> 477206a (fix valkeynode e2e tests not creating system users secret)
 
 			nodeManifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyNode
@@ -358,8 +382,15 @@ spec:
 
 			applyManifest(nodeManifest, "ValkeyNode with external ConfigMap")
 			defer func() {
+<<<<<<< HEAD
 				deleteResource("valkeynode", nodeName)
 				deleteSystemUsersSecrets(nodeName)
+=======
+				cmd := exec.Command("kubectl", "delete", "valkeynode", nodeName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "secret", "internal-"+nodeName+"-acl", "internal-"+nodeName+"-system-passwords", "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+>>>>>>> 477206a (fix valkeynode e2e tests not creating system users secret)
 			}()
 
 			By("verifying the controller did NOT create an owned ConfigMap")

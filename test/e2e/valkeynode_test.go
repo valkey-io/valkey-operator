@@ -51,7 +51,17 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
-`, name)
+---
+apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-system-passwords
+data:
+  _exporter: aGVsbG8=
+  _operator: aGVsbG8=
+  _replication: aGVsbG8=
+`, name, name)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = strings.NewReader(secretManifest)
 		_, err := utils.Run(cmd)
@@ -88,7 +98,7 @@ spec:
 		}).Should(Succeed())
 	}
 
-	Context("standalone StatefulSet", Label("valkeynode"), func() {
+	Context("standalone StatefulSet", Label("valkeynode", "standalone-sts"), func() {
 		const nodeName = "valkeynode-sts-e2e"
 		expectedConfigMapName := controller.GetServerConfigMapName(nodeName)
 
@@ -302,7 +312,17 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
-`, nodeName)
+---
+apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-system-passwords
+data:
+  _exporter: aGVsbG8=
+  _operator: aGVsbG8=
+  _replication: aGVsbG8=
+`, nodeName, nodeName)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(secretManifest)
@@ -325,7 +345,7 @@ spec:
 			defer func() {
 				cmd := exec.Command("kubectl", "delete", "valkeynode", nodeName, "--ignore-not-found=true", "--wait=false")
 				_, _ = utils.Run(cmd)
-				cmd = exec.Command("kubectl", "delete", "secret", "internal-"+nodeName+"-acl", "--ignore-not-found=true", "--wait=false")
+				cmd = exec.Command("kubectl", "delete", "secret", "internal-"+nodeName+"-acl", "internal-"+nodeName+"-system-passwords", "--ignore-not-found=true", "--wait=false")
 				_, _ = utils.Run(cmd)
 			}()
 

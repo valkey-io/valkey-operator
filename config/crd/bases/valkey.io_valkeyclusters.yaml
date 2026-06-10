@@ -3138,6 +3138,29 @@ spec:
               tls:
                 description: TLS configuration for the cluster
                 properties:
+                  authClients:
+                    default: Optional
+                    description: |-
+                      AuthClients controls whether clients must authenticate with a TLS
+                      certificate. `Required` enforces mTLS, `Optional` (the default) allows
+                      both authenticated and unauthenticated clients, and `Disabled` turns
+                      client certificate processing off entirely.
+                    enum:
+                    - Optional
+                    - Required
+                    - Disabled
+                    type: string
+                  authClientsUser:
+                    default: "Off"
+                    description: |-
+                      AuthClientsUser configures how Valkey maps an authenticated client
+                      certificate to an ACL user. Set to `CN` to authenticate clients as
+                      the ACL user matching the certificate's Common Name. Defaults to
+                      `Off` (no automatic mapping). Requires Valkey >= 9.0.0.
+                    enum:
+                    - CN
+                    - "Off"
+                    type: string
                   certificate:
                     description: |-
                       Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.

@@ -18,13 +18,16 @@ package controller
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
+var factory = promauto.With(metrics.Registry)
+
 var (
-	clusterInfo = prometheus.NewGaugeVec(
+	clusterStateInfo = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_state_info",
 			Help: "Information about a ValkeyCluster. Value is 1 for the current state, 0 for all others.",
@@ -32,7 +35,7 @@ var (
 		[]string{"valkey_cluster", "namespace", "state"},
 	)
 
-	clusterShards = prometheus.NewGaugeVec(
+	clusterShards = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_shards",
 			Help: "Total number of shards in a ValkeyCluster.",
@@ -40,7 +43,7 @@ var (
 		[]string{"valkey_cluster", "namespace"},
 	)
 
-	clusterShardsReady = prometheus.NewGaugeVec(
+	clusterShardsReady = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_shards_ready",
 			Help: "Number of ready shards in a ValkeyCluster.",
@@ -48,7 +51,7 @@ var (
 		[]string{"valkey_cluster", "namespace"},
 	)
 
-	failoversTotal = prometheus.NewCounterVec(
+	failoversTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "valkey_operator_failovers_total",
 			Help: "Total number of failover events.",
@@ -56,7 +59,7 @@ var (
 		[]string{"valkey_cluster", "namespace", "type"},
 	)
 
-	slotMigrationBatchesTotal = prometheus.NewCounterVec(
+	slotMigrationBatchesTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "valkey_operator_slot_migration_batches_total",
 			Help: "Total number of slot migration batches completed.",
@@ -65,48 +68,31 @@ var (
 	)
 )
 
-func init() {
-	metrics.Registry.MustRegister(
-		clusterInfo,
-		clusterShards,
-		clusterShardsReady,
-		failoversTotal,
-		slotMigrationBatchesTotal,
-	)
-}
-
-// clusterStates lists all possible ValkeyCluster states for metric cleanup.
-var clusterStates = []valkeyiov1alpha1.ClusterState{
-	valkeyiov1alpha1.ClusterStateInitializing,
-	valkeyiov1alpha1.ClusterStateReconciling,
-	valkeyiov1alpha1.ClusterStateReady,
-	valkeyiov1alpha1.ClusterStateDegraded,
-	valkeyiov1alpha1.ClusterStateFailed,
-}
-
 // updateClusterMetrics sets the Prometheus gauges for a ValkeyCluster.
 func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
 	name := cluster.Name
 	ns := cluster.Namespace
 
 	// Set info gauge: 1 for current state, 0 for all others
-	for _, s := range clusterStates {
+	for _, s := range valkeyiov1alpha1.ClusterStates {
 		val := float64(0)
 		if cluster.Status.State == s {
 			val = 1
 		}
-		clusterInfo.WithLabelValues(name, ns, string(s)).Set(val)
+		clusterStateInfo.WithLabelValues(name, ns, string(s)).Set(val)
 	}
 
 	clusterShards.WithLabelValues(name, ns).Set(float64(cluster.Status.Shards))
 	clusterShardsReady.WithLabelValues(name, ns).Set(float64(cluster.Status.ReadyShards))
 }
 
-// deleteClusterMetrics removes all gauge metrics for a deleted ValkeyCluster.
+// deleteClusterMetrics removes all metrics for a deleted ValkeyCluster.
 func deleteClusterMetrics(name, namespace string) {
-	for _, s := range clusterStates {
-		clusterInfo.DeleteLabelValues(name, namespace, string(s))
+	for _, s := range valkeyiov1alpha1.ClusterStates {
+		clusterStateInfo.DeleteLabelValues(name, namespace, string(s))
 	}
 	clusterShards.DeleteLabelValues(name, namespace)
 	clusterShardsReady.DeleteLabelValues(name, namespace)
+	failoversTotal.DeletePartialMatch(prometheus.Labels{"valkey_cluster": name, "namespace": namespace})
+	slotMigrationBatchesTotal.DeleteLabelValues(name, namespace)
 }

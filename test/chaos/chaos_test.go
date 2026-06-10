@@ -19,19 +19,7 @@ limitations under the License.
 
 package chaos
 
-//----------------------------------------------------------
-// Example:
-//
-// CHAOS_SCENARIOS=delete-recreate-cluster \
-//   CHAOS_WORKLOAD_TYPE=Deployment \
-//   make test-chaos 2>&1 | tee --ignore-interrupts chaos.log
-//
-// To run in parallel with e2e tests (separate Kind cluster),
-// set KUBECONFIG to avoid context conflicts:
-//
-// KUBECONFIG=/tmp/chaos-kube.conf make test-chaos
-//
-//----------------------------------------------------------
+// Chaos test suite. See docs/chaos-testing.md for configuration and usage.
 
 import (
 	"fmt"
@@ -308,7 +296,8 @@ spec:
 			var targetShardsForIteration []int
 			switch targetShards {
 			case "random":
-				targetShardsForIteration = []int{rnd.Intn(shards)}
+				count := rnd.Intn(shards) + 1
+				targetShardsForIteration = rnd.Perm(shards)[:count]
 			case "all":
 				targetShardsForIteration = make([]int, shards)
 				for i := range shards {
@@ -436,12 +425,16 @@ spec:
 // Fault scenario implementations
 
 func deletePrimaryPod(ctx *ChaosContext) error {
+	var pods []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary pod: %s (shard %d)\n", pod, shard)
+		pods = append(pods, pod)
+	}
+	for _, pod := range pods {
 		if err := utils.DeletePod(pod, ctx.Namespace); err != nil {
 			return err
 		}
@@ -453,12 +446,16 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
 	}
+	var pods []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica pod: %s (shard %d)\n", pod, shard)
+		pods = append(pods, pod)
+	}
+	for _, pod := range pods {
 		if err := utils.DeletePod(pod, ctx.Namespace); err != nil {
 			return err
 		}
@@ -492,6 +489,7 @@ func deleteShardPods(ctx *ChaosContext) error {
 }
 
 func deletePrimaryWorkload(ctx *ChaosContext) error {
+	var workloads []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
@@ -502,6 +500,9 @@ func deletePrimaryWorkload(ctx *ChaosContext) error {
 			return err
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary %s: %s (shard %d)\n", ctx.WorkloadType, workload, shard)
+		workloads = append(workloads, workload)
+	}
+	for _, workload := range workloads {
 		if err := utils.DeleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
 			return err
 		}
@@ -513,6 +514,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
 	}
+	var workloads []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
@@ -523,6 +525,9 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 			return err
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica %s: %s (shard %d)\n", ctx.WorkloadType, workload, shard)
+		workloads = append(workloads, workload)
+	}
+	for _, workload := range workloads {
 		if err := utils.DeleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
 			return err
 		}

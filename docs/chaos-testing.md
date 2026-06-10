@@ -53,7 +53,7 @@ All configuration is via environment variables:
 | `CHAOS_SCENARIOS` | all except disabled | Comma-separated list of scenarios to run |
 | `CHAOS_SEED` | current time | Random seed for reproducibility |
 | `CHAOS_MODE` | `random` | `random` or `sequential` scenario selection |
-| `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random`, `all`, or comma-separated indices (e.g. `0,2`) |
+| `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random` (1 to N shards each iteration), `all`, or comma-separated indices (e.g. `0,2`) |
 | `CHAOS_RECOVERY_TIMEOUT` | `5m` | Max time to wait for cluster recovery |
 | `CHAOS_TOLERATION_SECONDS` | `0` | Pod toleration seconds for not-ready/unreachable (0 = not set) |
 | `CHAOS_NUM_KEYS` | `100000` | Number of keys to seed |
@@ -144,3 +144,19 @@ CHAOS_SHARDS=3 CHAOS_REPLICAS=1 CHAOS_TARGET_SHARDS=0,1 \
 # Delete all pods in all shards
 CHAOS_TARGET_SHARDS=all CHAOS_SCENARIOS=delete-shard-pods make test-chaos
 ```
+
+## Running Multiple Tests in Parallel
+
+The chaos test uses a dedicated Kind cluster (`valkey-operator-test-chaos`) that is separate from the e2e test cluster.
+To run two chaos tests simultaneously with different configurations, use separate Kind clusters and kubeconfigs:
+
+```bash
+# Terminal 1: default config
+make test-chaos 2>&1 | tee --ignore-interrupts chaos-run1.log
+
+# Terminal 2: different cluster name and kubeconfig to avoid conflicts
+KIND_CLUSTER_CHAOS=chaos-2 KUBECONFIG=/tmp/chaos-2.conf \
+  make test-chaos 2>&1 | tee --ignore-interrupts chaos-run2.log
+```
+
+Each run creates its own Kind cluster, so they don't interfere with each other.

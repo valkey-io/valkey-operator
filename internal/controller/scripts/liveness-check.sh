@@ -42,10 +42,10 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
-# Authenticate as the custom user when user and password are set.
+# Authenticate as the custom user when user is set.
 auth_args=""
-if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-    auth_args="--user $VALKEY_USER --no-auth-warning"
+if [ -n "${VALKEY_USER:-}" ]; then
+    auth_args="--user $VALKEY_USER"
 fi
 
 # Perform check

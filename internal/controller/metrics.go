@@ -32,7 +32,7 @@ var (
 			Name: "valkey_operator_cluster_state_info",
 			Help: "Information about a ValkeyCluster. Value is 1 for the current state, 0 for all others.",
 		},
-		[]string{"valkey_cluster", "namespace", "state"},
+		[]string{"valkey_cluster", "target_namespace", "state"},
 	)
 
 	clusterShards = factory.NewGaugeVec(
@@ -40,7 +40,7 @@ var (
 			Name: "valkey_operator_cluster_shards",
 			Help: "Total number of shards in a ValkeyCluster.",
 		},
-		[]string{"valkey_cluster", "namespace"},
+		[]string{"valkey_cluster", "target_namespace"},
 	)
 
 	clusterShardsReady = factory.NewGaugeVec(
@@ -48,7 +48,7 @@ var (
 			Name: "valkey_operator_cluster_shards_ready",
 			Help: "Number of ready shards in a ValkeyCluster.",
 		},
-		[]string{"valkey_cluster", "namespace"},
+		[]string{"valkey_cluster", "target_namespace"},
 	)
 
 	failoversTotal = factory.NewCounterVec(
@@ -56,7 +56,7 @@ var (
 			Name: "valkey_operator_failovers_total",
 			Help: "Total number of failover events.",
 		},
-		[]string{"valkey_cluster", "namespace", "type"},
+		[]string{"valkey_cluster", "target_namespace", "type"},
 	)
 
 	slotMigrationBatchesTotal = factory.NewCounterVec(
@@ -64,7 +64,7 @@ var (
 			Name: "valkey_operator_slot_migration_batches_total",
 			Help: "Total number of slot migration batches completed.",
 		},
-		[]string{"valkey_cluster", "namespace"},
+		[]string{"valkey_cluster", "target_namespace"},
 	)
 )
 
@@ -93,6 +93,6 @@ func deleteClusterMetrics(name, namespace string) {
 	}
 	clusterShards.DeleteLabelValues(name, namespace)
 	clusterShardsReady.DeleteLabelValues(name, namespace)
-	failoversTotal.DeletePartialMatch(prometheus.Labels{"valkey_cluster": name, "namespace": namespace})
+	failoversTotal.DeletePartialMatch(prometheus.Labels{"valkey_cluster": name, "target_namespace": namespace})
 	slotMigrationBatchesTotal.DeleteLabelValues(name, namespace)
 }

@@ -59,7 +59,6 @@ metadata:
   name: internal-%s-system-passwords
 data:
   _exporter: aGVsbG8=
-  _operator: aGVsbG8=
   _replication: aGVsbG8=
 `, name, name)
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -320,7 +319,6 @@ metadata:
   name: internal-%s-system-passwords
 data:
   _exporter: aGVsbG8=
-  _operator: aGVsbG8=
   _replication: aGVsbG8=
 `, nodeName, nodeName)
 

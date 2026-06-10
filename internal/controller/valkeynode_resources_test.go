@@ -919,6 +919,14 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			got, err = os.ReadFile(argsFile)
 			require.NoError(t, err)
 			assert.NotContains(t, string(got), "-user")
+
+			// With probe user but empty auth env: no --user.
+			cmd = exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=")
+			require.NoError(t, cmd.Run())
+			got, err = os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.NotContains(t, string(got), "-user")
 		})
 	}
 }

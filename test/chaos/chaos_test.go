@@ -625,20 +625,22 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 func pausePrimaryContainer(ctx *ChaosContext) error {
 	// 1-5s covers both non-failover (<2s timeout) and failover (>2s) cases
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
-	var paused []string
+	var pods []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing primary container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
+		pods = append(pods, pod)
+	}
+	for _, pod := range pods {
 		if err := utils.PauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
-		paused = append(paused, pod)
 	}
 	time.Sleep(duration)
-	for _, pod := range paused {
+	for _, pod := range pods {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing primary container in pod: %s\n", pod)
 		if err := utils.UnpauseContainer(pod, ctx.Namespace); err != nil {
 			return err
@@ -653,20 +655,22 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 	}
 	// 1-5s covers both non-failover (<2s timeout) and failover (>2s) cases
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
-	var paused []string
+	var pods []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing replica container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
+		pods = append(pods, pod)
+	}
+	for _, pod := range pods {
 		if err := utils.PauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
-		paused = append(paused, pod)
 	}
 	time.Sleep(duration)
-	for _, pod := range paused {
+	for _, pod := range pods {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing replica container in pod: %s\n", pod)
 		if err := utils.UnpauseContainer(pod, ctx.Namespace); err != nil {
 			return err

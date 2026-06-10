@@ -84,6 +84,9 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	// Reset any CPU pressure before teardown.
+	utils.UnthrottleNodes(utils.GetWorkerNodes())
+
 	teardownCertManager()
 
 	By("undeploying the controller-manager")

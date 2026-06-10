@@ -364,7 +364,6 @@ metadata:
   name: internal-%s-system-passwords
 data:
   _exporter: aGVsbG8=
-  _operator: aGVsbG8=
   _replication: aGVsbG8=
 `, nodeName, nodeName)
 >>>>>>> 477206a (fix valkeynode e2e tests not creating system users secret)

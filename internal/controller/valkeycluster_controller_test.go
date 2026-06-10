@@ -491,6 +491,50 @@ var _ = Describe("reconcileUsersAcl", func() {
 
 			Expect(internalSecret.Type).To(Equal(AclSecretType))
 		})
+
+		It("should update the system user secret when spec.exporter is enabled after cluster creation", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-system-user-reconciliation-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Exporter: valkeyiov1alpha1.ExporterSpec{
+						Enabled: false,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			systemUsersSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      getSystemPasswordSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, systemUsersSecret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, systemUsersSecret) }()
+			Expect(systemUsersSecret.Data).NotTo(HaveKey(exporterUser))
+
+			cluster.Spec.Exporter.Enabled = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			err = reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, secretName, systemUsersSecret)).To(Succeed())
+			Expect(systemUsersSecret.Data).To(HaveKey(exporterUser))
+		})
 	})
 })
 

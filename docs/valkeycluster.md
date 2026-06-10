@@ -15,6 +15,7 @@
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
+- [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
 - [Users](#users)
@@ -30,14 +31,22 @@ config:
 
 Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf/) to all nodes in the cluster.
 
+Listed below are configurations can be applied live without rolling pods. We are adopting configs that can be applied live on a case-by-case basis. For any requests please [raise an issue](https://github.com/valkey-io/valkey-operator/issues/new).
+
+```
+maxclients
+maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
+maxmemory-policy
+```
+
 #### Constraints
 
-- All config changes cause pods to be rolled
 - Cluster management settings owned by the operator cannot be overwritten
 
 #### Future plans
 
-- Pods are not rolled for configs that can be applied live
+- Operator validates configs before they are applied to the server
+  - https://github.com/valkey-io/valkey-operator/issues/141#issuecomment-4269559003
 
 ### Containers
 
@@ -110,6 +119,16 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 |---|---|
 | `Managed` | Operator creates and owns the PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
+
+### Private image registries
+
+```yaml
+image: registry.example.com/valkey/valkey:9.0.0
+imagePullSecrets:
+  - name: registrycredential
+```
+
+`imagePullSecrets` is a list of `Secret` references (in the cluster's namespace) used to pull images from private registries. It is applied at the pod level, so a single list covers every image in the pod - the Valkey server, the metrics exporter sidecar, and any additional containers. It is optional and has no default; omit it when the nodes already authenticate to the registry.
 
 ### Scheduling
 

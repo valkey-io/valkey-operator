@@ -43,6 +43,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// ImagePullSecrets is a list of references to Secrets used for pulling the pod's
+	// images from private registries.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.
 	// +kubebuilder:default=StatefulSet
@@ -107,6 +112,13 @@ type ValkeyNodeSpec struct {
 	// TLS configuration for the node
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
+
+	// Config is the user-facing Valkey configuration, copied verbatim from the
+	// owning cluster's Spec.Config. The controller applies the subset of these
+	// keys that are live-settable (see the operator's allowlist) via CONFIG SET;
+	// the rest take effect on the next pod roll.
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
@@ -147,6 +159,10 @@ const (
 	ValkeyNodeConditionPersistentVolumeClaimReady = "PersistentVolumeClaimReady"
 	// ValkeyNodeConditionPersistentVolumeClaimSizeReady indicates the managed PVC has satisfied the requested size.
 	ValkeyNodeConditionPersistentVolumeClaimSizeReady = "PersistentVolumeClaimSizeReady"
+	// ValkeyNodeConditionLiveConfigApplied indicates that the live-settable subset
+	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
+	// controller blocks one-at-a-time progress until this condition is True.
+	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 )
 
 const (

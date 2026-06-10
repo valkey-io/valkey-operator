@@ -143,6 +143,36 @@ func TestNodeRequiresRoll(t *testing.T) {
 	})
 }
 
+func TestNodeRequiresRollIgnoresConfig(t *testing.T) {
+	withConfig := func(policy string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				Image:            "valkey:8",
+				ServerConfigHash: "abc",
+				Config:           map[string]string{"maxmemory-policy": policy},
+			},
+		}
+	}
+
+	t.Run("does not require a roll when only Config differs", func(t *testing.T) {
+		current := withConfig("allkeys-lru")
+		current.Status.PodIP = "10.0.0.1"
+		desired := withConfig("volatile-lru")
+		assert.False(t, nodeRequiresRoll(current, desired))
+	})
+
+	t.Run("requires a roll when a non-Config spec field differs", func(t *testing.T) {
+		current := &valkeyiov1alpha1.ValkeyNode{
+			Spec:   valkeyiov1alpha1.ValkeyNodeSpec{Image: "valkey:8"},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
+		}
+		desired := &valkeyiov1alpha1.ValkeyNode{
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{Image: "valkey:9"},
+		}
+		assert.True(t, nodeRequiresRoll(current, desired))
+	})
+}
+
 func TestAnyNodeRequiresRoll(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},

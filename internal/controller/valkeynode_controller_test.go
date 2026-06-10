@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1078,5 +1079,170 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 		updated2 := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated2)).To(Succeed())
 		Expect(updated2.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when nothing changed")
+	})
+})
+
+var _ = Describe("clearLiveConfigCondition", func() {
+	var (
+		node *valkeyiov1alpha1.ValkeyNode
+		r    *ValkeyNodeReconciler
+		ctx  context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "clearcond-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		r = &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+	})
+
+	It("removes a stale False condition so it reverts to absent", func() {
+		By("setting LiveConfigApplied=False, as a CONFIG SET failure would")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
+
+		By("clearing the condition, as happens once the offending key is removed")
+		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeNil())
+	})
+
+	It("does not write status when the condition is already absent", func() {
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvBefore := updated.ResourceVersion
+
+		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvBefore), "status write should be skipped when condition is absent")
+	})
+})
+
+var _ = Describe("setLiveConfigCondition", func() {
+	var (
+		node *valkeyiov1alpha1.ValkeyNode
+		r    *ValkeyNodeReconciler
+		ctx  context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "setcond-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		r = &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+	})
+
+	It("does not write status when the condition is unchanged", func() {
+		By("setting LiveConfigApplied=True for the first time")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("setting the identical condition again")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
+	})
+})
+
+type fakeConfigClient struct {
+	params map[string]string
+	err    error
+	closed bool
+}
+
+func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string) error {
+	f.params = params
+	return f.err
+}
+
+func (f *fakeConfigClient) Close() { f.closed = true }
+
+var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
+	nodeWith := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: cfg}}
+	}
+
+	ctx := context.Background()
+
+	It("applies only allowlisted keys and closes the client", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{
+			"maxmemory-policy": "allkeys-lru",
+			"appendonly":       "yes",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("returns an error when CONFIG SET fails", func() {
+		fake := &fakeConfigClient{err: fmt.Errorf("boom")}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		Expect(err).To(HaveOccurred())
+		Expect(applied).To(BeFalse())
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("does not open a client when no allowlisted keys are present", func() {
+		called := false
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				called = true
+				return nil, nil
+			},
+		}
+		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeFalse())
+		Expect(called).To(BeFalse())
 	})
 })

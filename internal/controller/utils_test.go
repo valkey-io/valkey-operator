@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
@@ -377,4 +378,21 @@ func TestBuildClusterValkeyNodeLabels(t *testing.T) {
 
 	// Recommended labels cannot be overridden by user-defined cluster labels.
 	assert.Equal(t, appName, node.Labels["app.kubernetes.io/name"])
+}
+
+func TestBuildClusterValkeyNodeImagePullSecrets(t *testing.T) {
+	secrets := []corev1.LocalObjectReference{{Name: "registrycredential"}}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{ImagePullSecrets: secrets},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, secrets, node.Spec.ImagePullSecrets, "imagePullSecrets should propagate cluster -> node")
+
+	// Absent on the cluster -> absent on the node.
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Empty(t, bare.Spec.ImagePullSecrets)
 }

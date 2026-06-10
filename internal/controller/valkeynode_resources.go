@@ -362,6 +362,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	podSpec := corev1.PodSpec{
 		Containers:                containers,
+		ImagePullSecrets:          node.Spec.ImagePullSecrets,
 		NodeSelector:              node.Spec.NodeSelector,
 		Affinity:                  node.Spec.Affinity,
 		Tolerations:               node.Spec.Tolerations,

@@ -272,3 +272,248 @@ spec:
 		})
 	})
 })
+
+var _ = Describe("ValkeyCluster mTLS with CN-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS"), func() {
+	const (
+		clusterName       = "cluster-mtls"
+		customIssuer      = "valkey-mtls-custom-issuer"
+		caCertName        = "valkey-mtls-ca"
+		caIssuerName      = "valkey-mtls-ca-issuer"
+		serverCertSecret  = "valkey-mtls-server-cert"
+		clientCertSecret  = "valkey-mtls-client-alice"
+		mtlsClientPodName = "client-mtls"
+		mtlsNoCertPodName = "client-mtls-noauth"
+	)
+	var tmpDir string
+
+	BeforeAll(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "valkey-mtls-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		// Use a CA Issuer pattern so server + client certs share a trust
+		// root: a self-signed custom Issuer mints a CA Certificate, and
+		// the CA Issuer (referencing that CA secret) signs both leaves.
+		// Without this, mTLS verification fails because each cert-manager
+		// `selfSigned` Certificate becomes its own root.
+		By("creating custom Issuer, root CA Certificate, CA Issuer, server Certificate, and client Certificate (CN=alice)")
+		manifest := fmt.Sprintf(`
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: %s
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: %s
+spec:
+  secretName: %s
+  isCA: true
+  commonName: valkey-mtls-test-ca
+  issuerRef:
+    name: %s
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: %s
+spec:
+  ca:
+    secretName: %s
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: %s
+spec:
+  secretName: %s
+  commonName: valkey-%s.default.svc.cluster.local
+  dnsNames:
+    - valkey-%s.default.svc.cluster.local
+    - localhost
+  issuerRef:
+    name: %s
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: %s
+spec:
+  secretName: %s
+  commonName: alice
+  issuerRef:
+    name: %s
+    kind: Issuer
+    group: cert-manager.io
+`, customIssuer,
+			caCertName, caCertName, customIssuer,
+			caIssuerName, caCertName,
+			serverCertSecret, serverCertSecret, clusterName, clusterName, caIssuerName,
+			clientCertSecret, clientCertSecret, caIssuerName)
+		manifestFile := filepath.Join(tmpDir, "mtls-cert-manager.yaml")
+		Expect(os.WriteFile(manifestFile, []byte(manifest), 0644)).To(Succeed())
+
+		Eventually(func() error {
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", manifestFile))
+			return err
+		}).Should(Succeed())
+
+		By("waiting for both leaf certificate Secrets to be created")
+		Eventually(func() error {
+			_, err := utils.Run(exec.Command("kubectl", "get", "secret", serverCertSecret))
+			return err
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		Eventually(func() error {
+			_, err := utils.Run(exec.Command("kubectl", "get", "secret", clientCertSecret))
+			return err
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("creating the ValkeyCluster with mTLS + a passwordless 'alice' ACL user")
+		clusterManifest := fmt.Sprintf(`
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  tls:
+    certificate:
+      secretName: %s
+    authClients: Required
+    authClientsUser: CN
+  users:
+    - name: alice
+      enabled: true
+      nopass: true
+      permissions: "+@all ~* &*"
+`, clusterName, serverCertSecret)
+		clusterFile := filepath.Join(tmpDir, "valkeycluster-mtls.yaml")
+		Expect(os.WriteFile(clusterFile, []byte(clusterManifest), 0644)).To(Succeed())
+
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true"))
+		_, err = utils.Run(exec.Command("kubectl", "apply", "-f", clusterFile))
+		Expect(err).NotTo(HaveOccurred())
+
+		// We intentionally wait for pod-level Ready rather than the full
+		// cluster `state: Ready`: under `authClients: Required` the operator
+		// itself currently lacks a client cert, so the operator can't drive
+		// CLUSTER MEET against its own cluster. Pod readiness is sufficient
+		// to prove that Valkey accepted the rendered TLS directives.
+		By("waiting for the Valkey server pod to become ready under mTLS")
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "jsonpath={.items[0].status.containerStatuses[?(@.name=='server')].ready}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("true"))
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "certificate", serverCertSecret, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "certificate", clientCertSecret, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "certificate", caCertName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "issuer", caIssuerName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "issuer", customIssuer, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", serverCertSecret, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", clientCertSecret, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", caCertName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsClientPodName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsNoCertPodName, "--ignore-not-found=true"))
+		os.RemoveAll(tmpDir)
+	})
+
+	AfterEach(func() {
+		if CurrentSpecReport().Failed() {
+			utils.CollectDebugInfo("default")
+			utils.CollectDebugInfo(namespace)
+		}
+	})
+
+	It("renders the mTLS directives into valkey.conf", func() {
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "configmap",
+				fmt.Sprintf("valkey-%s", clusterName),
+				"-o", "jsonpath={.data.valkey\\.conf}")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("tls-auth-clients yes"))
+			g.Expect(out).To(ContainSubstring("tls-auth-clients-user CN"))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+	})
+
+	It("authenticates a client with CN=alice as the matching ACL user", func() {
+		clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", clusterName)
+
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsClientPodName, "--ignore-not-found=true"))
+		cmd := exec.Command("kubectl", "run", mtlsClientPodName,
+			fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--overrides",
+			fmt.Sprintf(`{
+				"spec": {
+					"containers": [{
+						"name": "client",
+						"image": "%s",
+						"command": ["valkey-cli", "-h", "%s", "--tls", "--cert", "/client-tls/tls.crt", "--key", "/client-tls/tls.key", "--cacert", "/server-tls/ca.crt", "ACL", "WHOAMI"],
+						"volumeMounts": [
+							{"name": "server-tls", "mountPath": "/server-tls", "readOnly": true},
+							{"name": "client-tls", "mountPath": "/client-tls", "readOnly": true}
+						]
+					}],
+					"volumes": [
+						{"name": "server-tls", "secret": {"secretName": "%s"}},
+						{"name": "client-tls", "secret": {"secretName": "%s"}}
+					]
+				}
+			}`, valkeyClientImage, clusterFqdn, serverCertSecret, clientCertSecret))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = utils.Run(exec.Command("kubectl", "wait", fmt.Sprintf("pod/%s", mtlsClientPodName),
+			"--for=jsonpath={.status.phase}=Succeeded", "--timeout=120s"))
+		Expect(err).NotTo(HaveOccurred())
+
+		out, err := utils.Run(exec.Command("kubectl", "logs", mtlsClientPodName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(out)).To(Equal("alice"),
+			"ACL WHOAMI should resolve to the user mapped from the certificate's CN")
+
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsClientPodName, "--ignore-not-found=true"))
+	})
+
+	It("rejects a client that does not present a certificate", func() {
+		clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", clusterName)
+
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsNoCertPodName, "--ignore-not-found=true"))
+		cmd := exec.Command("kubectl", "run", mtlsNoCertPodName,
+			fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--overrides",
+			fmt.Sprintf(`{
+				"spec": {
+					"containers": [{
+						"name": "client",
+						"image": "%s",
+						"command": ["valkey-cli", "-h", "%s", "--tls", "--cacert", "/tls/ca.crt", "PING"],
+						"volumeMounts": [{"name": "tls-vol", "mountPath": "/tls", "readOnly": true}]
+					}],
+					"volumes": [{"name": "tls-vol", "secret": {"secretName": "%s"}}]
+				}
+			}`, valkeyClientImage, clusterFqdn, serverCertSecret))
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = utils.Run(exec.Command("kubectl", "wait", fmt.Sprintf("pod/%s", mtlsNoCertPodName),
+			"--for=jsonpath={.status.phase}=Failed", "--timeout=120s"))
+		Expect(err).NotTo(HaveOccurred(),
+			"client without a certificate should fail under authClients=Required")
+
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsNoCertPodName, "--ignore-not-found=true"))
+	})
+})

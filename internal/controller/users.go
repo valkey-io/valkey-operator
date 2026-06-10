@@ -20,8 +20,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"strings"
 
@@ -70,6 +72,11 @@ var (
 		// the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
 		replicationUser: "-@all +psync +replconf +ping",
 	}
+)
+
+var (
+	errUnknownSystemUser = errors.New("unknown system user")
+	errMissingSystemUser = errors.New("missing system user")
 )
 
 func getInternalSecretName(clusterName string) string {
@@ -147,6 +154,20 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 			return "", err
 		}
 	}
+
+	err = validateSystemUserPasswordSecret(systemUserSecret.Data, cluster)
+	if err != nil {
+		if errors.Is(err, errMissingSystemUser) {
+			systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, r.Client, cluster)
+			if err != nil {
+				log.Error(err, "failed to update system user secret")
+				return "", err
+			}
+		} else {
+			return "", err
+		}
+	}
+
 	for _, user := range systemUsers {
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
 			continue
@@ -360,25 +381,62 @@ func generatePassword(length int) ([]byte, error) {
 	return ret, nil
 }
 
+func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	// list of users need to exists in the secret (with _exporter being optional)
+	u := make([]string, len(systemUsers))
+	copy(u, systemUsers)
+	for user := range data {
+		i := slices.Index(u, user)
+		if i == -1 {
+			return fmt.Errorf("%w: %s", errUnknownSystemUser, user)
+		}
+		u = append(u[:i], u[i+1:]...)
+	}
+	for _, user := range u {
+		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+			continue
+		}
+		return fmt.Errorf("%w: %s", errMissingSystemUser, user)
+	}
+	return nil
+}
+
 func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, apiClient client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
 	log := logf.FromContext(ctx)
+	var createSecret bool
+	secretName := getSystemPasswordSecretName(cluster.Name)
+	systemUsersSecret := &corev1.Secret{}
 
-	systemUsersSecret := corev1.Secret{
-		Type: AclSecretType,
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      getSystemPasswordSecretName(cluster.Name),
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      secretName,
+		Namespace: cluster.Namespace,
+	}, systemUsersSecret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to fetch system users secret")
+			return nil, err
+		}
+		log.V(2).Info("creating internal secret", "secretName", systemUsersSecret)
+
+		systemUsersSecret.Type = AclSecretType
+		systemUsersSecret.ObjectMeta = metav1.ObjectMeta{
+			Name:      secretName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
-		},
-		Data: map[string][]byte{},
+		}
+		systemUsersSecret.Data = make(map[string][]byte)
+		// Register ownership of the new internal Secret
+		if err := controllerutil.SetControllerReference(cluster, systemUsersSecret, r.Scheme); err != nil {
+			log.Error(err, "Failed to grab ownership of system users secret")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
+			return systemUsersSecret, err
+		}
+		createSecret = true
 	}
-	// Register ownership of the new internal Secret
-	if err := controllerutil.SetControllerReference(cluster, &systemUsersSecret, r.Scheme); err != nil {
-		log.Error(err, "Failed to grab ownership of system users secret")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
-		return &systemUsersSecret, err
-	}
+
 	for _, user := range systemUsers {
+		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
+			continue
+		}
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
 			continue
 		}
@@ -386,13 +444,18 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		if err != nil {
 			log.Error(err, "Failed to generate random password", "username", user)
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to generate random password: %v", err)
-			return &systemUsersSecret, err
+			return systemUsersSecret, err
 		}
 		systemUsersSecret.Data[user] = password
 	}
 
-	err := apiClient.Create(ctx, &systemUsersSecret)
-	return &systemUsersSecret, err
+	var err error
+	if createSecret {
+		err = apiClient.Create(ctx, systemUsersSecret)
+	} else {
+		err = apiClient.Update(ctx, systemUsersSecret)
+	}
+	return systemUsersSecret, err
 }
 
 func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclBytes []byte) error {

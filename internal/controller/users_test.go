@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/onsi/gomega"
+
 	//	corev1 "k8s.io/api/core/v1"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
@@ -114,4 +116,21 @@ func TestBuildAclFileContents(t *testing.T) {
 			t.Errorf("%s ACL Failed. Expected '%s'; got '%s'", userName, expected, acl)
 		}
 	}
+}
+
+func TestValidateSystemUserPasswordSecret(t *testing.T) {
+	g := NewWithT(t)
+	userSecret := map[string][]byte{
+		operatorUser:    nil,
+		replicationUser: nil,
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Exporter: valkeyiov1alpha1.ExporterSpec{
+				Enabled: true,
+			},
+		},
+	}
+	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	g.Expect(err).To(MatchError(errMissingSystemUser))
 }

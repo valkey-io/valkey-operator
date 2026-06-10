@@ -91,6 +91,7 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 	return &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: getSystemPasswordSecretName(clusterName)},
 		Key:                  operatorUser,
+		Optional:             func(b bool) *bool { return &b }(true),
 	}
 }
 

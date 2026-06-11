@@ -486,10 +486,14 @@ spec:
 			}
 			Eventually(verifyReady).Should(Succeed())
 
-			By("validating internal secret was created")
+			By("validating internal secrets were created")
 			verifyInternalSecretExists := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
 				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords")
+				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 			Eventually(verifyInternalSecretExists).Should(Succeed())

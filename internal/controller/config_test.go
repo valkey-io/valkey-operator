@@ -46,6 +46,9 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 
 		// Base, non-overridable parameter
 		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
+
+		// Primary fails over to a replica on SIGTERM (graceful shutdown)
+		Expect(testConfigString).To(ContainSubstring("shutdown-on-sigterm failover"))
 	})
 })
 

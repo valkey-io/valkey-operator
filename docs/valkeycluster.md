@@ -120,6 +120,12 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 | `Managed` | Operator creates and owns the PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
 
+### Graceful shutdown
+
+On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+.
+
+The handoff runs inside the pod's termination grace period, so set `terminationGracePeriodSeconds` at least as high as `cluster-manual-failover-timeout`; otherwise `SIGKILL` can cut the failover short.
+
 ### Private image registries
 
 ```yaml

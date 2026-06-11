@@ -311,3 +311,152 @@ func TestCurrentEpoch(t *testing.T) {
 		}
 	})
 }
+
+func TestClusterState_HasFailoverQuorum(t *testing.T) {
+	t.Run("no shards", func(t *testing.T) {
+		state := &ClusterState{Shards: []*ShardState{}}
+		if state.HasFailoverQuorum() {
+			t.Error("expected false with no shards")
+		}
+	})
+
+	t.Run("majority alive (2 of 3)", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "p1", Slots: []SlotsRange{{0, 5461}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+				{PrimaryId: "p2", Slots: []SlotsRange{{5462, 10922}}, Nodes: []*NodeState{{Id: "p2", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+			},
+		}
+		if !state.HasFailoverQuorum() {
+			t.Error("expected true: 2 > 3/2")
+		}
+	})
+
+	t.Run("no majority (1 of 3)", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "p1", Slots: []SlotsRange{{0, 5461}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+			},
+		}
+		if state.HasFailoverQuorum() {
+			t.Error("expected false: 1 <= 3/2")
+		}
+	})
+
+	t.Run("all alive (3 of 3)", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "p1", Slots: []SlotsRange{{0, 5461}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+				{PrimaryId: "p2", Slots: []SlotsRange{{5462, 10922}}, Nodes: []*NodeState{{Id: "p2", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+				{PrimaryId: "p3", Slots: []SlotsRange{{10923, 16383}}, Nodes: []*NodeState{{Id: "p3", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+			},
+		}
+		if !state.HasFailoverQuorum() {
+			t.Error("expected true: 3 > 3/2")
+		}
+	})
+
+	t.Run("half alive (2 of 4)", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "p1", Slots: []SlotsRange{{0, 4095}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{"cluster_size": "4"}}}},
+				{PrimaryId: "p2", Slots: []SlotsRange{{4096, 8191}}, Nodes: []*NodeState{{Id: "p2", ClusterInfo: map[string]string{"cluster_size": "4"}}}},
+			},
+		}
+		if state.HasFailoverQuorum() {
+			t.Error("expected false: 2 <= 4/2")
+		}
+	})
+
+	t.Run("only replicas alive (0 primaries of 3)", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "", Nodes: []*NodeState{{Id: "r1", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+				{PrimaryId: "", Nodes: []*NodeState{{Id: "r2", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+				{PrimaryId: "", Nodes: []*NodeState{{Id: "r3", ClusterInfo: map[string]string{"cluster_size": "3"}}}},
+			},
+		}
+		if state.HasFailoverQuorum() {
+			t.Error("expected false: 0 live primaries")
+		}
+	})
+
+	t.Run("fallback when cluster_size missing", func(t *testing.T) {
+		state := &ClusterState{
+			Shards: []*ShardState{
+				{PrimaryId: "p1", Slots: []SlotsRange{{0, 8191}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{}}}},
+				{PrimaryId: "p2", Slots: []SlotsRange{{8192, 16383}}, Nodes: []*NodeState{{Id: "p2", ClusterInfo: map[string]string{}}}},
+			},
+		}
+		// Falls back to clusterSize = livePrimaries = 2, so 2 > 2/2 = true
+		if !state.HasFailoverQuorum() {
+			t.Error("expected true with fallback")
+		}
+	})
+}
+
+func TestClusterState_IsNodeFailed(t *testing.T) {
+	state := &ClusterState{
+		Shards: []*ShardState{
+			{
+				Nodes: []*NodeState{
+					{ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\ndead1 10.0.0.99:6379@16379 master,fail - 0 0 2 connected 5462-10922\npfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n"},
+				},
+			},
+		},
+	}
+
+	t.Run("fail", func(t *testing.T) {
+		if !state.IsNodeFailed("dead1") {
+			t.Error("expected true")
+		}
+	})
+
+	t.Run("pfail", func(t *testing.T) {
+		if !state.IsNodeFailed("pfail1") {
+			t.Error("expected true for pfail")
+		}
+	})
+
+	t.Run("not failed", func(t *testing.T) {
+		if state.IsNodeFailed("abc123") {
+			t.Error("expected false")
+		}
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		if state.IsNodeFailed("unknown") {
+			t.Error("expected false")
+		}
+	})
+}
+
+func TestClusterState_BestReplicaOf(t *testing.T) {
+	state := &ClusterState{
+		Shards: []*ShardState{
+			{
+				PrimaryId: "primary1",
+				Nodes: []*NodeState{
+					{Id: "primary1", Flags: []string{"master"}, ClusterNodes: "primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n"},
+					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"master_repl_offset": "100"}, ClusterNodes: "r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n"},
+					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"master_repl_offset": "500"}, ClusterNodes: "r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n"},
+					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"master_repl_offset": "200"}, ClusterNodes: "r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n"},
+				},
+			},
+		},
+	}
+
+	t.Run("picks highest offset", func(t *testing.T) {
+		best := state.BestReplicaOf("primary1")
+		if best == nil || best.Id != "r2" {
+			t.Errorf("expected r2 (offset 500), got %v", best)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		best := state.BestReplicaOf("unknown")
+		if best != nil {
+			t.Errorf("expected nil, got %v", best.Id)
+		}
+	})
+}

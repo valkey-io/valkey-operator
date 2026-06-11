@@ -11,7 +11,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 `internal/controller/valkeycluster_controller.go` — owns top-level orchestration. Each reconcile loop:
 
 1. Upserts a headless Service and PodDisruptionBudget
-2. Reconciles ACL users (Secret with type `valkey.io/acl`)
+2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
 3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard
 5. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`

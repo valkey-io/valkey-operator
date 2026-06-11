@@ -421,7 +421,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			log.Error(err, "failed to fetch system users secret")
 			return nil, err
 		}
-		log.V(2).Info("creating internal secret", "secretName", systemUsersSecret)
+		log.V(2).Info("creating internal secret", "secretName", secretName)
 
 		systemUsersSecret.Type = AclSecretType
 		systemUsersSecret.ObjectMeta = metav1.ObjectMeta{

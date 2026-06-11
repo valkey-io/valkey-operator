@@ -44,6 +44,8 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 		// Check user-added parameter
 		Expect(testConfigString).To(ContainSubstring("maxmemory-policy"))
 
+		// Base, non-overridable parameter
+		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
 	})
 })
 

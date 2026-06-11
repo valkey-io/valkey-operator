@@ -211,6 +211,12 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *va
 			continue
 		}
 		for _, shard := range state.Shards {
+			// Only consider shards that have a primary with slots.
+			// Orphaned replicas (no primary, no slots) should not block
+			// slot assignment to a replacement primary.
+			if shard.PrimaryId == "" || len(shard.Slots) == 0 {
+				continue
+			}
 			for _, node := range shard.Nodes {
 				if node.Address == n.Status.PodIP {
 					return true

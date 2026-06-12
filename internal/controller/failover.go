@@ -60,6 +60,21 @@ func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.Shar
 	return shard, replicas
 }
 
+// highestOffsetReplica returns the synced replica with the greatest replication
+// offset, the one most caught up with the primary. Replicas whose offset is
+// unavailable sort last and ties keep discovery order, so the result is stable
+// and never nil for a non-empty slice.
+func highestOffsetReplica(replicas []*valkey.NodeState) *valkey.NodeState {
+	best := replicas[0]
+	bestOffset := best.ReplicationOffset()
+	for _, replica := range replicas[1:] {
+		if offset := replica.ReplicationOffset(); offset > bestOffset {
+			best, bestOffset = replica, offset
+		}
+	}
+	return best
+}
+
 // proactiveFailover issues CLUSTER FAILOVER to the best synced replica in shard,
 // then polls until the replica reports role:master or the timeout is reached.
 // shard must be non-nil; replicas must be non-empty.
@@ -67,9 +82,11 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 	log := logf.FromContext(ctx)
 	primaryAddress := shard.GetPrimaryNode().Address
 
-	// Pick the first synced replica as the failover target. The ordering is
-	// determined by node discovery order — no priority scheme is applied yet.
-	target := replicas[0]
+	// Fail over to the most caught-up replica (highest replication offset). A
+	// graceful CLUSTER FAILOVER holds writes on the primary until the target
+	// replica catches up, so promoting the furthest-ahead one minimises that
+	// write pause and the exposure if the primary dies mid-failover.
+	target := highestOffsetReplica(replicas)
 	log.Info("initiating proactive failover", "shard", shard.Id, "target", target.Address)
 
 	// Emit FailoverInitiated before the command so observers see the event at

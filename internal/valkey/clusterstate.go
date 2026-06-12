@@ -41,6 +41,21 @@ type NodeState struct {
 	ClusterNodes string
 }
 
+// ReplicationOffset returns this node's processed replication offset from
+// INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
+// value means the replica is more caught up with its primary.
+func (n *NodeState) ReplicationOffset() int64 {
+	v, ok := n.Info["slave_repl_offset"]
+	if !ok {
+		return -1
+	}
+	offset, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return offset
+}
+
 // ShardState represents the current state of a shard.
 type ShardState struct {
 	Id        string

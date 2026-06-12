@@ -201,3 +201,38 @@ func TestAnyNodeRequiresRoll(t *testing.T) {
 		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash))
 	})
 }
+
+func TestHighestOffsetReplica(t *testing.T) {
+	replica := func(addr, offset string) *valkey.NodeState {
+		info := map[string]string{}
+		if offset != "" {
+			info["slave_repl_offset"] = offset
+		}
+		return &valkey.NodeState{Address: addr, Info: info}
+	}
+
+	t.Run("picks the replica with the greatest offset", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("a", "100"), replica("b", "300"), replica("c", "200")}
+		assert.Equal(t, "b", highestOffsetReplica(replicas).Address)
+	})
+
+	t.Run("a replica with no offset sorts last", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("a", ""), replica("b", "5")}
+		assert.Equal(t, "b", highestOffsetReplica(replicas).Address)
+	})
+
+	t.Run("ties keep discovery order", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("a", "10"), replica("b", "10")}
+		assert.Equal(t, "a", highestOffsetReplica(replicas).Address)
+	})
+
+	t.Run("a single replica is returned", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("only", "42")}
+		assert.Equal(t, "only", highestOffsetReplica(replicas).Address)
+	})
+
+	t.Run("all replicas without an offset keep discovery order", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("a", ""), replica("b", "")}
+		assert.Equal(t, "a", highestOffsetReplica(replicas).Address)
+	})
+}

@@ -122,7 +122,12 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		dataSize = envIntOrDefault("CHAOS_DATA_SIZE", 3, 1 /* min */)
 		targetShards = envOrDefault("CHAOS_TARGET_SHARDS", "random")
 		mode = envOneOf("CHAOS_MODE", "random", []string{"random", "sequential"})
-		recoveryTimeout = envDurationOrDefault("CHAOS_RECOVERY_TIMEOUT", 5*time.Minute)
+		// Scale timeout with cluster size: 15s per pod, minimum 5 minutes.
+		defaultTimeout := time.Duration(shards*(replicas+1)) * 15 * time.Second
+		if defaultTimeout < 5*time.Minute {
+			defaultTimeout = 5 * time.Minute
+		}
+		recoveryTimeout = envDurationOrDefault("CHAOS_RECOVERY_TIMEOUT", defaultTimeout)
 		tolerationSec = envIntOrDefault("CHAOS_TOLERATION_SECONDS", 0, 0 /* min */)
 		seed = envInt64OrDefault("CHAOS_SEED", time.Now().UnixNano())
 		scenarios = filterScenarios(allScenarios, envOrDefault("CHAOS_SCENARIOS", ""))
@@ -372,9 +377,17 @@ spec:
 
 			// Wait until CR is Ready, all pods are Running, and cluster health is ok.
 			By(fmt.Sprintf("Iteration %d: waiting for cluster recovery", iteration))
+			recoveryStart := time.Now()
+			lastStatus := recoveryStart
 			Eventually(func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(clusterName)
 				g.Expect(err).NotTo(HaveOccurred())
+				if time.Since(lastStatus) >= time.Minute {
+					remaining := recoveryTimeout - time.Since(recoveryStart)
+					_, _ = fmt.Fprintf(GinkgoWriter, "    recovery status: state=%s reason=%s readyShards=%d/%d (timeout in %s)\n",
+						cr.Status.State, cr.Status.Reason, cr.Status.ReadyShards, shards, remaining.Truncate(time.Second))
+					lastStatus = time.Now()
+				}
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
 					fmt.Sprintf("cluster state: %s, reason: %s", cr.Status.State, cr.Status.Reason))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(shards)))

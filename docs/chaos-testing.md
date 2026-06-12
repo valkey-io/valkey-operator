@@ -74,6 +74,7 @@ All configuration is via environment variables:
 | `pause-primary-container` | Pauses the primary container |
 | `pause-replica-container` | Pauses a replica container |
 | `scale-shards` | Scales shards up or down randomly |
+| `scale-replicas` | Scales replicas up or down randomly |
 | `rolling-update` | Changes cluster config to trigger a rolling update |
 | `delete-recreate-cluster` | Deletes and recreates the ValkeyCluster |
 | `delete-controller-pod` | Kills the operator controller pod |
@@ -133,6 +134,9 @@ CHAOS_SCENARIOS=network-partition-primary,pause-worker-node \
 
 # Large cluster with more workers
 CHAOS_SHARDS=7 CHAOS_REPLICAS=2 KIND_WORKERS=3 make test-chaos
+
+# Test scaling shards and replicas together
+CHAOS_SHARDS=5 CHAOS_REPLICAS=2 CHAOS_SCENARIOS=scale-shards,scale-replicas make test-chaos
 
 # Run scenarios in sequence instead of random
 CHAOS_SCENARIOS=delete-primary-pod,scale-shards CHAOS_MODE=sequential make test-chaos

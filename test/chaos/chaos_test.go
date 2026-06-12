@@ -50,6 +50,7 @@ type ChaosContext struct {
 	MinShards     int
 	MaxShards     int
 	Replicas      int
+	MaxReplicas   int
 	TolerationSec int
 	Rand          *rand.Rand
 }
@@ -76,6 +77,7 @@ var allScenarios = []Scenario{
 	{Name: "pause-primary-container", Inject: pausePrimaryContainer},
 	{Name: "pause-replica-container", Inject: pauseReplicaContainer},
 	{Name: "scale-shards", Inject: scaleShards},
+	{Name: "scale-replicas", Inject: scaleReplicas},
 	{Name: "rolling-update", Inject: rollingUpdate},
 	{Name: "delete-recreate-cluster", LosesData: true, Inject: deleteRecreateCluster},
 	{Name: "delete-controller-pod", Inject: deleteControllerPod},
@@ -348,6 +350,7 @@ spec:
 				MinShards:     minShards,
 				MaxShards:     maxShards,
 				Replicas:      replicas,
+				MaxReplicas:   replicas + 2,
 				TolerationSec: tolerationSec,
 				Rand:          rnd,
 			}
@@ -744,6 +747,23 @@ func scaleShards(ctx *ChaosContext) error {
 		return err
 	}
 	ctx.Shards = newShards
+	return nil
+}
+
+func scaleReplicas(ctx *ChaosContext) error {
+	// Pick a random replica count in [0, MaxReplicas], excluding current.
+	newReplicas := ctx.Rand.Intn(ctx.MaxReplicas)
+	if newReplicas >= ctx.Replicas {
+		newReplicas++
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "  Scaling replicas from %d to %d\n", ctx.Replicas, newReplicas)
+	cmd := exec.Command("kubectl", "patch", "valkeycluster", ctx.ClusterName,
+		"-n", ctx.Namespace, "--type=merge",
+		"-p", fmt.Sprintf(`{"spec":{"replicas":%d}}`, newReplicas))
+	if _, err := utils.Run(cmd); err != nil {
+		return err
+	}
+	ctx.Replicas = newReplicas
 	return nil
 }
 

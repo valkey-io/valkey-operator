@@ -1,0 +1,85 @@
+name: Feature Request
+description: Request a new feature or enhancement for the Valkey Operator
+title: "[FEATURE]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a new feature!
+
+        For larger or architectural changes, consider starting a
+        [Design Discussion](https://github.com/valkey-io/valkey-operator/discussions/categories/design-proposal)
+        or [Idea](https://github.com/valkey-io/valkey-operator/discussions/categories/ideas)
+        first so the community can shape the proposal before code is written.
+
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and discussions and could not find a duplicate.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use case
+      description: What problem are you trying to solve? Why is this important?
+      placeholder: I'm trying to expose valkey clusters outside the cluster using ingress/load-balancer and currently...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Describe the desired behaviour. Where relevant, include:
+        - CRD field changes (with example YAML)
+        - Operator behaviour changes
+        - Backwards-compatibility considerations
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope of change
+      description: Best guess — maintainers may reclassify during triage.
+      options:
+        - Small (small CRD field or controller behaviour tweak)
+        - Medium (new CRD field group / new controller flow)
+        - Large (new CRD, major behaviour change, requires design doc)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: breaking
+    attributes:
+      label: API / behaviour impact
+      options:
+        - label: This change is backwards-compatible with existing ValkeyCluster CRs.
+          required: false
+        - label: This change introduces a breaking API change in `v1alpha1`.
+          required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to implement this feature myself.
+          required: false
+        - label: I would like to help review or test this feature.
+          required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Links to related issues, screenshots, etc.
+    validations:
+      required: false

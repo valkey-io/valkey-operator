@@ -381,16 +381,16 @@ func TestClusterState_HasFailoverQuorum(t *testing.T) {
 		}
 	})
 
-	t.Run("fallback when cluster_size missing", func(t *testing.T) {
+	t.Run("returns false when cluster_size missing", func(t *testing.T) {
 		state := &ClusterState{
 			Shards: []*ShardState{
 				{PrimaryId: "p1", Slots: []SlotsRange{{0, 8191}}, Nodes: []*NodeState{{Id: "p1", ClusterInfo: map[string]string{}}}},
 				{PrimaryId: "p2", Slots: []SlotsRange{{8192, 16383}}, Nodes: []*NodeState{{Id: "p2", ClusterInfo: map[string]string{}}}},
 			},
 		}
-		// Falls back to clusterSize = livePrimaries = 2, so 2 > 2/2 = true
-		if !state.HasFailoverQuorum() {
-			t.Error("expected true with fallback")
+		// Cannot determine cluster size but assume no quorum
+		if state.HasFailoverQuorum() {
+			t.Error("expected false when cluster_size unavailable")
 		}
 	})
 }

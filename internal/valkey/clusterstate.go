@@ -290,7 +290,7 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 		}
 	}
 	if clusterSize == 0 {
-		clusterSize = livePrimaries
+		return false
 	}
 	return livePrimaries > (clusterSize / 2)
 }

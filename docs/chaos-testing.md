@@ -87,6 +87,24 @@ Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 Scenarios marked "disabled by default" are excluded unless explicitly listed in `CHAOS_SCENARIOS`.
 They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testing.
 
+### Compound Scenarios
+
+Use the `+` separator in `CHAOS_SCENARIOS` to inject multiple faults back-to-back within a single iteration.
+Each sub-scenario runs sequentially with a random 0-9s delay between them, testing that the operator handles overlapping faults mid-reconciliation.
+
+```bash
+# Scale shards while killing a primary during the operation
+CHAOS_SCENARIOS=scale-shards+delete-primary-pod make test-chaos
+
+# Multiple compounds, randomly selected each iteration
+CHAOS_SCENARIOS=scale-shards+delete-primary-pod,scale-replicas+delete-replica-pod make test-chaos
+
+# Triple fault: scale + kill primary + kill replica
+CHAOS_SCENARIOS=scale-shards+delete-primary-pod+delete-replica-pod make test-chaos
+```
+
+Compound scenarios are always marked as potentially losing data; the test logs a warning showing how many keys were lost and re-seeds after each iteration.
+
 ## Reading the Output
 
 Each iteration logs:

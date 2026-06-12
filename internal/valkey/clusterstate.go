@@ -326,7 +326,7 @@ func (s *ClusterState) BestReplicaOf(primaryId string) *NodeState {
 			if node.PrimaryIdFromSelf() != primaryId {
 				continue
 			}
-			offset, _ := strconv.ParseInt(node.Info["master_repl_offset"], 10, 64)
+			offset, _ := strconv.ParseInt(node.Info["slave_repl_offset"], 10, 64)
 			if best == nil || offset > bestOffset {
 				best = node
 				bestOffset = offset

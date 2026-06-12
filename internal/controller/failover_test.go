@@ -230,4 +230,9 @@ func TestHighestOffsetReplica(t *testing.T) {
 		replicas := []*valkey.NodeState{replica("only", "42")}
 		assert.Equal(t, "only", highestOffsetReplica(replicas).Address)
 	})
+
+	t.Run("all replicas without an offset keep discovery order", func(t *testing.T) {
+		replicas := []*valkey.NodeState{replica("a", ""), replica("b", "")}
+		assert.Equal(t, "a", highestOffsetReplica(replicas).Address)
+	})
 }

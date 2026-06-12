@@ -292,7 +292,7 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	if clusterSize == 0 {
 		clusterSize = livePrimaries
 	}
-	return livePrimaries > clusterSize/2
+	return livePrimaries > (clusterSize / 2)
 }
 
 // IsNodeFailed returns true if any live node reports the given node ID as

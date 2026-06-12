@@ -49,6 +49,47 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 	})
 })
 
+var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
+	It("renders mTLS directives when AuthClients=Required and AuthClientsUser=CN", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.TLS = &valkeyiov1alpha1.TLSConfig{
+			Certificate:     valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+			AuthClients:     valkeyiov1alpha1.TLSAuthClientsRequired,
+			AuthClientsUser: valkeyiov1alpha1.TLSAuthClientsUserCN,
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients yes"))
+		Expect(conf).To(ContainSubstring("tls-auth-clients-user CN"))
+	})
+
+	It("renders tls-auth-clients optional by default", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.TLS = &valkeyiov1alpha1.TLSConfig{
+			Certificate: valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients optional"))
+		Expect(conf).NotTo(ContainSubstring("tls-auth-clients-user"))
+	})
+
+	It("renders tls-auth-clients no when AuthClients=Disabled", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.TLS = &valkeyiov1alpha1.TLSConfig{
+			Certificate: valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+			AuthClients: valkeyiov1alpha1.TLSAuthClientsDisabled,
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients no"))
+	})
+
+	It("does not render TLS directives when TLS is unset", func() {
+		cluster := getSampleCluster()
+		conf := buildServerConfig(cluster)
+		Expect(conf).NotTo(ContainSubstring("tls-port"))
+		Expect(conf).NotTo(ContainSubstring("tls-auth-clients"))
+	})
+})
+
 var _ = Describe("Live config", Label("liveconfig"), func() {
 	newCluster := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
 		return &valkeyiov1alpha1.ValkeyCluster{

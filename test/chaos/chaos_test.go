@@ -415,6 +415,10 @@ spec:
 				}, 60*time.Second).Should(Succeed(),
 					fmt.Sprintf("Iteration %d: data integrity check failed (seed=%d)", iteration, seed))
 			} else {
+				By(fmt.Sprintf("Iteration %d: checking for data loss (scenario may lose data)", iteration))
+				if err := utils.VerifyTestData(clusterName, "default", seededKeys); err != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: data lost (expected): %s\n", err)
+				}
 				By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
 				err := utils.FlushAll(clusterName, "default")
 				Expect(err).NotTo(HaveOccurred(), "Failed to flush data")
@@ -1001,21 +1005,70 @@ func filterScenarios(all []Scenario, filter string) []Scenario {
 		}
 		return result
 	}
-	requested := make(map[string]bool)
-	for _, name := range strings.Split(filter, ",") {
-		requested[strings.TrimSpace(name)] = true
-	}
 	var result []Scenario
-	for _, s := range all {
-		if requested[s.Name] {
-			result = append(result, s)
-			delete(requested, s.Name)
+	for _, name := range strings.Split(filter, ",") {
+		name = strings.TrimSpace(name)
+		if strings.Contains(name, "+") {
+			// Ad-hoc compound: "scale-shards+delete-primary-pod"
+			parts := strings.Split(name, "+")
+			group := make([]string, len(parts))
+			for i, p := range parts {
+				group[i] = strings.TrimSpace(p)
+			}
+			result = append(result, Scenario{
+				Name:      name,
+				LosesData: true, // compound scenarios may lose data due to overlapping faults
+				Inject:    makeCompoundInject(group),
+			})
+			continue
+		}
+		found := false
+		for _, s := range all {
+			if s.Name == name {
+				result = append(result, s)
+				found = true
+				break
+			}
+		}
+		if !found {
+			Fail(fmt.Sprintf("CHAOS_SCENARIOS contains unknown scenario: %q", name))
 		}
 	}
-	for name := range requested {
-		Fail(fmt.Sprintf("CHAOS_SCENARIOS contains unknown scenario: %q", name))
-	}
 	return result
+}
+
+func scenarioByName(name string) *Scenario {
+	for i := range allScenarios {
+		if allScenarios[i].Name == name {
+			return &allScenarios[i]
+		}
+	}
+	return nil
+}
+
+func makeCompoundInject(group []string) func(*ChaosContext) error {
+	return func(ctx *ChaosContext) error {
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Compound test: %s\n", strings.Join(group, " + "))
+		for i, n := range group {
+			if i > 0 {
+				delay := time.Duration(ctx.Rand.Intn(10)) * time.Second
+				_, _ = fmt.Fprintf(GinkgoWriter, "    delay %s before %s\n", delay, n)
+				time.Sleep(delay)
+			}
+			s := scenarioByName(n)
+			if s == nil {
+				return fmt.Errorf("unknown scenario in compound: %s", n)
+			}
+			if err := s.Inject(ctx); err != nil {
+				if strings.Contains(err.Error(), "skip:") {
+					_, _ = fmt.Fprintf(GinkgoWriter, "    %s skipped: %s\n", n, err)
+					continue
+				}
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func envFloat64OrDefault(key string, defaultVal float64, minVal float64) float64 {

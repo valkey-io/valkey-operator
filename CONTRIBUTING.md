@@ -185,12 +185,18 @@ valkey-operator/
 # Run unit tests
 make test
 
-# Run E2E tests (requires cluster)
-make test-e2e
-
 # Run specific tests
 go test ./internal/controller/... -v
 ```
+
+### E2E
+```bash
+# Run E2E tests (requires cluster)
+make test-e2e
+```
+
+To run specific e2e tests use the `Focus` decorator of the GinkGo library (see [docs](https://onsi.github.io/ginkgo/#focused-specs)). <br/>
+E.g. `It("just me please", Focus, func() { ... })`.
 
 ## Making Changes to the API
 

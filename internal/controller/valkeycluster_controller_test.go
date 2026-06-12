@@ -80,9 +80,10 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			By("Reconciling the created resource")
 			fakeRecorder := events.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: fakeRecorder,
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  fakeRecorder,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -151,9 +152,10 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		By("reconciling to create the ConfigMap and ValkeyNodes")
@@ -258,9 +260,10 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:   staleConfigMapClient{Client: k8sClient},
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    staleConfigMapClient{Client: k8sClient},
+			APIReader: staleConfigMapClient{Client: k8sClient},
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		By("reconciling with a client that cannot yet see the freshly created ConfigMap")
@@ -334,9 +337,10 @@ var _ = Describe("pod scheduling issue handling", func() {
 
 		fakeRecorder := events.NewFakeRecorder(100)
 		reconciler := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 
 		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
@@ -376,9 +380,10 @@ var _ = Describe("pod scheduling issue handling", func() {
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionTrue)
 
 		reconciler := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
@@ -432,9 +437,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
@@ -466,9 +472,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
@@ -508,9 +515,10 @@ var _ = Describe("updateStatus", func() {
 		// For updateStatus, we need a client to Get the current object.
 		// The envtest client is used here.
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		// Create the cluster object in the fake client
@@ -599,9 +607,10 @@ var _ = Describe("EventRecorder", func() {
 		ctx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 	})
 
@@ -747,9 +756,10 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		testCtx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -981,9 +991,10 @@ var _ = Describe("reconcileValkeyNode", func() {
 		testCtx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{

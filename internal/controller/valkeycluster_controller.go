@@ -992,7 +992,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	promoted := 0
+	var promoted, attempted int
 	deadPrimaries := make(map[string]bool)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
@@ -1019,6 +1019,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		if replica == nil {
 			continue
 		}
+		attempted++
 		log.Info("promoting orphaned replica via TAKEOVER", "node", replica.Address, "deadPrimary", primaryId)
 		if err := replica.Client.Do(ctx, replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
@@ -1026,8 +1027,10 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			promoted++
 		}
 	}
-	if promoted > 0 {
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
+	if promoted > 0 || attempted > 0 {
+		if promoted > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
+		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
 	return ctrl.Result{}, false

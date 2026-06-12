@@ -81,6 +81,12 @@ var _ = BeforeSuite(func() {
 	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 	_, err = utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	By("increasing controller-manager memory limit for large clusters")
+	cmd = exec.Command("kubectl", "set", "resources", "deployment/valkey-operator-controller-manager",
+		"-n", namespace, "--limits=memory=512Mi", "--requests=memory=128Mi")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to set controller-manager memory limits")
 })
 
 var _ = AfterSuite(func() {

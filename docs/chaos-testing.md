@@ -54,7 +54,7 @@ All configuration is via environment variables:
 | `CHAOS_SEED` | current time | Random seed for reproducibility |
 | `CHAOS_MODE` | `random` | `random` or `sequential` scenario selection |
 | `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random` (1 to N shards each iteration), `all`, or comma-separated indices (e.g. `0,2`) |
-| `CHAOS_RECOVERY_TIMEOUT` | `5m` | Max time to wait for cluster recovery |
+| `CHAOS_RECOVERY_TIMEOUT` | `15s × pods` (min 5m) | Max time to wait for cluster recovery |
 | `CHAOS_TOLERATION_SECONDS` | `0` | Pod toleration seconds for not-ready/unreachable (0 = not set) |
 | `CHAOS_NUM_KEYS` | `100000` | Number of keys to seed |
 | `CHAOS_DATA_SIZE` | `3` | Size of each key's value in bytes |

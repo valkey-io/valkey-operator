@@ -165,12 +165,19 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		for _, s := range scenarios {
 			enabledNames[s.Name] = true
 		}
+		allNames := make(map[string]bool)
 		for _, s := range allScenarios {
+			allNames[s.Name] = true
 			status := "enabled"
 			if !enabledNames[s.Name] {
 				status = "disabled"
 			}
 			_, _ = fmt.Fprintf(GinkgoWriter, "    - %-30s [%s]\n", s.Name, status)
+		}
+		for _, s := range scenarios {
+			if !allNames[s.Name] {
+				_, _ = fmt.Fprintf(GinkgoWriter, "    - %-30s [enabled]\n", s.Name)
+			}
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "================================\n")
 
@@ -301,15 +308,22 @@ spec:
 			}
 
 			var targetShardsForIteration []int
-			switch targetShards {
-			case "random":
+			switch {
+			case targetShards == "random":
 				count := rnd.Intn(shards) + 1
 				targetShardsForIteration = rnd.Perm(shards)[:count]
-			case "all":
+			case targetShards == "all":
 				targetShardsForIteration = make([]int, shards)
 				for i := range shards {
 					targetShardsForIteration[i] = i
 				}
+			case strings.HasPrefix(targetShards, "random"):
+				count, err := strconv.Atoi(strings.TrimPrefix(targetShards, "random"))
+				if err != nil || count < 1 {
+					Fail(fmt.Sprintf("CHAOS_TARGET_SHARDS=%q: expected 'randomN' where N >= 1", targetShards))
+				}
+				count = min(count, shards)
+				targetShardsForIteration = rnd.Perm(shards)[:count]
 			default:
 				for _, s := range strings.Split(targetShards, ",") {
 					if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {

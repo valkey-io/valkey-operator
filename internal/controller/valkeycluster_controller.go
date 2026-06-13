@@ -988,7 +988,7 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // the pod will return with the same node ID, so TAKEOVER is skipped.
 // Returns (result, true) if a promotion was made and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if state.HasFailoverQuorum() || cluster.Spec.Persistence != nil {
+	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
@@ -1054,7 +1054,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				// voting in the auto-failover election, permanently
 				// blocking the replica's promotion.
 				if state.HasReplicaOf(failing.Id) {
-					if state.HasFailoverQuorum() || cluster.Spec.Persistence != nil {
+					if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
 						log.V(1).Info("skipping forget; failover pending for node",
 							"address", failing.Address, "Id", failing.Id)
 						continue

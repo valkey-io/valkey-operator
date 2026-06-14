@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DeletePod deletes a pod by name in the given namespace.
@@ -328,28 +329,6 @@ func FlushAll(clusterName, namespace string) error {
 		}
 	}
 	return nil
-}
-
-// SeedTestData uses valkey-benchmark to write keys across the cluster.
-// Returns the actual number of keys stored (from INFO keyspace).
-func SeedTestData(clusterName, namespace string, numKeys, dataSize int, seed int64) (int, error) {
-	anyPod, err := GetPodNameByLabels(namespace, map[string]string{
-		"valkey.io/cluster": clusterName,
-	})
-	if err != nil {
-		return 0, err
-	}
-	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-benchmark", "-n", strconv.Itoa(numKeys),
-		"--cluster", "-r", strconv.Itoa(numKeys),
-		"-d", strconv.Itoa(dataSize), "-q",
-		"--seed", strconv.FormatInt(seed, 10),
-		"SET", "key:{tag}:__rand_int__", "__data__")
-	if _, err := Run(cmd); err != nil {
-		return 0, fmt.Errorf("valkey-benchmark failed: %w", err)
-	}
-	total, _, err := GetTotalKeyCount(clusterName, namespace)
-	return total, err
 }
 
 // VerifyTestData checks that the total key count across all primaries matches expected.
@@ -656,4 +635,69 @@ func ThrottleRandomWorkerNodes(rnd *rand.Rand, nodes []string, cpuMin, cpuMax fl
 		}
 	}
 	return throttled
+}
+
+const backgroundClientPod = "chaos-background-client"
+
+// StartBackgroundClient deploys a pod running a custom Go client that seeds
+// all keys and then continuously overwrites them, keeping replication offsets
+// active on all shards. Waits for seeding to complete before returning.
+// Returns the number of keys seeded.
+func StartBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps int) (int, error) {
+	// Delete any leftover client pod
+	StopBackgroundClient(namespace)
+
+	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)
+	cmd := exec.Command("kubectl", "run", backgroundClientPod,
+		"-n", namespace,
+		"--image=chaos-client:v0.0.1",
+		"--restart=Always",
+		"--image-pull-policy=Never",
+		"--env=VALKEY_ADDR="+svcHost,
+		"--env=NUM_KEYS="+strconv.Itoa(numKeys),
+		"--env=DATA_SIZE="+strconv.Itoa(dataSize),
+		"--env=RPS="+strconv.Itoa(rps),
+	)
+	if _, err := Run(cmd); err != nil {
+		return 0, err
+	}
+
+	// Wait for "SEEDED N" in logs
+	var seeded int
+	for attempts := 0; attempts < 240; attempts++ {
+		time.Sleep(1 * time.Second)
+		cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace)
+		output, err := Run(cmd)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(output, "\n") {
+			if idx := strings.Index(line, "SEEDED "); idx >= 0 {
+				if n, err := fmt.Sscanf(line[idx:], "SEEDED %d", &seeded); n == 1 && err == nil {
+					return seeded, nil
+				}
+			}
+		}
+	}
+	// Print pod logs on timeout to help debug
+	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=50")
+	if output, err := Run(cmd); err == nil {
+		fmt.Printf("  Background client logs at timeout:\n%s\n", output)
+	}
+	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--previous", "--tail=50")
+	if output, err := Run(cmd); err == nil && output != "" {
+		fmt.Printf("  Background client previous logs:\n%s\n", output)
+	}
+	return 0, fmt.Errorf("background client did not finish seeding within 240s")
+}
+
+// StopBackgroundClient prints stats and deletes the background client pod.
+func StopBackgroundClient(namespace string) {
+	cmd := exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=20")
+	if output, err := Run(cmd); err == nil && output != "" {
+		fmt.Printf("  Background client output:\n%s\n", output)
+	}
+	cmd = exec.Command("kubectl", "delete", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
+	_, _ = Run(cmd)
 }

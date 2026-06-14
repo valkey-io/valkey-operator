@@ -56,8 +56,9 @@ All configuration is via environment variables:
 | `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random` (1 to N shards each iteration), `randomX` (exactly X random shards), `all`, or comma-separated indices (e.g. `0,2`) |
 | `CHAOS_RECOVERY_TIMEOUT` | `15s × pods` (min 5m) | Max time to wait for cluster recovery |
 | `CHAOS_TOLERATION_SECONDS` | `0` | Pod toleration seconds for not-ready/unreachable (0 = not set) |
-| `CHAOS_NUM_KEYS` | `100000` | Number of keys to seed |
+| `CHAOS_NUM_KEYS` | `100000` | Number of keys |
 | `CHAOS_DATA_SIZE` | `3` | Size of each key's value in bytes |
+| `CHAOS_WRITE_RPS` | `20` | Continuous write rate after seeding (0 = seed only, client exits) |
 | `CHAOS_CPU_PRESSURE` | `false` | Throttle Kind worker node CPUs each iteration |
 | `CHAOS_CPU_MIN` | `0.3` | Minimum CPU limit when throttling |
 | `CHAOS_CPU_MAX` | `1.0` | Maximum CPU limit when throttling |
@@ -86,6 +87,28 @@ Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 
 Scenarios marked "disabled by default" are excluded unless explicitly listed in `CHAOS_SCENARIOS`.
 They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testing.
+
+### Client
+
+A custom Go client (`test/chaos/client/`) handles seeding and continuous writes.
+It is built and loaded into Kind automatically during `BeforeSuite`.
+
+**Seeding:** Writes `CHAOS_NUM_KEYS` keys sequentially (`key:000000000000` to `key:000000099999`)
+with a fixed value of `CHAOS_DATA_SIZE` bytes.
+
+**Continuous writes:** After seeding, the client overwrites the same keys at `CHAOS_WRITE_RPS` rate.
+This generates replication traffic on all shards, simulating a real workload during fault injection.
+Set `CHAOS_WRITE_RPS=0` to disable (client seeds and exits).
+
+**Stats output** (printed at test end and in pod logs):
+```
+2026/06/14 15:50:53 writes=5721 errors=21 rps=20.0
+```
+- `writes` — successful SET commands since seeding completed
+- `errors` — failed SET commands (cluster unavailable, CLUSTERDOWN, timeout)
+- `rps` — configured target rate
+
+Errors during faults are expected. Sustained errors after recovery indicate an operator bug.
 
 ### Compound Scenarios
 

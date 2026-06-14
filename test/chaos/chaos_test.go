@@ -110,6 +110,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		cpuMax          float64
 		throttledNodes  []string
 		workerNodes     []string
+		writeRPS        int
 	)
 
 	BeforeAll(func() {
@@ -136,6 +137,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		cpuPressure = envBool("CHAOS_CPU_PRESSURE", false)
 		cpuMin = envFloat64OrDefault("CHAOS_CPU_MIN", 0.3, 0.1)
 		cpuMax = envFloat64OrDefault("CHAOS_CPU_MAX", 1.0, cpuMin)
+		writeRPS = envIntOrDefault("CHAOS_WRITE_RPS", 20, 0 /* min */)
 		if cpuPressure {
 			workerNodes = utils.GetWorkerNodes()
 		}
@@ -233,7 +235,7 @@ spec:
 		}, recoveryTimeout, 5*time.Second).Should(Succeed())
 
 		By("seeding test data")
-		seededKeys, err = utils.SeedTestData(clusterName, "default", numKeys, dataSize, seed)
+		seededKeys, err = utils.StartBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
 		Expect(err).NotTo(HaveOccurred(), "Failed to seed test data")
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 	})
@@ -291,6 +293,7 @@ spec:
 	})
 
 	AfterAll(func() {
+		utils.StopBackgroundClient("default")
 		By("cleaning up chaos cluster")
 		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
@@ -436,7 +439,7 @@ spec:
 				By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
 				err := utils.FlushAll(clusterName, "default")
 				Expect(err).NotTo(HaveOccurred(), "Failed to flush data")
-				seededKeys, err = utils.SeedTestData(clusterName, "default", numKeys, dataSize, seed)
+				seededKeys, err = utils.StartBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
 				Expect(err).NotTo(HaveOccurred(), "Failed to re-seed test data")
 				_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 			}

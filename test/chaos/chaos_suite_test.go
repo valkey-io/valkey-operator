@@ -57,6 +57,15 @@ var _ = BeforeSuite(func() {
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
+	By("building the chaos client image")
+	cmd = exec.Command("docker", "build", "-t", "chaos-client:v0.0.1", "test/chaos/client/")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the chaos client image")
+
+	By("loading the chaos client image on Kind")
+	err = utils.LoadImageToKindClusterWithName("chaos-client:v0.0.1")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the chaos client image into Kind")
+
 	setupCertManager()
 
 	SetDefaultEventuallyTimeout(2 * time.Minute)

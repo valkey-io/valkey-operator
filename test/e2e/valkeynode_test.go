@@ -76,6 +76,8 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-system-passwords
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
 stringData:
   _operator: %s
 `, name, e2eOperatorPassword), "system-passwords secret for "+name)
@@ -85,6 +87,8 @@ kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
 stringData:
   users.acl: |
     user default on >%s ~* &* +@all

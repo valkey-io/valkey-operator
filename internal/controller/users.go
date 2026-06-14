@@ -80,6 +80,20 @@ func getSystemPasswordSecretName(clusterName string) string {
 	return "internal-" + clusterName + "-system-passwords"
 }
 
+// operatorUserPasswordSecret returns a SecretKeySelector for the operator-managed
+// "_operator" system user's password.
+func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
+	if clusterName == "" {
+		// this can be empty only when valkeynode is created independently without ValkeyCluster CR
+		return nil
+	}
+	return &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: getSystemPasswordSecretName(clusterName)},
+		Key:                  operatorUser,
+		Optional:             func(b bool) *bool { return &b }(true),
+	}
+}
+
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
 	log.Info("getting system users secret: " + cluster.Name)

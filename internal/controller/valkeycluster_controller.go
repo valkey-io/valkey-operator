@@ -511,14 +511,24 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
 			if err != nil {
 				return false, err
 			}
-			if requeue {
+			switch result {
+			case nodeDeferred:
+				// Roll deferred; MEET and REPLICATE isolated nodes so they
+				// rejoin the shard before next reconcile.
+				if _, meetErr := r.meetIsolatedNodes(ctx, cluster, clusterState); meetErr != nil {
+					log.Error(meetErr, "meetIsolatedNodes failed during deferred roll")
+				}
+				if _, replErr := r.replicatePendingReplicas(ctx, cluster, clusterState, nodes); replErr != nil {
+					log.Error(replErr, "replicatePendingReplicas failed during deferred roll")
+				}
 				return true, nil
-			}
-			if nodeCreated {
+			case nodeRequeued:
+				return true, nil
+			case nodeCreated:
 				totalCreated++
 			}
 		}
@@ -530,10 +540,20 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	return false, nil
 }
 
+// nodeResult describes the outcome of reconciling a single ValkeyNode.
+type nodeResult int
+
+const (
+	nodeUnchanged nodeResult = iota // no spec change, node is ready
+	nodeRequeued                    // spec updated or not ready, caller should requeue
+	nodeCreated                     // new ValkeyNode was created
+	nodeDeferred                    // primary roll deferred, waiting for synced replica
+)
+
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns (requeue, nodeCreated, err). requeue signals the caller should stop
 // iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (bool, bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
@@ -565,17 +585,17 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 				}
 			} else if cluster.Spec.Replicas > 0 {
 				// findFailoverShard returned nil for one of three reasons:
-				// 1. Node is the shard primary but has no synced replicas: skip roll, would lose data
+				// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
 				// 2. Node is in a shard but is a replica: safe to roll
 				// 3. Node isn't in any shard (isolated): safe to roll
-				// Only case 1 requires skipping; identify it's the actual primary of its shard.
+				// Only case 1 requires waiting; identify it's the actual primary of its shard.
 				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
 				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
 					log.Info("primary has no synced replicas, deferring roll",
 						"name", node.Name, "address", current.Status.PodIP,
 						"shardNodes", len(shardInState.Nodes),
 						"shardId", shardInState.Id)
-					return false, false, nil
+					return nodeDeferred, nil
 				}
 			}
 		}
@@ -588,26 +608,26 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	})
 	if err != nil {
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeWarning, "ValkeyNodeFailed", "ReconcileValkeyNode", "Failed to reconcile ValkeyNode: %v", err)
-		return false, false, err
+		return nodeUnchanged, err
 	}
 	switch result {
 	case controllerutil.OperationResultCreated:
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d", shardIndex, nodeIndex)
-		return false, true, nil
+		return nodeCreated, nil
 	case controllerutil.OperationResultUpdated:
 		// A spec change was applied. Requeue unconditionally so the node has
 		// time to settle before we advance to the next one (one-at-a-time
 		// rolling update).
 		log.V(1).Info("updated ValkeyNode, waiting for it to become ready", "name", node.Name)
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
-		return true, false, nil
+		return nodeRequeued, nil
 	case controllerutil.OperationResultNone:
 		if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
 			log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
 				"name", node.Name,
 				"generation", node.Generation,
 				"observedGeneration", node.Status.ObservedGeneration)
-			return true, false, nil
+			return nodeRequeued, nil
 		}
 		if !node.Status.Ready {
 			// No spec change, but the node hasn't reached Ready yet (e.g.
@@ -615,16 +635,16 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			// only wait when not-ready; a ready unchanged node is safe to
 			// advance past.
 			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
-			return true, false, nil
+			return nodeRequeued, nil
 		}
 		if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
 			log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
-			return true, false, nil
+			return nodeRequeued, nil
 		}
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
-	return false, false, nil
+	return nodeUnchanged, nil
 }
 
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.

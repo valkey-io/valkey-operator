@@ -78,7 +78,7 @@ var allScenarios = []Scenario{
 	{Name: "pause-replica-container", Inject: pauseReplicaContainer},
 	{Name: "scale-shards", Inject: scaleShards},
 	{Name: "scale-replicas", Inject: scaleReplicas},
-	{Name: "rolling-update", Inject: rollingUpdate},
+	{Name: "rolling-update", LosesDataIfNoReplica: true, Inject: rollingUpdate},
 	{Name: "delete-recreate-cluster", LosesData: true, Inject: deleteRecreateCluster},
 	{Name: "delete-controller-pod", Inject: deleteControllerPod},
 	{Name: "pause-worker-node", DisabledByDefault: true, LosesData: true, Inject: pauseWorkerNode},
@@ -125,12 +125,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		dataSize = envIntOrDefault("CHAOS_DATA_SIZE", 3, 1 /* min */)
 		targetShards = envOrDefault("CHAOS_TARGET_SHARDS", "random")
 		mode = envOneOf("CHAOS_MODE", "random", []string{"random", "sequential"})
-		// Scale timeout with cluster size: 15s per pod, minimum 5 minutes.
-		defaultTimeout := time.Duration(shards*(replicas+1)) * 15 * time.Second
-		if defaultTimeout < 5*time.Minute {
-			defaultTimeout = 5 * time.Minute
-		}
-		recoveryTimeout = envDurationOrDefault("CHAOS_RECOVERY_TIMEOUT", defaultTimeout)
+		recoveryTimeout = envDurationOrDefault("CHAOS_RECOVERY_TIMEOUT", calcTimeout(shards, replicas))
 		tolerationSec = envIntOrDefault("CHAOS_TOLERATION_SECONDS", 0, 0 /* min */)
 		seed = envInt64OrDefault("CHAOS_SEED", time.Now().UnixNano())
 		scenarios = filterScenarios(allScenarios, envOrDefault("CHAOS_SCENARIOS", ""))
@@ -395,6 +390,9 @@ spec:
 			shards = ctx.Shards
 			replicas = ctx.Replicas
 
+			// Recalculate timeout based on current cluster size (may have scaled)
+			recoveryTimeout = envDurationOrDefault("CHAOS_RECOVERY_TIMEOUT", calcTimeout(shards, replicas))
+
 			// Wait until CR is Ready, all pods are Running, and cluster health is ok.
 			By(fmt.Sprintf("Iteration %d: waiting for cluster recovery", iteration))
 			recoveryStart := time.Now()
@@ -415,6 +413,8 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "K8s resources not ready: %v", err)
 				err = utils.VerifyClusterHealth(clusterName, "default", shards, replicas)
 				g.Expect(err).NotTo(HaveOccurred(), "cluster health: %v", err)
+				err = utils.VerifyConfigHashConsistency(clusterName, "default")
+				g.Expect(err).NotTo(HaveOccurred(), "config hash: %v", err)
 			}, recoveryTimeout, 5*time.Second).Should(Succeed(),
 				fmt.Sprintf("Iteration %d: cluster did not recover after %s (scenario=%s, shards=%v, seed=%d)",
 					iteration, recoveryTimeout, scenario.Name, targetShardsForIteration, seed))
@@ -998,6 +998,15 @@ func envInt64OrDefault(key string, defaultVal int64) int64 {
 		Fail(fmt.Sprintf("%s=%q is not a valid integer", key, v))
 	}
 	return i
+}
+
+// calcTimeout returns a recovery timeout scaled to the cluster size: 15s per pod, minimum 5 minutes.
+func calcTimeout(shards, replicas int) time.Duration {
+	t := time.Duration(shards*(replicas+1)) * 15 * time.Second
+	if t < 5*time.Minute {
+		t = 5 * time.Minute
+	}
+	return t
 }
 
 func envDurationOrDefault(key string, defaultVal time.Duration) time.Duration {

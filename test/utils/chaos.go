@@ -35,16 +35,31 @@ func DeletePod(name, namespace string) error {
 	return err
 }
 
-// GetPodNameByLabels returns the first pod name matching the given labels.
+// GetPodNameByLabels returns a Ready pod name matching the given labels,
+// falling back to any matching pod if none are Ready.
 func GetPodNameByLabels(namespace string, labels map[string]string) (string, error) {
 	selector := labelsToSelector(labels)
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
-		"-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
+		"-l", selector,
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}`)
 	output, err := Run(cmd)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(output), nil
+	var fallback string
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), " ", 2)
+		if len(parts) == 2 && parts[1] == "true" {
+			return parts[0], nil
+		}
+		if fallback == "" {
+			fallback = parts[0]
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
+	}
+	return "", fmt.Errorf("no pods found with labels %v", labels)
 }
 
 // DeleteWorkload deletes a StatefulSet or Deployment by name.
@@ -700,4 +715,29 @@ func StopBackgroundClient(namespace string) {
 	cmd = exec.Command("kubectl", "delete", "pod", backgroundClientPod,
 		"-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
 	_, _ = Run(cmd)
+}
+
+// VerifyConfigHashConsistency checks that all ValkeyNodes in the cluster have
+// the same spec.serverConfigHash. A mismatch means the rolling update hasn't
+// finished — some nodes still have the old config.
+func VerifyConfigHashConsistency(clusterName, namespace string) error {
+	cmd := exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", "jsonpath={range .items[*]}{.spec.serverConfigHash}{\"\\n\"}{end}")
+	output, err := Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to get config hashes: %w", err)
+	}
+	var expected string
+	for _, hash := range strings.Split(strings.TrimSpace(output), "\n") {
+		if hash == "" {
+			continue
+		}
+		if expected == "" {
+			expected = hash
+		} else if hash != expected {
+			return fmt.Errorf("config hash mismatch: expected %s, got %s", expected, hash)
+		}
+	}
+	return nil
 }

@@ -35,6 +35,9 @@ import (
 const (
 	appName        = "valkey"
 	resourcePrefix = "valkey-"
+
+	// shellPath used in exec for running scripts
+	shellPath = "/bin/sh"
 )
 
 // Naming and labelling scheme

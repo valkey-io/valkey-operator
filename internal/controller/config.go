@@ -42,6 +42,9 @@ const (
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
 
+	// configEnabled is Valkey config value used to enable feature.
+	configEnabled = "yes"
+
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 )
@@ -71,8 +74,8 @@ func buildManagedConfig(includeACL bool, persistence *valkeyiov1alpha1.Persisten
 	if tls != nil {
 		config["tls-port"] = fmt.Sprintf("%d", DefaultPort)
 		config["port"] = "0"
-		config["tls-cluster"] = "yes"
-		config["tls-replication"] = "yes"
+		config["tls-cluster"] = configEnabled
+		config["tls-replication"] = configEnabled
 		config["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
 		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
 		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
@@ -103,7 +106,7 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	baseConfig := buildManagedConfig(true, cluster.Spec.Persistence, cluster.Spec.TLS)
 	maps.Copy(baseConfig, map[string]string{
-		"cluster-enabled":                 "yes",
+		"cluster-enabled":                 configEnabled,
 		"protected-mode":                  "no",
 		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",

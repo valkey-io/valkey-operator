@@ -104,16 +104,10 @@ type ValkeyClusterReconciler struct {
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
-<<<<<<< HEAD
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
-func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
-=======
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
->>>>>>> tmp-original-16-06-26-01-02
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
@@ -452,7 +446,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			svc.Spec.ClusterIP = "None"
 		}
 		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
-		svc.Spec.Ports = []corev1.ServicePort{{Name: "valkey", Port: DefaultPort}}
+		svc.Spec.Ports = []corev1.ServicePort{{Name: appName, Port: DefaultPort}}
 		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
 	})
 	if err != nil {

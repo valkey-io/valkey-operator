@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // WorkloadType specifies the type of workload to create for the ValkeyNode.
@@ -215,5 +216,8 @@ type ValkeyNodeList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ValkeyNode{}, &ValkeyNodeList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &ValkeyNode{}, &ValkeyNodeList{})
+		return nil
+	})
 }

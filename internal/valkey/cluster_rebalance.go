@@ -18,7 +18,8 @@ package valkey
 
 import (
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 )
 
 // SlotMove describes a small, incremental slot migration between two primaries.
@@ -62,7 +63,9 @@ func PlanRebalanceMove(shards []*ShardState, expectedShards int, maxSlots int) (
 		})
 	}
 	// Sort by address for deterministic target assignment.
-	sort.Slice(slotAllocations, func(i, j int) bool { return slotAllocations[i].node.Address < slotAllocations[j].node.Address })
+	slices.SortFunc(slotAllocations, func(a, b *primarySlots) int {
+		return strings.Compare(a.node.Address, b.node.Address)
+	})
 
 	// Assign per-shard slot targets and find the first imbalance.
 	numSlotsPerShard, rem := TotalSlots/expectedShards, TotalSlots%expectedShards

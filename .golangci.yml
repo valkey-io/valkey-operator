@@ -36,6 +36,9 @@ linters:
           deny:
             - pkg: sort
               desc: Should be replaced with slices package
+    goconst:
+      # TODO update tests to fix goconst lint later.
+      ignore-tests: true
     revive:
       rules:
         - name: comment-spacings

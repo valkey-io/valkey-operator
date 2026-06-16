@@ -551,8 +551,7 @@ const (
 )
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
-// Returns (requeue, nodeCreated, err). requeue signals the caller should stop
-// iterating and wait before processing the next node.
+// Returns a nodeResult signaling the outcome or required next action.
 func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 

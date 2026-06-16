@@ -17,10 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
-	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 
 	//	corev1 "k8s.io/api/core/v1"
@@ -129,7 +129,6 @@ func TestBuildAclFileContents(t *testing.T) {
 }
 
 func TestValidateSystemUserPasswordSecret(t *testing.T) {
-	g := NewWithT(t)
 	userSecret := map[string][]byte{
 		operatorUser:    nil,
 		replicationUser: nil,
@@ -142,5 +141,7 @@ func TestValidateSystemUserPasswordSecret(t *testing.T) {
 		},
 	}
 	err := validateSystemUserPasswordSecret(userSecret, cluster)
-	g.Expect(err).To(MatchError(errMissingSystemUser))
+	if !errors.Is(err, errMissingSystemUser) {
+		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
+	}
 }

@@ -268,6 +268,74 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// HasFailoverQuorum returns true if a majority of slot-owning primaries are
+// reachable. Valkey requires a majority of primaries to vote in a failover
+// election; if quorum is unreachable, no automatic failover can succeed.
+// Uses cluster_size from CLUSTER INFO (total primaries with slots, including
+// failed ones) as the denominator.
+func (s *ClusterState) HasFailoverQuorum() bool {
+	if len(s.Shards) == 0 {
+		return false
+	}
+	var livePrimaries, clusterSize int
+	for _, shard := range s.Shards {
+		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
+			livePrimaries++
+		}
+		for _, node := range shard.Nodes {
+			// Take the max across nodes in case gossip hasn't fully propagated.
+			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
+				clusterSize = size
+			}
+		}
+	}
+	if clusterSize == 0 {
+		return false
+	}
+	return livePrimaries > (clusterSize / 2)
+}
+
+// IsNodeFailed returns true if any live node reports the given node ID as
+// "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
+// majority of primaries are down, pfail can never promote to fail.
+func (s *ClusterState) IsNodeFailed(nodeId string) bool {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			for line := range strings.SplitSeq(node.ClusterNodes, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 8 || fields[0] != nodeId {
+					continue
+				}
+				flags := strings.Split(fields[2], ",")
+				if slices.Contains(flags, "fail") || slices.Contains(flags, "fail?") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// BestReplicaOf returns the replica with the highest replication offset
+// that references the given primary ID, or nil if none found.
+func (s *ClusterState) BestReplicaOf(primaryId string) *NodeState {
+	var best *NodeState
+	var bestOffset int64
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.PrimaryIdFromSelf() != primaryId {
+				continue
+			}
+			offset, _ := strconv.ParseInt(node.Info["slave_repl_offset"], 10, 64)
+			if best == nil || offset > bestOffset {
+				best = node
+				bestOffset = offset
+			}
+		}
+	}
+	return best
+}
+
 // PrimaryIdFromSelf returns the primary node ID that this node reports as its
 // own primary in CLUSTER NODES (fields[3] of the "myself" line). Returns "-"
 // for primaries and the primary's node ID for replicas.

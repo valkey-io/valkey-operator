@@ -115,7 +115,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			deleteClusterMetrics(req.Name, req.Namespace)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	if err := r.upsertService(ctx, cluster); err != nil {
@@ -1119,6 +1123,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Message = readyCondition.Message
 	}
 
+	// Update Prometheus metrics
+	updateClusterMetrics(current)
+
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			log.Error(err, statusUpdateFailedMsg)
@@ -1201,6 +1208,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		}
 		return false, err
 	}
+	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
 }
 
@@ -1314,6 +1322,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			}
 			return false, err
 		}
+		slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 		return true, nil
 	}
 

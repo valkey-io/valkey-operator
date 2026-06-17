@@ -42,10 +42,16 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
+# Authenticate as the custom user when user and password are set.
+auth_args=""
+if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
+    auth_args="--user $VALKEY_USER"
+fi
+
 # Perform checks
 response=$(
     timeout_cmd $timeout \
-    valkey-cli -h localhost -p $port $tls_args PING)
+    valkey-cli -h localhost -p $port $tls_args $auth_args PING)
 
 if [ "$response" != "PONG" ]; then
     echo "$response" >&2

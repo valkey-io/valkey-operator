@@ -34,6 +34,13 @@ import (
 	"valkey.io/valkey-operator/test/utils"
 )
 
+const (
+	// Credentials the e2e provisions to stand in for the operator-managed
+	// "_operator" system user.
+	e2eOperatorPassword = "e2eOperatorPassw0rd"
+	e2eDefaultPassword  = "e2eDefaultPassword"
+)
+
 var _ = Describe("ValkeyNode", func() {
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
@@ -42,22 +49,64 @@ var _ = Describe("ValkeyNode", func() {
 		}
 	})
 
-	// createStandaloneValkeyNode applies a ValkeyNode manifest and returns a cleanup func.
-	// workloadType must be "StatefulSet" or "Deployment".
-	createStandaloneValkeyNode := func(name, workloadType string) func() {
-		// create the internal ACL secret
-		secretManifest := fmt.Sprintf(`apiVersion: v1
+	// applyManifest pipes a manifest to "kubectl apply -f -" and asserts success.
+	applyManifest := func(manifest, desc string) {
+		cmd := exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(manifest)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to apply %s", desc)
+	}
+
+	// deleteResource best-effort deletes a namespaced resource.
+	deleteResource := func(kind, name string) {
+		cmd := exec.Command("kubectl", "delete", kind, name, "--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+	}
+
+	// applySystemUsersSecrets provisions the operator-managed credentials that the
+	// ValkeyCluster controller normally creates for cluster-owned nodes:
+	//   - internal-<name>-system-passwords: the raw "_operator" password, read by
+	//     the probe (VALKEYCLI_AUTH) and by the operator's role lookup.
+	//   - internal-<name>-acl (users.acl): defines "_operator" and a password-
+	//     protected "default" user, so a Ready node proves the probe authenticated
+	//     as "_operator" rather than silently passing via a nopass "default".
+	applySystemUsersSecrets := func(name string) {
+		applyManifest(fmt.Sprintf(`apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-system-passwords
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
+stringData:
+  _operator: %s
+`, name, e2eOperatorPassword), "system-passwords secret for "+name)
+
+		applyManifest(fmt.Sprintf(`apiVersion: v1
 kind: Secret
 type: valkey.io/acl
 metadata:
   name: internal-%s-acl
   labels:
     app.kubernetes.io/managed-by: valkey-operator
-`, name)
-		cmd := exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(secretManifest)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create internal ACL secret internal-%s-acl", name)
+stringData:
+  users.acl: |
+    user default on >%s ~* &* +@all
+    user _operator on >%s ~* &* +@all
+`, name, e2eDefaultPassword, e2eOperatorPassword), "ACL secret for "+name)
+	}
+
+	deleteSystemUsersSecrets := func(name string) {
+		deleteResource("secret", "internal-"+name+"-acl")
+		deleteResource("secret", "internal-"+name+"-system-passwords")
+	}
+
+	// createStandaloneValkeyNode provisions operator-managed credentials, applies a
+	// ValkeyNode that loads them via usersACLSecretName, and returns a cleanup func.
+	// This is used only for testing standalone ValkeyNode CRs.
+	createStandaloneValkeyNode := func(name, workloadType string) func() {
+		applySystemUsersSecrets(name)
+
 		manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyNode
 metadata:
@@ -66,18 +115,13 @@ metadata:
     valkey.io/cluster: %s
 spec:
   workloadType: %s
-`, name, name, workloadType)
-
-		cmd = exec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(manifest)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyNode %s", name)
+  usersACLSecretName: internal-%s-acl
+`, name, name, workloadType, name)
+		applyManifest(manifest, "ValkeyNode "+name)
 
 		return func() {
-			cmd := exec.Command("kubectl", "delete", "valkeynode", name, "--ignore-not-found=true", "--wait=false")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "secret", "internal-"+name+"-acl", "--ignore-not-found=true", "--wait=false")
-			_, _ = utils.Run(cmd)
+			deleteResource("valkeynode", name)
+			deleteSystemUsersSecrets(name)
 		}
 	}
 
@@ -265,15 +309,20 @@ spec:
 
 		It("uses an externally provided ConfigMap instead of creating one", func() {
 			By("creating the external ConfigMap with required scripts")
-			// Use the scripts embedded by the operator's own ConfigMap builder as a baseline —
-			// create a minimal stub that satisfies the probe scripts.
-			livenessScript := `#!/bin/bash
-response=$(valkey-cli -h 127.0.0.1 -p 6379 PING 2>/dev/null || true)
+			// Minimal stub scripts that, like the operator's own probes, authenticate
+			// as the custom user when VALKEY_USER is set. valkey.conf loads the ACL so
+			// "default" requires a password and custom user exists.
+			livenessScript := `#!/bin/sh
+auth_args=""
+if [ -n "${VALKEY_USER:-}" ]; then auth_args="--user $VALKEY_USER"; fi
+response=$(valkey-cli -h 127.0.0.1 -p 6379 $auth_args PING 2>/dev/null || true)
 if echo "$response" | grep -qE "^(PONG|LOADING|MASTERDOWN)"; then exit 0; fi
 exit 1
 `
-			readinessScript := `#!/bin/bash
-response=$(valkey-cli -h 127.0.0.1 -p 6379 PING 2>/dev/null || true)
+			readinessScript := `#!/bin/sh
+auth_args=""
+if [ -n "${VALKEY_USER:-}" ]; then auth_args="--user $VALKEY_USER"; fi
+response=$(valkey-cli -h 127.0.0.1 -p 6379 $auth_args PING 2>/dev/null || true)
 if [ "$response" = "PONG" ]; then exit 0; fi
 exit 1
 `
@@ -282,36 +331,20 @@ kind: ConfigMap
 metadata:
   name: %s
 data:
-  valkey.conf: ""
+  valkey.conf: |
+    aclfile /config/users/users.acl
   liveness-check.sh: |
 %s
   readiness-check.sh: |
 %s
 `, cmName, indentLines(livenessScript, "    "), indentLines(readinessScript, "    "))
 
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(cmManifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create external ConfigMap")
-			defer func() {
-				cmd := exec.Command("kubectl", "delete", "configmap", cmName, "--ignore-not-found=true")
-				_, _ = utils.Run(cmd)
-			}()
+			applyManifest(cmManifest, "external ConfigMap")
+			defer deleteResource("configmap", cmName)
 
 			By("creating a ValkeyNode that references the external ConfigMap")
-			secretManifest := fmt.Sprintf(`apiVersion: v1
-kind: Secret
-type: valkey.io/acl
-metadata:
-  name: internal-%s-acl
-  labels:
-    app.kubernetes.io/managed-by: valkey-operator
-`, nodeName)
+			applySystemUsersSecrets(nodeName)
 
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(secretManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create internal ACL secret")
 			nodeManifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyNode
 metadata:
@@ -320,17 +353,13 @@ metadata:
     valkey.io/cluster: %s
 spec:
   serverConfigMapName: %s
-`, nodeName, nodeName, cmName)
+  usersACLSecretName: internal-%s-acl
+`, nodeName, nodeName, cmName, nodeName)
 
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(nodeManifest)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyNode with external ConfigMap")
+			applyManifest(nodeManifest, "ValkeyNode with external ConfigMap")
 			defer func() {
-				cmd := exec.Command("kubectl", "delete", "valkeynode", nodeName, "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
-				cmd = exec.Command("kubectl", "delete", "secret", "internal-"+nodeName+"-acl", "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
+				deleteResource("valkeynode", nodeName)
+				deleteSystemUsersSecrets(nodeName)
 			}()
 
 			By("verifying the controller did NOT create an owned ConfigMap")

@@ -460,3 +460,47 @@ func TestClusterState_BestReplicaOf(t *testing.T) {
 		}
 	})
 }
+
+func TestHighestOffsetReplica(t *testing.T) {
+	replica := func(id, offset string) *NodeState {
+		info := map[string]string{}
+		if offset != "" {
+			info["slave_repl_offset"] = offset
+		}
+		return &NodeState{Id: id, Info: info}
+	}
+
+	t.Run("nil for no replicas", func(t *testing.T) {
+		if got := HighestOffsetReplica(nil); got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("picks the greatest offset", func(t *testing.T) {
+		got := HighestOffsetReplica([]*NodeState{replica("a", "100"), replica("b", "300"), replica("c", "200")})
+		if got == nil || got.Id != "b" {
+			t.Errorf("expected b, got %v", got)
+		}
+	})
+
+	t.Run("a replica with no offset sorts last", func(t *testing.T) {
+		got := HighestOffsetReplica([]*NodeState{replica("a", ""), replica("b", "5")})
+		if got == nil || got.Id != "b" {
+			t.Errorf("expected b, got %v", got)
+		}
+	})
+
+	t.Run("ties keep slice order", func(t *testing.T) {
+		got := HighestOffsetReplica([]*NodeState{replica("a", "10"), replica("b", "10")})
+		if got == nil || got.Id != "a" {
+			t.Errorf("expected a, got %v", got)
+		}
+	})
+
+	t.Run("all without an offset keep slice order", func(t *testing.T) {
+		got := HighestOffsetReplica([]*NodeState{replica("a", ""), replica("b", "")})
+		if got == nil || got.Id != "a" {
+			t.Errorf("expected a, got %v", got)
+		}
+	})
+}

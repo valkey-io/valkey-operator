@@ -145,3 +145,23 @@ func TestValidateSystemUserPasswordSecret(t *testing.T) {
 		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
 	}
 }
+
+func TestValidateSystemUserPasswordSecret_UnknownUser(t *testing.T) {
+	unknownUser := "_randomuser"
+	userSecret := map[string][]byte{
+		operatorUser:    nil,
+		replicationUser: nil,
+		unknownUser:     nil,
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Exporter: valkeyiov1alpha1.ExporterSpec{
+				Enabled: false,
+			},
+		},
+	}
+	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	if !errors.Is(err, errUnknownSystemUser) {
+		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
+	}
+}

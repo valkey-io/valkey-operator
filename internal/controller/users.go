@@ -136,7 +136,8 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 				return "", err
 			}
 		} else {
-			return "", err
+			// error is unknown system user, either by manual modification, or removal from between valkey-operator versions
+			log.Error(err, "error validating system user secret")
 		}
 	}
 

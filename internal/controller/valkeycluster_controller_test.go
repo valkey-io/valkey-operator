@@ -492,6 +492,58 @@ var _ = Describe("reconcileUsersAcl", func() {
 			Expect(internalSecret.Type).To(Equal(AclSecretType))
 		})
 
+		It("should be able to create the internal ACL secret when unknown system user is present", func() {
+			unknownUser := "_unknown"
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-unknown-system-user-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Exporter: valkeyiov1alpha1.ExporterSpec{
+						Enabled: false,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getSystemPasswordSecretName(cluster.Name),
+					Namespace: "default",
+				},
+				Type: AclSecretType,
+				StringData: map[string]string{
+					unknownUser: "",
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			aclSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      getInternalSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, aclSecret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, aclSecret) }()
+			acl := string(aclSecret.Data[aclFilename])
+			Expect(acl).To(ContainSubstring("user _operator on"))
+			Expect(acl).NotTo(ContainSubstring("user " + unknownUser))
+		})
+
 		It("should update the system user secret when spec.exporter is enabled after cluster creation", func() {
 			ctx := context.Background()
 			cluster := &valkeyiov1alpha1.ValkeyCluster{

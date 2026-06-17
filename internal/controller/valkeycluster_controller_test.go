@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"time"
 
@@ -532,6 +534,16 @@ var _ = Describe("reconcileUsersAcl", func() {
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
+			systemSecret := &corev1.Secret{}
+			systemSecretName := types.NamespacedName{
+				Name:      getSystemPasswordSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, systemSecretName, systemSecret)).To(Succeed())
+			Expect(systemSecret.Data).To(HaveKey(operatorUser))
+			Expect(systemSecret.Data).To(HaveKey(replicationUser))
+			Expect(systemSecret.Data).To(HaveKey(unknownUser))
+
 			aclSecret := &corev1.Secret{}
 			secretName := types.NamespacedName{
 				Name:      getInternalSecretName(cluster.Name),
@@ -540,8 +552,14 @@ var _ = Describe("reconcileUsersAcl", func() {
 			Expect(k8sClient.Get(ctx, secretName, aclSecret)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, aclSecret) }()
 			acl := string(aclSecret.Data[aclFilename])
+			nilPassword := fmt.Sprintf("%x", sha256.Sum256(nil))
+
 			Expect(acl).To(ContainSubstring("user _operator on"))
+			Expect(acl).To(ContainSubstring("user _replication on"))
 			Expect(acl).NotTo(ContainSubstring("user " + unknownUser))
+
+			// assert that the generated password for users are not nil/empty string
+			Expect(acl).NotTo(ContainSubstring(nilPassword))
 		})
 
 		It("should update the system user secret when spec.exporter is enabled after cluster creation", func() {

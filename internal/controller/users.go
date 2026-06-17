@@ -363,16 +363,20 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 	copy(u, systemUsers)
 	for user := range data {
 		i := slices.Index(u, user)
-		if i == -1 {
-			return fmt.Errorf("%w: %s", errUnknownSystemUser, user)
+		if i != -1 {
+			u = append(u[:i], u[i+1:]...)
 		}
-		u = append(u[:i], u[i+1:]...)
 	}
 	for _, user := range u {
 		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
 			continue
 		}
 		return fmt.Errorf("%w: %s", errMissingSystemUser, user)
+	}
+	for user := range data {
+		if !slices.Contains(systemUsers, user) {
+			return fmt.Errorf("%w: %s", errUnknownSystemUser, user)
+		}
 	}
 	return nil
 }

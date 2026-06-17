@@ -176,14 +176,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	} else if handled {
-		return result, nil
-	}
-
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
@@ -277,7 +269,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	allShards := effectiveShards(state, nodes)
 
 	// Handle scale-in: drain excess shards and clean up leftover ValkeyNodes.
+	// This runs before pod scheduling checks so that excess shard pods from a
+	// prior scale-up don't block scale-down when they can't be scheduled.
 	if result, requeue := r.handleScaleIn(ctx, cluster, state, nodes); requeue {
+		return result, nil
+	}
+
+	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{}, err
+	} else if handled {
 		return result, nil
 	}
 

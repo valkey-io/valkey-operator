@@ -854,3 +854,79 @@ func runProbeScript(t *testing.T, scriptPath, response string) error {
 	)
 	return cmd.Run()
 }
+
+func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	server := pts.Spec.Containers[0]
+	envByName := map[string]corev1.EnvVar{}
+	for i := range server.Env {
+		envByName[server.Env[i].Name] = server.Env[i]
+	}
+
+	user, ok := envByName["VALKEY_USER"]
+	require.True(t, ok, "VALKEY_USER env should be set")
+	assert.Equal(t, "_operator", user.Value)
+
+	e, ok := envByName["VALKEYCLI_AUTH"]
+	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
+	require.NotNil(t, e.ValueFrom)
+	require.NotNil(t, e.ValueFrom.SecretKeyRef)
+	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "_operator", e.ValueFrom.SecretKeyRef.Key)
+}
+
+// A ValkeyNode without a cluster label (e.g. a standalone node) has no
+// operator-managed system-passwords Secret, so no probe auth env is injected.
+func TestBuildValkeyNodePodTemplateSpec_NoOperatorUserProbeEnv(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	for _, e := range pts.Spec.Containers[0].Env {
+		assert.NotEqual(t, "VALKEY_USER", e.Name)
+		assert.NotEqual(t, "VALKEYCLI_AUTH", e.Name)
+	}
+}
+
+// TestProbeScriptOperatorUserArgs verifies the probe scripts pass --user for the
+// probe user when set, while the password itself never appears on the command line.
+func TestProbeScriptOperatorUserArgs(t *testing.T) {
+	for _, name := range []string{"liveness-check.sh", "readiness-check.sh"} {
+		t.Run(name, func(t *testing.T) {
+			scriptPath := filepath.Join("scripts", name)
+			binDir := t.TempDir()
+			argsFile := filepath.Join(binDir, "args.txt")
+			stub := "#!/bin/sh\nprintf '%s' \"$*\" > \"" + argsFile + "\"\necho PONG\n"
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
+			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+
+			// With probe user + auth env: --user present, password absent from argv.
+			cmd := exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=s3cr3t")
+			require.NoError(t, cmd.Run())
+			got, err := os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.Contains(t, string(got), "-user _operator")
+			assert.NotContains(t, string(got), "s3cr3t", "password must not be passed on the command line")
+
+			// Without any probe env: no --user.
+			cmd = exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=", "VALKEYCLI_AUTH=")
+			require.NoError(t, cmd.Run())
+			got, err = os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.NotContains(t, string(got), "-user")
+
+			// With probe user but empty auth env: no --user.
+			cmd = exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=")
+			require.NoError(t, cmd.Run())
+			got, err = os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.NotContains(t, string(got), "-user")
+		})
+	}
+}

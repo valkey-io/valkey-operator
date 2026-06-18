@@ -301,6 +301,14 @@ These events are emitted during proactive primary failovers (e.g., when a primar
 | `FailoverTimeout` | Warning | The failover did not complete within the allowed timeout |
 | `FailoverCompleted` | Normal | The replica has successfully become the new primary |
 
+### Recovery events
+
+These events are emitted when the operator intervenes to recover the cluster.
+
+| Event Type | Type | Description |
+|---|---|---|
+| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER` after quorum loss |
+
 ### Maintenance events
 
 These events are emitted during cluster maintenance operations.

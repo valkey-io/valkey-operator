@@ -39,6 +39,15 @@ const (
 	ClusterStateFailed ClusterState = "Failed"
 )
 
+// ClusterStates lists all possible ValkeyCluster states.
+var ClusterStates = []ClusterState{
+	ClusterStateInitializing,
+	ClusterStateReconciling,
+	ClusterStateReady,
+	ClusterStateDegraded,
+	ClusterStateFailed,
+}
+
 // PDBPolicy controls whether the operator manages a PodDisruptionBudget for the cluster.
 // Values may be added in future versions; clients MUST handle unknown values gracefully.
 // +kubebuilder:validation:Enum=Managed;Disabled

@@ -278,6 +278,16 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
+	// Use operator-managed custom user for probes
+	clusterName := node.Labels[LabelCluster]
+	probeUserSecret := operatorUserPasswordSecret(clusterName)
+	if probeUserSecret != nil && probeUserSecret.Name != "" {
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "VALKEY_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "VALKEYCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: probeUserSecret}},
+		)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))

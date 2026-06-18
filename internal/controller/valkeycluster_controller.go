@@ -80,27 +80,31 @@ type ValkeyClusterReconciler struct {
 // cluster one step closer to the desired state described by the ValkeyCluster
 // spec. The pipeline runs in the following order:
 //
-//  1. Ensure the headless Service exists (upsertService).
-//  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
+//   - Ensure the headless Service exists (upsertService).
+//   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
+//   - Ensure internal ACL users are configured (reconcileUsersAcl).
+//   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one ValkeyNode per (shard, node) pair exists, creating missing
+//   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes).
-//  4. List all ValkeyNodes and build the Valkey cluster state by connecting to each
-//     node and scraping CLUSTER INFO / CLUSTER NODES.
-//  5. Forget stale nodes that no longer have a backing ValkeyNode.
-//  6. Phase 1 – MEET: batch-introduce all isolated pending nodes to the
-//     cluster via CLUSTER MEET. Requeue to let gossip propagate.
-//  7. Phase 2 – Assign slots: batch-assign hash-slot ranges to all
-//     primary-labeled pending nodes via CLUSTER ADDSLOTSRANGE.
-//  8. Phase 3 – Replicate: batch-attach all replica-labeled pending nodes
-//     to their matching primaries via CLUSTER REPLICATE.
-//  9. Scale-in: if the cluster has more shards than desired, drain slots
+//   - Build the Valkey cluster state by connecting to each node and scraping
+//     CLUSTER INFO / CLUSTER NODES.
+//   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
+//     is lost (promoteOrphanedReplicas).
+//   - Forget stale nodes that no longer have a backing ValkeyNode.
+//   - MEET: batch-introduce all isolated pending nodes to the cluster via
+//     CLUSTER MEET. Requeue to let gossip propagate.
+//   - Assign slots: batch-assign hash-slot ranges to all primary-labeled
+//     pending nodes via CLUSTER ADDSLOTSRANGE.
+//   - Replicate: batch-attach all replica-labeled pending nodes to their
+//     matching primaries via CLUSTER REPLICATE.
+//   - Scale-in: if the cluster has more shards than desired, drain slots
 //     from excess shards via CLUSTER MIGRATESLOTS and delete their
 //     ValkeyNodes once fully drained.
-//  10. Verify that the expected number of shards and replicas exist.
-//  11. Verify that all 16384 hash slots are assigned.
-//  12. If everything is healthy, mark the cluster Ready and requeue after 30s
+//   - Verify that the expected number of shards and replicas exist.
+//   - Verify that all 16384 hash slots are assigned.
+//   - If everything is healthy, mark the cluster Ready and requeue after 30s
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
@@ -111,7 +115,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			deleteClusterMetrics(req.Name, req.Namespace)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	if err := r.upsertService(ctx, cluster); err != nil {
@@ -185,6 +193,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
+
+	// Promote replicas of dead primaries when quorum is lost.
+	// TAKEOVER before FORGET so slots remain continuously owned.
+	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+		return result, nil
+	}
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
 
@@ -971,6 +985,59 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	return nil
 }
 
+// promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
+// primary is dead and failover quorum is unreachable. With persistence enabled
+// the pod will return with the same node ID, so TAKEOVER is skipped.
+// Returns (result, true) if a promotion was made and reconcile should requeue.
+func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
+	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+		return ctrl.Result{}, false
+	}
+	log := logf.FromContext(ctx)
+	var promoted, attempted int
+	deadPrimaries := make(map[string]bool)
+	for _, shard := range state.Shards {
+		for _, node := range shard.Nodes {
+			primaryId := node.PrimaryIdFromSelf()
+			if primaryId == "-" || primaryId == "" {
+				continue // node is a primary
+			}
+			if deadPrimaries[primaryId] {
+				continue
+			}
+			if !state.IsNodeFailed(primaryId) {
+				continue
+			}
+			// Note: we don't check if the pod still exists in k8s here.
+			// Without persistence, even if the primary is merely partitioned
+			// (not gone), the TAKEOVER'd replica will own the slots at a
+			// higher epoch. A returning primary will see the higher epoch
+			// and demote itself; no split-brain.
+			deadPrimaries[primaryId] = true
+		}
+	}
+	for primaryId := range deadPrimaries {
+		replica := state.BestReplicaOf(primaryId)
+		if replica == nil {
+			continue
+		}
+		attempted++
+		log.Info("promoting orphaned replica via TAKEOVER", "node", replica.Address, "deadPrimary", primaryId)
+		if err := replica.Client.Do(ctx, replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
+		} else {
+			promoted++
+		}
+	}
+	if promoted > 0 || attempted > 0 {
+		if promoted > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+	return ctrl.Result{}, false
+}
+
 // Check each cluster node and forget stale nodes (noaddr or status fail)
 func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
 	log := logf.FromContext(ctx)
@@ -989,11 +1056,16 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				// voting in the auto-failover election, permanently
 				// blocking the replica's promotion.
 				if state.HasReplicaOf(failing.Id) {
-					log.V(1).Info("skipping forget; failover pending for node",
+					if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+						log.V(1).Info("skipping forget; failover pending for node",
+							"address", failing.Address, "Id", failing.Id)
+						continue
+					}
+					log.Info("forget node despite pending replica; quorum unreachable",
 						"address", failing.Address, "Id", failing.Id)
-					continue
+				} else {
+					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 				}
-				log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
 					log.Error(err, "command failed: CLUSTER FORGET")
 					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
@@ -1050,6 +1122,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Reason = readyCondition.Reason
 		current.Status.Message = readyCondition.Message
 	}
+
+	// Update Prometheus metrics
+	updateClusterMetrics(current)
 
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
@@ -1133,6 +1208,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		}
 		return false, err
 	}
+	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
 }
 
@@ -1246,6 +1322,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			}
 			return false, err
 		}
+		slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 		return true, nil
 	}
 

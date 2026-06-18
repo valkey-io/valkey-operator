@@ -20,9 +20,18 @@ import (
 	"strings"
 	"testing"
 
-	//	corev1 "k8s.io/api/core/v1"
+	"github.com/stretchr/testify/assert"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
+
+func TestOperatorUserPasswordSecret(t *testing.T) {
+	sel := operatorUserPasswordSecret("c1")
+	assert.NotNil(t, sel)
+	assert.Equal(t, "internal-c1-system-passwords", sel.Name)
+	assert.Equal(t, "_operator", sel.Key)
+	assert.NotNil(t, sel.Optional)
+	assert.True(t, *sel.Optional)
+}
 
 func TestBuildAclFileContents(t *testing.T) {
 

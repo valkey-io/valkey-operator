@@ -56,6 +56,8 @@ func GetServerConfigMapName(clusterName string) string {
 
 // buildManagedConfig returns the operator-managed directives shared by the
 // cluster and standalone ValkeyNode config paths.
+//
+//nolint:goconst
 func buildManagedConfig(includeACL bool, persistence *valkeyiov1alpha1.PersistenceSpec, tls *valkeyiov1alpha1.TLSConfig) map[string]string {
 	config := map[string]string{}
 
@@ -100,6 +102,8 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 }
 
 // Return a base config of parameters that users shouldn't be able to override
+//
+//nolint:goconst
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	baseConfig := buildManagedConfig(true, cluster.Spec.Persistence, cluster.Spec.TLS)
 	maps.Copy(baseConfig, map[string]string{

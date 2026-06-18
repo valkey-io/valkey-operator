@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ClusterState represents the high-level state of the ValkeyCluster.
@@ -284,5 +285,8 @@ type ValkeyClusterList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ValkeyCluster{}, &ValkeyClusterList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &ValkeyCluster{}, &ValkeyClusterList{})
+		return nil
+	})
 }

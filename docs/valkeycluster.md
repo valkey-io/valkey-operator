@@ -124,7 +124,7 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 
 On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+.
 
-The handoff runs inside the pod's termination grace period, so set `terminationGracePeriodSeconds` at least as high as `cluster-manual-failover-timeout`; otherwise `SIGKILL` can cut the failover short.
+The handoff runs inside the pod's termination grace period. With defaults there is comfortable margin: the Kubernetes default `terminationGracePeriodSeconds` is 30s and the Valkey default `cluster-manual-failover-timeout` is 5s, so the failover completes well before `SIGKILL`. If you raise `cluster-manual-failover-timeout`, raise `terminationGracePeriodSeconds` to keep it above the timeout, otherwise `SIGKILL` can cut the failover short.
 
 ### Private image registries
 

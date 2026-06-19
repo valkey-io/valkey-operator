@@ -41,6 +41,35 @@ type NodeState struct {
 	ClusterNodes string
 }
 
+// ReplicationOffset returns this node's processed replication offset from
+// INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
+// value means the replica is more caught up with its primary.
+func (n *NodeState) ReplicationOffset() int64 {
+	v, ok := n.Info["slave_repl_offset"]
+	if !ok {
+		return -1
+	}
+	offset, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return offset
+}
+
+// HighestOffsetReplica returns the replica with the greatest replication offset,
+// the one most caught up with its primary. Replicas whose offset is unavailable
+// sort last and ties keep slice order. Returns nil for an empty slice.
+func HighestOffsetReplica(replicas []*NodeState) *NodeState {
+	var best *NodeState
+	var bestOffset int64
+	for _, replica := range replicas {
+		if offset := replica.ReplicationOffset(); best == nil || offset > bestOffset {
+			best, bestOffset = replica, offset
+		}
+	}
+	return best
+}
+
 // ShardState represents the current state of a shard.
 type ShardState struct {
 	Id        string
@@ -319,21 +348,15 @@ func (s *ClusterState) IsNodeFailed(nodeId string) bool {
 // BestReplicaOf returns the replica with the highest replication offset
 // that references the given primary ID, or nil if none found.
 func (s *ClusterState) BestReplicaOf(primaryId string) *NodeState {
-	var best *NodeState
-	var bestOffset int64
+	var replicas []*NodeState
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
-			if node.PrimaryIdFromSelf() != primaryId {
-				continue
-			}
-			offset, _ := strconv.ParseInt(node.Info["slave_repl_offset"], 10, 64)
-			if best == nil || offset > bestOffset {
-				best = node
-				bestOffset = offset
+			if node.PrimaryIdFromSelf() == primaryId {
+				replicas = append(replicas, node)
 			}
 		}
 	}
-	return best
+	return HighestOffsetReplica(replicas)
 }
 
 // PrimaryIdFromSelf returns the primary node ID that this node reports as its

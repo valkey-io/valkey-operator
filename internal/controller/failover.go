@@ -67,9 +67,11 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 	log := logf.FromContext(ctx)
 	primaryAddress := shard.GetPrimaryNode().Address
 
-	// Pick the first synced replica as the failover target. The ordering is
-	// determined by node discovery order — no priority scheme is applied yet.
-	target := replicas[0]
+	// Fail over to the most caught-up replica (highest replication offset). A
+	// graceful CLUSTER FAILOVER holds writes on the primary until the target
+	// replica catches up, so promoting the furthest-ahead one minimises that
+	// write pause and the exposure if the primary dies mid-failover.
+	target := valkey.HighestOffsetReplica(replicas)
 	log.Info("initiating proactive failover", "shard", shard.Id, "target", target.Address)
 
 	// Emit FailoverInitiated before the command so observers see the event at

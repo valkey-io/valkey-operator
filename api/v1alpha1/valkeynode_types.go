@@ -130,6 +130,12 @@ type ValkeyNodeSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// TerminationGracePeriodSeconds is the pod termination grace period, set by
+	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
+	// can complete before SIGKILL.
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

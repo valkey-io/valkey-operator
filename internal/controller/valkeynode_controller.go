@@ -122,13 +122,23 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
+		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
 		return ctrl.Result{}, err
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
+		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
 		return ctrl.Result{}, err
 	}
 
 	if err := r.ensureWorkload(ctx, node); err != nil {
+		workloadReason := "WorkloadError"
+		switch node.Spec.WorkloadType {
+		case valkeyiov1alpha1.WorkloadTypeStatefulSet:
+			workloadReason = "StatefulSetError"
+		case valkeyiov1alpha1.WorkloadTypeDeployment:
+			workloadReason = "DeploymentError"
+		}
+		r.setReadyCondition(ctx, node, workloadReason, err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -210,6 +220,32 @@ func (r *ValkeyNodeReconciler) clearLiveConfigCondition(ctx context.Context, nod
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
+}
+
+// setReadyCondition sets the Ready condition to False on the ValkeyNode status
+// so that errors from early reconcile stages (ConfigMap, PVC, workload creation)
+// are visible on the resource.
+func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) {
+	log := logf.FromContext(ctx)
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		log.Error(err, "failed to get ValkeyNode for status update")
+		return
+	}
+	patchBase := current.DeepCopy()
+	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: current.Generation,
+	}) {
+		return
+	}
+	current.Status.Ready = false
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		log.Error(err, "failed to patch ValkeyNode Ready condition")
+	}
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {

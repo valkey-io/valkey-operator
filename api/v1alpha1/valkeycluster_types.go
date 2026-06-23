@@ -141,6 +141,7 @@ type ValkeyClusterSpec struct {
 	// replica before SIGKILL. When unset, the operator derives a safe default
 	// from cluster-manual-failover-timeout. A value below that derived minimum
 	// is honoured but reported as a warning.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
@@ -239,6 +240,10 @@ const (
 	ConditionDegraded      = "Degraded"
 	ConditionClusterFormed = "ClusterFormed"
 	ConditionSlotsAssigned = "SlotsAssigned"
+	// ConditionConfigurationWarning flags a spec value the operator accepted but
+	// considers risky, for example a terminationGracePeriodSeconds too short for
+	// graceful failover.
+	ConditionConfigurationWarning = "ConfigurationWarning"
 )
 
 const (
@@ -258,6 +263,8 @@ const (
 	ReasonTopologyComplete         = "TopologyComplete"
 	ReasonAllSlotsAssigned         = "AllSlotsAssigned"
 	ReasonSlotsUnassigned          = "SlotsUnassigned"
+	ReasonGracePeriodTooShort      = "GracePeriodTooShort"
+	ReasonConfigurationValid       = "ConfigurationValid"
 	ReasonPrimaryLost              = "PrimaryLost"
 	ReasonNoSlots                  = "NoSlotsAvailable"
 	ReasonRebalancingSlots         = "RebalancingSlots"

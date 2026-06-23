@@ -3144,6 +3144,7 @@ spec:
                   from cluster-manual-failover-timeout. A value below that derived minimum
                   is honoured but reported as a warning.
                 format: int64
+                minimum: 1
                 type: integer
               tls:
                 description: TLS configuration for the cluster

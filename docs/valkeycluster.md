@@ -136,7 +136,7 @@ terminationGracePeriodSeconds: 60
 
 When omitted, the operator picks a safe value: the larger of the Kubernetes default (30s) and `cluster-manual-failover-timeout` (default 5s) plus a 10s buffer. With defaults that stays at 30s. Raising `cluster-manual-failover-timeout` pulls the derived grace period up with it.
 
-An explicit value is honoured as-is, even if it is below the recommended minimum. In that case the operator emits a `GracePeriodTooShort` warning event on the `ValkeyCluster` rather than silently overriding it.
+An explicit value is honoured as-is, even if it is below the recommended minimum. In that case the operator sets a `ConfigurationWarning` condition (reason `GracePeriodTooShort`) on the `ValkeyCluster` and emits an event when the cluster first enters that state, rather than silently overriding the value. The value must be a positive integer; the CRD rejects zero or negative values.
 
 ### Private image registries
 

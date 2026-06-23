@@ -3140,6 +3140,7 @@ spec:
                   the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
                   can complete before SIGKILL.
                 format: int64
+                minimum: 1
                 type: integer
               tls:
                 description: TLS configuration for the node

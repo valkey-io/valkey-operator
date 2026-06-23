@@ -112,6 +112,11 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
+		// On SIGTERM (graceful pod shutdown from a node drain, eviction, or
+		// preemption), a cluster primary hands its slots off to a replica as
+		// part of shutdown. This covers out-of-band descheduling that the
+		// operator's own rolling failover never observes. Requires Valkey 9.0+.
+		"shutdown-on-sigterm": "failover",
 	})
 
 	return baseConfig

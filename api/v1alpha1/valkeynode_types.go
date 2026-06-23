@@ -134,6 +134,7 @@ type ValkeyNodeSpec struct {
 	// TerminationGracePeriodSeconds is the pod termination grace period, set by
 	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
 	// can complete before SIGKILL.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }

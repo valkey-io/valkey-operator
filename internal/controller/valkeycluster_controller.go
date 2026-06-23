@@ -153,16 +153,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
 	configHash := serverConfigRollHash(cluster)
 
-	// Warn when an explicit terminationGracePeriodSeconds is too short for the
-	// graceful failover on SIGTERM to finish before SIGKILL. The value is still
-	// honoured; the operator does not silently override it.
-	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil {
-		if rec := recommendedGracePeriodSeconds(cluster); *g < rec {
+	// Surface a ConfigurationWarning condition when an explicit
+	// terminationGracePeriodSeconds is too short for the graceful failover on
+	// SIGTERM to finish before SIGKILL. The value is honoured; the operator does
+	// not silently override it. The condition is idempotent, so the event fires
+	// only when the cluster first enters the warning state.
+	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < recommendedGracePeriodSeconds(cluster) {
+		rec := recommendedGracePeriodSeconds(cluster)
+		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
+		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning) {
 			log.Info("terminationGracePeriodSeconds is below the recommended minimum for graceful failover",
 				"requested", *g, "recommended", rec)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "GracePeriodTooShort", "ReconcileValkeyCluster",
-				"spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, "ReconcileValkeyCluster", "%s", msg)
 		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, msg, metav1.ConditionTrue)
+	} else {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort)
 	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -743,7 +749,13 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	l[LabelShardIndex] = strconv.Itoa(shardIndex)
 	l[LabelNodeIndex] = strconv.Itoa(nodeIndex)
 
-	gracePeriod := effectiveGracePeriodSeconds(cluster)
+	// Only set the field when it differs from the Kubernetes default, so existing
+	// clusters that resolve to the default keep a nil value and are not rolled on
+	// operator upgrade.
+	var gracePeriod *int64
+	if g := effectiveGracePeriodSeconds(cluster); g != defaultGracePeriodSeconds {
+		gracePeriod = &g
+	}
 
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -769,7 +781,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TLS:                           cluster.Spec.TLS,
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
-			TerminationGracePeriodSeconds: &gracePeriod,
+			TerminationGracePeriodSeconds: gracePeriod,
 		},
 	}
 }

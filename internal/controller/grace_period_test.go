@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -66,5 +68,32 @@ func TestEffectiveGracePeriodSeconds(t *testing.T) {
 
 	t.Run("an explicit value below the recommended minimum is still honoured", func(t *testing.T) {
 		assert.Equal(t, int64(5), effectiveGracePeriodSeconds(clusterWith(ptr(5), nil)))
+	})
+}
+
+func TestBuildClusterValkeyNodeGracePeriod(t *testing.T) {
+	ptr := func(v int64) *int64 { return &v }
+	cluster := func(grace *int64, cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{TerminationGracePeriodSeconds: grace, Config: cfg},
+		}
+	}
+
+	t.Run("the resolved default leaves the node field nil so upgrades do not roll", func(t *testing.T) {
+		node := buildClusterValkeyNode(cluster(nil, nil), 0, 0)
+		assert.Nil(t, node.Spec.TerminationGracePeriodSeconds)
+	})
+
+	t.Run("an explicit value is propagated to the node", func(t *testing.T) {
+		node := buildClusterValkeyNode(cluster(ptr(60), nil), 0, 0)
+		require.NotNil(t, node.Spec.TerminationGracePeriodSeconds)
+		assert.Equal(t, int64(60), *node.Spec.TerminationGracePeriodSeconds)
+	})
+
+	t.Run("a long failover timeout pulls the derived value above the default", func(t *testing.T) {
+		node := buildClusterValkeyNode(cluster(nil, map[string]string{"cluster-manual-failover-timeout": "60000"}), 0, 0)
+		require.NotNil(t, node.Spec.TerminationGracePeriodSeconds)
+		assert.Equal(t, int64(70), *node.Spec.TerminationGracePeriodSeconds)
 	})
 }

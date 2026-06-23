@@ -135,6 +135,15 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
+	// TerminationGracePeriodSeconds is the pod termination grace period for the
+	// Valkey nodes. It must give the graceful CLUSTER FAILOVER triggered on
+	// SIGTERM (shutdown-on-sigterm) enough time to hand the shard off to a
+	// replica before SIGKILL. When unset, the operator derives a safe default
+	// from cluster-manual-failover-timeout. A value below that derived minimum
+	// is honoured but reported as a warning.
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
 	// TLS configuration for the cluster
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`

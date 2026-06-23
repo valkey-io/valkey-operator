@@ -3135,6 +3135,16 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              terminationGracePeriodSeconds:
+                description: |-
+                  TerminationGracePeriodSeconds is the pod termination grace period for the
+                  Valkey nodes. It must give the graceful CLUSTER FAILOVER triggered on
+                  SIGTERM (shutdown-on-sigterm) enough time to hand the shard off to a
+                  replica before SIGKILL. When unset, the operator derives a safe default
+                  from cluster-manual-failover-timeout. A value below that derived minimum
+                  is honoured but reported as a warning.
+                format: int64
+                type: integer
               tls:
                 description: TLS configuration for the cluster
                 properties:

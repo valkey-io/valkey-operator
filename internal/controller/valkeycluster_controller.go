@@ -153,6 +153,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
 	configHash := serverConfigRollHash(cluster)
 
+	// Warn when an explicit terminationGracePeriodSeconds is too short for the
+	// graceful failover on SIGTERM to finish before SIGKILL. The value is still
+	// honoured; the operator does not silently override it.
+	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil {
+		if rec := recommendedGracePeriodSeconds(cluster); *g < rec {
+			log.Info("terminationGracePeriodSeconds is below the recommended minimum for graceful failover",
+				"requested", *g, "recommended", rec)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "GracePeriodTooShort", "ReconcileValkeyCluster",
+				"spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
+		}
+	}
+
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		log.Error(err, "failed to list ValkeyNodes")
@@ -671,6 +683,51 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	return nodeUnchanged, nil
 }
 
+const (
+	// gracePeriodBufferSeconds is added on top of cluster-manual-failover-timeout
+	// so the SIGTERM-triggered failover has headroom to finish before SIGKILL.
+	gracePeriodBufferSeconds = 10
+	// defaultFailoverTimeoutSeconds mirrors the Valkey default for
+	// cluster-manual-failover-timeout (5000ms).
+	defaultFailoverTimeoutSeconds = 5
+	// defaultGracePeriodSeconds mirrors the Kubernetes default
+	// terminationGracePeriodSeconds.
+	defaultGracePeriodSeconds = 30
+)
+
+// failoverTimeoutSeconds returns cluster-manual-failover-timeout in whole
+// seconds (rounded up), or the Valkey default when unset or unparseable.
+func failoverTimeoutSeconds(config map[string]string) int64 {
+	v, ok := config["cluster-manual-failover-timeout"]
+	if !ok {
+		return defaultFailoverTimeoutSeconds
+	}
+	ms, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || ms <= 0 {
+		return defaultFailoverTimeoutSeconds
+	}
+	return (ms + 999) / 1000
+}
+
+// recommendedGracePeriodSeconds is the smallest terminationGracePeriodSeconds
+// that lets a SIGTERM-triggered failover finish before SIGKILL.
+func recommendedGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 {
+	return failoverTimeoutSeconds(cluster.Spec.Config) + gracePeriodBufferSeconds
+}
+
+// effectiveGracePeriodSeconds is the grace period the operator applies to the
+// Valkey pods: the user's value when set, otherwise a safe default that is at
+// least the Kubernetes default and the recommended minimum.
+func effectiveGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 {
+	if cluster.Spec.TerminationGracePeriodSeconds != nil {
+		return *cluster.Spec.TerminationGracePeriodSeconds
+	}
+	if rec := recommendedGracePeriodSeconds(cluster); rec > defaultGracePeriodSeconds {
+		return rec
+	}
+	return defaultGracePeriodSeconds
+}
+
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.
 func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *valkeyiov1alpha1.ValkeyNode {
 	// Start with recommended k8s labels; instance is the cluster name and component is "valkey-node".
@@ -686,6 +743,8 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	l[LabelShardIndex] = strconv.Itoa(shardIndex)
 	l[LabelNodeIndex] = strconv.Itoa(nodeIndex)
 
+	gracePeriod := effectiveGracePeriodSeconds(cluster)
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -693,22 +752,23 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Labels:    l,
 		},
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-			Image:                     cluster.Spec.Image,
-			ImagePullSecrets:          cluster.Spec.ImagePullSecrets,
-			WorkloadType:              cluster.Spec.WorkloadType,
-			Persistence:               cluster.Spec.Persistence,
-			Resources:                 cluster.Spec.Resources,
-			NodeSelector:              cluster.Spec.NodeSelector,
-			Affinity:                  cluster.Spec.Affinity,
-			Tolerations:               cluster.Spec.Tolerations,
-			TopologySpreadConstraints: cluster.Spec.TopologySpreadConstraints,
-			Exporter:                  cluster.Spec.Exporter,
-			Containers:                cluster.Spec.Containers,
-			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),
-			UsersACLSecretName:        getInternalSecretName(cluster.Name),
-			TLS:                       cluster.Spec.TLS,
-			Config:                    cluster.Spec.Config,
-			PodSecurityContext:        cluster.Spec.PodSecurityContext,
+			Image:                         cluster.Spec.Image,
+			ImagePullSecrets:              cluster.Spec.ImagePullSecrets,
+			WorkloadType:                  cluster.Spec.WorkloadType,
+			Persistence:                   cluster.Spec.Persistence,
+			Resources:                     cluster.Spec.Resources,
+			NodeSelector:                  cluster.Spec.NodeSelector,
+			Affinity:                      cluster.Spec.Affinity,
+			Tolerations:                   cluster.Spec.Tolerations,
+			TopologySpreadConstraints:     cluster.Spec.TopologySpreadConstraints,
+			Exporter:                      cluster.Spec.Exporter,
+			Containers:                    cluster.Spec.Containers,
+			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
+			UsersACLSecretName:            getInternalSecretName(cluster.Name),
+			TLS:                           cluster.Spec.TLS,
+			Config:                        cluster.Spec.Config,
+			PodSecurityContext:            cluster.Spec.PodSecurityContext,
+			TerminationGracePeriodSeconds: &gracePeriod,
 		},
 	}
 }

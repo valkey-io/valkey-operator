@@ -417,7 +417,14 @@ func (r *ValkeyClusterReconciler) findPodSchedulingIssue(ctx context.Context, cl
 		return nil, fmt.Errorf("list Valkey pods: %w", err)
 	}
 
+	desiredShards := int(cluster.Spec.Shards)
 	for i := range pods.Items {
+		if label, ok := pods.Items[i].Labels[LabelShardIndex]; ok {
+			si, err := strconv.Atoi(label)
+			if err == nil && si >= desiredShards {
+				continue
+			}
+		}
 		if issue := podSchedulingIssueForPod(&pods.Items[i]); issue != nil {
 			return issue, nil
 		}

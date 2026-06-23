@@ -21,7 +21,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -105,7 +104,8 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile moves the current state of the ValkeyNode closer to the desired state.
-func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Status conditions are mutated in memory and flushed by a single deferred patch.
+func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconciling ValkeyNode")
 
@@ -116,17 +116,47 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !node.DeletionTimestamp.IsZero() {
 		return r.reconcileDeletion(ctx, node)
 	}
+
+	// Snapshot for deferred status patch.
+	patchBase := client.MergeFrom(node.DeepCopy())
+
+	defer func() {
+		if err := r.Status().Patch(ctx, node, patchBase); err != nil {
+			log.Error(err, "failed to patch ValkeyNode status")
+			if retErr == nil {
+				retErr = err
+			}
+		}
+	}()
+
+	setCondition := func(condType string, status metav1.ConditionStatus, reason, message string) {
+		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: node.Generation,
+		})
+	}
+
+	removeCondition := func(condType string) {
+		meta.RemoveStatusCondition(&node.Status.Conditions, condType)
+	}
+
 	if requeue, err := r.reconcilePersistenceFinalizer(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	} else if requeue {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+
 	if err := r.ensureConfigMap(ctx, node); err != nil {
-		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionFalse, "ConfigMapError", err.Error())
+		node.Status.Ready = false
 		return ctrl.Result{}, err
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
-		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionFalse, "PersistentVolumeClaimError", err.Error())
+		node.Status.Ready = false
 		return ctrl.Result{}, err
 	}
 
@@ -138,12 +168,78 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		case valkeyiov1alpha1.WorkloadTypeDeployment:
 			workloadReason = "DeploymentError"
 		}
-		r.setReadyCondition(ctx, node, workloadReason, err.Error())
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionFalse, workloadReason, err.Error())
+		node.Status.Ready = false
 		return ctrl.Result{}, err
 	}
 
-	if err := r.updateStatus(ctx, node); err != nil {
+	// Update status from workload and pod state.
+	node.Status.ObservedGeneration = node.Generation
+
+	pvc, err := r.getPersistentVolumeClaim(ctx, node)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if node.Spec.Persistence != nil {
+		pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady, pvcStatus, pvcReason, pvcMessage)
+		pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(node, pvc)
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady, pvcSizeStatus, pvcSizeReason, pvcSizeMessage)
+	} else {
+		removeCondition(valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+		removeCondition(valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
+	}
+
+	pod, err := r.getPod(ctx, node)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if pod == nil {
+		node.Status.Ready = false
+		node.Status.PodName = ""
+		node.Status.PodIP = ""
+		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+		message := "Pod does not exist yet"
+		if node.Spec.Persistence != nil {
+			_, reason, message = pvcStatusCondition(pvc)
+		}
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionFalse, reason, message)
+	} else {
+		node.Status.PodName = pod.Name
+		node.Status.PodIP = pod.Status.PodIP
+
+		podReady := false
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				podReady = true
+				break
+			}
+		}
+
+		if podReady {
+			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			podReady = rolled
+		}
+
+		node.Status.Ready = podReady
+		if podReady {
+			node.Status.Role = r.getValkeyRole(ctx, node)
+			setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonPodRunning, "Pod is running and ready")
+		} else {
+			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+			message := "Pod is not ready"
+			if node.Spec.Persistence != nil {
+				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
+					reason = pvcReason
+					message = pvcMessage
+				}
+			}
+			setCondition(valkeyiov1alpha1.ValkeyNodeConditionReady, metav1.ConditionFalse, reason, message)
+		}
 	}
 
 	if !node.Status.Ready {
@@ -155,97 +251,17 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
-			log.Error(condErr, "failed to set LiveConfigApplied condition")
-		}
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 	if applied {
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied"); condErr != nil {
-			log.Error(condErr, "failed to set LiveConfigApplied condition")
-			return ctrl.Result{}, condErr
-		}
+		setCondition(valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, metav1.ConditionTrue, "Applied", "Live config applied")
 	} else {
-		// Nothing to apply (no allowlisted keys in spec.config). Clear any
-		// stale condition so it reverts to absent, which the cluster
-		// controller treats the same as True. Without this, a prior False
-		// (e.g. from a CONFIG SET failure) would persist after the offending
-		// key is removed and block cluster progress indefinitely.
-		if condErr := r.clearLiveConfigCondition(ctx, node); condErr != nil {
-			log.Error(condErr, "failed to clear LiveConfigApplied condition")
-			return ctrl.Result{}, condErr
-		}
+		removeCondition(valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
 	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
-	// Requeue after 60 seconds to check on the ValkeyNode role.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
-}
-
-func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
-	}
-	return nil
-}
-
-// clearLiveConfigCondition removes the LiveConfigApplied condition if present.
-// An absent condition is treated as True by the cluster controller, so this is
-// the correct resting state when there are no allowlisted keys to apply. It
-// no-ops (no patch) when the condition is already absent.
-func (r *ValkeyNodeReconciler) clearLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	patchBase := current.DeepCopy()
-	if !meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied) {
-		return nil
-	}
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
-	}
-	return nil
-}
-
-// setReadyCondition sets the Ready condition to False on the ValkeyNode status
-// so that errors from early reconcile stages (ConfigMap, PVC, workload creation)
-// are visible on the resource.
-func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) {
-	log := logf.FromContext(ctx)
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		log.Error(err, "failed to get ValkeyNode for status update")
-		return
-	}
-	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: current.Generation,
-	}) {
-		return
-	}
-	current.Status.Ready = false
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-		log.Error(err, "failed to patch ValkeyNode Ready condition")
-	}
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -373,141 +389,6 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 		return err
 	}
 	log.V(1).Info("reconciled ConfigMap", "result", result, "name", cm.Name)
-	return nil
-}
-
-// updateStatus updates the ValkeyNode status based on workload and Pod state.
-func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	log := logf.FromContext(ctx)
-
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return err
-	}
-
-	// Snapshot for patch base before mutations.
-	patchBase := current.DeepCopy()
-	patch := client.MergeFrom(patchBase)
-
-	// Always stamp the observed generation so ValkeyCluster can detect
-	// whether the controller has processed the latest spec.
-	current.Status.ObservedGeneration = current.Generation
-
-	pvc, err := r.getPersistentVolumeClaim(ctx, node)
-	if err != nil {
-		return err
-	}
-	if node.Spec.Persistence != nil {
-		pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady,
-			Status:             pvcStatus,
-			Reason:             pvcReason,
-			Message:            pvcMessage,
-			ObservedGeneration: current.Generation,
-		})
-		pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(current, pvc)
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
-			Status:             pvcSizeStatus,
-			Reason:             pvcSizeReason,
-			Message:            pvcSizeMessage,
-			ObservedGeneration: current.Generation,
-		})
-	} else {
-		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
-		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
-	}
-
-	pod, err := r.getPod(ctx, node)
-	if err != nil {
-		return err
-	}
-
-	if pod == nil {
-		current.Status.Ready = false
-		current.Status.PodName = ""
-		current.Status.PodIP = ""
-		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-		message := "Pod does not exist yet"
-		if node.Spec.Persistence != nil {
-			_, reason, message = pvcStatusCondition(pvc)
-		}
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: current.Generation,
-		})
-	} else {
-		current.Status.PodName = pod.Name
-		current.Status.PodIP = pod.Status.PodIP
-
-		podReady := false
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				podReady = true
-				break
-			}
-		}
-
-		// If the pod appears ready, also verify the workload rollout has completed.
-		// The old pod may still be running (and ready) while the StatefulSet is rolling
-		// to a new spec; we must not report Ready=true until the rollout is done so the
-		// ValkeyCluster controller waits before advancing to the next node.
-		if podReady {
-			rolled, err := r.isWorkloadRolledOut(ctx, node)
-			if err != nil {
-				return err
-			}
-			podReady = rolled
-		}
-
-		current.Status.Ready = podReady
-		if podReady {
-			current.Status.Role = r.getValkeyRole(ctx, current)
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodRunning,
-				Message:            "Pod is running and ready",
-				ObservedGeneration: current.Generation,
-			})
-		} else {
-			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-			message := "Pod is not ready"
-			if node.Spec.Persistence != nil {
-				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
-					reason = pvcReason
-					message = pvcMessage
-				}
-			}
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             reason,
-				Message:            message,
-				ObservedGeneration: current.Generation,
-			})
-		}
-	}
-
-	if !reflect.DeepEqual(patchBase.Status, current.Status) {
-		if err := r.Status().Patch(ctx, current, patch); err != nil {
-			log.Error(err, "failed to update ValkeyNode status")
-			return err
-		}
-		log.V(1).Info("status updated", "ready", current.Status.Ready, "role", current.Status.Role)
-	} else {
-		log.V(2).Info("status unchanged, skipping update")
-	}
-
-	// Sync status fields back to the caller's object so Reconcile uses the
-	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
-	node.Status.Ready = current.Status.Ready
-	node.Status.PodIP = current.Status.PodIP
-
 	return nil
 }
 

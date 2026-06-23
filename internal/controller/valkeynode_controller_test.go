@@ -1022,7 +1022,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 	})
 })
 
-var _ = Describe("ValkeyNode updateStatus", func() {
+var _ = Describe("ValkeyNode Reconcile status handling", func() {
 	var (
 		node *valkeyiov1alpha1.ValkeyNode
 		r    *ValkeyNodeReconciler
@@ -1033,14 +1033,27 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 		ctx = context.Background()
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "updatestatus-test",
+				Name:      "status-test",
 				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster: "status-test",
+				},
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      getInternalSecretName("status-test"),
+				Namespace: "default",
+			},
+			Type: AclSecretType,
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
 		r = &ValkeyNodeReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
@@ -1049,11 +1062,33 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 	})
 
 	AfterEach(func() {
-		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+		cm := &corev1.ConfigMap{}
+		cmName := types.NamespacedName{Name: GetServerConfigMapName("status-test"), Namespace: "default"}
+		if err := k8sClient.Get(ctx, cmName, cm); err == nil {
+			Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+		}
+		sts := &appsv1.StatefulSet{}
+		stsName := types.NamespacedName{Name: "valkey-status-test", Namespace: "default"}
+		if err := k8sClient.Get(ctx, stsName, sts); err == nil {
+			Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
+		}
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node); err == nil {
+			node.Finalizers = nil
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+		}
+		secret := &corev1.Secret{}
+		secretName := types.NamespacedName{Name: getInternalSecretName("status-test"), Namespace: "default"}
+		if err := k8sClient.Get(ctx, secretName, secret); err == nil {
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		}
 	})
 
-	It("should set Ready=false with PodNotReady condition when no pod exists", func() {
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+	It("should set Ready=false with PodNotReady when no pod exists", func() {
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(node),
+		})
+		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
@@ -1065,120 +1100,24 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 		Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 	})
 
-	It("should not write status when nothing has changed between calls", func() {
-		By("calling updateStatus to establish baseline status")
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+	It("should not change ResourceVersion on second reconcile with no state change", func() {
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(node),
+		})
+		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
-		By("calling updateStatus again with no state change")
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+		_, err = r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(node),
+		})
+		Expect(err).NotTo(HaveOccurred())
 
 		updated2 := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated2)).To(Succeed())
-		Expect(updated2.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when nothing changed")
-	})
-})
-
-var _ = Describe("clearLiveConfigCondition", func() {
-	var (
-		node *valkeyiov1alpha1.ValkeyNode
-		r    *ValkeyNodeReconciler
-		ctx  context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-		node = &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "clearcond-test",
-				Namespace: "default",
-			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		r = &ValkeyNodeReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
-		}
-	})
-
-	AfterEach(func() {
-		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
-	})
-
-	It("removes a stale False condition so it reverts to absent", func() {
-		By("setting LiveConfigApplied=False, as a CONFIG SET failure would")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
-
-		By("clearing the condition, as happens once the offending key is removed")
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeNil())
-	})
-
-	It("does not write status when the condition is already absent", func() {
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		rvBefore := updated.ResourceVersion
-
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvBefore), "status write should be skipped when condition is absent")
-	})
-})
-
-var _ = Describe("setLiveConfigCondition", func() {
-	var (
-		node *valkeyiov1alpha1.ValkeyNode
-		r    *ValkeyNodeReconciler
-		ctx  context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-		node = &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "setcond-test",
-				Namespace: "default",
-			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		r = &ValkeyNodeReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
-		}
-	})
-
-	AfterEach(func() {
-		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
-	})
-
-	It("does not write status when the condition is unchanged", func() {
-		By("setting LiveConfigApplied=True for the first time")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
-
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		rvAfterFirst := updated.ResourceVersion
-
-		By("setting the identical condition again")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
-
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
+		Expect(updated2.ResourceVersion).To(Equal(rvAfterFirst))
 	})
 })
 

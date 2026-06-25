@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -127,6 +129,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+
+	endpoints, err := r.reconcileShardServices(ctx, cluster)
+	if err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+	cluster.Status.ExternalEndpoints = endpoints
 
 	if err := r.reconcilePodDisruptionBudget(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodDisruptionBudgetError, err.Error(), metav1.ConditionFalse)
@@ -478,6 +488,136 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	}
 	if result == controllerutil.OperationResultCreated {
 		r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
+	}
+	return nil
+}
+
+func shardServiceName(clusterName string, shardIndex int) string {
+	return fmt.Sprintf("%s%s-shard-%d", resourcePrefix, clusterName, shardIndex)
+}
+
+// reconcileShardServices ensures one externally-reachable Service per shard when
+// external access is enabled, and removes Services left behind by a scale-in. It
+// returns the external endpoint of each shard for the cluster status.
+//
+// Each Service selects the pods of a single shard and exposes one port per node,
+// targeting the node's uniquely-named client port (see shardClientPortName) so a
+// port reaches exactly one pod. NodePort ports are allocated by Kubernetes and read
+// back from the Service; LoadBalancer ports are the node-indexed frontend ports.
+func (r *ValkeyClusterReconciler) reconcileShardServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) ([]valkeyiov1alpha1.ShardEndpoint, error) {
+	if cluster.Spec.ExternalAccess == nil || !cluster.Spec.ExternalAccess.Enabled {
+		return nil, r.deleteExcessShardServices(ctx, cluster, 0)
+	}
+
+	ea := cluster.Spec.ExternalAccess
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	serviceType := ea.ServiceType
+	if serviceType == "" {
+		serviceType = corev1.ServiceTypeNodePort
+	}
+
+	endpoints := make([]valkeyiov1alpha1.ShardEndpoint, 0, int(cluster.Spec.Shards))
+	for shardIndex := range int(cluster.Spec.Shards) {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      shardServiceName(cluster.Name, shardIndex),
+				Namespace: cluster.Namespace,
+			},
+		}
+		shardSelector := strconv.Itoa(shardIndex)
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+			svc.Labels = labels(cluster)
+			svc.Labels[LabelCluster] = cluster.Name
+			svc.Labels[LabelShardIndex] = shardSelector
+			svc.Annotations = maps.Clone(ea.ServiceAnnotations)
+			svc.Spec.Type = serviceType
+			svc.Spec.ExternalTrafficPolicy = ea.ExternalTrafficPolicy
+			svc.Spec.Selector = map[string]string{
+				LabelCluster:    cluster.Name,
+				LabelShardIndex: shardSelector,
+			}
+			svc.Spec.Ports = buildShardServicePorts(svc.Spec.Ports, nodesPerShard)
+			return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
+		})
+		if err != nil {
+			r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ShardServiceUpdateFailed", "UpdateShardService", "Failed to upsert shard %d Service: %v", shardIndex, err)
+			return nil, err
+		}
+
+		endpoints = append(endpoints, shardEndpointFromService(int32(shardIndex), svc, serviceType, nodesPerShard))
+	}
+
+	if err := r.deleteExcessShardServices(ctx, cluster, int(cluster.Spec.Shards)); err != nil {
+		return nil, err
+	}
+	return endpoints, nil
+}
+
+// buildShardServicePorts returns one ServicePort per node, targeting the node's
+// uniquely-named client port. Existing ports are passed in so Kubernetes-allocated
+// NodePort values are preserved across updates. The Port value is the in-cluster
+// port and only needs to be unique within the Service.
+func buildShardServicePorts(existing []corev1.ServicePort, nodesPerShard int) []corev1.ServicePort {
+	nodePortByName := make(map[string]int32, len(existing))
+	for _, p := range existing {
+		nodePortByName[p.Name] = p.NodePort
+	}
+
+	ports := make([]corev1.ServicePort, 0, nodesPerShard)
+	for nodeIndex := range nodesPerShard {
+		name := shardClientPortName(strconv.Itoa(nodeIndex))
+		ports = append(ports, corev1.ServicePort{
+			Name:       name,
+			Port:       int32(DefaultPort + nodeIndex),
+			TargetPort: intstr.FromString(name),
+			NodePort:   nodePortByName[name],
+		})
+	}
+	return ports
+}
+
+// shardEndpointFromService reads the externally-reachable ports of a shard Service.
+// For NodePort it reports the Kubernetes-allocated node ports; otherwise the Service
+// ports (the LoadBalancer frontend ports).
+func shardEndpointFromService(shardIndex int32, svc *corev1.Service, serviceType corev1.ServiceType, nodesPerShard int) valkeyiov1alpha1.ShardEndpoint {
+	portByName := make(map[string]corev1.ServicePort, len(svc.Spec.Ports))
+	for _, p := range svc.Spec.Ports {
+		portByName[p.Name] = p
+	}
+
+	nodePorts := make([]int32, 0, nodesPerShard)
+	for nodeIndex := range nodesPerShard {
+		p := portByName[shardClientPortName(strconv.Itoa(nodeIndex))]
+		if serviceType == corev1.ServiceTypeNodePort {
+			nodePorts = append(nodePorts, p.NodePort)
+		} else {
+			nodePorts = append(nodePorts, p.Port)
+		}
+	}
+	return valkeyiov1alpha1.ShardEndpoint{ShardIndex: shardIndex, NodePorts: nodePorts}
+}
+
+// deleteExcessShardServices removes shard Services whose index is at or beyond
+// desiredShards. A desiredShards of 0 removes all of them (external access disabled).
+func (r *ValkeyClusterReconciler) deleteExcessShardServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, desiredShards int) error {
+	log := logf.FromContext(ctx)
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		return err
+	}
+	for i := range services.Items {
+		svc := &services.Items[i]
+		shardIndex, err := strconv.Atoi(svc.Labels[LabelShardIndex])
+		if err != nil {
+			// Not a shard Service (e.g. the headless Service has no shard-index label).
+			continue
+		}
+		if shardIndex >= desiredShards {
+			if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete excess shard Service %s: %w", svc.Name, err)
+			}
+			log.V(1).Info("deleted excess shard Service", "name", svc.Name, "shard", shardIndex)
+		}
 	}
 	return nil
 }
@@ -1127,6 +1267,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 
 	// Apply conditions from the in-memory cluster object
 	current.Status.Conditions = cluster.Status.Conditions
+
+	// Apply external endpoints from the in-memory cluster object
+	current.Status.ExternalEndpoints = cluster.Status.ExternalEndpoints
 
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)

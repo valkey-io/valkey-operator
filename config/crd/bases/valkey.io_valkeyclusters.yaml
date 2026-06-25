@@ -2580,6 +2580,31 @@ spec:
                   enabled:
                     description: Enabled turns on external access for the cluster.
                     type: boolean
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+                      Use Local to preserve the client source IP, which requires DNS to resolve a
+                      shard hostname to the nodes hosting that shard's pods.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  serviceAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ServiceAnnotations are applied to each per-shard Service, for example to
+                      configure external-dns or a cloud load-balancer controller.
+                    type: object
+                  serviceType:
+                    default: NodePort
+                    description: |-
+                      ServiceType is the type of the per-shard Service. NodePort ports are allocated
+                      by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+                    enum:
+                    - NodePort
+                    - LoadBalancer
+                    type: string
                 type: object
               image:
                 description: Override the default Valkey image
@@ -3151,6 +3176,35 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
+                x-kubernetes-list-type: map
+              externalEndpoints:
+                description: |-
+                  ExternalEndpoints lists the externally-reachable endpoint of each shard,
+                  populated when external access is enabled.
+                items:
+                  description: ShardEndpoint describes the externally-reachable endpoint
+                    of a single shard.
+                  properties:
+                    nodePorts:
+                      description: |-
+                        NodePorts are the external ports of the shard's nodes, indexed by node index
+                        (NodePorts[0] is the node-index 0 port). The address to reach each port
+                        depends on the Service type and the user's DNS configuration.
+                      items:
+                        format: int32
+                        type: integer
+                      type: array
+                    shardIndex:
+                      description: ShardIndex is the index of the shard this endpoint
+                        belongs to.
+                      format: int32
+                      type: integer
+                  required:
+                  - shardIndex
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - shardIndex
                 x-kubernetes-list-type: map
               message:
                 description: Message provides human-readable details about the current

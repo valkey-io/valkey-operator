@@ -69,11 +69,22 @@ containers:
 ```yaml
 externalAccess:
   enabled: true
+  serviceType: NodePort
 ```
 
 `externalAccess` configures reachability of the cluster from outside Kubernetes. When omitted, the cluster is internal-only and behaves identically to a cluster without this field. Requires Valkey 9.0+.
 
 Enabling external access announces a human-readable node name (the ValkeyNode name, e.g. `cluster-sample-1-2`) so cluster events such as failures reference it alongside the node ID. Node-to-node traffic (gossip and replication) always stays on internal pod IPs.
+
+The operator creates one Service per shard, selecting that shard's pods and exposing one port per node. Each port targets a single node, so a client can reach a specific primary or replica.
+
+| Field | Description |
+|---|---|
+| `serviceType` | `NodePort` (default) or `LoadBalancer`. |
+| `externalTrafficPolicy` | `Cluster` (default) or `Local`. Use `Local` to preserve the client source IP. |
+| `serviceAnnotations` | Applied to each per-shard Service, e.g. for external-dns or a cloud load-balancer controller. |
+
+With `NodePort`, Kubernetes allocates the external ports; the operator reads them back and reports them per shard under `status.externalEndpoints` (indexed by node). With `LoadBalancer`, each shard's node ports are `6379 + nodeIndex`.
 
 ### Metrics
 

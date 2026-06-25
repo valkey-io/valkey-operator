@@ -7,3 +7,4 @@ spec:
   replicas: 1
   externalAccess:
     enabled: true
+    serviceType: NodePort

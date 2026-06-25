@@ -102,6 +102,17 @@ var _ = Describe("ValkeyCluster external access", Ordered, Label("ValkeyCluster"
 			g.Expect(utils.GetNonEmptyLines(output)).NotTo(BeEmpty())
 		}
 		Eventually(verifyEndpoints).Should(Succeed())
+
+		By("verifying the announced shard hostname appears in CLUSTER NODES")
+		verifyHostname := func(g Gomega) {
+			cmd := exec.Command("kubectl", "exec",
+				fmt.Sprintf("valkey-%s-0-0-0", clusterName), "-c", "server", "--",
+				"valkey-cli", "CLUSTER", "NODES")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("shard-0.valkey.example.com"))
+		}
+		Eventually(verifyHostname).Should(Succeed())
 	})
 })
 

@@ -177,6 +177,20 @@ type ExternalAccessSpec struct {
 	// configure external-dns or a cloud load-balancer controller.
 	// +optional
 	ServiceAnnotations map[string]string `json:"serviceAnnotations,omitempty"`
+
+	// HostnamePrefix is prepended to each shard hostname, which is announced as
+	// "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+	// several clusters share one domain. Has no effect unless domain is set.
+	// +kubebuilder:default=shard
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	HostnamePrefix string `json:"hostnamePrefix,omitempty"`
+
+	// Domain is the DNS domain under which shard hostnames are announced. When set,
+	// each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+	// clients in addition to its IP. The hostname must resolve to the shard's Service.
+	// +optional
+	Domain string `json:"domain,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

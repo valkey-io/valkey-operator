@@ -8,3 +8,4 @@ spec:
   externalAccess:
     enabled: true
     serviceType: NodePort
+    domain: valkey.example.com

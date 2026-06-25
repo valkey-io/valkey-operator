@@ -504,3 +504,24 @@ func TestHighestOffsetReplica(t *testing.T) {
 		}
 	})
 }
+
+func TestGetFailingNodes_WithAnnouncedHostname(t *testing.T) {
+	// When an announced hostname is set, CLUSTER NODES appends ",hostname" to the
+	// address field. The address parser must still extract the node IP so the
+	// reconciler can correlate it with the pod IP.
+	node := &NodeState{
+		ClusterNodes: "self 10.0.0.1:6379@16379,shard-0.example.com myself,master - 0 0 1 connected 0-5461\n" +
+			"dead1 10.0.0.99:6379@16379,shard-1.example.com master,fail - 0 0 2 connected 5462-10922\n",
+	}
+
+	failing := node.GetFailingNodes()
+	if len(failing) != 1 {
+		t.Fatalf("expected 1 failing node, got %d", len(failing))
+	}
+	if failing[0].Address != "10.0.0.99" {
+		t.Errorf("expected address 10.0.0.99, got %q", failing[0].Address)
+	}
+	if failing[0].Id != "dead1" {
+		t.Errorf("expected id dead1, got %q", failing[0].Id)
+	}
+}

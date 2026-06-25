@@ -296,6 +296,15 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		containers[0].Command = append(containers[0].Command,
 			"--cluster-announce-human-nodename", node.Name)
 		containers[0].Ports[0].Name = shardClientPortName(node.Labels[LabelNodeIndex])
+
+		// Announce the shard hostname so clients can be directed to it. This is
+		// metadata until cluster-preferred-endpoint-type selects hostname; the
+		// cluster bus continues to use the node's IP.
+		if ea.Domain != "" {
+			containers[0].Command = append(containers[0].Command,
+				"--cluster-announce-hostname",
+				shardHostname(ea.HostnamePrefix, node.Labels[LabelShardIndex], ea.Domain))
+		}
 	}
 
 	// Add exporter sidecar if enabled.

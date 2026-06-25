@@ -323,6 +323,13 @@ func shardClientPortName(nodeIndex string) string {
 	return "vk-n" + nodeIndex
 }
 
+// shardHostname returns the client-facing hostname a node announces, formed as
+// "<prefix>-<shardIndex>.<domain>". All nodes in a shard share one hostname; they
+// are distinguished by their announced client port.
+func shardHostname(prefix, shardIndex, domain string) string {
+	return fmt.Sprintf("%s-%s.%s", prefix, shardIndex, domain)
+}
+
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}

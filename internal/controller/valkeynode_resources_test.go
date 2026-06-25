@@ -435,6 +435,37 @@ func TestBuildContainersDef_ExternalAccessHumanNodename(t *testing.T) {
 		"enabling external access should announce the ValkeyNode name as the human nodename")
 }
 
+func TestBuildContainersDef_ExternalAccessHostname(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{
+		Enabled:        true,
+		HostnamePrefix: "shard",
+		Domain:         "example.com",
+	}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-hostname")
+	assert.Contains(t, containers[0].Command, "shard-1.example.com",
+		"the shard hostname should be <prefix>-<shardIndex>.<domain>")
+	// The client port is named per node so the shard Service can target it.
+	assert.Equal(t, "vk-n2", containers[0].Ports[0].Name)
+}
+
+func TestBuildContainersDef_ExternalAccessNoHostnameWithoutDomain(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true, HostnamePrefix: "shard"}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-hostname",
+		"no hostname should be announced when domain is unset")
+}
+
 func TestBuildContainersDef_ExternalAccessDisabledIsUnchanged(t *testing.T) {
 	// Backward compatibility: a nil or disabled ExternalAccess must render the
 	// same command as a cluster without the field at all.

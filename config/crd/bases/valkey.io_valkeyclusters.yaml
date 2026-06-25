@@ -2577,6 +2577,12 @@ spec:
                   When omitted, the cluster is internal-only and behaves identically to a cluster
                   without this field. Requires Valkey 9.0+.
                 properties:
+                  domain:
+                    description: |-
+                      Domain is the DNS domain under which shard hostnames are announced. When set,
+                      each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+                      clients in addition to its IP. The hostname must resolve to the shard's Service.
+                    type: string
                   enabled:
                     description: Enabled turns on external access for the cluster.
                     type: boolean
@@ -2588,6 +2594,14 @@ spec:
                     enum:
                     - Cluster
                     - Local
+                    type: string
+                  hostnamePrefix:
+                    default: shard
+                    description: |-
+                      HostnamePrefix is prepended to each shard hostname, which is announced as
+                      "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+                      several clusters share one domain. Has no effect unless domain is set.
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   serviceAnnotations:
                     additionalProperties:

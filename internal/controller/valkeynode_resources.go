@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -304,6 +305,18 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			containers[0].Command = append(containers[0].Command,
 				"--cluster-announce-hostname",
 				shardHostname(ea.HostnamePrefix, node.Labels[LabelShardIndex], ea.Domain))
+		}
+
+		// Announce the external client port once the per-shard Service has
+		// allocated it. The client port is separate from the node-to-node port,
+		// so the bus is unaffected. Under TLS the client port is a TLS port.
+		if node.Spec.ExternalAccessClientPort > 0 {
+			clientPortFlag := "--cluster-announce-client-port"
+			if node.Spec.TLS != nil {
+				clientPortFlag = "--cluster-announce-client-tls-port"
+			}
+			containers[0].Command = append(containers[0].Command,
+				clientPortFlag, strconv.Itoa(int(node.Spec.ExternalAccessClientPort)))
 		}
 	}
 

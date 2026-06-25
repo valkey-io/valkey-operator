@@ -2603,6 +2603,17 @@ spec:
                       several clusters share one domain. Has no effect unless domain is set.
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
+                  preferredEndpointType:
+                    default: ip
+                    description: |-
+                      PreferredEndpointType selects what clients are redirected to on MOVED/ASK and
+                      in CLUSTER SLOTS. "hostname" returns the announced shard hostname and external
+                      port; "ip" (the default) leaves clients on the internal pod IP. Setting
+                      "hostname" requires domain.
+                    enum:
+                    - ip
+                    - hostname
+                    type: string
                   serviceAnnotations:
                     additionalProperties:
                       type: string
@@ -3117,6 +3128,10 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: externalAccess.domain is required when preferredEndpointType
+                is hostname
+              rule: '!has(self.externalAccess) || self.externalAccess.preferredEndpointType
+                != ''hostname'' || has(self.externalAccess.domain)'
           status:
             default:
               readyShards: 0

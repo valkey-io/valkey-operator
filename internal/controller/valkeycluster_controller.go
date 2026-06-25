@@ -847,8 +847,25 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TLS:                       cluster.Spec.TLS,
 			Config:                    cluster.Spec.Config,
 			ExternalAccess:            cluster.Spec.ExternalAccess,
+			ExternalAccessClientPort:  externalClientPort(cluster, shardIndex, nodeIndex),
 		},
 	}
+}
+
+// externalClientPort returns the external client port allocated to a node from the
+// cluster's status, or 0 if external access is disabled or the port is not yet
+// allocated. The Service is reconciled before the nodes, so the port is normally
+// available on the same reconcile that creates the node.
+func externalClientPort(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int) int32 {
+	if cluster.Spec.ExternalAccess == nil || !cluster.Spec.ExternalAccess.Enabled {
+		return 0
+	}
+	for _, ep := range cluster.Status.ExternalEndpoints {
+		if int(ep.ShardIndex) == shardIndex && nodeIndex < len(ep.NodePorts) {
+			return ep.NodePorts[nodeIndex]
+		}
+	}
+	return 0
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {

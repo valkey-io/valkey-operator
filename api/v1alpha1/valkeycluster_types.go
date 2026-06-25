@@ -64,6 +64,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || self.externalAccess.preferredEndpointType != 'hostname' || has(self.externalAccess.domain)",message="externalAccess.domain is required when preferredEndpointType is hostname"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -191,6 +192,15 @@ type ExternalAccessSpec struct {
 	// clients in addition to its IP. The hostname must resolve to the shard's Service.
 	// +optional
 	Domain string `json:"domain,omitempty"`
+
+	// PreferredEndpointType selects what clients are redirected to on MOVED/ASK and
+	// in CLUSTER SLOTS. "hostname" returns the announced shard hostname and external
+	// port; "ip" (the default) leaves clients on the internal pod IP. Setting
+	// "hostname" requires domain.
+	// +kubebuilder:default=ip
+	// +kubebuilder:validation:Enum=ip;hostname
+	// +optional
+	PreferredEndpointType string `json:"preferredEndpointType,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

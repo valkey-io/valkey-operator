@@ -9,3 +9,4 @@ spec:
     enabled: true
     serviceType: NodePort
     domain: valkey.example.com
+    preferredEndpointType: hostname

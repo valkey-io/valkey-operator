@@ -2611,6 +2611,17 @@ spec:
                       several clusters share one domain. Has no effect unless domain is set.
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
+                  preferredEndpointType:
+                    default: ip
+                    description: |-
+                      PreferredEndpointType selects what clients are redirected to on MOVED/ASK and
+                      in CLUSTER SLOTS. "hostname" returns the announced shard hostname and external
+                      port; "ip" (the default) leaves clients on the internal pod IP. Setting
+                      "hostname" requires domain.
+                    enum:
+                    - ip
+                    - hostname
+                    type: string
                   serviceAnnotations:
                     additionalProperties:
                       type: string
@@ -2628,6 +2639,12 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+              externalAccessClientPort:
+                description: |-
+                  ExternalAccessClientPort is the external client port this node announces, set by
+                  the cluster controller after the per-shard Service has allocated its ports.
+                format: int32
+                type: integer
               image:
                 description: Image is the Valkey container image to use.
                 type: string

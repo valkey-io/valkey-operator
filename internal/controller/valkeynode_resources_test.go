@@ -466,6 +466,35 @@ func TestBuildContainersDef_ExternalAccessNoHostnameWithoutDomain(t *testing.T) 
 		"no hostname should be announced when domain is unset")
 }
 
+func TestBuildContainersDef_ExternalAccessClientPort(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+	node.Spec.ExternalAccessClientPort = 31234
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-client-port")
+	assert.Contains(t, containers[0].Command, "31234")
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-client-tls-port")
+}
+
+func TestBuildContainersDef_ExternalAccessClientPortTLS(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+	node.Spec.ExternalAccessClientPort = 31234
+	node.Spec.TLS = &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "tls"}}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-client-tls-port",
+		"a TLS cluster must announce a TLS client port")
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-client-port")
+}
+
 func TestBuildContainersDef_ExternalAccessDisabledIsUnchanged(t *testing.T) {
 	// Backward compatibility: a nil or disabled ExternalAccess must render the
 	// same command as a cluster without the field at all.

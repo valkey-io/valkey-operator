@@ -422,6 +422,38 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
 }
 
+func TestBuildContainersDef_ExternalAccessHumanNodename(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		[]string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)", "--cluster-announce-human-nodename", "mycluster-1-2"},
+		containers[0].Command,
+		"enabling external access should announce the ValkeyNode name as the human nodename")
+}
+
+func TestBuildContainersDef_ExternalAccessDisabledIsUnchanged(t *testing.T) {
+	// Backward compatibility: a nil or disabled ExternalAccess must render the
+	// same command as a cluster without the field at all.
+	base := newTestValkeyNode("mycluster-1-2", "test-ns")
+	baseContainers, err := buildContainersDef(base)
+	require.NoError(t, err)
+
+	disabled := newTestValkeyNode("mycluster-1-2", "test-ns")
+	disabled.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: false}
+	disabledContainers, err := buildContainersDef(disabled)
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		[]string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)"},
+		baseContainers[0].Command)
+	assert.Equal(t, baseContainers[0].Command, disabledContainers[0].Command,
+		"a disabled ExternalAccess must not change the rendered command")
+}
+
 func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	cm, err := buildValkeyNodeConfigMap(node)

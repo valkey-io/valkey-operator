@@ -82,7 +82,7 @@ The operator creates one Service per shard, selecting that shard's pods and expo
 
 | Field | Description |
 |---|---|
-| `serviceType` | `NodePort` (default) or `LoadBalancer`. |
+| `serviceType` | `NodePort` (default), `LoadBalancer`, or `ClusterIP`. Defaults to `ClusterIP` when a Gateway is configured. |
 | `externalTrafficPolicy` | `Cluster` (default) or `Local`. Use `Local` to preserve the client source IP. |
 | `serviceAnnotations` | Applied to each per-shard Service, e.g. for external-dns or a cloud load-balancer controller. |
 | `hostnamePrefix` | Prefix for shard hostnames (default `shard`). Set a unique prefix per cluster when several clusters share one domain. |
@@ -98,6 +98,29 @@ With `preferredEndpointType: hostname`, clients are redirected to the announced 
 To turn external access off, first set `preferredEndpointType: ip` so clients move off the hostnames, then remove `domain` or set `enabled: false`. Reversing the order would advertise a hostname endpoint that is no longer announced.
 
 When TLS is enabled, the certificate must cover both the internal Service FQDN (`valkey-<cluster>.<namespace>.svc.cluster.local`) and every shard hostname (`<hostnamePrefix>-0.<domain>` … `<hostnamePrefix>-N.<domain>`). Widen the certificate before scaling out.
+
+#### Gateway API
+
+```yaml
+externalAccess:
+  enabled: true
+  domain: valkey.example.com
+  preferredEndpointType: hostname
+  gateway:
+    gatewayRef:
+      name: public-gateway
+    basePort: 30000
+```
+
+When `gateway` is set, the operator creates one [Gateway API](https://gateway-api.sigs.k8s.io/) `TCPRoute` per node, attaching to an existing `Gateway` in the same namespace and forwarding to the node's port on the per-shard Service. The Gateway becomes the external surface, so the per-shard Service defaults to `ClusterIP` (override `serviceType` to also expose it directly). This requires the Gateway API CRDs to be installed; without them the field is ignored and the operator records a warning event.
+
+| Field | Description |
+|---|---|
+| `gatewayRef.name` | Name of the Gateway, in the same namespace as the cluster, that the TCPRoutes attach to. |
+| `gatewayRef.sectionName` | Optional named listener on the Gateway to pin the routes to. |
+| `basePort` | First Gateway listener port. The node at `(shardIndex, nodeIndex)` attaches to `basePort + shardIndex*(replicas+1) + nodeIndex`, which is also the port announced to clients. |
+
+You provision the Gateway and one listener per node port, and the DNS that resolves the shard hostnames to the Gateway address. Cross-namespace Gateways are not supported in this version.
 
 ### Metrics
 

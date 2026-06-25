@@ -160,10 +160,11 @@ type ExternalAccessSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
-	// ServiceType is the type of the per-shard Service. NodePort ports are allocated
-	// by Kubernetes; LoadBalancer frontend ports are derived from the node index.
-	// +kubebuilder:default=NodePort
-	// +kubebuilder:validation:Enum=NodePort;LoadBalancer
+	// ServiceType is the type of the per-shard Service. NodePort (the default) lets
+	// Kubernetes allocate the external ports; LoadBalancer frontend ports are derived
+	// from the node index. ClusterIP keeps the Service internal, which is the default
+	// and intended backend when the cluster is exposed through a Gateway.
+	// +kubebuilder:validation:Enum=NodePort;LoadBalancer;ClusterIP
 	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
@@ -201,6 +202,40 @@ type ExternalAccessSpec struct {
 	// +kubebuilder:validation:Enum=ip;hostname
 	// +optional
 	PreferredEndpointType string `json:"preferredEndpointType,omitempty"`
+
+	// Gateway exposes the cluster through Gateway API TCPRoutes attached to an
+	// existing Gateway in the same namespace. It requires the Gateway API CRDs to be
+	// installed; when they are absent the field is ignored. When set, the per-shard
+	// Service defaults to ClusterIP so the Gateway is the only external surface.
+	// +optional
+	Gateway *GatewayExposureSpec `json:"gateway,omitempty"`
+}
+
+// GatewayExposureSpec configures exposure of a ValkeyCluster through Gateway API
+// TCPRoutes. The operator creates one TCPRoute per node; the user owns the Gateway
+// and its listeners.
+type GatewayExposureSpec struct {
+	// GatewayRef identifies the Gateway, in the same namespace as the cluster, that
+	// the generated TCPRoutes attach to.
+	GatewayRef GatewayReference `json:"gatewayRef"`
+
+	// BasePort is the first Gateway listener port. The node at (shardIndex, nodeIndex)
+	// is reached on basePort + shardIndex*(replicas+1) + nodeIndex, which must match a
+	// listener on the Gateway. This value is also announced to clients as the node's
+	// client port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	BasePort int32 `json:"basePort"`
+}
+
+// GatewayReference identifies a Gateway resource in the same namespace as the cluster.
+type GatewayReference struct {
+	// Name is the name of the Gateway.
+	Name string `json:"name"`
+
+	// SectionName optionally pins the TCPRoutes to a named listener on the Gateway.
+	// +optional
+	SectionName *string `json:"sectionName,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

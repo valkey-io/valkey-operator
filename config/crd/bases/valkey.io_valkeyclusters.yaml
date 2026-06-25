@@ -2595,6 +2595,42 @@ spec:
                     - Cluster
                     - Local
                     type: string
+                  gateway:
+                    description: |-
+                      Gateway exposes the cluster through Gateway API TCPRoutes attached to an
+                      existing Gateway in the same namespace. It requires the Gateway API CRDs to be
+                      installed; when they are absent the field is ignored. When set, the per-shard
+                      Service defaults to ClusterIP so the Gateway is the only external surface.
+                    properties:
+                      basePort:
+                        description: |-
+                          BasePort is the first Gateway listener port. The node at (shardIndex, nodeIndex)
+                          is reached on basePort + shardIndex*(replicas+1) + nodeIndex, which must match a
+                          listener on the Gateway. This value is also announced to clients as the node's
+                          client port.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      gatewayRef:
+                        description: |-
+                          GatewayRef identifies the Gateway, in the same namespace as the cluster, that
+                          the generated TCPRoutes attach to.
+                        properties:
+                          name:
+                            description: Name is the name of the Gateway.
+                            type: string
+                          sectionName:
+                            description: SectionName optionally pins the TCPRoutes
+                              to a named listener on the Gateway.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - basePort
+                    - gatewayRef
+                    type: object
                   hostnamePrefix:
                     default: shard
                     description: |-
@@ -2622,13 +2658,15 @@ spec:
                       configure external-dns or a cloud load-balancer controller.
                     type: object
                   serviceType:
-                    default: NodePort
                     description: |-
-                      ServiceType is the type of the per-shard Service. NodePort ports are allocated
-                      by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+                      ServiceType is the type of the per-shard Service. NodePort (the default) lets
+                      Kubernetes allocate the external ports; LoadBalancer frontend ports are derived
+                      from the node index. ClusterIP keeps the Service internal, which is the default
+                      and intended backend when the cluster is exposed through a Gateway.
                     enum:
                     - NodePort
                     - LoadBalancer
+                    - ClusterIP
                     type: string
                 type: object
               image:

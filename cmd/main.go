@@ -36,7 +36,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +49,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
@@ -62,6 +65,29 @@ func init() {
 
 	utilruntime.Must(valkeyiov1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// gatewayAPIAvailable reports whether the Gateway API TCPRoute kind is served by
+// the API server. Gateway API is an optional dependency: when its CRDs are not
+// installed the operator runs exactly as it would without Gateway support.
+func gatewayAPIAvailable(cfg *rest.Config) bool {
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "Failed to create discovery client; assuming Gateway API is unavailable")
+		return false
+	}
+	resources, err := dc.ServerResourcesForGroupVersion(gatewayv1alpha2.GroupVersion.String())
+	if err != nil {
+		// A NotFound here means the group/version is not served; treat any error as
+		// "unavailable" and leave the Gateway integration disabled.
+		return false
+	}
+	for _, r := range resources.APIResources {
+		if r.Kind == "TCPRoute" {
+			return true
+		}
+	}
+	return false
 }
 
 // nolint:gocyclo
@@ -191,20 +217,33 @@ func main() {
 	managedBySelector := labels.SelectorFromSet(labels.Set{
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	})
-	cacheOpts := cache.Options{
-		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Service{}:               {Label: managedBySelector},
-			&appsv1.StatefulSet{}:           {Label: managedBySelector},
-			&appsv1.Deployment{}:            {Label: managedBySelector},
-			&corev1.ConfigMap{}:             {Label: managedBySelector},
-			&corev1.Secret{}:                {Label: managedBySelector},
-			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
-			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
-			// Pod is not explicitly watched but is cached due to r.List calls
-			// in the ValkeyNode controller.
-			&corev1.Pod{}: {Label: managedBySelector},
-		},
+	cacheByObject := map[client.Object]cache.ByObject{
+		&corev1.Service{}:               {Label: managedBySelector},
+		&appsv1.StatefulSet{}:           {Label: managedBySelector},
+		&appsv1.Deployment{}:            {Label: managedBySelector},
+		&corev1.ConfigMap{}:             {Label: managedBySelector},
+		&corev1.Secret{}:                {Label: managedBySelector},
+		&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
+		&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
+		// Pod is not explicitly watched but is cached due to r.List calls
+		// in the ValkeyNode controller.
+		&corev1.Pod{}: {Label: managedBySelector},
 	}
+
+	// Gateway API is optional. Only register its scheme and cache it when the
+	// TCPRoute kind is served; otherwise the operator behaves as if the feature
+	// did not exist, and never references a type the API server cannot serve.
+	restConfig := ctrl.GetConfigOrDie()
+	gatewayAPIEnabled := gatewayAPIAvailable(restConfig)
+	if gatewayAPIEnabled {
+		utilruntime.Must(gatewayv1alpha2.Install(scheme))
+		cacheByObject[&gatewayv1alpha2.TCPRoute{}] = cache.ByObject{Label: managedBySelector}
+		setupLog.Info("Gateway API detected; TCPRoute exposure is available")
+	} else {
+		setupLog.Info("Gateway API not detected; TCPRoute exposure is disabled")
+	}
+
+	cacheOpts := cache.Options{ByObject: cacheByObject}
 	if len(watchNamespaces) > 0 {
 		setupLog.Info("Restricting cache to namespaces", "namespaces", watchNamespaces)
 		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))
@@ -213,7 +252,7 @@ func main() {
 		}
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		Cache:                  cacheOpts,
@@ -239,9 +278,10 @@ func main() {
 	}
 
 	if err := (&controller.ValkeyClusterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("valkeycluster-controller"),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorder("valkeycluster-controller"),
+		GatewayAPIEnabled: gatewayAPIEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "ValkeyCluster")
 		os.Exit(1)

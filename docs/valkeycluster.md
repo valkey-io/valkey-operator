@@ -12,6 +12,7 @@
 
 - [Config](#config)
 - [Containers](#containers)
+- [External access](#external-access)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
@@ -62,6 +63,17 @@ containers:
 ```
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
+
+### External access
+
+```yaml
+externalAccess:
+  enabled: true
+```
+
+`externalAccess` configures reachability of the cluster from outside Kubernetes. When omitted, the cluster is internal-only and behaves identically to a cluster without this field. Requires Valkey 9.0+.
+
+Enabling external access announces a human-readable node name (the ValkeyNode name, e.g. `cluster-sample-1-2`) so cluster events such as failures reference it alongside the node ID. Node-to-node traffic (gossip and replication) always stays on internal pod IPs.
 
 ### Metrics
 

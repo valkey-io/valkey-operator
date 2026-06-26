@@ -2571,6 +2571,16 @@ spec:
                         type: object
                     type: object
                 type: object
+              externalAccess:
+                description: |-
+                  ExternalAccess configures reachability of the cluster from outside Kubernetes.
+                  When omitted, the cluster is internal-only and behaves identically to a cluster
+                  without this field. Requires Valkey 9.0+.
+                properties:
+                  enabled:
+                    description: Enabled turns on external access for the cluster.
+                    type: boolean
+                type: object
               image:
                 description: Override the default Valkey image
                 type: string

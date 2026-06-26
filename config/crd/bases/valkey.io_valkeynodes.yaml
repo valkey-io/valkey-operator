@@ -2580,6 +2580,15 @@ spec:
                         type: object
                     type: object
                 type: object
+              externalAccess:
+                description: |-
+                  ExternalAccess is copied verbatim from the owning cluster's Spec.ExternalAccess
+                  and configures how this node is exposed to clients outside the Kubernetes cluster.
+                properties:
+                  enabled:
+                    description: Enabled turns on external access for the cluster.
+                    type: boolean
+                type: object
               image:
                 description: Image is the Valkey container image to use.
                 type: string

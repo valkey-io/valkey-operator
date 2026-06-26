@@ -288,6 +288,14 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
+	// When external access is enabled, announce a human-readable node name so
+	// cross-node events (e.g. failures) reference the ValkeyNode name instead of
+	// only the opaque node ID.
+	if ea := node.Spec.ExternalAccess; ea != nil && ea.Enabled {
+		containers[0].Command = append(containers[0].Command,
+			"--cluster-announce-human-nodename", node.Name)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))

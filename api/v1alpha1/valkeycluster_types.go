@@ -144,6 +144,21 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default=Managed
 	// +optional
 	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+
+	// ExternalAccess configures reachability of the cluster from outside Kubernetes.
+	// When omitted, the cluster is internal-only and behaves identically to a cluster
+	// without this field. Requires Valkey 9.0+.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+}
+
+// ExternalAccessSpec defines how a ValkeyCluster is exposed to clients outside the
+// Kubernetes cluster. Node-to-node traffic always stays on internal pod IPs; only
+// the client-facing endpoint is affected.
+type ExternalAccessSpec struct {
+	// Enabled turns on external access for the cluster.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

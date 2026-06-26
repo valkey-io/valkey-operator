@@ -3052,6 +3052,8 @@ spec:
                 x-kubernetes-validations:
                 - message: workloadType is immutable
                   rule: self == oldSelf
+            required:
+            - shards
             type: object
             x-kubernetes-validations:
             - message: persistence requires workloadType StatefulSet

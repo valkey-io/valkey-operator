@@ -508,6 +508,9 @@ var _ = Describe("updateStatus", func() {
 				Name:      "test-cluster",
 				Namespace: "default",
 			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1,
+			},
 		}
 		// In a real scenario, the reconciler would be created with a real client,
 		// but for this focused unit test, we can use a fake client if needed,
@@ -693,6 +696,10 @@ var _ = Describe("EventRecorder", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "event-type-test",
 					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())

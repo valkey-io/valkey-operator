@@ -76,8 +76,9 @@ type ValkeyClusterSpec struct {
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// The number of shards groups. Each shard group contains one primary and N replicas.
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
-	Shards int32 `json:"shards,omitempty"`
+	Shards int32 `json:"shards"`
 
 	// The number of replicas for each shard group.
 	// +kubebuilder:validation:Minimum=0

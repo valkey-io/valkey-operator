@@ -144,6 +144,54 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default=Managed
 	// +optional
 	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+
+	// ExternalAccess configures reachability of the cluster from outside Kubernetes.
+	// When omitted, the cluster is internal-only and behaves identically to a cluster
+	// without this field. Requires Valkey 9.0+.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+}
+
+// ExternalAccessSpec defines how a ValkeyCluster is exposed to clients outside the
+// Kubernetes cluster. Node-to-node traffic always stays on internal pod IPs; only
+// the client-facing endpoint is affected.
+type ExternalAccessSpec struct {
+	// Enabled turns on external access for the cluster.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ServiceType is the type of the per-shard Service. NodePort ports are allocated
+	// by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+	// +kubebuilder:default=NodePort
+	// +kubebuilder:validation:Enum=NodePort;LoadBalancer
+	// +optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+
+	// ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+	// Use Local to preserve the client source IP, which requires DNS to resolve a
+	// shard hostname to the nodes hosting that shard's pods.
+	// +kubebuilder:validation:Enum=Cluster;Local
+	// +optional
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
+
+	// ServiceAnnotations are applied to each per-shard Service, for example to
+	// configure external-dns or a cloud load-balancer controller.
+	// +optional
+	ServiceAnnotations map[string]string `json:"serviceAnnotations,omitempty"`
+
+	// HostnamePrefix is prepended to each shard hostname, which is announced as
+	// "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+	// several clusters share one domain. Has no effect unless domain is set.
+	// +kubebuilder:default=shard
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	HostnamePrefix string `json:"hostnamePrefix,omitempty"`
+
+	// Domain is the DNS domain under which shard hostnames are announced. When set,
+	// each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+	// clients in addition to its IP. The hostname must resolve to the shard's Service.
+	// +optional
+	Domain string `json:"domain,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
@@ -213,6 +261,25 @@ type ValkeyClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ExternalEndpoints lists the externally-reachable endpoint of each shard,
+	// populated when external access is enabled.
+	// +listType=map
+	// +listMapKey=shardIndex
+	// +optional
+	ExternalEndpoints []ShardEndpoint `json:"externalEndpoints,omitempty"`
+}
+
+// ShardEndpoint describes the externally-reachable endpoint of a single shard.
+type ShardEndpoint struct {
+	// ShardIndex is the index of the shard this endpoint belongs to.
+	ShardIndex int32 `json:"shardIndex"`
+
+	// NodePorts are the external ports of the shard's nodes, indexed by node index
+	// (NodePorts[0] is the node-index 0 port). The address to reach each port
+	// depends on the Service type and the user's DNS configuration.
+	// +optional
+	NodePorts []int32 `json:"nodePorts,omitempty"`
 }
 
 const (

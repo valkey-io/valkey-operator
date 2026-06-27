@@ -288,6 +288,25 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
+	// When external access is enabled, announce a human-readable node name so
+	// cross-node events (e.g. failures) reference the ValkeyNode name instead of
+	// only the opaque node ID, and give the client port a node-unique name so a
+	// per-shard Service can target this node individually.
+	if ea := node.Spec.ExternalAccess; ea != nil && ea.Enabled {
+		containers[0].Command = append(containers[0].Command,
+			"--cluster-announce-human-nodename", node.Name)
+		containers[0].Ports[0].Name = shardClientPortName(node.Labels[LabelNodeIndex])
+
+		// Announce the shard hostname so clients can be directed to it. This is
+		// metadata until cluster-preferred-endpoint-type selects hostname; the
+		// cluster bus continues to use the node's IP.
+		if ea.Domain != "" {
+			containers[0].Command = append(containers[0].Command,
+				"--cluster-announce-hostname",
+				shardHostname(ea.HostnamePrefix, node.Labels[LabelShardIndex], ea.Domain))
+		}
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))

@@ -315,6 +315,21 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }
 
+// shardClientPortName returns the node-unique name of the server container's
+// client port. A per-shard Service targets each node individually by referencing
+// this name as its targetPort, so only the matching pod is added to the endpoints
+// of that Service port. The name fits the 15-character port-name limit.
+func shardClientPortName(nodeIndex string) string {
+	return "vk-n" + nodeIndex
+}
+
+// shardHostname returns the client-facing hostname a node announces, formed as
+// "<prefix>-<shardIndex>.<domain>". All nodes in a shard share one hostname; they
+// are distinguished by their announced client port.
+func shardHostname(prefix, shardIndex, domain string) string {
+	return fmt.Sprintf("%s-%s.%s", prefix, shardIndex, domain)
+}
+
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}

@@ -2580,6 +2580,54 @@ spec:
                         type: object
                     type: object
                 type: object
+              externalAccess:
+                description: |-
+                  ExternalAccess is copied verbatim from the owning cluster's Spec.ExternalAccess
+                  and configures how this node is exposed to clients outside the Kubernetes cluster.
+                properties:
+                  domain:
+                    description: |-
+                      Domain is the DNS domain under which shard hostnames are announced. When set,
+                      each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+                      clients in addition to its IP. The hostname must resolve to the shard's Service.
+                    type: string
+                  enabled:
+                    description: Enabled turns on external access for the cluster.
+                    type: boolean
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+                      Use Local to preserve the client source IP, which requires DNS to resolve a
+                      shard hostname to the nodes hosting that shard's pods.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  hostnamePrefix:
+                    default: shard
+                    description: |-
+                      HostnamePrefix is prepended to each shard hostname, which is announced as
+                      "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+                      several clusters share one domain. Has no effect unless domain is set.
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  serviceAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ServiceAnnotations are applied to each per-shard Service, for example to
+                      configure external-dns or a cloud load-balancer controller.
+                    type: object
+                  serviceType:
+                    default: NodePort
+                    description: |-
+                      ServiceType is the type of the per-shard Service. NodePort ports are allocated
+                      by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+                    enum:
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
               image:
                 description: Image is the Valkey container image to use.
                 type: string

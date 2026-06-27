@@ -50,6 +50,7 @@ body:
       label: Scope of change
       description: Best guess — maintainers may reclassify during triage.
       options:
+        - ""
         - Small (small CRD field or controller behaviour tweak)
         - Medium (new CRD field group / new controller flow)
         - Large (new CRD, major behaviour change, requires design doc)

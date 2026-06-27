@@ -100,7 +100,7 @@ body:
     id: k8s-version
     attributes:
       label: Kubernetes version
-      description: Output of `kubectl version --short` (server version is what matters).
+      description: Output of `kubectl version` (server version is what matters).
       placeholder: e.g. v1.31.2
     validations:
       required: true

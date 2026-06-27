@@ -2571,6 +2571,66 @@ spec:
                         type: object
                     type: object
                 type: object
+              externalAccess:
+                description: |-
+                  ExternalAccess configures reachability of the cluster from outside Kubernetes.
+                  When omitted, the cluster is internal-only and behaves identically to a cluster
+                  without this field. Requires Valkey 9.0+.
+                properties:
+                  domain:
+                    description: |-
+                      Domain is the DNS domain under which shard hostnames are announced. When set,
+                      each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+                      clients in addition to its IP. The hostname must resolve to the shard's Service.
+                    type: string
+                  enabled:
+                    description: Enabled turns on external access for the cluster.
+                    type: boolean
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+                      Use Local to preserve the client source IP, which requires DNS to resolve a
+                      shard hostname to the nodes hosting that shard's pods.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  hostnamePrefix:
+                    default: shard
+                    description: |-
+                      HostnamePrefix is prepended to each shard hostname, which is announced as
+                      "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+                      several clusters share one domain. Has no effect unless domain is set.
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  preferredEndpointType:
+                    default: ip
+                    description: |-
+                      PreferredEndpointType selects what clients are redirected to on MOVED/ASK and
+                      in CLUSTER SLOTS. "hostname" returns the announced shard hostname and external
+                      port; "ip" (the default) leaves clients on the internal pod IP. Setting
+                      "hostname" requires domain.
+                    enum:
+                    - ip
+                    - hostname
+                    type: string
+                  serviceAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ServiceAnnotations are applied to each per-shard Service, for example to
+                      configure external-dns or a cloud load-balancer controller.
+                    type: object
+                  serviceType:
+                    default: NodePort
+                    description: |-
+                      ServiceType is the type of the per-shard Service. NodePort ports are allocated
+                      by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+                    enum:
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
               image:
                 description: Override the default Valkey image
                 type: string
@@ -3070,6 +3130,10 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: externalAccess.domain is required when preferredEndpointType
+                is hostname
+              rule: '!has(self.externalAccess) || self.externalAccess.preferredEndpointType
+                != ''hostname'' || has(self.externalAccess.domain)'
           status:
             default:
               readyShards: 0
@@ -3143,6 +3207,35 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
+                x-kubernetes-list-type: map
+              externalEndpoints:
+                description: |-
+                  ExternalEndpoints lists the externally-reachable endpoint of each shard,
+                  populated when external access is enabled.
+                items:
+                  description: ShardEndpoint describes the externally-reachable endpoint
+                    of a single shard.
+                  properties:
+                    nodePorts:
+                      description: |-
+                        NodePorts are the external ports of the shard's nodes, indexed by node index
+                        (NodePorts[0] is the node-index 0 port). The address to reach each port
+                        depends on the Service type and the user's DNS configuration.
+                      items:
+                        format: int32
+                        type: integer
+                      type: array
+                    shardIndex:
+                      description: ShardIndex is the index of the shard this endpoint
+                        belongs to.
+                      format: int32
+                      type: integer
+                  required:
+                  - shardIndex
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - shardIndex
                 x-kubernetes-list-type: map
               message:
                 description: Message provides human-readable details about the current

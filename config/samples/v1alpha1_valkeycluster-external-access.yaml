@@ -1,0 +1,12 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-external-access-sample
+spec:
+  shards: 3
+  replicas: 1
+  externalAccess:
+    enabled: true
+    serviceType: NodePort
+    domain: valkey.example.com
+    preferredEndpointType: hostname

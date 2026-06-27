@@ -52,6 +52,28 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 	})
 })
 
+var _ = Describe("External access config", Label("externalaccess"), func() {
+	It("omits cluster-preferred-endpoint-type by default", func() {
+		Expect(buildServerConfig(getSampleCluster())).NotTo(ContainSubstring("cluster-preferred-endpoint-type"))
+	})
+
+	It("sets cluster-preferred-endpoint-type when the endpoint type is hostname", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.ExternalAccess = &valkeyiov1alpha1.ExternalAccessSpec{
+			Enabled:               true,
+			Domain:                "example.com",
+			PreferredEndpointType: "hostname",
+		}
+		Expect(buildServerConfig(cluster)).To(ContainSubstring("cluster-preferred-endpoint-type hostname"))
+	})
+
+	It("leaves clients on IP when the endpoint type is not hostname", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.ExternalAccess = &valkeyiov1alpha1.ExternalAccessSpec{Enabled: true}
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("cluster-preferred-endpoint-type"))
+	})
+})
+
 var _ = Describe("Live config", Label("liveconfig"), func() {
 	newCluster := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
 		return &valkeyiov1alpha1.ValkeyCluster{

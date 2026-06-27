@@ -41,6 +41,20 @@ const (
 	eventActionProactiveFailover = "ProactiveFailover"
 )
 
+type FailoverType string
+
+const (
+	FailoverProactive FailoverType = "proactive"
+)
+
+var FailoverTypes = []FailoverType{
+	FailoverProactive,
+}
+
+func (ft FailoverType) String() string {
+	return string(ft)
+}
+
 // findFailoverShard returns the shard and its synced replicas if the node at
 // address is a primary that should be gracefully failed over before being
 // updated, or nil if no failover is needed.
@@ -106,7 +120,7 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 			if role == RolePrimary {
 				recorder.Eventf(cluster, nil, corev1.EventTypeNormal, eventReasonFailoverCompleted, eventActionProactiveFailover, "Failover completed: %s is now primary in shard %s", target.Address, shard.Id)
 				log.Info("proactive failover completed", "newPrimary", target.Address, "shard", shard.Id)
-				failoversTotal.WithLabelValues(cluster.Name, cluster.Namespace, "proactive").Inc()
+				failoversTotal.WithLabelValues(cluster.Name, cluster.Namespace, FailoverProactive.String()).Inc()
 				return nil
 			}
 		}

@@ -37,9 +37,9 @@ import (
 const (
 	// Credentials the e2e provisions to stand in for the operator-managed
 	// "_operator" system user.
-	e2eOperatorPassword = "e2eOperatorPassw0rd"
+	e2eOperatorPassword    = "e2eOperatorPassw0rd"
 	e2eReplicationPassword = "e2eReplicationPassword"
-	e2eDefaultPassword  = "e2eDefaultPassword"
+	e2eDefaultPassword     = "e2eDefaultPassword"
 )
 
 var _ = Describe("ValkeyNode", func() {

@@ -28,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -993,7 +992,7 @@ func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough(t *testin
 	gid := int64(56849)
 	fsGroup := int64(56849)
 	psc := &corev1.PodSecurityContext{
-		RunAsNonRoot:   ptr.To(true),
+		RunAsNonRoot:   boolPtr(true),
 		RunAsUser:      &uid,
 		RunAsGroup:     &gid,
 		FSGroup:        &fsGroup,

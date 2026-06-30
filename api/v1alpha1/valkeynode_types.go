@@ -120,6 +120,11 @@ type ValkeyNodeSpec struct {
 	// the rest take effect on the next pod roll.
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
+
+	// Override the PodSecurityContext applied to the ValkeyNode pod.
+	// When set, this overrides the default PodSecurityContext.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

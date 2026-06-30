@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -114,21 +115,57 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
 	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
 
-	// VolumeMounts
-	require.Len(t, c.VolumeMounts, 2)
+	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence)
+	require.Len(t, c.VolumeMounts, 3)
 	assert.Equal(t, "scripts", c.VolumeMounts[0].Name)
 	assert.Equal(t, "/scripts", c.VolumeMounts[0].MountPath)
 	assert.Equal(t, "valkey-conf", c.VolumeMounts[1].Name)
 	assert.Equal(t, "/config", c.VolumeMounts[1].MountPath)
 	assert.True(t, c.VolumeMounts[1].ReadOnly, "valkey-conf mount should be read-only")
+	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
+	assert.Equal(t, dataMountPath, c.VolumeMounts[2].MountPath)
+	assert.False(t, c.VolumeMounts[2].ReadOnly, "/data must be writable for nodes.conf")
 
-	// Volumes
-	require.Len(t, pts.Spec.Volumes, 2)
+	// Volumes: scripts + valkey-conf + /data emptyDir
+	require.Len(t, pts.Spec.Volumes, 3)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
+	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
+	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	var dataVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == dataVolumeName {
+			dataVol = &pts.Spec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, dataVol, "/data volume must exist even without persistence (PSS-restricted / readOnlyRootFilesystem support)")
+	require.NotNil(t, dataVol.EmptyDir, "/data should be an emptyDir when persistence is not configured")
+	assert.Nil(t, dataVol.PersistentVolumeClaim)
+
+	server := pts.Spec.Containers[0]
+	var dataMount *corev1.VolumeMount
+	for i := range server.VolumeMounts {
+		if server.VolumeMounts[i].Name == dataVolumeName {
+			dataMount = &server.VolumeMounts[i]
+			break
+		}
+	}
+	require.NotNil(t, dataMount, "server container must mount /data")
+	assert.Equal(t, dataMountPath, dataMount.MountPath)
+	assert.False(t, dataMount.ReadOnly)
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -494,14 +531,27 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Volumes, 3)
-	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
-	require.NotNil(t, pts.Spec.Volumes[2].PersistentVolumeClaim)
-	assert.Equal(t, "valkey-mynode-data", pts.Spec.Volumes[2].PersistentVolumeClaim.ClaimName)
+	var dataVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == dataVolumeName {
+			dataVol = &pts.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, dataVol, "data volume must be present")
+	require.NotNil(t, dataVol.PersistentVolumeClaim, "with persistence the data volume must be a PVC")
+	require.Nil(t, dataVol.EmptyDir, "with persistence the data volume must not be an emptyDir")
+	assert.Equal(t, "valkey-mynode-data", dataVol.PersistentVolumeClaim.ClaimName)
 
 	server := pts.Spec.Containers[0]
 	require.Len(t, server.VolumeMounts, 3)
-	assert.Equal(t, dataVolumeName, server.VolumeMounts[2].Name)
-	assert.Equal(t, dataMountPath, server.VolumeMounts[2].MountPath)
+	var dataMount *corev1.VolumeMount
+	for i := range server.VolumeMounts {
+		if server.VolumeMounts[i].Name == dataVolumeName {
+			dataMount = &server.VolumeMounts[i]
+		}
+	}
+	require.NotNil(t, dataMount, "server container must mount /data")
+	assert.Equal(t, dataMountPath, dataMount.MountPath)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
@@ -688,17 +738,21 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	// Volumes: scripts, valkey-conf, users-acl
-	require.Len(t, pts.Spec.Volumes, 3)
+	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir
+	require.Len(t, pts.Spec.Volumes, 4)
 	aclVol := pts.Spec.Volumes[2]
 	assert.Equal(t, "users-acl", aclVol.Name)
 	require.NotNil(t, aclVol.Secret)
 	assert.Equal(t, "mynode-internal", aclVol.Secret.SecretName)
+	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[3].Name)
+	require.NotNil(t, pts.Spec.Volumes[3].EmptyDir)
 
-	// VolumeMounts on the server container (always Containers[0])
+	// VolumeMounts on the server container (always Containers[0]):
+	// scripts, valkey-conf, /data, users-acl
 	c := pts.Spec.Containers[0]
-	require.Len(t, c.VolumeMounts, 3)
-	aclMount := c.VolumeMounts[2]
+	require.Len(t, c.VolumeMounts, 4)
+	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
+	aclMount := c.VolumeMounts[3]
 	assert.Equal(t, "users-acl", aclMount.Name)
 	assert.Equal(t, "/config/users", aclMount.MountPath)
 	assert.True(t, aclMount.ReadOnly)
@@ -710,8 +764,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 2, "should only have scripts and valkey-conf volumes")
-	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 2, "should only have scripts and valkey-conf mounts")
+	require.Len(t, pts.Spec.Volumes, 3, "scripts, valkey-conf, /data emptyDir")
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 3, "scripts, valkey-conf, /data")
 }
 
 func TestLivenessCheckScript(t *testing.T) {
@@ -929,4 +983,40 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			assert.NotContains(t, string(got), "-user")
 		})
 	}
+}
+
+// TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough verifies
+// the user-supplied PodSecurityContext is set verbatim on the pod (fixes the
+// persistence + non-root + PSS-restricted permission-denied case).
+func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough(t *testing.T) {
+	uid := int64(56849)
+	gid := int64(56849)
+	fsGroup := int64(56849)
+	psc := &corev1.PodSecurityContext{
+		RunAsNonRoot:   ptr.To(true),
+		RunAsUser:      &uid,
+		RunAsGroup:     &gid,
+		FSGroup:        &fsGroup,
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.PodSecurityContext = psc
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.NotNil(t, pts.Spec.SecurityContext, "pod-level SecurityContext should be set")
+	assert.Equal(t, psc, pts.Spec.SecurityContext, "PodSecurityContext should pass through verbatim")
+}
+
+// TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop confirms
+// backward compatibility: omitting the field results in no pod-level
+// SecurityContext (existing CRs unchanged).
+func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Nil(t, pts.Spec.SecurityContext, "omitting PodSecurityContext must leave pod-level SecurityContext nil")
 }

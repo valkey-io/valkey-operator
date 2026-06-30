@@ -255,12 +255,12 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
-	if node.Spec.Persistence != nil {
-		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
-			Name:      dataVolumeName,
-			MountPath: dataMountPath,
-		})
-	}
+	// /data is always mounted (PVC when persistence is set, emptyDir otherwise)
+	// so the server can write nodes.conf under readOnlyRootFilesystem.
+	containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      dataVolumeName,
+		MountPath: dataMountPath,
+	})
 
 	if node.Spec.TLS != nil {
 		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
@@ -367,6 +367,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		Affinity:                  node.Spec.Affinity,
 		Tolerations:               node.Spec.Tolerations,
 		TopologySpreadConstraints: buildShardTopologySpreadConstraints(node, labels),
+		SecurityContext:           node.Spec.PodSecurityContext,
 		Volumes: []corev1.Volume{
 			{
 				Name: "scripts",
@@ -420,16 +421,21 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		})
 	}
 
+	// Back /data with a PVC when persistence is set; otherwise an emptyDir so
+	// the cluster works on readOnlyRootFilesystem.
+	dataVolume := corev1.Volume{Name: dataVolumeName}
 	if node.Spec.Persistence != nil {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: dataVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: valkeyNodePVCName(node),
-				},
+		dataVolume.VolumeSource = corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: valkeyNodePVCName(node),
 			},
-		})
+		}
+	} else {
+		dataVolume.VolumeSource = corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		}
 	}
+	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{

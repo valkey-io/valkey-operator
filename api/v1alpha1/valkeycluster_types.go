@@ -144,6 +144,11 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default=Managed
 	// +optional
 	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+
+	// Override the PodSecurityContext applied to each ValkeyNode pod of the cluster.
+	// When set, this overrides the default PodSecurityContext.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

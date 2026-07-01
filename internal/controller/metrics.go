@@ -73,6 +73,20 @@ var (
 	)
 )
 
+// initClusterMetrics creates empty metrics for a valkey cluster
+func initClusterMetrics(name, namespace string) {
+	for _, s := range valkeyiov1alpha1.ClusterStates {
+		clusterStateInfo.WithLabelValues(name, namespace, string(s))
+	}
+	for _, s := range FailoverTypes {
+		failoversTotal.WithLabelValues(name, namespace, s.String())
+	}
+
+	clusterShards.WithLabelValues(name, namespace)
+	clusterShardsReady.WithLabelValues(name, namespace)
+	slotMigrationBatchesTotal.WithLabelValues(name, namespace)
+}
+
 // updateClusterMetrics sets the Prometheus gauges for a ValkeyCluster.
 func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
 	name := cluster.Name

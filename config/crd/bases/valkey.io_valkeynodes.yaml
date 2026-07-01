@@ -2580,6 +2580,40 @@ spec:
                         type: object
                     type: object
                 type: object
+              externalAccess:
+                description: |-
+                  ExternalAccess is copied verbatim from the owning cluster's Spec.ExternalAccess
+                  and configures how this node is exposed to clients outside the Kubernetes cluster.
+                properties:
+                  enabled:
+                    description: Enabled turns on external access for the cluster.
+                    type: boolean
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+                      Use Local to preserve the client source IP, which requires DNS to resolve a
+                      shard hostname to the nodes hosting that shard's pods.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  serviceAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ServiceAnnotations are applied to each per-shard Service, for example to
+                      configure external-dns or a cloud load-balancer controller.
+                    type: object
+                  serviceType:
+                    default: NodePort
+                    description: |-
+                      ServiceType is the type of the per-shard Service. NodePort ports are allocated
+                      by Kubernetes; LoadBalancer frontend ports are derived from the node index.
+                    enum:
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
               image:
                 description: Image is the Valkey container image to use.
                 type: string

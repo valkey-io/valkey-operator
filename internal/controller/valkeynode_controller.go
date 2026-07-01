@@ -613,14 +613,17 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 // getValkeyRole connects to a Valkey pod and returns its replication role
 // ("primary" or "replica"). Returns an empty string if the role cannot be determined.
 func (r *ValkeyNodeReconciler) getValkeyRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string {
+	log := logf.FromContext(ctx)
 	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
 	if err != nil {
+		log.Error(err, "failed to create valkey client")
 		return ""
 	}
 	defer c.Close()
 
 	info, err := c.Do(ctx, c.B().Info().Section("replication").Build()).ToString()
 	if err != nil {
+		log.Error(err, "failed to get replication info")
 		return ""
 	}
 

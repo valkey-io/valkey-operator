@@ -37,8 +37,9 @@ import (
 const (
 	// Credentials the e2e provisions to stand in for the operator-managed
 	// "_operator" system user.
-	e2eOperatorPassword = "e2eOperatorPassw0rd"
-	e2eDefaultPassword  = "e2eDefaultPassword"
+	e2eOperatorPassword    = "e2eOperatorPassw0rd"
+	e2eReplicationPassword = "e2eReplicationPassword"
+	e2eDefaultPassword     = "e2eDefaultPassword"
 )
 
 var _ = Describe("ValkeyNode", func() {
@@ -80,7 +81,8 @@ metadata:
     app.kubernetes.io/managed-by: valkey-operator
 stringData:
   _operator: %s
-`, name, e2eOperatorPassword), "system-passwords secret for "+name)
+  _replication: %s
+`, name, e2eOperatorPassword, e2eReplicationPassword), "system-passwords secret for "+name)
 
 		applyManifest(fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -93,7 +95,8 @@ stringData:
   users.acl: |
     user default on >%s ~* &* +@all
     user _operator on >%s ~* &* +@all
-`, name, e2eDefaultPassword, e2eOperatorPassword), "ACL secret for "+name)
+    user _replication on >%s ~* &* +@all
+`, name, e2eDefaultPassword, e2eOperatorPassword, e2eReplicationPassword), "ACL secret for "+name)
 	}
 
 	deleteSystemUsersSecrets := func(name string) {
@@ -134,7 +137,7 @@ spec:
 		}).Should(Succeed())
 	}
 
-	Context("standalone StatefulSet", Label("valkeynode"), func() {
+	Context("standalone StatefulSet", Label("valkeynode", "standalone-sts"), func() {
 		const nodeName = "valkeynode-sts-e2e"
 		expectedConfigMapName := controller.GetServerConfigMapName(nodeName)
 

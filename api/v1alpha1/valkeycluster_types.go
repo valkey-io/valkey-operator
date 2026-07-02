@@ -179,6 +179,10 @@ type ExporterSpec struct {
 
 	// Enable or disable the exporter sidecar container
 	Enabled bool `json:"enabled,omitempty"`
+
+	// Override the SecurityContext applied to the exporter sidecar container.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

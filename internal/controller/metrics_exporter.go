@@ -96,6 +96,7 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 				},
 			},
 		},
-		Resources: exporter.Resources,
+		Resources:       exporter.Resources,
+		SecurityContext: exporter.SecurityContext,
 	}
 }

@@ -705,6 +705,26 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
 	})
+
+	t.Run("security context passthrough", func(t *testing.T) {
+		sc := &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			ReadOnlyRootFilesystem:   boolPtr(true),
+			RunAsNonRoot:             boolPtr(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		}
+		exporter := valkeyv1.ExporterSpec{Enabled: true, SecurityContext: sc}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, sc, c.SecurityContext, "SecurityContext should pass through verbatim")
+	})
+
+	t.Run("nil security context is noop", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Nil(t, c.SecurityContext, "omitting SecurityContext must leave container SecurityContext nil")
+	})
 }
 
 func TestValkeyNodeLabels_WithClusterLabels(t *testing.T) {

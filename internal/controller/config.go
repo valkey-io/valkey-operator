@@ -119,6 +119,12 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 		"shutdown-on-sigterm": "failover",
 	})
 
+	// Direct clients to the announced shard hostname instead of the pod IP. This
+	// is cluster-wide; the cluster bus continues to use IPs regardless.
+	if ea := cluster.Spec.ExternalAccess; ea != nil && ea.Enabled && ea.PreferredEndpointType == "hostname" {
+		baseConfig["cluster-preferred-endpoint-type"] = "hostname"
+	}
+
 	return baseConfig
 }
 

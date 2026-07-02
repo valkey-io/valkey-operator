@@ -64,6 +64,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.externalAccess) || self.externalAccess.preferredEndpointType != 'hostname' || has(self.externalAccess.domain)",message="externalAccess.domain is required when preferredEndpointType is hostname"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -144,6 +145,98 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:default=Managed
 	// +optional
 	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+
+	// ExternalAccess configures reachability of the cluster from outside Kubernetes.
+	// When omitted, the cluster is internal-only and behaves identically to a cluster
+	// without this field. Requires Valkey 9.0+.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+}
+
+// ExternalAccessSpec defines how a ValkeyCluster is exposed to clients outside the
+// Kubernetes cluster. Node-to-node traffic always stays on internal pod IPs; only
+// the client-facing endpoint is affected.
+type ExternalAccessSpec struct {
+	// Enabled turns on external access for the cluster.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ServiceType is the type of the per-shard Service. NodePort (the default) lets
+	// Kubernetes allocate the external ports; LoadBalancer frontend ports are derived
+	// from the node index. ClusterIP keeps the Service internal, which is the default
+	// and intended backend when the cluster is exposed through a Gateway.
+	// +kubebuilder:validation:Enum=NodePort;LoadBalancer;ClusterIP
+	// +optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+
+	// ExternalTrafficPolicy sets the externalTrafficPolicy of the per-shard Service.
+	// Use Local to preserve the client source IP, which requires DNS to resolve a
+	// shard hostname to the nodes hosting that shard's pods.
+	// +kubebuilder:validation:Enum=Cluster;Local
+	// +optional
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
+
+	// ServiceAnnotations are applied to each per-shard Service, for example to
+	// configure external-dns or a cloud load-balancer controller.
+	// +optional
+	ServiceAnnotations map[string]string `json:"serviceAnnotations,omitempty"`
+
+	// HostnamePrefix is prepended to each shard hostname, which is announced as
+	// "<hostnamePrefix>-<shardIndex>.<domain>". Set a unique prefix per cluster when
+	// several clusters share one domain. Has no effect unless domain is set.
+	// +kubebuilder:default=shard
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	HostnamePrefix string `json:"hostnamePrefix,omitempty"`
+
+	// Domain is the DNS domain under which shard hostnames are announced. When set,
+	// each node announces the hostname "<hostnamePrefix>-<shardIndex>.<domain>" to
+	// clients in addition to its IP. The hostname must resolve to the shard's Service.
+	// +optional
+	Domain string `json:"domain,omitempty"`
+
+	// PreferredEndpointType selects what clients are redirected to on MOVED/ASK and
+	// in CLUSTER SLOTS. "hostname" returns the announced shard hostname and external
+	// port; "ip" (the default) leaves clients on the internal pod IP. Setting
+	// "hostname" requires domain.
+	// +kubebuilder:default=ip
+	// +kubebuilder:validation:Enum=ip;hostname
+	// +optional
+	PreferredEndpointType string `json:"preferredEndpointType,omitempty"`
+
+	// Gateway exposes the cluster through Gateway API TCPRoutes attached to an
+	// existing Gateway in the same namespace. It requires the Gateway API CRDs to be
+	// installed; when they are absent the field is ignored. When set, the per-shard
+	// Service defaults to ClusterIP so the Gateway is the only external surface.
+	// +optional
+	Gateway *GatewayExposureSpec `json:"gateway,omitempty"`
+}
+
+// GatewayExposureSpec configures exposure of a ValkeyCluster through Gateway API
+// TCPRoutes. The operator creates one TCPRoute per node; the user owns the Gateway
+// and its listeners.
+type GatewayExposureSpec struct {
+	// GatewayRef identifies the Gateway, in the same namespace as the cluster, that
+	// the generated TCPRoutes attach to.
+	GatewayRef GatewayReference `json:"gatewayRef"`
+
+	// BasePort is the first Gateway listener port. The node at (shardIndex, nodeIndex)
+	// is reached on basePort + shardIndex*(replicas+1) + nodeIndex, which must match a
+	// listener on the Gateway. This value is also announced to clients as the node's
+	// client port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	BasePort int32 `json:"basePort"`
+}
+
+// GatewayReference identifies a Gateway resource in the same namespace as the cluster.
+type GatewayReference struct {
+	// Name is the name of the Gateway.
+	Name string `json:"name"`
+
+	// SectionName optionally pins the TCPRoutes to a named listener on the Gateway.
+	// +optional
+	SectionName *string `json:"sectionName,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
@@ -213,6 +306,25 @@ type ValkeyClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ExternalEndpoints lists the externally-reachable endpoint of each shard,
+	// populated when external access is enabled.
+	// +listType=map
+	// +listMapKey=shardIndex
+	// +optional
+	ExternalEndpoints []ShardEndpoint `json:"externalEndpoints,omitempty"`
+}
+
+// ShardEndpoint describes the externally-reachable endpoint of a single shard.
+type ShardEndpoint struct {
+	// ShardIndex is the index of the shard this endpoint belongs to.
+	ShardIndex int32 `json:"shardIndex"`
+
+	// NodePorts are the external ports of the shard's nodes, indexed by node index
+	// (NodePorts[0] is the node-index 0 port). The address to reach each port
+	// depends on the Service type and the user's DNS configuration.
+	// +optional
+	NodePorts []int32 `json:"nodePorts,omitempty"`
 }
 
 const (

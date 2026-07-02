@@ -2,4 +2,6 @@
 resources:
 - v1alpha1_valkeycluster.yaml
 - v1alpha1_valkeycluster-persistent.yaml
+- v1alpha1_valkeycluster-external-access.yaml
+- v1alpha1_valkeycluster-gateway.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

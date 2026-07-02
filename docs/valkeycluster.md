@@ -12,6 +12,7 @@
 
 - [Config](#config)
 - [Containers](#containers)
+- [External access](#external-access)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
@@ -62,6 +63,64 @@ containers:
 ```
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
+
+### External access
+
+```yaml
+externalAccess:
+  enabled: true
+  serviceType: NodePort
+  domain: valkey.example.com
+  preferredEndpointType: hostname
+```
+
+`externalAccess` configures reachability of the cluster from outside Kubernetes. When omitted, the cluster is internal-only and behaves identically to a cluster without this field. Requires Valkey 9.0+.
+
+Enabling external access announces a human-readable node name (the ValkeyNode name, e.g. `cluster-sample-1-2`) so cluster events such as failures reference it alongside the node ID. Node-to-node traffic (gossip and replication) always stays on internal pod IPs.
+
+The operator creates one Service per shard, selecting that shard's pods and exposing one port per node. Each port targets a single node, so a client can reach a specific primary or replica.
+
+| Field | Description |
+|---|---|
+| `serviceType` | `NodePort` (default), `LoadBalancer`, or `ClusterIP`. Defaults to `ClusterIP` when a Gateway is configured. |
+| `externalTrafficPolicy` | `Cluster` (default) or `Local`. Use `Local` to preserve the client source IP. |
+| `serviceAnnotations` | Applied to each per-shard Service, e.g. for external-dns or a cloud load-balancer controller. |
+| `hostnamePrefix` | Prefix for shard hostnames (default `shard`). Set a unique prefix per cluster when several clusters share one domain. |
+| `domain` | DNS domain for shard hostnames. When set, each node announces `<hostnamePrefix>-<shardIndex>.<domain>` to clients. |
+| `preferredEndpointType` | `ip` (default) or `hostname`. `hostname` directs clients to the announced shard hostname on MOVED/ASK and in CLUSTER SLOTS. Requires `domain`. |
+
+With `NodePort`, Kubernetes allocates the external ports; the operator reads them back and reports them per shard under `status.externalEndpoints` (indexed by node). With `LoadBalancer`, each shard's node ports are `6379 + nodeIndex`.
+
+When `domain` is set, each shard announces the hostname `<hostnamePrefix>-<shardIndex>.<domain>` (e.g. `shard-0.valkey.example.com`). You are responsible for the DNS records that resolve these hostnames to the shard Services. Until `preferredEndpointType` is `hostname`, the hostname is announced only as metadata and clients stay on the pod IP; the cluster bus always uses pod IPs.
+
+With `preferredEndpointType: hostname`, clients are redirected to the announced shard hostname and external port. Because this applies cluster-wide, in-cluster clients are also directed to the hostname — resolve it to the shard Service internally (split-horizon DNS) or accept that traffic leaves and re-enters the cluster.
+
+To turn external access off, first set `preferredEndpointType: ip` so clients move off the hostnames, then remove `domain` or set `enabled: false`. Reversing the order would advertise a hostname endpoint that is no longer announced.
+
+When TLS is enabled, the certificate must cover both the internal Service FQDN (`valkey-<cluster>.<namespace>.svc.cluster.local`) and every shard hostname (`<hostnamePrefix>-0.<domain>` … `<hostnamePrefix>-N.<domain>`). Widen the certificate before scaling out.
+
+#### Gateway API
+
+```yaml
+externalAccess:
+  enabled: true
+  domain: valkey.example.com
+  preferredEndpointType: hostname
+  gateway:
+    gatewayRef:
+      name: public-gateway
+    basePort: 30000
+```
+
+When `gateway` is set, the operator creates one [Gateway API](https://gateway-api.sigs.k8s.io/) `TCPRoute` per node, attaching to an existing `Gateway` in the same namespace and forwarding to the node's port on the per-shard Service. The Gateway becomes the external surface, so the per-shard Service defaults to `ClusterIP` (override `serviceType` to also expose it directly). This requires the Gateway API CRDs to be installed; without them the field is ignored and the operator records a warning event.
+
+| Field | Description |
+|---|---|
+| `gatewayRef.name` | Name of the Gateway, in the same namespace as the cluster, that the TCPRoutes attach to. |
+| `gatewayRef.sectionName` | Optional named listener on the Gateway to pin the routes to. |
+| `basePort` | First Gateway listener port. The node at `(shardIndex, nodeIndex)` attaches to `basePort + shardIndex*(replicas+1) + nodeIndex`, which is also the port announced to clients. |
+
+You provision the Gateway and one listener per node port, and the DNS that resolves the shard hostnames to the Gateway address. Cross-namespace Gateways are not supported in this version.
 
 ### Metrics
 

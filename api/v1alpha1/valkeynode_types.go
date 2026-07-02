@@ -120,6 +120,16 @@ type ValkeyNodeSpec struct {
 	// the rest take effect on the next pod roll.
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
+
+	// ExternalAccess is copied verbatim from the owning cluster's Spec.ExternalAccess
+	// and configures how this node is exposed to clients outside the Kubernetes cluster.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+
+	// ExternalAccessClientPort is the external client port this node announces, set by
+	// the cluster controller after the per-shard Service has allocated its ports.
+	// +optional
+	ExternalAccessClientPort int32 `json:"externalAccessClientPort,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

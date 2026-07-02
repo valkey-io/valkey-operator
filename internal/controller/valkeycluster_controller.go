@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -33,11 +34,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 	"valkey.io/valkey-operator/internal/valkey"
 )
@@ -62,6 +65,9 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
+	// GatewayAPIEnabled is set when the Gateway API TCPRoute kind is served by the
+	// API server. When false, the controller never references the TCPRoute type.
+	GatewayAPIEnabled bool
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -75,6 +81,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconciliation loop. On each invocation it drives the
 // cluster one step closer to the desired state described by the ValkeyCluster
@@ -125,6 +132,20 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+
+	endpoints, err := r.reconcileShardServices(ctx, cluster)
+	if err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+	cluster.Status.ExternalEndpoints = endpoints
+
+	if err := r.reconcileShardRoutes(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -484,6 +505,245 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
+func shardServiceName(clusterName string, shardIndex int) string {
+	return fmt.Sprintf("%s%s-shard-%d", resourcePrefix, clusterName, shardIndex)
+}
+
+// reconcileShardServices ensures one externally-reachable Service per shard when
+// external access is enabled, and removes Services left behind by a scale-in. It
+// returns the external endpoint of each shard for the cluster status.
+//
+// Each Service selects the pods of a single shard and exposes one port per node,
+// targeting the node's uniquely-named client port (see shardClientPortName) so a
+// port reaches exactly one pod. NodePort ports are allocated by Kubernetes and read
+// back from the Service; LoadBalancer ports are the node-indexed frontend ports.
+func (r *ValkeyClusterReconciler) reconcileShardServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) ([]valkeyiov1alpha1.ShardEndpoint, error) {
+	if cluster.Spec.ExternalAccess == nil || !cluster.Spec.ExternalAccess.Enabled {
+		return nil, r.deleteExcessShardServices(ctx, cluster, 0)
+	}
+
+	ea := cluster.Spec.ExternalAccess
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	serviceType := resolveServiceType(ea)
+
+	endpoints := make([]valkeyiov1alpha1.ShardEndpoint, 0, int(cluster.Spec.Shards))
+	for shardIndex := range int(cluster.Spec.Shards) {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      shardServiceName(cluster.Name, shardIndex),
+				Namespace: cluster.Namespace,
+			},
+		}
+		shardSelector := strconv.Itoa(shardIndex)
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+			svc.Labels = labels(cluster)
+			svc.Labels[LabelCluster] = cluster.Name
+			svc.Labels[LabelShardIndex] = shardSelector
+			svc.Annotations = maps.Clone(ea.ServiceAnnotations)
+			svc.Spec.Type = serviceType
+			svc.Spec.ExternalTrafficPolicy = ea.ExternalTrafficPolicy
+			svc.Spec.Selector = map[string]string{
+				LabelCluster:    cluster.Name,
+				LabelShardIndex: shardSelector,
+			}
+			svc.Spec.Ports = buildShardServicePorts(svc.Spec.Ports, nodesPerShard)
+			return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
+		})
+		if err != nil {
+			r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ShardServiceUpdateFailed", "UpdateShardService", "Failed to upsert shard %d Service: %v", shardIndex, err)
+			return nil, err
+		}
+
+		endpoints = append(endpoints, shardEndpointFromService(int32(shardIndex), svc, serviceType, nodesPerShard))
+	}
+
+	if err := r.deleteExcessShardServices(ctx, cluster, int(cluster.Spec.Shards)); err != nil {
+		return nil, err
+	}
+	return endpoints, nil
+}
+
+// buildShardServicePorts returns one ServicePort per node, targeting the node's
+// uniquely-named client port. Existing ports are passed in so Kubernetes-allocated
+// NodePort values are preserved across updates. The Port value is the in-cluster
+// port and only needs to be unique within the Service.
+func buildShardServicePorts(existing []corev1.ServicePort, nodesPerShard int) []corev1.ServicePort {
+	nodePortByName := make(map[string]int32, len(existing))
+	for _, p := range existing {
+		nodePortByName[p.Name] = p.NodePort
+	}
+
+	ports := make([]corev1.ServicePort, 0, nodesPerShard)
+	for nodeIndex := range nodesPerShard {
+		name := shardClientPortName(strconv.Itoa(nodeIndex))
+		ports = append(ports, corev1.ServicePort{
+			Name:       name,
+			Port:       int32(DefaultPort + nodeIndex),
+			TargetPort: intstr.FromString(name),
+			NodePort:   nodePortByName[name],
+		})
+	}
+	return ports
+}
+
+// shardEndpointFromService reads the externally-reachable ports of a shard Service.
+// For NodePort it reports the Kubernetes-allocated node ports; otherwise the Service
+// ports (the LoadBalancer frontend ports).
+func shardEndpointFromService(shardIndex int32, svc *corev1.Service, serviceType corev1.ServiceType, nodesPerShard int) valkeyiov1alpha1.ShardEndpoint {
+	portByName := make(map[string]corev1.ServicePort, len(svc.Spec.Ports))
+	for _, p := range svc.Spec.Ports {
+		portByName[p.Name] = p
+	}
+
+	nodePorts := make([]int32, 0, nodesPerShard)
+	for nodeIndex := range nodesPerShard {
+		p := portByName[shardClientPortName(strconv.Itoa(nodeIndex))]
+		if serviceType == corev1.ServiceTypeNodePort {
+			nodePorts = append(nodePorts, p.NodePort)
+		} else {
+			nodePorts = append(nodePorts, p.Port)
+		}
+	}
+	return valkeyiov1alpha1.ShardEndpoint{ShardIndex: shardIndex, NodePorts: nodePorts}
+}
+
+// deleteExcessShardServices removes shard Services whose index is at or beyond
+// desiredShards. A desiredShards of 0 removes all of them (external access disabled).
+func (r *ValkeyClusterReconciler) deleteExcessShardServices(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, desiredShards int) error {
+	log := logf.FromContext(ctx)
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		return err
+	}
+	for i := range services.Items {
+		svc := &services.Items[i]
+		shardIndex, err := strconv.Atoi(svc.Labels[LabelShardIndex])
+		if err != nil {
+			// Not a shard Service (e.g. the headless Service has no shard-index label).
+			continue
+		}
+		if shardIndex >= desiredShards {
+			if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete excess shard Service %s: %w", svc.Name, err)
+			}
+			log.V(1).Info("deleted excess shard Service", "name", svc.Name, "shard", shardIndex)
+		}
+	}
+	return nil
+}
+
+func shardRouteName(clusterName string, shardIndex, nodeIndex int) string {
+	return fmt.Sprintf("%s%s-%d-%d", resourcePrefix, clusterName, shardIndex, nodeIndex)
+}
+
+// reconcileShardRoutes manages one Gateway API TCPRoute per node when a Gateway is
+// configured, and removes routes left behind by a scale-in. Each route attaches to
+// the user's Gateway and forwards to the node's port on the per-shard Service.
+//
+// It is a no-op (beyond cleaning up any existing routes) unless the Gateway API is
+// installed; when the user configures a Gateway on a cluster without the CRDs, it
+// records a one-time warning event so the misconfiguration is visible.
+func (r *ValkeyClusterReconciler) reconcileShardRoutes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	if !r.GatewayAPIEnabled {
+		if ea := cluster.Spec.ExternalAccess; ea != nil && ea.Enabled && ea.Gateway != nil {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "GatewayAPIUnavailable", "ReconcileShardRoutes",
+				"externalAccess.gateway is set but the Gateway API CRDs are not installed; no TCPRoutes were created")
+		}
+		return nil
+	}
+
+	ea := cluster.Spec.ExternalAccess
+	if ea == nil || !ea.Enabled || ea.Gateway == nil {
+		return r.deleteExcessShardRoutes(ctx, cluster, 0, 0)
+	}
+
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	for shardIndex := range int(cluster.Spec.Shards) {
+		for nodeIndex := range nodesPerShard {
+			route := &gatewayv1alpha2.TCPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      shardRouteName(cluster.Name, shardIndex, nodeIndex),
+					Namespace: cluster.Namespace,
+				},
+			}
+			_, err := controllerutil.CreateOrUpdate(ctx, r.Client, route, func() error {
+				route.Labels = labels(cluster)
+				route.Labels[LabelCluster] = cluster.Name
+				route.Labels[LabelShardIndex] = strconv.Itoa(shardIndex)
+				route.Labels[LabelNodeIndex] = strconv.Itoa(nodeIndex)
+				route.Spec = buildShardRouteSpec(cluster, ea.Gateway, shardIndex, nodeIndex, nodesPerShard)
+				return controllerutil.SetControllerReference(cluster, route, r.Scheme)
+			})
+			if err != nil {
+				r.Recorder.Eventf(cluster, route, corev1.EventTypeWarning, "ShardRouteUpdateFailed", "UpdateShardRoute", "Failed to upsert TCPRoute for shard %d node %d: %v", shardIndex, nodeIndex, err)
+				return err
+			}
+		}
+	}
+
+	return r.deleteExcessShardRoutes(ctx, cluster, int(cluster.Spec.Shards), nodesPerShard)
+}
+
+// buildShardRouteSpec builds the TCPRoute spec for a node: it attaches to the
+// user's Gateway (optionally a named listener) and forwards to the node's port on
+// the per-shard Service.
+func buildShardRouteSpec(cluster *valkeyiov1alpha1.ValkeyCluster, gw *valkeyiov1alpha1.GatewayExposureSpec, shardIndex, nodeIndex, nodesPerShard int) gatewayv1alpha2.TCPRouteSpec {
+	listenerPort := gatewayListenerPort(gw.BasePort, shardIndex, nodeIndex, nodesPerShard)
+	parentRef := gatewayv1alpha2.ParentReference{
+		Name: gatewayv1alpha2.ObjectName(gw.GatewayRef.Name),
+		Port: &listenerPort,
+	}
+	if gw.GatewayRef.SectionName != nil {
+		sectionName := gatewayv1alpha2.SectionName(*gw.GatewayRef.SectionName)
+		parentRef.SectionName = &sectionName
+	}
+
+	backendPort := gatewayv1alpha2.PortNumber(DefaultPort + nodeIndex)
+	return gatewayv1alpha2.TCPRouteSpec{
+		CommonRouteSpec: gatewayv1alpha2.CommonRouteSpec{
+			ParentRefs: []gatewayv1alpha2.ParentReference{parentRef},
+		},
+		Rules: []gatewayv1alpha2.TCPRouteRule{
+			{
+				BackendRefs: []gatewayv1alpha2.BackendRef{
+					{
+						BackendObjectReference: gatewayv1alpha2.BackendObjectReference{
+							Name: gatewayv1alpha2.ObjectName(shardServiceName(cluster.Name, shardIndex)),
+							Port: &backendPort,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// deleteExcessShardRoutes removes TCPRoutes whose shard or node index is at or
+// beyond the desired counts. desiredShards of 0 removes all of them (Gateway
+// exposure disabled).
+func (r *ValkeyClusterReconciler) deleteExcessShardRoutes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, desiredShards, nodesPerShard int) error {
+	log := logf.FromContext(ctx)
+	routes := &gatewayv1alpha2.TCPRouteList{}
+	if err := r.List(ctx, routes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		return err
+	}
+	for i := range routes.Items {
+		route := &routes.Items[i]
+		shardIndex, sErr := strconv.Atoi(route.Labels[LabelShardIndex])
+		nodeIndex, nErr := strconv.Atoi(route.Labels[LabelNodeIndex])
+		if sErr != nil || nErr != nil {
+			continue
+		}
+		if shardIndex >= desiredShards || nodeIndex >= nodesPerShard {
+			if err := r.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete excess TCPRoute %s: %w", route.Name, err)
+			}
+			log.V(1).Info("deleted excess TCPRoute", "name", route.Name, "shard", shardIndex, "node", nodeIndex)
+		}
+	}
+	return nil
+}
+
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
@@ -708,8 +968,52 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			UsersACLSecretName:        getInternalSecretName(cluster.Name),
 			TLS:                       cluster.Spec.TLS,
 			Config:                    cluster.Spec.Config,
+			ExternalAccess:            cluster.Spec.ExternalAccess,
+			ExternalAccessClientPort:  externalClientPort(cluster, shardIndex, nodeIndex),
 		},
 	}
+}
+
+// externalClientPort returns the external client port a node announces, or 0 if
+// external access is disabled or no port is available yet. When a Gateway is
+// configured the port is deterministic (the Gateway listener port); otherwise it
+// is the port allocated by the per-shard Service and read back into the cluster
+// status. The Service is reconciled before the nodes, so the status port is
+// normally available on the same reconcile that creates the node.
+func externalClientPort(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int) int32 {
+	ea := cluster.Spec.ExternalAccess
+	if ea == nil || !ea.Enabled {
+		return 0
+	}
+	if ea.Gateway != nil {
+		return gatewayListenerPort(ea.Gateway.BasePort, shardIndex, nodeIndex, 1+int(cluster.Spec.Replicas))
+	}
+	for _, ep := range cluster.Status.ExternalEndpoints {
+		if int(ep.ShardIndex) == shardIndex && nodeIndex < len(ep.NodePorts) {
+			return ep.NodePorts[nodeIndex]
+		}
+	}
+	return 0
+}
+
+// resolveServiceType returns the per-shard Service type. It defaults to ClusterIP
+// when a Gateway backs the cluster (the Gateway is the external surface), and to
+// NodePort otherwise. An explicit serviceType always wins.
+func resolveServiceType(ea *valkeyiov1alpha1.ExternalAccessSpec) corev1.ServiceType {
+	if ea.ServiceType != "" {
+		return ea.ServiceType
+	}
+	if ea.Gateway != nil {
+		return corev1.ServiceTypeClusterIP
+	}
+	return corev1.ServiceTypeNodePort
+}
+
+// gatewayListenerPort returns the Gateway listener port for a node, computed as a
+// flat index across the cluster so every node maps to a distinct listener:
+// basePort + shardIndex*nodesPerShard + nodeIndex.
+func gatewayListenerPort(basePort int32, shardIndex, nodeIndex, nodesPerShard int) int32 {
+	return basePort + int32(shardIndex*nodesPerShard+nodeIndex)
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
@@ -1129,6 +1433,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	// Apply conditions from the in-memory cluster object
 	current.Status.Conditions = cluster.Status.Conditions
 
+	// Apply external endpoints from the in-memory cluster object
+	current.Status.ExternalEndpoints = cluster.Status.ExternalEndpoints
+
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
@@ -1441,13 +1748,19 @@ func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.Valke
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.APIReader = mgr.GetAPIReader()
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyCluster{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
-		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&policyv1.PodDisruptionBudget{})
+	// Only watch TCPRoutes when the Gateway API is installed; owning a type the
+	// API server cannot serve would prevent the manager from starting.
+	if r.GatewayAPIEnabled {
+		builder = builder.Owns(&gatewayv1alpha2.TCPRoute{})
+	}
+	return builder.
 		Named("valkeycluster").
 		Complete(r)
 }

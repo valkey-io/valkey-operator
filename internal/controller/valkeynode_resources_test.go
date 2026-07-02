@@ -427,6 +427,98 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
 }
 
+func TestBuildContainersDef_ExternalAccessHumanNodename(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		[]string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)", "--cluster-announce-human-nodename", "mycluster-1-2"},
+		containers[0].Command,
+		"enabling external access should announce the ValkeyNode name as the human nodename")
+}
+
+func TestBuildContainersDef_ExternalAccessHostname(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{
+		Enabled:        true,
+		HostnamePrefix: "shard",
+		Domain:         "example.com",
+	}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-hostname")
+	assert.Contains(t, containers[0].Command, "shard-1.example.com",
+		"the shard hostname should be <prefix>-<shardIndex>.<domain>")
+	// The client port is named per node so the shard Service can target it.
+	assert.Equal(t, "vk-n2", containers[0].Ports[0].Name)
+}
+
+func TestBuildContainersDef_ExternalAccessNoHostnameWithoutDomain(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true, HostnamePrefix: "shard"}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-hostname",
+		"no hostname should be announced when domain is unset")
+}
+
+func TestBuildContainersDef_ExternalAccessClientPort(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+	node.Spec.ExternalAccessClientPort = 31234
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-client-port")
+	assert.Contains(t, containers[0].Command, "31234")
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-client-tls-port")
+}
+
+func TestBuildContainersDef_ExternalAccessClientPortTLS(t *testing.T) {
+	node := newTestValkeyNode("mycluster-1-2", "test-ns")
+	node.Labels = map[string]string{LabelShardIndex: "1", LabelNodeIndex: "2"}
+	node.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: true}
+	node.Spec.ExternalAccessClientPort = 31234
+	node.Spec.TLS = &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "tls"}}
+
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+
+	assert.Contains(t, containers[0].Command, "--cluster-announce-client-tls-port",
+		"a TLS cluster must announce a TLS client port")
+	assert.NotContains(t, containers[0].Command, "--cluster-announce-client-port")
+}
+
+func TestBuildContainersDef_ExternalAccessDisabledIsUnchanged(t *testing.T) {
+	// Backward compatibility: a nil or disabled ExternalAccess must render the
+	// same command as a cluster without the field at all.
+	base := newTestValkeyNode("mycluster-1-2", "test-ns")
+	baseContainers, err := buildContainersDef(base)
+	require.NoError(t, err)
+
+	disabled := newTestValkeyNode("mycluster-1-2", "test-ns")
+	disabled.Spec.ExternalAccess = &valkeyv1.ExternalAccessSpec{Enabled: false}
+	disabledContainers, err := buildContainersDef(disabled)
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		[]string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)"},
+		baseContainers[0].Command)
+	assert.Equal(t, baseContainers[0].Command, disabledContainers[0].Command,
+		"a disabled ExternalAccess must not change the rendered command")
+}
+
 func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	cm, err := buildValkeyNodeConfigMap(node)

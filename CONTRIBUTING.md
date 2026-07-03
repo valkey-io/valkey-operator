@@ -190,13 +190,25 @@ go test ./internal/controller/... -v
 ```
 
 ### E2E
+End-to-end tests are executed against pull requests and are required to pass in order for the PR to be mergeable.
+
+To run end-to-end tests locally, you can execute the below command.
 ```bash
 # Run E2E tests (requires cluster)
 make test-e2e
 ```
 
-To run specific e2e tests use the `Focus` decorator of the GinkGo library (see [docs](https://onsi.github.io/ginkgo/#focused-specs)). <br/>
-E.g. `It("just me please", Focus, func() { ... })`.
+To run specific e2e tests locally use the `Focus` decorator of the GinkGo library (see [docs](https://onsi.github.io/ginkgo/#focused-specs)). <br/>
+Select a test case e.g.
+```go
+It("creates a cluster with custom users", func() {...}
+```
+Add the `Focus` decorator
+```go
+It("creates a cluster with custom users", Focus, func() {...}
+```
+Run `make test-e2e`. It'll just run the selected test case.
+
 
 ## Making Changes to the API
 

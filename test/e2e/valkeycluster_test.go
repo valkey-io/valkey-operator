@@ -610,7 +610,6 @@ EOF`,
 					"DEL foo",
 					"KEYS *",
 					"CONFIG GET *",
-					//"CONFIG SET hz 15",
 					"ACL LIST",
 				}
 

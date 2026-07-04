@@ -20,6 +20,7 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -502,10 +503,24 @@ spec:
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd := exec.Command("kubectl", "run", "client",
+				cmd := exec.Command(
+					"sh", "-c",
+					`kubectl get secret valkey-cluster-sample-users \
+    -n default \
+    -o jsonpath='{.data.defaultpw}'`)
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				b64Password = strings.TrimSpace(b64Password)
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				operatorPassword := string(decoded)
+
+				cmd = exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
-					"valkey-cli", "-c", "-h", clusterFqdn, "ACL", "LIST")
-				_, err := utils.Run(cmd)
+					"valkey-cli", "-c", "-h", clusterFqdn, "-a", operatorPassword, "ACL", "LIST")
+				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
 				cmd = exec.Command("kubectl", "wait", "pod/client",

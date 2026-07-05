@@ -153,33 +153,38 @@ type ValkeyClusterSpec struct {
 
 // TLSAuthClients controls how Valkey treats incoming client TLS certificates.
 // It mirrors the Valkey `tls-auth-clients` directive.
-// +kubebuilder:validation:Enum=Optional;Required;Disabled
+// +kubebuilder:validation:Enum=optional;yes;no
 type TLSAuthClients string
 
 const (
 	// TLSAuthClientsOptional accepts both authenticated and unauthenticated clients.
 	// Maps to `tls-auth-clients optional`.
-	TLSAuthClientsOptional TLSAuthClients = "Optional"
+	TLSAuthClientsOptional TLSAuthClients = "optional"
 	// TLSAuthClientsRequired enforces mTLS - clients must present a certificate
 	// signed by the configured CA. Maps to `tls-auth-clients yes`.
-	TLSAuthClientsRequired TLSAuthClients = "Required"
+	TLSAuthClientsRequired TLSAuthClients = "yes"
 	// TLSAuthClientsDisabled disables client certificate processing entirely.
 	// Maps to `tls-auth-clients no`.
-	TLSAuthClientsDisabled TLSAuthClients = "Disabled"
+	TLSAuthClientsDisabled TLSAuthClients = "no"
 )
 
 // TLSAuthClientsUser controls how Valkey maps an authenticated client
 // certificate to an ACL user. It mirrors the Valkey `tls-auth-clients-user` directive.
-// +kubebuilder:validation:Enum=CN;Off
+// +kubebuilder:validation:Enum=CN;URI;off
 type TLSAuthClientsUser string
 
 const (
 	// TLSAuthClientsUserCN maps the certificate's Common Name (CN) to an
 	// ACL username. Pair with `AuthClients: Required` to enforce mTLS.
 	TLSAuthClientsUserCN TLSAuthClientsUser = "CN"
+	// TLSAuthClientsUserURI maps the first URI from the certificate's
+	// Subject Alternative Name (SAN) that natches valkey ACL username.
+	TLSAuthClientsUserURI TLSAuthClientsUser = "URI"
 	// TLSAuthClientsUserOff disables certificate-to-user mapping (default).
-	TLSAuthClientsUserOff TLSAuthClientsUser = "Off"
+	TLSAuthClientsUserOff TLSAuthClientsUser = "off"
 )
+
+// +kubebuilder:validation:XValidation:rule="!(self.authClients == 'no' && self.authClientsUser != 'off')",message="authClientsUser=CN/URI has no effect when authClients=no (Valkey ignores client certificates)"
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
 type TLSConfig struct {
@@ -192,18 +197,18 @@ type TLSConfig struct {
 	Certificate CertificateRef `json:"certificate,omitempty"`
 
 	// AuthClients controls whether clients must authenticate with a TLS
-	// certificate. `Required` enforces mTLS, `Optional` (the default) allows
-	// both authenticated and unauthenticated clients, and `Disabled` turns
+	// certificate. `yes` (the default) enforces mTLS, `optional` allows
+	// both authenticated and unauthenticated clients, and `no` turns
 	// client certificate processing off entirely.
-	// +kubebuilder:default=Optional
+	// +kubebuilder:default=yes
 	// +optional
 	AuthClients TLSAuthClients `json:"authClients,omitempty"`
 
 	// AuthClientsUser configures how Valkey maps an authenticated client
-	// certificate to an ACL user. Set to `CN` to authenticate clients as
-	// the ACL user matching the certificate's Common Name. Defaults to
-	// `Off` (no automatic mapping). Requires Valkey >= 9.0.0.
-	// +kubebuilder:default=Off
+	// certificate to an ACL user. Set to `CN` to use the certificate's Common
+	// Name, or `URI` to use the first matching URI from the certificate's Subject Alternative
+	// Name (SAN). Defaults to `off`. Requires Valkey >= 9.0.0.
+	// +kubebuilder:default=off
 	// +optional
 	AuthClientsUser TLSAuthClientsUser `json:"authClientsUser,omitempty"`
 }

@@ -19,6 +19,7 @@ package controller
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -70,6 +71,54 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 	})
 })
 
+var _ = Describe("TLSConfig CEL admission rules", Label("tls", "cel"), func() {
+	newCluster := func(name string, authClients valkeyiov1alpha1.TLSAuthClients, authClientsUser valkeyiov1alpha1.TLSAuthClientsUser) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1,
+				TLS: &valkeyiov1alpha1.TLSConfig{
+					Certificate:     valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+					AuthClients:     authClients,
+					AuthClientsUser: authClientsUser,
+				},
+			},
+		}
+	}
+
+	It("rejects authClients=no with authClientsUser=CN", func() {
+		cluster := newCluster("cel-disabled-cn", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserCN)
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("authClientsUser=CN"))
+	})
+
+	It("rejects authClients=no with authClientsUser=URI", func() {
+		cluster := newCluster("cel-disabled-uri", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserURI)
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("authClientsUser=CN/URI"))
+	})
+
+	It("accepts authClients=yes with authClientsUser=CN", func() {
+		cluster := newCluster("cel-required-cn", valkeyiov1alpha1.TLSAuthClientsRequired, valkeyiov1alpha1.TLSAuthClientsUserCN)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("accepts authClients=yes with authClientsUser=URI", func() {
+		cluster := newCluster("cel-required-uri", valkeyiov1alpha1.TLSAuthClientsRequired, valkeyiov1alpha1.TLSAuthClientsUserURI)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("accepts authClients=no with authClientsUser=off", func() {
+		cluster := newCluster("cel-disabled-off", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserOff)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+})
+
 var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
 	It("renders mTLS directives when AuthClients=Required and AuthClientsUser=CN", func() {
 		cluster := getSampleCluster()
@@ -83,14 +132,16 @@ var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
 		Expect(conf).To(ContainSubstring("tls-auth-clients-user CN"))
 	})
 
-	It("renders tls-auth-clients optional by default", func() {
+	It("renders mTLS directives when AuthClients=Required and AuthClientsUser=URI", func() {
 		cluster := getSampleCluster()
 		cluster.Spec.TLS = &valkeyiov1alpha1.TLSConfig{
-			Certificate: valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+			Certificate:     valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+			AuthClients:     valkeyiov1alpha1.TLSAuthClientsRequired,
+			AuthClientsUser: valkeyiov1alpha1.TLSAuthClientsUserURI,
 		}
 		conf := buildServerConfig(cluster)
-		Expect(conf).To(ContainSubstring("tls-auth-clients optional"))
-		Expect(conf).NotTo(ContainSubstring("tls-auth-clients-user"))
+		Expect(conf).To(ContainSubstring("tls-auth-clients yes"))
+		Expect(conf).To(ContainSubstring("tls-auth-clients-user URI"))
 	})
 
 	It("renders tls-auth-clients no when AuthClients=Disabled", func() {

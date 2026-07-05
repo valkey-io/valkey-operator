@@ -213,7 +213,7 @@ spec:
 				for _, status := range strings.Fields(out) {
 					g.Expect(status).To(Equal("true"))
 				}
-			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("getting pod IP")
 			var podIP string
@@ -268,7 +268,7 @@ spec:
 				g.Expect(out).To(MatchRegexp(`redis_up\s+1`), "redis_up should be 1 when exporter connects via TLS")
 				g.Expect(out).To(ContainSubstring("redis_connected_clients"))
 				g.Expect(out).To(ContainSubstring("redis_memory_used_bytes"))
-			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 		})
 	})
 })
@@ -369,11 +369,11 @@ spec:
 		Eventually(func() error {
 			_, err := utils.Run(exec.Command("kubectl", "get", "secret", serverCertSecret))
 			return err
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}).Should(Succeed())
 		Eventually(func() error {
 			_, err := utils.Run(exec.Command("kubectl", "get", "secret", clientCertSecret))
 			return err
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}).Should(Succeed())
 
 		By("creating the ValkeyCluster with mTLS + a passwordless 'alice' ACL user")
 		clusterManifest := fmt.Sprintf(`
@@ -387,7 +387,7 @@ spec:
   tls:
     certificate:
       secretName: %s
-    authClients: Required
+    authClients: "yes"
     authClientsUser: CN
   users:
     - name: alice
@@ -402,19 +402,13 @@ spec:
 		_, err = utils.Run(exec.Command("kubectl", "apply", "-f", clusterFile))
 		Expect(err).NotTo(HaveOccurred())
 
-		// We intentionally wait for pod-level Ready rather than the full
-		// cluster `state: Ready`: under `authClients: Required` the operator
-		// itself currently lacks a client cert, so the operator can't drive
-		// CLUSTER MEET against its own cluster. Pod readiness is sufficient
-		// to prove that Valkey accepted the rendered TLS directives.
-		By("waiting for the Valkey server pod to become ready under mTLS")
-		Eventually(func(g Gomega) {
-			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
-				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-				"-o", "jsonpath={.items[0].status.containerStatuses[?(@.name=='server')].ready}"))
+		By("waiting for the cluster to be ready")
+		verifyReady := func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(out).To(Equal("true"))
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+		}
+		Eventually(verifyReady).Should(Succeed())
 	})
 
 	AfterAll(func() {
@@ -448,7 +442,7 @@ spec:
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(ContainSubstring("tls-auth-clients yes"))
 			g.Expect(out).To(ContainSubstring("tls-auth-clients-user CN"))
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}).Should(Succeed())
 	})
 
 	It("authenticates a client with CN=alice as the matching ACL user", func() {
@@ -512,7 +506,7 @@ spec:
 		_, err = utils.Run(exec.Command("kubectl", "wait", fmt.Sprintf("pod/%s", mtlsNoCertPodName),
 			"--for=jsonpath={.status.phase}=Failed", "--timeout=120s"))
 		Expect(err).NotTo(HaveOccurred(),
-			"client without a certificate should fail under authClients=Required")
+			"client without a certificate should fail under authClients=yes")
 
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsNoCertPodName, "--ignore-not-found=true"))
 	})

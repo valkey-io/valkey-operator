@@ -334,10 +334,24 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
 	}
 
+	certData, certOk := secret.Data[tlsSecretKeyCert]
+	keyData, keyOk := secret.Data[tlsSecretKeyKey]
+	if !certOk || !keyOk {
+		return nil, fmt.Errorf("TLS secret is missing required key: cert=%v, key=%v", certOk, keyOk)
+	}
+
+	cert, err := tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse TLS certificate/key from secret: %q: %w", secretName, err)
+	}
+
 	tlsCfg := &tls.Config{
 		RootCAs:    caCertPool,
 		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
+		Certificates: []tls.Certificate{
+			cert,
+		},
 	}
 	return tlsCfg, nil
 }

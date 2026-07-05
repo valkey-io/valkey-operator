@@ -416,7 +416,22 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
 	assert.Contains(t, conf, "tls-port 6379")
 	assert.Contains(t, conf, "port 0")
-	assert.Contains(t, conf, "tls-auth-clients optional")
+}
+
+func TestBuildValkeyNodeConfigMap_WithAuthClientsUserURI(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.TLS = &valkeyv1.TLSConfig{
+		Certificate:     valkeyv1.CertificateRef{SecretName: "tls-secret"},
+		AuthClients:     valkeyv1.TLSAuthClientsRequired,
+		AuthClientsUser: valkeyv1.TLSAuthClientsUserURI,
+	}
+
+	cm, err := buildValkeyNodeConfigMap(node)
+	require.NoError(t, err)
+
+	conf := cm.Data["valkey.conf"]
+	assert.Contains(t, conf, "tls-auth-clients yes")
+	assert.Contains(t, conf, "tls-auth-clients-user URI")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {

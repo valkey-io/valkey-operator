@@ -42,9 +42,6 @@ const (
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
 
-	valkeyYes = "yes"
-	valkeyNo  = "no"
-
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 )
@@ -83,30 +80,17 @@ func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[st
 		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
 		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
 
-		config["tls-auth-clients"] = tlsAuthClientsValue(tls.AuthClients)
+		if tls.AuthClients != "" {
+			config["tls-auth-clients"] = string(tls.AuthClients)
+		}
 
-		if tls.AuthClientsUser == valkeyiov1alpha1.TLSAuthClientsUserCN {
-			// Map the client certificate's CN to an ACL user only when explicitly opted-in
-			// so the Valkey server keeps its native default ("off") for unconfigured clusters
-			config["tls-auth-clients-user"] = "CN"
+		if tls.AuthClientsUser != "" {
+			// Automatically authenticate TLS clients as ACL users based on their cetificate fields.
+			config["tls-auth-clients-user"] = string(tls.AuthClientsUser)
 		}
 	}
 
 	return config
-}
-
-// tlsAuthClientsValue maps the CRD enum onto the Valkey-native value for the
-// tls-auth-clients directive. An empty value (nothing set on the spec) maps
-// to the documented kubebuilder default ("optional").
-func tlsAuthClientsValue(mode valkeyiov1alpha1.TLSAuthClients) string {
-	switch mode {
-	case valkeyiov1alpha1.TLSAuthClientsRequired:
-		return valkeyYes // require clients to present a client certificate
-	case valkeyiov1alpha1.TLSAuthClientsDisabled:
-		return valkeyNo // ignore client certificates entirely
-	default:
-		return "optional" // allow clients to connect with or without a client certificate
-	}
 }
 
 func writeSortedConfig(builder *strings.Builder, config map[string]string) {

@@ -503,12 +503,7 @@ spec:
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd := exec.Command(
-					"sh", "-c",
-					`kubectl get secret valkey-cluster-sample-users \
-    -n default \
-    -o jsonpath='{.data.defaultpw}'`)
-
+				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
 				b64Password, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 

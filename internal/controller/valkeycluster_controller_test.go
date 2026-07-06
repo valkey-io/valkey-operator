@@ -1256,3 +1256,30 @@ var _ = Describe("buildClusterValkeyNode config passthrough", Label("liveconfig"
 		Expect(node.Spec.Config).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 })
+
+var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
+	It("copies cluster Spec.PriorityClassName into the built ValkeyNode spec", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:            1,
+				Replicas:          0,
+				PriorityClassName: "high-priority",
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.PriorityClassName).To(Equal("high-priority"))
+	})
+
+	It("leaves PriorityClassName empty when the cluster does not set it", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.PriorityClassName).To(BeEmpty())
+	})
+})

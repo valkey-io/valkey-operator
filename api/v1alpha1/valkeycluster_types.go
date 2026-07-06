@@ -100,6 +100,12 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// every pod in the cluster, protecting them from eviction under resource
+	// pressure.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// TopologySpreadConstraints defines pod topology spread constraints applied
 	// to the ValkeyNode workloads. The operator augments these constraints with
 	// shard-aware selectors so pods from the same shard can be spread across the

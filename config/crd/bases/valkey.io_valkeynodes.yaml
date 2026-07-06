@@ -3062,6 +3062,11 @@ spec:
                         type: string
                     type: object
                 type: object
+              priorityClassName:
+                description: |-
+                  PriorityClassName is the name of an existing PriorityClass applied to
+                  the pod, protecting it from eviction under resource pressure.
+                type: string
               resources:
                 description: Resources defines the resource requirements for the Valkey
                   container.

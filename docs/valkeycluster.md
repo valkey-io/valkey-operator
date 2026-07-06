@@ -153,9 +153,10 @@ affinity:
           matchLabels:
             app.kubernetes.io/name: valkey
         topologyKey: kubernetes.io/hostname
+priorityClassName: high-priority
 ```
 
-`tolerations`, `nodeSelector`, and `affinity` are passed through to every pod in the cluster.
+`tolerations`, `nodeSelector`, `affinity`, and `priorityClassName` are passed through to every pod in the cluster. `priorityClassName` must reference an existing [PriorityClass](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) and protects the Valkey pods from eviction under resource pressure.
 
 #### Topology spread constraints
 

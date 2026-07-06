@@ -381,6 +381,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		NodeSelector:              node.Spec.NodeSelector,
 		Affinity:                  node.Spec.Affinity,
 		Tolerations:               node.Spec.Tolerations,
+		PriorityClassName:         node.Spec.PriorityClassName,
 		TopologySpreadConstraints: buildShardTopologySpreadConstraints(node, labels),
 		SecurityContext:           node.Spec.PodSecurityContext,
 		Volumes: []corev1.Volume{

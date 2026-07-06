@@ -3064,6 +3064,12 @@ spec:
                         type: string
                     type: object
                 type: object
+              priorityClassName:
+                description: |-
+                  PriorityClassName is the name of an existing PriorityClass applied to
+                  every pod in the cluster, protecting them from eviction under resource
+                  pressure.
+                type: string
               replicas:
                 description: The number of replicas for each shard group.
                 format: int32

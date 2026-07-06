@@ -383,7 +383,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicas: 1
   tls:
     certificate:
       secretName: %s
@@ -481,6 +481,54 @@ spec:
 			"ACL WHOAMI should resolve to the user mapped from the certificate's CN")
 
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mtlsClientPodName, "--ignore-not-found=true"))
+	})
+
+	// Verifies that primary <-> replica replication works under authClients=yes
+	It("replicates data from primary to replica when mTLS authClients is enabled", func() {
+		// get the primary pod by querying ValkeyNode status.role == "primary".
+		var primaryPod string
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "valkeynode",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", `jsonpath={range .items[?(@.status.role=="primary")]}{.status.podName}{"\n"}{end}`))
+			g.Expect(err).NotTo(HaveOccurred())
+			pods := strings.Fields(strings.TrimSpace(out))
+			g.Expect(pods).To(HaveLen(1), "expected exactly 1 ValkeyNode with status.role=primary, got: %v", pods)
+			primaryPod = pods[0]
+		}).Should(Succeed())
+
+		// Write a key directly on the primary.
+		key := fmt.Sprintf("repl-mtls-%d", time.Now().UnixNano())
+		_, err := utils.Run(exec.Command("kubectl", "exec", primaryPod, "-c", "server", "--",
+			"valkey-cli", "--tls",
+			"--cert", "/tls/tls.crt",
+			"--key", "/tls/tls.key",
+			"--cacert", "/tls/ca.crt",
+			"SET", key, "hello"))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Verify replication: WAIT 1 <timeout_ms> blocks until at least 1 replica
+		// has acknowledged all pending writes, or the timeout expires.
+		// A return value of "1" on the first line proves the key reached the replica.
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "exec", primaryPod, "-c", "server", "--",
+				"valkey-cli", "--tls",
+				"--cert", "/tls/tls.crt",
+				"--key", "/tls/tls.key",
+				"--cacert", "/tls/ca.crt",
+				"WAIT", "1", "5000"))
+			g.Expect(err).NotTo(HaveOccurred())
+			firstLine := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
+			g.Expect(strings.TrimSpace(firstLine)).To(Equal("1"), "expected WAIT to return 1 (replica acknowledged)")
+		}).Should(Succeed())
+
+		// Cleanup.
+		_, _ = utils.Run(exec.Command("kubectl", "exec", primaryPod, "-c", "server", "--",
+			"valkey-cli", "--tls",
+			"--cert", "/tls/tls.crt",
+			"--key", "/tls/tls.key",
+			"--cacert", "/tls/ca.crt",
+			"DEL", key))
 	})
 
 	It("rejects a client that does not present a certificate", func() {

@@ -158,8 +158,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// SIGTERM to finish before SIGKILL. The value is honoured; the operator does
 	// not silently override it. The condition is idempotent, so the event fires
 	// only when the cluster first enters the warning state.
-	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < recommendedGracePeriodSeconds(cluster) {
-		rec := recommendedGracePeriodSeconds(cluster)
+	rec := recommendedGracePeriodSeconds(cluster)
+	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < rec {
 		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
 		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning) {
 			log.Info("terminationGracePeriodSeconds is below the recommended minimum for graceful failover",
@@ -752,9 +752,17 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	// Only set the field when it differs from the Kubernetes default, so existing
 	// clusters that resolve to the default keep a nil value and are not rolled on
 	// operator upgrade.
+	// Store the user's value verbatim when set, so an explicit change (including
+	// back to the Kubernetes default) always propagates to the pod. When unset,
+	// only populate the field if the derived default deviates from the Kubernetes
+	// pod default, so existing clusters that resolve to the default are not rolled
+	// on operator upgrade.
 	var gracePeriod *int64
-	if g := effectiveGracePeriodSeconds(cluster); g != defaultGracePeriodSeconds {
+	if cluster.Spec.TerminationGracePeriodSeconds != nil {
+		g := *cluster.Spec.TerminationGracePeriodSeconds
 		gracePeriod = &g
+	} else if d := effectiveGracePeriodSeconds(cluster); d != defaultGracePeriodSeconds {
+		gracePeriod = &d
 	}
 
 	return &valkeyiov1alpha1.ValkeyNode{

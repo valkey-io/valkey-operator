@@ -123,6 +123,17 @@ Common reasons:
 - `AllSlotsAssigned` – all 16384 slots are assigned
 - `SlotsUnassigned` – waiting for slots to be assigned
 
+#### `ConfigurationWarning`
+Indicates the operator accepted a spec value it considers risky, rather than rejecting or overriding it.
+
+| Status | Meaning |
+|---|---|
+| `True` | A risky value is in effect; see the reason and message. |
+| `False` (or absent) | No configuration warning. |
+
+Common reasons:
+- `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
+
 ---
 
 ### ValkeyNode conditions

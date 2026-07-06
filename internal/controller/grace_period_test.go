@@ -85,6 +85,12 @@ func TestBuildClusterValkeyNodeGracePeriod(t *testing.T) {
 		assert.Nil(t, node.Spec.TerminationGracePeriodSeconds)
 	})
 
+	t.Run("an explicit value equal to the default is still stored verbatim", func(t *testing.T) {
+		node := buildClusterValkeyNode(cluster(ptr(30), nil), 0, 0)
+		require.NotNil(t, node.Spec.TerminationGracePeriodSeconds)
+		assert.Equal(t, int64(30), *node.Spec.TerminationGracePeriodSeconds)
+	})
+
 	t.Run("an explicit value is propagated to the node", func(t *testing.T) {
 		node := buildClusterValkeyNode(cluster(ptr(60), nil), 0, 0)
 		require.NotNil(t, node.Spec.TerminationGracePeriodSeconds)

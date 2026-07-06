@@ -392,7 +392,7 @@ spec:
   users:
     - name: alice
       enabled: true
-      nopass: true
+      resetpass: true
       permissions: "+@all ~* &*"
 `, clusterName, serverCertSecret)
 		clusterFile := filepath.Join(tmpDir, "valkeycluster-mtls.yaml")

@@ -18,6 +18,7 @@
 - [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
+- [Networking](#networking)
 - [Users](#users)
 - [Workload type](#workload-type)
 
@@ -242,6 +243,24 @@ tls:
 | `ca.crt` | Certificate authority |
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
+
+When clients use TLS, pair this with `networking.preferredEndpointType: Hostname` (see below) so nodes announce DNS-resolvable FQDNs. Otherwise, after `CLUSTER SLOTS`, clients re-dial each node by pod IP and fail SNI verification against DNS-only SANs (e.g. cert-manager issued certificates).
+
+### Networking
+
+```yaml
+networking:
+  preferredEndpointType: Hostname   # or IP (default)
+```
+
+`preferredEndpointType` controls how each node advertises itself in the cluster and mirrors valkey's `cluster-preferred-endpoint-type` directive.
+
+| Value | Behaviour |
+|---|---|
+| `IP` (default) | Nodes announce their pod IP via `--cluster-announce-ip`. Backwards compatible; no pod-template change. |
+| `Hostname` | Operator sets `pod.spec.subdomain` to the cluster's headless Service, passes `--cluster-announce-hostname <pod>.<svc>.<ns>.svc.cluster.local`, and adds `cluster-preferred-endpoint-type: hostname` to `valkey.conf`. |
+
+Switching an existing cluster from `IP` to `Hostname` rolls all pods because the subdomain field is part of the pod template.
 
 ### Users
 

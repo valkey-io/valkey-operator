@@ -1,0 +1,15 @@
+# TLS cluster with hostname endpoint announcement so DNS-SAN certs
+# survive the follow-up dial after CLUSTER SLOTS. The referenced Secret
+# must already exist with ca.crt / tls.crt / tls.key.
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-tls-sample
+spec:
+  shards: 3
+  replicas: 1
+  tls:
+    certificate:
+      secretName: cluster-tls-sample-tls
+  networking:
+    preferredEndpointType: Hostname

@@ -214,6 +214,28 @@ type ValkeyClusterSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// Networking configures how nodes advertise themselves in the cluster.
+	// +optional
+	Networking *NetworkingSpec `json:"networking,omitempty"`
+}
+
+// PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
+// +kubebuilder:validation:Enum=IP;Hostname
+type PreferredEndpointType string
+
+const (
+	PreferredEndpointTypeIP       PreferredEndpointType = "IP"
+	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
+)
+
+// NetworkingSpec configures cluster endpoint announcement.
+type NetworkingSpec struct {
+	// PreferredEndpointType selects IP (default) or Hostname announcement.
+	// Use Hostname with TLS clients that verify SNI against DNS names.
+	// +kubebuilder:default=IP
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

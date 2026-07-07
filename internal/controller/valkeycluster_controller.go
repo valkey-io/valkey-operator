@@ -795,6 +795,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
+			Networking:                    cluster.Spec.Networking,
 		},
 	}
 }

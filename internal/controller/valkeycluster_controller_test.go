@@ -1255,6 +1255,31 @@ var _ = Describe("buildClusterValkeyNode config passthrough", Label("liveconfig"
 		node := buildClusterValkeyNode(cluster, 0, 0)
 		Expect(node.Spec.Config).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
+
+	It("propagates cluster Spec.Networking into the built ValkeyNode spec", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+				},
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.Networking).NotTo(BeNil())
+		Expect(node.Spec.Networking.PreferredEndpointType).To(Equal(valkeyiov1alpha1.PreferredEndpointTypeHostname))
+	})
+
+	It("leaves ValkeyNode.Spec.Networking nil when the cluster does not set it", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.Networking).To(BeNil())
+	})
 })
 
 var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {

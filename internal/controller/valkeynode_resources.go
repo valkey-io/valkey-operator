@@ -154,6 +154,38 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 	return output, nil
 }
 
+// valkeyAnnounceArgsAndEnv returns the --cluster-announce-* flags and matching
+// env vars for the server container: pod IP by default, pod FQDN in Hostname mode.
+func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []corev1.EnvVar) {
+	podNameEnv := corev1.EnvVar{
+		Name: "POD_NAME",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.name",
+			},
+		},
+	}
+	podIPEnv := corev1.EnvVar{
+		Name: "POD_IP",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			},
+		},
+	}
+
+	if node.Spec.Networking != nil && node.Spec.Networking.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname {
+		// Requires pod.spec.subdomain = headless service name; set in buildValkeyNodePodTemplateSpec.
+		fqdn := fmt.Sprintf("$(POD_NAME).%s.%s.svc.cluster.local",
+			headlessServiceName(node.Labels[LabelCluster]),
+			node.Namespace,
+		)
+		return []string{"--cluster-announce-hostname", fqdn}, []corev1.EnvVar{podNameEnv}
+	}
+
+	return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
+}
+
 // buildContainersDef builds the base containers definition for the ValkeyNode
 // and applies any strategic merge patches from node.Spec.Containers.
 func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, error) {
@@ -162,42 +194,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		image = node.Spec.Image
 	}
 
+	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+
 	containers := []corev1.Container{
 		{
 			Name:      "server",
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: []string{
+			Command: append([]string{
 				"valkey-server",
 				"/config/valkey.conf",
-				"--cluster-announce-ip",
-				"$(POD_IP)",
+			}, append(announceArgs, []string{
 				"--primaryuser",
 				replicationUser,
 				"--primaryauth",
 				"$(PRIMARY_AUTH)",
-			},
-			Env: []corev1.EnvVar{
-				{
-					Name: "POD_IP",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "status.podIP",
+			}...)...),
+			Env: append(announceEnv, corev1.EnvVar{
+				Name: "PRIMARY_AUTH",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
 						},
+						Key: replicationUser,
 					},
 				},
-				{
-					Name: "PRIMARY_AUTH",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
-							},
-							Key: replicationUser,
-						},
-					},
-				},
-			},
+			}),
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "client",
@@ -436,6 +459,11 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				},
 			},
 		})
+	}
+
+	// Only set in Hostname mode so IP-mode clusters aren't rolled on operator upgrade.
+	if node.Spec.Networking != nil && node.Spec.Networking.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname {
+		podSpec.Subdomain = headlessServiceName(node.Labels[LabelCluster])
 	}
 
 	// Back /data with a PVC when persistence is set; otherwise an emptyDir so

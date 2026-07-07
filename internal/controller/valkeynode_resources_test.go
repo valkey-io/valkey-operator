@@ -55,6 +55,78 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 	assert.Equal(t, "valkey-foo", valkeyNodeResourceName(node))
 }
 
+func TestValkeyAnnounceArgsAndEnv_DefaultsToIP(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "default")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+
+	args, env := valkeyAnnounceArgsAndEnv(node)
+
+	assert.Equal(t, []string{"--cluster-announce-ip", "$(POD_IP)"}, args)
+	require.Len(t, env, 1)
+	assert.Equal(t, "POD_IP", env[0].Name)
+	assert.Equal(t, "status.podIP", env[0].ValueFrom.FieldRef.FieldPath)
+}
+
+func TestValkeyAnnounceArgsAndEnv_IPExplicit(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "default")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.Networking = &valkeyv1.NetworkingSpec{
+		PreferredEndpointType: valkeyv1.PreferredEndpointTypeIP,
+	}
+
+	args, env := valkeyAnnounceArgsAndEnv(node)
+
+	assert.Equal(t, []string{"--cluster-announce-ip", "$(POD_IP)"}, args)
+	require.Len(t, env, 1)
+	assert.Equal(t, "POD_IP", env[0].Name)
+}
+
+func TestValkeyAnnounceArgsAndEnv_Hostname(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.Networking = &valkeyv1.NetworkingSpec{
+		PreferredEndpointType: valkeyv1.PreferredEndpointTypeHostname,
+	}
+
+	args, env := valkeyAnnounceArgsAndEnv(node)
+
+	assert.Equal(t, []string{
+		"--cluster-announce-hostname",
+		"$(POD_NAME).valkey-mycluster.test-ns.svc.cluster.local",
+	}, args)
+	require.Len(t, env, 1)
+	assert.Equal(t, "POD_NAME", env[0].Name)
+	assert.Equal(t, "metadata.name", env[0].ValueFrom.FieldRef.FieldPath)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_HostnameSetsSubdomain(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.Networking = &valkeyv1.NetworkingSpec{
+		PreferredEndpointType: valkeyv1.PreferredEndpointTypeHostname,
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Equal(t, "valkey-mycluster", pts.Spec.Subdomain)
+
+	// Server container also uses the hostname flag, not the IP flag.
+	assert.Contains(t, pts.Spec.Containers[0].Command, "--cluster-announce-hostname")
+	assert.NotContains(t, pts.Spec.Containers[0].Command, "--cluster-announce-ip")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_IPModeLeavesSubdomainEmpty(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Empty(t, pts.Spec.Subdomain)
+	assert.Contains(t, pts.Spec.Containers[0].Command, "--cluster-announce-ip")
+}
+
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	lbls := valkeyNodeLabels(node)

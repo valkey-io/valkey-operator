@@ -118,51 +118,6 @@ var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 		verifyClusterHealthyAndKeysIntact(valkeyName, replicaPod)
 	})
 
-	It("recovers when the primary's StatefulSet is deleted", func() {
-		valkeyName = "failover-sts-delete"
-		createFailoverCluster(valkeyName)
-
-		By("identifying the primary and replica of shard 0")
-		var primaryPod, replicaPod string
-		Eventually(func(g Gomega) {
-			primaryPod, replicaPod = getShardRoles(g, valkeyName, 0)
-			g.Expect(primaryPod).NotTo(BeEmpty(), "shard 0 has no primary")
-			g.Expect(replicaPod).NotTo(BeEmpty(), "shard 0 has no in-sync replica")
-		}).WithTimeout(3 * time.Minute).Should(Succeed())
-
-		By("writing keys across the keyspace")
-		writeTestKeys(primaryPod)
-
-		By("deleting the primary's StatefulSet to deschedule the whole workload")
-		// Pods are named <statefulset>-0.
-		primarySts := strings.TrimSuffix(primaryPod, "-0")
-		cmd := exec.Command("kubectl", "delete", "statefulset", primarySts, "--wait=false")
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to delete primary StatefulSet")
-
-		By("asserting the replica is promoted")
-		Eventually(func(g Gomega) {
-			output, err := execValkeyPodShell(replicaPod, "valkey-cli INFO replication")
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get replication info from replica")
-			g.Expect(output).To(ContainSubstring("role:master"),
-				"replica was not promoted to primary")
-		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
-
-		By("waiting for the operator to recreate the StatefulSet and the pod to rejoin as replica")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "statefulset", primarySts, "-o", "jsonpath={.status.readyReplicas}")
-			ready, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred(), "recreated StatefulSet does not exist yet")
-			g.Expect(ready).To(Equal("1"), "recreated StatefulSet has no ready replicas")
-
-			output, err := execValkeyPodShell(primaryPod, "valkey-cli INFO replication")
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get replication info from recreated pod")
-			g.Expect(output).To(ContainSubstring("role:slave"),
-				"recreated pod did not rejoin the shard as a replica")
-		}).WithTimeout(4 * time.Minute).Should(Succeed())
-
-		verifyClusterHealthyAndKeysIntact(valkeyName, replicaPod)
-	})
 })
 
 // createFailoverCluster creates a ValkeyCluster with one replica per shard

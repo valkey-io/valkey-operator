@@ -2800,6 +2800,12 @@ spec:
               networking:
                 description: Networking mirrors ValkeyCluster.Spec.Networking.
                 properties:
+                  clusterDomain:
+                    default: cluster.local
+                    description: |-
+                      ClusterDomain is the DNS suffix kubelet publishes pod records under.
+                      Only consulted when PreferredEndpointType is Hostname.
+                    type: string
                   preferredEndpointType:
                     default: IP
                     description: |-

@@ -1880,6 +1880,12 @@ spec:
                 description: Networking configures how nodes advertise themselves
                   in the cluster.
                 properties:
+                  clusterDomain:
+                    default: cluster.local
+                    description: |-
+                      ClusterDomain is the DNS suffix kubelet publishes pod records under.
+                      Only consulted when PreferredEndpointType is Hostname.
+                    type: string
                   preferredEndpointType:
                     default: IP
                     description: |-

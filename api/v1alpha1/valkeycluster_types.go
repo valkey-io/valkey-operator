@@ -236,6 +236,12 @@ type NetworkingSpec struct {
 	// +kubebuilder:default=IP
 	// +optional
 	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
+
+	// ClusterDomain is the DNS suffix kubelet publishes pod records under.
+	// Only consulted when PreferredEndpointType is Hostname.
+	// +kubebuilder:default="cluster.local"
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

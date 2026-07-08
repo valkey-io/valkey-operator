@@ -99,6 +99,22 @@ func TestValkeyAnnounceArgsAndEnv_Hostname(t *testing.T) {
 	assert.Equal(t, "metadata.name", env[0].ValueFrom.FieldRef.FieldPath)
 }
 
+func TestValkeyAnnounceArgsAndEnv_HostnameCustomClusterDomain(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.Networking = &valkeyv1.NetworkingSpec{
+		PreferredEndpointType: valkeyv1.PreferredEndpointTypeHostname,
+		ClusterDomain:         "mycompany.internal",
+	}
+
+	args, _ := valkeyAnnounceArgsAndEnv(node)
+
+	assert.Equal(t, []string{
+		"--cluster-announce-hostname",
+		"$(POD_NAME).valkey-mycluster.test-ns.svc.mycompany.internal",
+	}, args)
+}
+
 func TestBuildValkeyNodePodTemplateSpec_HostnameSetsSubdomain(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Labels = map[string]string{LabelCluster: "mycluster"}

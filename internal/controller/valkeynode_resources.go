@@ -176,9 +176,14 @@ func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []co
 
 	if node.Spec.Networking != nil && node.Spec.Networking.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname {
 		// Requires pod.spec.subdomain = headless service name; set in buildValkeyNodePodTemplateSpec.
-		fqdn := fmt.Sprintf("$(POD_NAME).%s.%s.svc.cluster.local",
+		clusterDomain := node.Spec.Networking.ClusterDomain
+		if clusterDomain == "" {
+			clusterDomain = "cluster.local"
+		}
+		fqdn := fmt.Sprintf("$(POD_NAME).%s.%s.svc.%s",
 			headlessServiceName(node.Labels[LabelCluster]),
 			node.Namespace,
+			clusterDomain,
 		)
 		return []string{"--cluster-announce-hostname", fqdn}, []corev1.EnvVar{podNameEnv}
 	}

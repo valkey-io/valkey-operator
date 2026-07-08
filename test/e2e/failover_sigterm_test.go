@@ -19,6 +19,7 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,6 +37,11 @@ import (
 // failover, and verified afterwards to prove no data was lost.
 const keyCount = 50
 
+// failoverDefaultPassword is the password configured for the default user of
+// the failover test clusters (via a passwordSecret, following the pattern
+// introduced in #292), so valkey-cli commands run authenticated.
+const failoverDefaultPassword = "e2eFailoverPassw0rd"
+
 var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 	var valkeyName string
 
@@ -47,6 +53,8 @@ var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 
 		By("cleaning up test resources")
 		cmd := exec.Command("kubectl", "delete", "valkeycluster", valkeyName, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "secret", valkeyName+"-users", "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 	})
 
@@ -157,21 +165,35 @@ var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 	})
 })
 
-// createFailoverCluster creates a ValkeyCluster with one replica per shard and
-// waits for it to become Ready.
+// createFailoverCluster creates a ValkeyCluster with one replica per shard
+// and a password-protected default user, and waits for it to become Ready.
 func createFailoverCluster(valkeyName string) {
 	GinkgoHelper()
 
 	By("creating a ValkeyCluster with one replica per shard")
 	valkeyYaml := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: %[1]s-users
+data:
+  defaultpw: %[2]s
+---
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
-  name: %s
+  name: %[1]s
 spec:
   shards: 3
   replicas: 1
-`, valkeyName)
+  users:
+    - name: default
+      enabled: true
+      permissions: "+@all ~* &*"
+      passwordSecret:
+        name: %[1]s-users
+        keys: [defaultpw]
+`, valkeyName, base64.StdEncoding.EncodeToString([]byte(failoverDefaultPassword)))
 
 	manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
 	err := os.WriteFile(manifestFile, []byte(valkeyYaml), 0644)
@@ -246,13 +268,14 @@ func verifyClusterHealthyAndKeysIntact(valkeyName, pod string) {
 }
 
 // execValkeyPodShell runs a shell script inside the pod's server container
-// with VALKEYCLI_AUTH unset. The operator injects that variable for the probe
-// scripts, and valkey-cli would otherwise automatically send AUTH as the
-// default user — which fails and pollutes the command output. Commands run as
-// the default (nopass) user, like the rest of the e2e suite.
+// with VALKEYCLI_AUTH set to the default user's password, so every valkey-cli
+// invocation in the script runs authenticated. The operator injects
+// VALKEYCLI_AUTH with the _operator user's password for the probe scripts;
+// it must be overridden here because valkey-cli auto-sends it as the default
+// user's AUTH credential.
 func execValkeyPodShell(pod string, script string) (string, error) {
 	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-		"sh", "-c", "unset VALKEYCLI_AUTH; "+script)
+		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
 	return utils.Run(cmd)
 }
 

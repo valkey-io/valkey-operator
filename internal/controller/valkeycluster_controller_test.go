@@ -1310,3 +1310,38 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		Expect(node.Spec.PriorityClassName).To(BeEmpty())
 	})
 })
+
+var _ = Describe("Networking CEL validation", Label("networking"), func() {
+	It("rejects preferredEndpointType=Hostname combined with workloadType=Deployment", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "hostname-deployment", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:       1,
+				Replicas:     0,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+				},
+			},
+		}
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("preferredEndpointType=Hostname requires workloadType=StatefulSet"))
+	})
+
+	It("allows preferredEndpointType=Hostname with workloadType=StatefulSet", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "hostname-sts", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:       1,
+				Replicas:     0,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+	})
+})

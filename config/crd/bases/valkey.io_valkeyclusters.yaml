@@ -3553,6 +3553,11 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: networking.preferredEndpointType=Hostname requires workloadType=StatefulSet
+                (pod names under Deployment are unstable across restarts, so the announced
+                FQDN changes and cluster gossip treats the node as new)
+              rule: '!(has(self.networking) && self.networking.preferredEndpointType
+                == ''Hostname'' && self.workloadType == ''Deployment'')'
           status:
             default:
               readyShards: 0

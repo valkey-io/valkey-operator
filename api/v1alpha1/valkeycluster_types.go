@@ -133,6 +133,7 @@ type SchedulingSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.networking) && self.networking.preferredEndpointType == 'Hostname' && self.workloadType == 'Deployment')",message="networking.preferredEndpointType=Hostname requires workloadType=StatefulSet (pod names under Deployment are unstable across restarts, so the announced FQDN changes and cluster gossip treats the node as new)"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image

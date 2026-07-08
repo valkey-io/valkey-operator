@@ -76,6 +76,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// the pod, protecting it from eviction under resource pressure.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// TopologySpreadConstraints defines pod topology spread constraints applied
 	// to the ValkeyNode workload. The operator augments these constraints with
 	// shard-aware selectors derived from node labels.

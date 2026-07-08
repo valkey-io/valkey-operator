@@ -310,6 +310,7 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	node.Spec.NodeSelector = nodeSelector
 	node.Spec.Affinity = affinity
 	node.Spec.Tolerations = tolerations
+	node.Spec.PriorityClassName = "high-priority"
 
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
@@ -318,6 +319,16 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	assert.Equal(t, nodeSelector, pts.Spec.NodeSelector, "node selector should pass through")
 	assert.Equal(t, affinity, pts.Spec.Affinity, "affinity should pass through")
 	assert.Equal(t, tolerations, pts.Spec.Tolerations, "tolerations should pass through")
+	assert.Equal(t, "high-priority", pts.Spec.PriorityClassName, "priorityClassName should pass through")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_PriorityClassNameDefaultsEmpty(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Empty(t, pts.Spec.PriorityClassName, "priorityClassName should be unset by default")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraints(t *testing.T) {

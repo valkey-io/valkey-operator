@@ -79,6 +79,9 @@ var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 		By("writing keys across the keyspace")
 		writeTestKeys(primaryPod)
 
+		By("starting a continuous writer to run through the disruption")
+		writer := startContinuousWriter(replicaPod)
+
 		By("gracefully terminating the primary pod (SIGTERM with default grace period)")
 		cmd = exec.Command("kubectl", "delete", "pod", primaryPod, "--wait=false")
 		_, err = utils.Run(cmd)
@@ -95,12 +98,40 @@ var _ = Describe("Shutdown-on-SIGTERM failover", Label("failover"), func() {
 				"replica was not promoted to primary")
 		}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
 
-		By("asserting the shard keeps serving writes through the disruption")
-		Eventually(func(g Gomega) {
-			output, err := execValkeyPodShell(replicaPod, "valkey-cli -c set e2e:failover:post v-post")
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to write through promoted primary")
-			g.Expect(output).To(ContainSubstring("OK"))
-		}).Should(Succeed())
+		// The graceful handoff is a coordinated failover driven by the
+		// terminating primary (CLUSTER FAILOVER FORCE REPLICAID), which logs
+		// "Forced failover primary request accepted" on the promoted replica.
+		// The crash path goes through FAIL detection and a rank-based election
+		// instead. valkey 9.0's replica selection on shutdown is best-effort
+		// (it requires exact ack-offset equality at the shutdown instant and
+		// intermittently falls back to the crash path, ~1 in 3 under write
+		// load in local testing), so the handoff path is reported rather than
+		// hard-asserted until the promotion is made deterministic.
+		By("reporting which failover path drove the promotion")
+		cmd = exec.Command("kubectl", "logs", replicaPod, "-c", "server")
+		logs, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to get promoted replica logs")
+		if strings.Contains(strings.ToLower(logs), "forced failover primary request accepted") {
+			_, _ = fmt.Fprintf(GinkgoWriter, "promotion path: coordinated shutdown handoff (forced failover)\n")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"promotion path: failure detection (shutdown handoff did not engage; see 'Unable to find a replica' on the primary)\n")
+		}
+
+		By("asserting every write acknowledged during the disruption is readable")
+		acked, maxGap := writer.stop()
+		Expect(acked).NotTo(BeEmpty(), "continuous writer recorded no acknowledged writes")
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"continuous writer: %d acknowledged writes, longest gap between acknowledged writes: %.2fs\n",
+			len(acked), maxGap)
+		verifyAcknowledgedWrites(replicaPod, acked)
+
+		// The orderly handoff keeps a writer available throughout the
+		// disruption; a crash-style failover leaves the shard writer-less for
+		// failure detection plus an election. The bound is deliberately
+		// generous to absorb CI noise.
+		Expect(maxGap).To(BeNumerically("<", 10.0),
+			fmt.Sprintf("shard had no writer for %.2fs during the graceful handoff", maxGap))
 
 		By("waiting for the replaced pod to come back and rejoin as replica")
 		Eventually(func(g Gomega) {
@@ -220,6 +251,113 @@ func verifyClusterHealthyAndKeysIntact(valkeyName, pod string) {
 		g.Expect(output).To(ContainSubstring(fmt.Sprintf("readable=%d", keyCount)),
 			fmt.Sprintf("Some keys were lost across the disruption: %s", output))
 	}).Should(Succeed())
+}
+
+// continuousWriter tracks a background write loop running inside a pod.
+type continuousWriter struct {
+	cmd    *exec.Cmd
+	output *strings.Builder
+}
+
+// startContinuousWriter starts a background loop inside the pod that writes
+// uniquely-numbered keys through the cluster for writerDurationSeconds,
+// recording a timestamped ack/fail line per attempt. It is started against
+// the shard's replica so cluster-mode redirects follow the primary across the
+// handoff.
+const writerDurationSeconds = 20
+
+func startContinuousWriter(pod string) *continuousWriter {
+	GinkgoHelper()
+
+	// POSIX-sh only: the image's /bin/sh is dash, which has no $SECONDS.
+	script := fmt.Sprintf(
+		"end=$(($(date +%%s)+%d)); i=0; "+
+			"while [ \"$(date +%%s)\" -lt \"$end\" ]; do "+
+			"r=$(valkey-cli -c set e2e:cw:$i v$i 2>/dev/null | tail -n 1); "+
+			"if [ \"$r\" = \"OK\" ]; then echo \"ack $i $(date +%%s.%%N)\"; "+
+			"else echo \"fail $i $(date +%%s.%%N)\"; fi; "+
+			"i=$((i+1)); "+
+			"done", writerDurationSeconds)
+	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
+		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
+
+	w := &continuousWriter{cmd: cmd, output: &strings.Builder{}}
+	cmd.Stdout = w.output
+	cmd.Stderr = w.output
+	Expect(cmd.Start()).To(Succeed(), "Failed to start continuous writer")
+	return w
+}
+
+// stop waits for the writer loop to finish and returns the map of
+// acknowledged key indices to their expected values, plus the longest gap in
+// seconds between consecutive acknowledged writes (the shard's effective
+// write-unavailability window).
+func (w *continuousWriter) stop() (acked map[string]string, maxGap float64) {
+	GinkgoHelper()
+
+	Expect(w.cmd.Wait()).To(Succeed(), "continuous writer failed: %s", w.output.String())
+
+	acked = map[string]string{}
+	lastAckTime := -1.0
+	for _, line := range utils.GetNonEmptyLines(w.output.String()) {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			continue
+		}
+		status, idx := fields[0], fields[1]
+		var ts float64
+		if _, err := fmt.Sscanf(fields[2], "%f", &ts); err != nil {
+			continue
+		}
+		if status != "ack" {
+			continue
+		}
+		if lastAckTime >= 0 && ts-lastAckTime > maxGap {
+			maxGap = ts - lastAckTime
+		}
+		lastAckTime = ts
+		acked[idx] = "v" + idx
+	}
+	return acked, maxGap
+}
+
+// verifyAcknowledgedWrites asserts that every key the continuous writer got
+// an OK for is readable with the expected value — i.e. no acknowledged write
+// was dropped during the handoff.
+func verifyAcknowledgedWrites(pod string, acked map[string]string) {
+	GinkgoHelper()
+
+	maxIdx := 0
+	for idx := range acked {
+		var i int
+		_, err := fmt.Sscanf(idx, "%d", &i)
+		Expect(err).NotTo(HaveOccurred())
+		if i > maxIdx {
+			maxIdx = i
+		}
+	}
+
+	script := fmt.Sprintf(
+		"for i in $(seq 0 %d); do v=$(valkey-cli -c get e2e:cw:$i 2>/dev/null | tail -n 1); echo \"$i $v\"; done", maxIdx)
+	output, err := execValkeyPodShell(pod, script)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read back acknowledged writes")
+
+	readable := map[string]string{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		fields := strings.Fields(line)
+		if len(fields) == 2 {
+			readable[fields[0]] = fields[1]
+		}
+	}
+
+	var lost []string
+	for idx, want := range acked {
+		if readable[idx] != want {
+			lost = append(lost, idx)
+		}
+	}
+	Expect(lost).To(BeEmpty(),
+		fmt.Sprintf("%d acknowledged write(s) were lost across the handoff: %v", len(lost), lost))
 }
 
 // execValkeyPodShell runs a shell script inside the pod's server container

@@ -770,6 +770,18 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		gracePeriod = &d
 	}
 
+	// Curate node-axis scheduling primitives from node.spread, merged with the
+	// user's escape-hatch passthrough. Preserve nil when nothing is curated.
+	shardsMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
+	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardsMode)
+	topologySpreadConstraints := scheduling.TopologySpreadConstraints
+	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode); len(curated) > 0 {
+		topologySpreadConstraints = append(
+			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
+			curated...,
+		)
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -783,10 +795,10 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Persistence:                   cluster.Spec.Persistence,
 			Resources:                     cluster.Spec.Resources,
 			NodeSelector:                  scheduling.NodeSelector,
-			Affinity:                      scheduling.Affinity,
+			Affinity:                      affinity,
 			Tolerations:                   scheduling.Tolerations,
 			PriorityClassName:             scheduling.PriorityClassName,
-			TopologySpreadConstraints:     scheduling.TopologySpreadConstraints,
+			TopologySpreadConstraints:     topologySpreadConstraints,
 			Exporter:                      cluster.Spec.Exporter,
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),

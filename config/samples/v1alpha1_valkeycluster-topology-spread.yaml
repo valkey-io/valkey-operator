@@ -13,3 +13,11 @@ spec:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: DoNotSchedule
+    node:
+      spread:
+        shards:
+          mode: Required
+        primaries:
+          mode: Disabled
+        pods:
+          mode: Preferred

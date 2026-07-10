@@ -141,6 +141,16 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
+	// TerminationGracePeriodSeconds is the pod termination grace period for the
+	// Valkey nodes. It must give the graceful CLUSTER FAILOVER triggered on
+	// SIGTERM (shutdown-on-sigterm) enough time to hand the shard off to a
+	// replica before SIGKILL. When unset, the operator derives a safe default
+	// from cluster-manual-failover-timeout. A value below that derived minimum
+	// is honoured but reported as a warning.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
 	// TLS configuration for the cluster
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
@@ -236,6 +246,10 @@ const (
 	ConditionDegraded      = "Degraded"
 	ConditionClusterFormed = "ClusterFormed"
 	ConditionSlotsAssigned = "SlotsAssigned"
+	// ConditionConfigurationWarning flags a spec value the operator accepted but
+	// considers risky, for example a terminationGracePeriodSeconds too short for
+	// graceful failover.
+	ConditionConfigurationWarning = "ConfigurationWarning"
 )
 
 const (
@@ -255,6 +269,7 @@ const (
 	ReasonTopologyComplete         = "TopologyComplete"
 	ReasonAllSlotsAssigned         = "AllSlotsAssigned"
 	ReasonSlotsUnassigned          = "SlotsUnassigned"
+	ReasonGracePeriodTooShort      = "GracePeriodTooShort"
 	ReasonPrimaryLost              = "PrimaryLost"
 	ReasonNoSlots                  = "NoSlotsAvailable"
 	ReasonRebalancingSlots         = "RebalancingSlots"

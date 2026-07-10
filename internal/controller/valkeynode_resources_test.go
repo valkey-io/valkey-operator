@@ -891,6 +891,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 						WhenUnsatisfiable: corev1.DoNotSchedule,
 					},
 				},
+				PriorityClassName: "high-priority",
 			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
@@ -911,6 +912,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Scheduling.Affinity, node.Spec.Affinity, "Affinity must be propagated")
 	assert.Equal(t, cluster.Spec.Scheduling.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
 	assert.Equal(t, cluster.Spec.Scheduling.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.PriorityClassName, node.Spec.PriorityClassName, "PriorityClassName must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")

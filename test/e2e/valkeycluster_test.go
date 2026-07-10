@@ -1210,10 +1210,11 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
+  scheduling:
+    topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1291,13 +1292,14 @@ metadata:
 spec:
   shards: 1
   replicas: 1
-  nodeSelector:
-    %s: "%s"
-  topologySpreadConstraints:
-  - maxSkew: 1
-    minDomains: 2
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
+  scheduling:
+    nodeSelector:
+      %s: "%s"
+    topologySpreadConstraints:
+    - maxSkew: 1
+      minDomains: 2
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
 `, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue)
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)

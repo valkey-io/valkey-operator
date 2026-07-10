@@ -686,6 +686,11 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	l[LabelShardIndex] = strconv.Itoa(shardIndex)
 	l[LabelNodeIndex] = strconv.Itoa(nodeIndex)
 
+	var scheduling valkeyiov1alpha1.SchedulingSpec
+	if cluster.Spec.Scheduling != nil {
+		scheduling = *cluster.Spec.Scheduling
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -698,11 +703,11 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			WorkloadType:              cluster.Spec.WorkloadType,
 			Persistence:               cluster.Spec.Persistence,
 			Resources:                 cluster.Spec.Resources,
-			NodeSelector:              cluster.Spec.NodeSelector,
-			Affinity:                  cluster.Spec.Affinity,
-			Tolerations:               cluster.Spec.Tolerations,
-			PriorityClassName:         cluster.Spec.PriorityClassName,
-			TopologySpreadConstraints: cluster.Spec.TopologySpreadConstraints,
+			NodeSelector:              scheduling.NodeSelector,
+			Affinity:                  scheduling.Affinity,
+			Tolerations:               scheduling.Tolerations,
+			PriorityClassName:         scheduling.PriorityClassName,
+			TopologySpreadConstraints: scheduling.TopologySpreadConstraints,
 			Exporter:                  cluster.Spec.Exporter,
 			Containers:                cluster.Spec.Containers,
 			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),

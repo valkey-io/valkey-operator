@@ -113,12 +113,12 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 podDisruptionBudget: Managed  # default
 ```
 
-The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting all pods in the cluster. Set to `Disabled` when the PDB is managed externally or is not required.
+The operator creates a per-shard `PodDisruptionBudget` with `minAvailable: 1` selecting pods belonging to that shard. Set to `Disabled` when the PDB is managed externally or is not required.
 
 | Value | Behaviour |
 |---|---|
-| `Managed` | Operator creates and owns the PDB |
-| `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
+| `Managed` | Operator creates and owns one PDB per shard |
+| `Disabled` | Operator deletes all per-shard PDBs if they exist and does not recreate them |
 
 ### Graceful shutdown
 

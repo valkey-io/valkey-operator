@@ -589,6 +589,26 @@ spec:
 			}
 			Eventually(verifyReadyForScaleOut, 10*time.Minute).Should(Succeed())
 
+			By("populating the cluster with data so slot migration snapshots real keys")
+			// the _replication user must be allowed to run SELECT and write commands
+			// or the slot migration will loop forever.
+			seedData := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+					"sh", "-c",
+					"awk 'BEGIN{for(i=1;i<=500;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 >/dev/null && valkey-cli -c -h 127.0.0.1 DBSIZE")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).NotTo(Equal("0"), "Expected keys to be written across slots")
+			}
+			Eventually(seedData).Should(Succeed())
+
 			By(fmt.Sprintf("scaling the cluster to %d shards", scaleOutShards))
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
 				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, scaleOutShards))

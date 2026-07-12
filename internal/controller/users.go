@@ -71,6 +71,9 @@ var (
 		replicationUser: strings.Join([]string{
 			"-@all +psync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
 			"+cluster|syncslots",           // required for atomic slot migration
+			// Today, Atomic slot migration streams the snapshot as a command stream
+			// (SELECT + type-specific write commands from the AOF-rewrite)
+			"+select +@write ~*",
 		}, " "),
 	}
 )

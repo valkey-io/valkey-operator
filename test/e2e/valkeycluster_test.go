@@ -1651,11 +1651,11 @@ func getShardRoles(g Gomega, clusterName string, shardIndex string) (primaryPod,
 func writeTestKeys(pod string) {
 	GinkgoHelper()
 
+	// All SETs are piped through a single valkey-cli instance; each
+	// successful SET prints exactly "OK" on its own line in raw mode.
 	script := fmt.Sprintf(
-		"ok=0; for i in $(seq 1 %d); do "+
-			"r=$(valkey-cli -t 2 -c set e2e:failover:$i v$i 2>/dev/null | tail -n 1); "+
-			"[ \"$r\" = \"OK\" ] && ok=$((ok+1)); "+
-			"done; echo written=$ok", failoverKeyCount)
+		"ok=$(for i in $(seq 1 %d); do echo \"set e2e:failover:$i v$i\"; done "+
+			"| valkey-cli -t 2 -c 2>/dev/null | grep -c '^OK$'); echo written=$ok", failoverKeyCount)
 	output, err := execValkeyPodShell(pod, script)
 	Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to write keys: %s", output))
 	Expect(output).To(ContainSubstring(fmt.Sprintf("written=%d", failoverKeyCount)),

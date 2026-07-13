@@ -1207,6 +1207,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.ReadyShards = r.countReadyShards(state, cluster)
 		current.Status.Shards = int32(len(state.Shards))
 	}
+	current.Status.ValkeyVersion = valkey.VersionStringFromImage(effectiveImage(cluster.Spec.Image))
 
 	// Apply conditions from the in-memory cluster object
 	current.Status.Conditions = cluster.Status.Conditions

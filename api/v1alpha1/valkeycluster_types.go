@@ -221,6 +221,11 @@ type ValkeyClusterStatus struct {
 	// +optional
 	Shards int32 `json:"shards,omitempty"`
 
+	// ValkeyVersion is the Valkey version parsed from spec.image's tag. It is
+	// empty when the version could not be determined.
+	// +optional
+	ValkeyVersion string `json:"valkeyVersion,omitempty"`
+
 	// ReadyShards represents the number of shards that are fully healthy.
 	// +kubebuilder:default=0
 	// +optional

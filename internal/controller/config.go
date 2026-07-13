@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const (
@@ -44,7 +46,12 @@ const (
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
+
+	tlsAutoReloadIntervalKey     = "tls-auto-reload-interval"
+	defaultTLSAutoReloadInterval = "86400"
 )
+
+var minTLSAutoReloadVersion = semver.MustParse("9.1.0")
 
 //go:embed scripts/*
 var scripts embed.FS
@@ -119,6 +126,13 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 		// operator's own rolling failover never observes. Requires Valkey 9.0+.
 		"shutdown-on-sigterm": "failover",
 	})
+
+	if cluster.Spec.TLS != nil {
+		if _, userSet := cluster.Spec.Config[tlsAutoReloadIntervalKey]; !userSet &&
+			valkey.MeetsMinVersion(effectiveImage(cluster.Spec.Image), minTLSAutoReloadVersion) {
+			baseConfig[tlsAutoReloadIntervalKey] = defaultTLSAutoReloadInterval
+		}
+	}
 
 	return baseConfig
 }

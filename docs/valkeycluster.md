@@ -238,6 +238,16 @@ tls:
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
 
+When TLS is enabled, the
+operator defaults `tls-auto-reload-interval` to `86400` (1 day) so rotated
+certificates (for example from cert-manager) are reloaded without a restart.
+Override or disable the default via `spec.config`:
+
+```yaml
+config:
+  tls-auto-reload-interval: "3600"
+```
+
 ### Users
 
 ```yaml

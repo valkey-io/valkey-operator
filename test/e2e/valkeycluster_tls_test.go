@@ -31,8 +31,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/controller"
 	"valkey.io/valkey-operator/test/utils"
 )
+
+const gatedImage = "valkey/valkey:9.1.0"
 
 var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS"), func() {
 	var valkeyClusterName string
@@ -94,6 +97,7 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  image: %s
   shards: 1
   replicas: 1
   tls:
@@ -101,7 +105,7 @@ spec:
       secretName: %s
   exporter:
     enabled: true
-`, valkeyClusterName, tlsSecretName)
+`, valkeyClusterName, gatedImage, tlsSecretName)
 		manifestFile := filepath.Join(tmpDir, "valkeycluster-tls.yaml")
 		err = os.WriteFile(manifestFile, []byte(manifest), 0644)
 		Expect(err).NotTo(HaveOccurred())
@@ -134,6 +138,20 @@ spec:
 	})
 
 	Context("when a Valkeycluster CR with TLS is applied", func() {
+		It("surfaces the parsed spec.image version on status.valkeyVersion", func() {
+			cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cr.Status.ValkeyVersion).To(Equal("9.1.0"))
+		})
+
+		It("defaults tls-auto-reload-interval into the rendered config when the version gate is met", func() {
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName),
+				"-o", "jsonpath={.data.valkey\\.conf}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("tls-auto-reload-interval 86400"))
+		})
+
 		It("mounts TLS certs into the server container", func() {
 			cmd := exec.Command("kubectl", "get", "pod",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),

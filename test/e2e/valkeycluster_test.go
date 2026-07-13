@@ -1662,21 +1662,49 @@ func writeTestKeys(pod string) {
 		fmt.Sprintf("Not all keys were written: %s", output))
 }
 
+// readKeysBatch reads the given key prefix for indices [from, to] through a
+// single valkey-cli instance: the GETs are piped over stdin with an
+// "echo KEY:<index>" marker before each one, so one process serves the whole
+// batch and the output can be correlated per key regardless of extra lines.
+func readKeysBatch(pod, keyPrefix string, from, to int) (map[string]string, error) {
+	script := fmt.Sprintf(
+		"for i in $(seq %d %d); do echo \"echo KEY:$i\"; echo \"get %s$i\"; done | valkey-cli -t 2 -c 2>/dev/null",
+		from, to, keyPrefix)
+	output, err := execValkeyPodShell(pod, script)
+	if err != nil {
+		return nil, fmt.Errorf("reading keys back: %w (output: %s)", err, output)
+	}
+
+	values := map[string]string{}
+	current := ""
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "KEY:"); ok {
+			current = after
+			continue
+		}
+		// The last non-empty line before the next marker is the value;
+		// a missing key prints an empty line and leaves no entry.
+		if current != "" && line != "" {
+			values[current] = line
+		}
+	}
+	return values, nil
+}
+
 // verifySeededKeys asserts every key written by writeTestKeys is still
 // readable with the expected value.
 func verifySeededKeys(pod string) {
 	GinkgoHelper()
 
-	script := fmt.Sprintf(
-		"ok=0; for i in $(seq 1 %d); do "+
-			"v=$(valkey-cli -t 2 -c get e2e:failover:$i 2>/dev/null | tail -n 1); "+
-			"[ \"$v\" = \"v$i\" ] && ok=$((ok+1)); "+
-			"done; echo readable=$ok", failoverKeyCount)
 	Eventually(func(g Gomega) {
-		output, err := execValkeyPodShell(pod, script)
-		g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to read keys back: %s", output))
-		g.Expect(output).To(ContainSubstring(fmt.Sprintf("readable=%d", failoverKeyCount)),
-			fmt.Sprintf("Some keys were lost across the disruption: %s", output))
+		values, err := readKeysBatch(pod, "e2e:failover:", 1, failoverKeyCount)
+		g.Expect(err).NotTo(HaveOccurred())
+		for i := 1; i <= failoverKeyCount; i++ {
+			idx := fmt.Sprintf("%d", i)
+			g.Expect(values[idx]).To(Equal("v"+idx),
+				fmt.Sprintf("seeded key e2e:failover:%s was lost across the disruption", idx))
+		}
 	}).Should(Succeed())
 }
 
@@ -1773,18 +1801,8 @@ func verifyAcknowledgedWrites(pod string, acked map[string]string) {
 		}
 	}
 
-	script := fmt.Sprintf(
-		"for i in $(seq 0 %d); do v=$(valkey-cli -t 2 -c get e2e:cw:$i 2>/dev/null | tail -n 1); echo \"$i $v\"; done", maxIdx)
-	output, err := execValkeyPodShell(pod, script)
+	readable, err := readKeysBatch(pod, "e2e:cw:", 0, maxIdx)
 	Expect(err).NotTo(HaveOccurred(), "Failed to read back acknowledged writes")
-
-	readable := map[string]string{}
-	for _, line := range utils.GetNonEmptyLines(output) {
-		fields := strings.Fields(line)
-		if len(fields) == 2 {
-			readable[fields[0]] = fields[1]
-		}
-	}
 
 	var lost []string
 	for idx, want := range acked {

@@ -69,7 +69,7 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 		})
 	})
 
-	Context("when PodDisruptionBudget is Managed (default)", func() {
+	Context("when PodDisruptionBudget is unset (default Cluster)", func() {
 		It("creates a PDB with maxUnavailable: 1 and the correct selector", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
@@ -103,10 +103,34 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 		})
 	})
 
+	Context("when PodDisruptionBudget mode is Cluster", func() {
+		It("creates a PDB with maxUnavailable: 1 and the correct selector", func() {
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, cluster)).To(Succeed())
+			cluster.Spec.PodDisruptionBudget = &valkeyiov1alpha1.PodDisruptionBudgetConfig{
+				Mode: valkeyiov1alpha1.PDBModeCluster,
+			}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			pdb := &policyv1.PodDisruptionBudget{}
+			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
+
+			maxUnavailable := intstr.FromInt32(1)
+			Expect(pdb.Spec.MaxUnavailable).To(Equal(&maxUnavailable))
+			Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue(LabelCluster, cluster.Name))
+		})
+	})
+
 	Context("when PodDisruptionBudget is Disabled", func() {
 		It("does not create a PDB", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, cluster)).To(Succeed())
-			cluster.Spec.PodDisruptionBudget = valkeyiov1alpha1.PDBPolicyDisabled
+			cluster.Spec.PodDisruptionBudget = &valkeyiov1alpha1.PodDisruptionBudgetConfig{
+				Mode: valkeyiov1alpha1.PDBModeDisabled,
+			}
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -130,7 +154,9 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, cluster)).To(Succeed())
-			cluster.Spec.PodDisruptionBudget = valkeyiov1alpha1.PDBPolicyDisabled
+			cluster.Spec.PodDisruptionBudget = &valkeyiov1alpha1.PodDisruptionBudgetConfig{
+				Mode: valkeyiov1alpha1.PDBModeDisabled,
+			}
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{

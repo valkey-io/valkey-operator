@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,15 +50,52 @@ var ClusterStates = []ClusterState{
 	ClusterStateFailed,
 }
 
-// PDBPolicy controls whether the operator manages a PodDisruptionBudget for the cluster.
-// Values may be added in future versions; clients MUST handle unknown values gracefully.
-// +kubebuilder:validation:Enum=Managed;Disabled
-type PDBPolicy string
+// PDBMode selects how the operator manages PodDisruptionBudgets for the cluster.
+// Additional values may be added in future versions; clients MUST handle unknown
+// values gracefully by falling back to default behaviour.
+// +kubebuilder:validation:Enum=Cluster;Disabled
+type PDBMode string
 
 const (
-	PDBPolicyManaged  PDBPolicy = "Managed"
-	PDBPolicyDisabled PDBPolicy = "Disabled"
+	// PDBModeCluster manages one cluster-wide PDB with maxUnavailable: 1.
+	PDBModeCluster PDBMode = "Cluster"
+	// PDBModeDisabled manages no PDB.
+	PDBModeDisabled PDBMode = "Disabled"
 )
+
+// PodDisruptionBudgetConfig configures operator-managed PodDisruptionBudgets.
+type PodDisruptionBudgetConfig struct {
+	// Mode selects the PDB strategy. Defaults to Cluster.
+	// +kubebuilder:default=Cluster
+	// +optional
+	Mode PDBMode `json:"mode,omitempty"`
+}
+
+// UnmarshalJSON accepts both the current object form and the legacy
+// string form ("Managed"/"Disabled"). It exists only so objects still stored
+// under the old string form decode instead of failing the whole informer list
+// decode during an operator upgrade. Removable at v1beta1.
+func (c *PodDisruptionBudgetConfig) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch s {
+		case "Managed":
+			*c = PodDisruptionBudgetConfig{Mode: PDBModeCluster}
+		case "Disabled":
+			*c = PodDisruptionBudgetConfig{Mode: PDBModeDisabled}
+		default:
+			*c = PodDisruptionBudgetConfig{Mode: PDBMode(s)}
+		}
+		return nil
+	}
+	type alias PodDisruptionBudgetConfig
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*c = PodDisruptionBudgetConfig(a)
+	return nil
+}
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
@@ -155,11 +194,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
 
-	// PodDisruptionBudget controls whether the operator manages a PodDisruptionBudget for this cluster.
-	// Set to Disabled when the PDB is managed externally or must be suppressed during maintenance.
-	// +kubebuilder:default=Managed
+	// PodDisruptionBudget configures the operator-managed PodDisruptionBudget(s)
+	// for this cluster. When unset, the operator applies the default (Cluster) mode.
 	// +optional
-	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+	PodDisruptionBudget *PodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
 
 	// Override the PodSecurityContext applied to each ValkeyNode pod of the cluster.
 	// When set, this overrides the default PodSecurityContext.

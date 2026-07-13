@@ -36,7 +36,12 @@ func pdbName(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 }
 
 func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
-	if cluster.Spec.PodDisruptionBudget == valkeyiov1alpha1.PDBPolicyDisabled {
+	mode := valkeyiov1alpha1.PDBModeCluster
+	if cfg := cluster.Spec.PodDisruptionBudget; cfg != nil && cfg.Mode != "" {
+		mode = cfg.Mode
+	}
+
+	if mode == valkeyiov1alpha1.PDBModeDisabled {
 		pdb := &policyv1.PodDisruptionBudget{}
 		err := r.Get(ctx, client.ObjectKey{Name: pdbName(cluster), Namespace: cluster.Namespace}, pdb)
 		if apierrors.IsNotFound(err) {
@@ -52,6 +57,7 @@ func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Conte
 		return nil
 	}
 
+	// Cluster mode (and any unknown future value) creates the cluster-wide PDB.
 	maxUnavailable := intstr.FromInt32(1)
 	existing := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{

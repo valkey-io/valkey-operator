@@ -110,14 +110,15 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 ### Pod disruption budget
 
 ```yaml
-podDisruptionBudget: Managed  # default
+podDisruptionBudget:
+  mode: Cluster  # default
 ```
 
-The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting all pods in the cluster. Set to `Disabled` when the PDB is managed externally or is not required.
+The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting all pods in the cluster. Set `mode: Disabled` when the PDB is managed externally or is not required. Omitting `podDisruptionBudget` entirely is equivalent to `mode: Cluster`.
 
-| Value | Behaviour |
+| Mode | Behaviour |
 |---|---|
-| `Managed` | Operator creates and owns the PDB |
+| `Cluster` | Operator creates and owns a single cluster-wide PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
 
 ### Graceful shutdown

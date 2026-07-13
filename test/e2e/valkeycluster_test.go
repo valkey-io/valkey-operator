@@ -601,7 +601,7 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
 
-				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
 					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
 				output, err := utils.Run(cmd)
@@ -665,7 +665,7 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
 
-				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "--",
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
 					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
 				output, err := utils.Run(cmd)

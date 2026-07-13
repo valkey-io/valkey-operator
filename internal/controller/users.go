@@ -64,6 +64,7 @@ var (
 			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
 			"+info",                      // node info and replication status
+			"+role",                      // current replication role
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",

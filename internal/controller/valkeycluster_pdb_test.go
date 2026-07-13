@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -58,7 +59,7 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-		pdbKey = types.NamespacedName{Name: pdbName(cluster), Namespace: cluster.Namespace}
+		pdbKey = types.NamespacedName{Name: pdbName(cluster, 0), Namespace: cluster.Namespace}
 
 		DeferCleanup(func() {
 			_ = k8sClient.Delete(ctx, cluster)
@@ -79,9 +80,10 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 			pdb := &policyv1.PodDisruptionBudget{}
 			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
 
-			maxUnavailable := intstr.FromInt32(1)
-			Expect(pdb.Spec.MaxUnavailable).To(Equal(&maxUnavailable))
+			minAvailable := intstr.FromInt32(1)
+			Expect(pdb.Spec.MinAvailable).To(Equal(&minAvailable))
 			Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue(LabelCluster, cluster.Name))
+			Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue(LabelShardIndex, "0"))
 		})
 
 		It("recreates the PDB if it is externally deleted", func() {
@@ -141,6 +143,38 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 			err = k8sClient.Get(ctx, pdbKey, pdb)
 			Expect(err).To(HaveOccurred())
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("when old-style PDB exists (without shard index)", func() {
+		It("deletes the old-style PDB and creates a new per-shard PDB", func() {
+			// Create an old-style PDB manually with controller reference
+			oldPdb := &policyv1.PodDisruptionBudget{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourcePrefix + cluster.Name,
+					Namespace: cluster.Namespace,
+				},
+				Spec: policyv1.PodDisruptionBudgetSpec{
+					MinAvailable: func() *intstr.IntOrString { v := intstr.FromInt32(1); return &v }(),
+				},
+			}
+			Expect(controllerutil.SetControllerReference(cluster, oldPdb, reconciler.Scheme)).To(Succeed())
+			Expect(k8sClient.Create(ctx, oldPdb)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Old-style PDB should be deleted
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: resourcePrefix + cluster.Name, Namespace: cluster.Namespace}, oldPdb)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			// New per-shard PDB should exist
+			newPdb := &policyv1.PodDisruptionBudget{}
+			Expect(k8sClient.Get(ctx, pdbKey, newPdb)).To(Succeed())
+			Expect(newPdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue(LabelShardIndex, "0"))
 		})
 	})
 })

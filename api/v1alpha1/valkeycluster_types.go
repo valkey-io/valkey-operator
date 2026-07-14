@@ -97,6 +97,36 @@ func (c *PodDisruptionBudgetConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// SchedulingSpec groups pod placement configuration for the cluster's pods.
+// These fields are rendered onto each ValkeyNode workload the cluster creates.
+type SchedulingSpec struct {
+	// Tolerations to apply to the pods
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector to apply to the pods
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Affinity to apply to the pods, overrides NodeSelector if set.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// TopologySpreadConstraints defines pod topology spread constraints applied
+	// to the ValkeyNode workloads. The operator augments these constraints with
+	// shard-aware selectors so pods from the same shard can be spread across the
+	// configured topology domain.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// every pod in the cluster, protecting them from eviction under resource
+	// pressure. Pod priority is a scheduling concern (preemption, scheduling-queue
+	// order), so it lives alongside the other placement fields.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
@@ -127,30 +157,11 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Tolerations to apply to the pods
+	// Scheduling groups pod placement configuration (affinity, node selector,
+	// tolerations, topology spread constraints, priority class) for the
+	// cluster's pods.
 	// +optional
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-
-	// NodeSelector to apply to the pods
-	// +optional
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Affinity to apply to the pods, overrides NodeSelector if set.
-	// +optional
-	Affinity *corev1.Affinity `json:"affinity,omitempty"`
-
-	// PriorityClassName is the name of an existing PriorityClass applied to
-	// every pod in the cluster, protecting them from eviction under resource
-	// pressure.
-	// +optional
-	PriorityClassName string `json:"priorityClassName,omitempty"`
-
-	// TopologySpreadConstraints defines pod topology spread constraints applied
-	// to the ValkeyNode workloads. The operator augments these constraints with
-	// shard-aware selectors so pods from the same shard can be spread across the
-	// configured topology domain.
-	// +optional
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}

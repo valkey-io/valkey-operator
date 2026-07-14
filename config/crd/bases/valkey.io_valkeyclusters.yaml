@@ -1904,14 +1904,18 @@ spec:
                 - size
                 type: object
               podDisruptionBudget:
-                default: Managed
                 description: |-
-                  PodDisruptionBudget controls whether the operator manages a PodDisruptionBudget for this cluster.
-                  Set to Disabled when the PDB is managed externally or must be suppressed during maintenance.
-                enum:
-                - Managed
-                - Disabled
-                type: string
+                  PodDisruptionBudget configures the operator-managed PodDisruptionBudget(s)
+                  for this cluster. When unset, the operator applies the default (Cluster) mode.
+                properties:
+                  mode:
+                    default: Cluster
+                    description: Mode selects the PDB strategy. Defaults to Cluster.
+                    enum:
+                    - Cluster
+                    - Disabled
+                    type: string
+                type: object
               podSecurityContext:
                 description: |-
                   Override the PodSecurityContext applied to each ValkeyNode pod of the cluster.

@@ -161,6 +161,32 @@ var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 		Expect(k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-no-curated", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))).To(Succeed())
 	})
 
+	It("rejects primaries Required + pods Preferred with passthrough hostname entries of both actions", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "spread-passthrough-both-actions",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   3,
+				Replicas: 1,
+				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+						{MaxSkew: 1, TopologyKey: corev1.LabelHostname, WhenUnsatisfiable: corev1.DoNotSchedule},
+						{MaxSkew: 1, TopologyKey: corev1.LabelHostname, WhenUnsatisfiable: corev1.ScheduleAnyway},
+					},
+					Node: &valkeyiov1alpha1.NodeScheduling{
+						Spread: valkeyiov1alpha1.NodeSpread{
+							Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadRequired},
+							Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadPreferred},
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).NotTo(Succeed())
+	})
+
 	It("accepts a ValkeyCluster with no scheduling.node set at all", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{

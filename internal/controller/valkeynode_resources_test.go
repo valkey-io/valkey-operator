@@ -868,27 +868,30 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 					corev1.ResourceCPU:    resource.MustParse("250m"),
 				},
 			},
-			NodeSelector: map[string]string{"zone": "us-east-1a"},
-			Affinity: &corev1.Affinity{
-				NodeAffinity: &corev1.NodeAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-						NodeSelectorTerms: []corev1.NodeSelectorTerm{
-							{MatchExpressions: []corev1.NodeSelectorRequirement{
-								{Key: "disktype", Operator: corev1.NodeSelectorOpIn, Values: []string{"ssd"}},
-							}},
+			Scheduling: &valkeyv1.SchedulingSpec{
+				NodeSelector: map[string]string{"zone": "us-east-1a"},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{
+								{MatchExpressions: []corev1.NodeSelectorRequirement{
+									{Key: "disktype", Operator: corev1.NodeSelectorOpIn, Values: []string{"ssd"}},
+								}},
+							},
 						},
 					},
 				},
-			},
-			Tolerations: []corev1.Toleration{
-				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
-			},
-			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-				{
-					MaxSkew:           1,
-					TopologyKey:       "kubernetes.io/hostname",
-					WhenUnsatisfiable: corev1.DoNotSchedule,
+				Tolerations: []corev1.Toleration{
+					{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
 				},
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+					{
+						MaxSkew:           1,
+						TopologyKey:       "kubernetes.io/hostname",
+						WhenUnsatisfiable: corev1.DoNotSchedule,
+					},
+				},
+				PriorityClassName: "high-priority",
 			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
@@ -905,10 +908,11 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.WorkloadType, node.Spec.WorkloadType, "WorkloadType must be propagated")
 	assert.Equal(t, cluster.Spec.Persistence, node.Spec.Persistence, "Persistence must be propagated")
 	assert.Equal(t, cluster.Spec.Resources, node.Spec.Resources, "Resources must be propagated")
-	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
-	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")
-	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
-	assert.Equal(t, cluster.Spec.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.Affinity, node.Spec.Affinity, "Affinity must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.PriorityClassName, node.Spec.PriorityClassName, "PriorityClassName must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")

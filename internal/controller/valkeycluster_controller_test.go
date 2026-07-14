@@ -1262,9 +1262,11 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:            1,
-				Replicas:          0,
-				PriorityClassName: "high-priority",
+				Shards:   1,
+				Replicas: 0,
+				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+					PriorityClassName: "high-priority",
+				},
 			},
 		}
 		node := buildClusterValkeyNode(cluster, 0, 0)

@@ -151,32 +151,34 @@ imagePullSecrets:
 ### Scheduling
 
 ```yaml
-tolerations:
-  - key: "dedicated"
-    operator: "Equal"
-    value: "valkey"
-    effect: "NoSchedule"
-nodeSelector:
-  kubernetes.io/arch: amd64
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchLabels:
-            app.kubernetes.io/name: valkey
-        topologyKey: kubernetes.io/hostname
-priorityClassName: high-priority
+scheduling:
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "valkey"
+      effect: "NoSchedule"
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+          topologyKey: kubernetes.io/hostname
+  priorityClassName: high-priority
 ```
 
-`tolerations`, `nodeSelector`, `affinity`, and `priorityClassName` are passed through to every pod in the cluster. `priorityClassName` must reference an existing [PriorityClass](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) and protects the Valkey pods from eviction under resource pressure.
+`scheduling.tolerations`, `scheduling.nodeSelector`, `scheduling.affinity`, and `scheduling.priorityClassName` are passed through to every pod in the cluster. `priorityClassName` must reference an existing [PriorityClass](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) and protects the Valkey pods from eviction under resource pressure.
 
 #### Topology spread constraints
 
 ```yaml
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
+scheduling:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
 ```
 
 `topologySpreadConstraints` uses Kubernetes' native pod topology spread constraints and applies them to every Valkey pod in the cluster.
@@ -203,10 +205,11 @@ Each constraint must include:
 Example strict node-level spreading:
 
 ```yaml
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
+scheduling:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
 ```
 
 This tries to keep pods from the same shard on different worker nodes. If the cluster does not have enough eligible worker nodes, affected pods stay `Pending`.
@@ -214,10 +217,11 @@ This tries to keep pods from the same shard on different worker nodes. If the cl
 Example preferred node-level spreading:
 
 ```yaml
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: ScheduleAnyway
+scheduling:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
 ```
 
 This still prefers spreading pods from the same shard across worker nodes, but allows scheduling to continue if the constraint cannot be satisfied.

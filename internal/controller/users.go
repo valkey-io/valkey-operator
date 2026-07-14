@@ -73,7 +73,7 @@ var (
 			"+cluster|syncslots",           // required for atomic slot migration
 			// Today, Atomic slot migration streams the snapshot as a command stream
 			// (SELECT + type-specific write commands from the AOF-rewrite)
-			"+select +@write ~*",
+			"+select +@write ~* -flushall -flushdb -swapdb",
 		}, " "),
 	}
 )

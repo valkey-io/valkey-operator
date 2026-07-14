@@ -3603,6 +3603,34 @@ spec:
                 && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
                 ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
                 )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries
+                or node.spread.pods set to Required, which render the same hostname
+                DoNotSchedule constraint: set that node.spread mode to Disabled, or
+                remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''DoNotSchedule'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries
+                or node.spread.pods set to Preferred, which render the same hostname
+                ScheduleAnyway constraint: set that node.spread mode to Disabled or
+                Required, or remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
           status:
             default:
               readyShards: 0

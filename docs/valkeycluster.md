@@ -183,11 +183,9 @@ For the common intents such as keep a shard's pods on different nodes, spread ea
 
 > **Do not overlap a hostname constraint with `node.spread`.**
 >
-> If you set a passthrough constraint on `topologyKey: kubernetes.io/hostname` and also enable `node.spread.primaries` or `node.spread.pods` with a matching `whenUnsatisfiable` (`Required` → `DoNotSchedule`, `Preferred` → `ScheduleAnyway`), the pod ends up with two constraints sharing that `{topologyKey, whenUnsatisfiable}` pair.
+> A passthrough constraint on `topologyKey: kubernetes.io/hostname` collides with an enabled `node.spread.primaries` or `node.spread.pods` that renders the same `whenUnsatisfiable` (`Required` → `DoNotSchedule`, `Preferred` → `ScheduleAnyway`), because the pod would carry two constraints sharing that `{topologyKey, whenUnsatisfiable}` pair — which Kubernetes forbids.
 >
-> Admission does not catch this — the operator only checks the curated `primaries`/`pods` pair against each other — so the `ValkeyCluster` is accepted, but Kubernetes then rejects the rendered pod template (a topology spread constraint may not be repeated for the same key/action) and the shard's pods are never created.
->
-> Keep hostname spreading in `node.spread` and reserve `topologySpreadConstraints` for other topology keys.
+> The operator rejects this combination at admission, so keep hostname spreading in `node.spread` and reserve `topologySpreadConstraints` for other topology keys (for example zones). A passthrough hostname constraint whose `whenUnsatisfiable` differs from what the enabled dimensions render is still allowed.
 
 Each constraint must include:
 

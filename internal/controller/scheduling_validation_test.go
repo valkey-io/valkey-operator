@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -39,6 +40,38 @@ func schedulingCluster(name string, primaries, pods valkeyiov1alpha1.SpreadMode)
 			Shards:   3,
 			Replicas: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+				Node: &valkeyiov1alpha1.NodeScheduling{
+					Spread: valkeyiov1alpha1.NodeSpread{
+						Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: primaries},
+						Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: pods},
+					},
+				},
+			},
+		},
+	}
+}
+
+// schedulingClusterWithPassthrough builds a ValkeyCluster with a raw
+// topologySpreadConstraints entry (the escape hatch) alongside explicit
+// node.spread.primaries/pods modes, for exercising the passthrough-vs-curated
+// collision CEL validation.
+func schedulingClusterWithPassthrough(name, topologyKey string, action corev1.UnsatisfiableConstraintAction, primaries, pods valkeyiov1alpha1.SpreadMode) *valkeyiov1alpha1.ValkeyCluster {
+	return &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+					{
+						MaxSkew:           1,
+						TopologyKey:       topologyKey,
+						WhenUnsatisfiable: action,
+					},
+				},
 				Node: &valkeyiov1alpha1.NodeScheduling{
 					Spread: valkeyiov1alpha1.NodeSpread{
 						Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: primaries},
@@ -96,6 +129,36 @@ var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	})
+
+	It("rejects a hostname DoNotSchedule passthrough constraint with node.spread.pods Required", func() {
+		err := k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-pods-required", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("DoNotSchedule collides"))
+	})
+
+	It("rejects a hostname DoNotSchedule passthrough constraint with node.spread.primaries Required", func() {
+		err := k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-primaries-required", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("DoNotSchedule collides"))
+	})
+
+	It("rejects a hostname ScheduleAnyway passthrough constraint with node.spread.pods Preferred", func() {
+		err := k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-pods-preferred", corev1.LabelHostname, corev1.ScheduleAnyway, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("ScheduleAnyway collides"))
+	})
+
+	It("accepts a hostname DoNotSchedule passthrough constraint with node.spread.pods Preferred (different action, no collision)", func() {
+		Expect(k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-mixed-action", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred))).To(Succeed())
+	})
+
+	It("accepts a non-hostname passthrough constraint with node.spread.pods Required (different topologyKey, no collision)", func() {
+		Expect(k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-zone", "topology.kubernetes.io/zone", corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired))).To(Succeed())
+	})
+
+	It("accepts a hostname DoNotSchedule passthrough constraint when all node.spread modes are Disabled", func() {
+		Expect(k8sClient.Create(ctx, schedulingClusterWithPassthrough("spread-passthrough-no-curated", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))).To(Succeed())
 	})
 
 	It("accepts a ValkeyCluster with no scheduling.node set at all", func() {

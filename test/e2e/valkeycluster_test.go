@@ -554,6 +554,7 @@ spec:
 		It("rebalances slots on scale out", func() {
 			const baseShards = 2
 			const scaleOutShards = 3
+			const seedKeys = 500
 			valkeyClusterName = "valkeycluster-scaleout"
 
 			By("creating a smaller ValkeyCluster for scale-out")
@@ -588,6 +589,26 @@ spec:
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(baseShards)))
 			}
 			Eventually(verifyReadyForScaleOut, 10*time.Minute).Should(Succeed())
+
+			By("populating the cluster with data so slot migration snapshots real keys")
+			// the _replication user must be allowed to run SELECT and write commands
+			// or the slot migration will loop forever.
+			seedData := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
+					"sh", "-c",
+					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seed writes should succeed across shards")
+			}
+			Eventually(seedData).Should(Succeed())
 
 			By(fmt.Sprintf("scaling the cluster to %d shards", scaleOutShards))
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
@@ -634,6 +655,24 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 			}
 			Eventually(verifyScaledOut).Should(Succeed())
+
+			By("verifying all seeded keys remain readable after slot migration")
+			verifySeededData := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
+					"sh", "-c",
+					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seeded keys should survive after rebalance")
+			}
+			Eventually(verifySeededData).Should(Succeed())
 		})
 
 		It("drains slots on scale in", func() {

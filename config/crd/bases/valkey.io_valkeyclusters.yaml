@@ -1876,6 +1876,26 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              networking:
+                description: Networking configures how nodes advertise themselves
+                  in the cluster.
+                properties:
+                  clusterDomain:
+                    default: cluster.local
+                    description: |-
+                      ClusterDomain is the DNS suffix kubelet publishes pod records under.
+                      Only consulted when PreferredEndpointType is Hostname.
+                    type: string
+                  preferredEndpointType:
+                    default: IP
+                    description: |-
+                      PreferredEndpointType selects IP (default) or Hostname announcement.
+                      Use Hostname with TLS clients that verify SNI against DNS names.
+                    enum:
+                    - IP
+                    - Hostname
+                    type: string
+                type: object
               persistence:
                 description: Persistence defines durable storage that is propagated
                   to each ValkeyNode.
@@ -3533,6 +3553,11 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: networking.preferredEndpointType=Hostname requires workloadType=StatefulSet
+                (pod names under Deployment are unstable across restarts, so the announced
+                FQDN changes and cluster gossip treats the node as new)
+              rule: '!(has(self.networking) && self.networking.preferredEndpointType
+                == ''Hostname'' && self.workloadType == ''Deployment'')'
           status:
             default:
               readyShards: 0

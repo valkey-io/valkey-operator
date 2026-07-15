@@ -133,6 +133,7 @@ type SchedulingSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.networking) && self.networking.preferredEndpointType == 'Hostname' && self.workloadType == 'Deployment')",message="networking.preferredEndpointType=Hostname requires workloadType=StatefulSet (pod names under Deployment are unstable across restarts, so the announced FQDN changes and cluster gossip treats the node as new)"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -214,6 +215,34 @@ type ValkeyClusterSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// Networking configures how nodes advertise themselves in the cluster.
+	// +optional
+	Networking *NetworkingSpec `json:"networking,omitempty"`
+}
+
+// PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
+// +kubebuilder:validation:Enum=IP;Hostname
+type PreferredEndpointType string
+
+const (
+	PreferredEndpointTypeIP       PreferredEndpointType = "IP"
+	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
+)
+
+// NetworkingSpec configures cluster endpoint announcement.
+type NetworkingSpec struct {
+	// PreferredEndpointType selects IP (default) or Hostname announcement.
+	// Use Hostname with TLS clients that verify SNI against DNS names.
+	// +kubebuilder:default=IP
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
+
+	// ClusterDomain is the DNS suffix kubelet publishes pod records under.
+	// Only consulted when PreferredEndpointType is Hostname.
+	// +kubebuilder:default="cluster.local"
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.

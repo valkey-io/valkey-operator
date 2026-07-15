@@ -18,6 +18,7 @@
 - [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
+- [Networking](#networking)
 - [Users](#users)
 - [Workload type](#workload-type)
 
@@ -242,6 +243,29 @@ tls:
 | `ca.crt` | Certificate authority |
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
+
+When clients use TLS, pair this with `networking.preferredEndpointType: Hostname` (see below) so nodes announce DNS-resolvable FQDNs. Otherwise, after `CLUSTER SLOTS`, clients re-dial each node by pod IP and fail SNI verification against DNS-only SANs (e.g. cert-manager issued certificates).
+
+The server certificate must cover every pod's announced FQDN. A wildcard SAN like `*.<headless-svc>.<namespace>.svc.<clusterDomain>` (e.g. `*.valkey-mycluster.default.svc.cluster.local`) covers every pod in the cluster and doesn't need re-issuing when the cluster scales.
+
+### Networking
+
+```yaml
+networking:
+  preferredEndpointType: Hostname   # or IP (default)
+  clusterDomain: cluster.local      # kubelet's --cluster-domain
+```
+
+`preferredEndpointType` controls how each node advertises itself in the cluster and mirrors valkey's `cluster-preferred-endpoint-type` directive.
+
+| Value | Behaviour |
+|---|---|
+| `IP` (default) | Nodes announce their pod IP via `--cluster-announce-ip`. Backwards compatible; no pod-template change. |
+| `Hostname` | Operator sets `pod.spec.subdomain` to the cluster's headless Service, passes `--cluster-announce-hostname <pod>.<svc>.<ns>.svc.<clusterDomain>`, and adds `cluster-preferred-endpoint-type: hostname` to `valkey.conf`. |
+
+`clusterDomain` defaults to `cluster.local` and must match whatever kubelet was started with. Only consulted in `Hostname` mode.
+
+Switching an existing cluster from `IP` to `Hostname` rolls all pods because the subdomain field is part of the pod template. `Hostname` is only valid with `workloadType: StatefulSet` — Deployment pod names change on restart, so the announced FQDN would drift and cluster gossip would treat the recreated node as new. The CRD enforces this at admission time.
 
 ### Users
 

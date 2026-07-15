@@ -1,0 +1,25 @@
+# TLS cluster with hostname endpoint announcement so DNS-SAN certs
+# survive the follow-up dial after CLUSTER SLOTS.
+#
+# The referenced Secret must already exist with ca.crt / tls.crt / tls.key.
+# The server certificate MUST cover every pod's announced FQDN. The
+# operator announces <pod>.<headless-svc>.<ns>.svc.<clusterDomain>, so
+# a single wildcard SAN like:
+#
+#     *.valkey-cluster-tls-sample.default.svc.cluster.local
+#
+# covers every pod in this cluster in this namespace. Alternatively, one
+# SAN per pod also works but has to be re-issued when the cluster scales.
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-tls-sample
+spec:
+  shards: 3
+  replicas: 1
+  tls:
+    certificate:
+      secretName: cluster-tls-sample-tls
+  networking:
+    preferredEndpointType: Hostname
+    # clusterDomain: cluster.local  # override if kubelet uses a non-default --cluster-domain

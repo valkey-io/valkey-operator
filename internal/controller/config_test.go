@@ -114,3 +114,26 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 		Expect(out).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 })
+
+var _ = Describe("Networking config", Label("networking"), func() {
+	It("does not set cluster-preferred-endpoint-type by default", func() {
+		cfg := buildManagedConfig(false, nil, nil)
+		_, ok := cfg["cluster-preferred-endpoint-type"]
+		Expect(ok).To(BeFalse())
+	})
+
+	It("does not set cluster-preferred-endpoint-type when IP is explicit", func() {
+		cfg := buildManagedConfig(false, nil, &valkeyiov1alpha1.NetworkingSpec{
+			PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeIP,
+		})
+		_, ok := cfg["cluster-preferred-endpoint-type"]
+		Expect(ok).To(BeFalse())
+	})
+
+	It("sets cluster-preferred-endpoint-type to hostname when Hostname", func() {
+		cfg := buildManagedConfig(false, nil, &valkeyiov1alpha1.NetworkingSpec{
+			PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+		})
+		Expect(cfg["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+	})
+})

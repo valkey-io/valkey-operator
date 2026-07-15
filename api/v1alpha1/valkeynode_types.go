@@ -137,6 +137,10 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// Networking mirrors ValkeyCluster.Spec.Networking.
+	// +optional
+	Networking *NetworkingSpec `json:"networking,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

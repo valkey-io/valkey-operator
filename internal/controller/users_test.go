@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 func TestOperatorUserPasswordSecret(t *testing.T) {

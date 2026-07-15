@@ -21,11 +21,11 @@ import (
 	"fmt"
 	"slices"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 // valkeyNodeResourceName returns the name used for resources

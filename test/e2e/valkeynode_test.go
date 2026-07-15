@@ -29,9 +29,9 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	controller "valkey.io/valkey-operator/internal/controller"
-	"valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	controller "github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 const (

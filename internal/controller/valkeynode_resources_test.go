@@ -1049,13 +1049,16 @@ func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough(t *testin
 }
 
 // TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop confirms
-// backward compatibility: omitting the field results in no pod-level
-// SecurityContext (existing CRs unchanged).
+// backward compatibility: omitting the field applies no security settings.
+// The built template carries the empty SecurityContext the API server would
+// default a stored pod template to — semantically identical to nil, and
+// required so an unchanged reconcile stays a no-op (#315).
 func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	assert.Nil(t, pts.Spec.SecurityContext, "omitting PodSecurityContext must leave pod-level SecurityContext nil")
+	assert.Equal(t, &corev1.PodSecurityContext{}, pts.Spec.SecurityContext,
+		"omitting PodSecurityContext must produce the empty SecurityContext the API server defaults to")
 }

@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -489,7 +490,15 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			svc.Spec.ClusterIP = "None"
 		}
 		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
-		svc.Spec.Ports = []corev1.ServicePort{{Name: appName, Port: DefaultPort}}
+		// Protocol and TargetPort are API-server defaults; set them explicitly
+		// so the rebuilt slice deep-equals the stored one and CreateOrUpdate
+		// stops updating the Service on every reconcile (#315).
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Name:       appName,
+			Port:       DefaultPort,
+			Protocol:   corev1.ProtocolTCP,
+			TargetPort: intstr.FromInt32(DefaultPort),
+		}}
 		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
 	})
 	if err != nil {

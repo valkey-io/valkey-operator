@@ -1186,6 +1186,15 @@ type fakeConfigClient struct {
 	params map[string]string
 	err    error
 	closed bool
+
+	// aclHashes is what the fake server currently reports per user.
+	aclHashes map[string][]string
+	// aclOnLoad is what an ACL LOAD converges the server to. Leaving it nil
+	// models a mounted aclfile that has not caught up yet, so the LOAD is a
+	// no-op.
+	aclOnLoad map[string][]string
+	aclLoads  int
+	aclErr    error
 }
 
 func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string) error {
@@ -1193,7 +1202,112 @@ func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string
 	return f.err
 }
 
+func (f *fakeConfigClient) LoadACL(_ context.Context) error {
+	f.aclLoads++
+	if f.aclErr != nil {
+		return f.aclErr
+	}
+	if f.aclOnLoad != nil {
+		f.aclHashes = f.aclOnLoad
+	}
+	return nil
+}
+
+func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string) ([]string, error) {
+	if f.aclErr != nil {
+		return nil, f.aclErr
+	}
+	hashes, ok := f.aclHashes[username]
+	if !ok {
+		return []string{}, nil
+	}
+	return hashes, nil
+}
+
 func (f *fakeConfigClient) Close() { f.closed = true }
+
+var _ = Describe("applyLiveACL", Label("liveacl"), func() {
+	ctx := context.Background()
+
+	// One alice password ("aaa") is what the aclfile Secret asks for.
+	const aclSecretName = "live-acl-users"
+	const aclFileContent = "user alice on #aaa ~* +@all\n"
+	desiredHashes := map[string][]string{"alice": {"aaa"}}
+	staleHashes := map[string][]string{"alice": {"old"}}
+
+	nodeWith := func(secretName string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "live-acl-node", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{UsersACLSecretName: secretName},
+		}
+	}
+	reconcilerFor := func(fake *fakeConfigClient) *ValkeyNodeReconciler {
+		return &ValkeyNodeReconciler{
+			APIReader: k8sClient,
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: aclSecretName, Namespace: "default"},
+			Data:       map[string][]byte{aclFilename: []byte(aclFileContent)},
+		}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
+	})
+
+	It("does nothing when the node has no ACL secret", func() {
+		fake := &fakeConfigClient{}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(BeZero(), "must not open a client when there is no ACL to manage")
+	})
+
+	It("treats a missing secret as nothing to apply", func() {
+		fake := &fakeConfigClient{}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(BeZero())
+	})
+
+	It("does not reload when the server already matches the aclfile", func() {
+		fake := &fakeConfigClient{aclHashes: desiredHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(BeZero(), "a steady-state reconcile must not issue ACL LOAD")
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("reloads and reports synced once the mounted file has caught up", func() {
+		fake := &fakeConfigClient{aclHashes: staleHashes, aclOnLoad: desiredHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(Equal(1))
+	})
+
+	It("reports not synced when the mounted aclfile is still stale", func() {
+		// aclOnLoad nil: the LOAD reads the pre-update file and changes nothing.
+		fake := &fakeConfigClient{aclHashes: staleHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeFalse(), "a premature LOAD must not be reported as applied")
+		Expect(fake.aclLoads).To(Equal(1))
+	})
+
+	It("returns an error when ACL LOAD fails", func() {
+		fake := &fakeConfigClient{aclErr: fmt.Errorf("boom")}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).To(HaveOccurred())
+		Expect(synced).To(BeFalse())
+		Expect(fake.closed).To(BeTrue())
+	})
+})
 
 var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 	nodeWith := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {

@@ -272,6 +272,21 @@ users:
 - `channels` — pub/sub channel patterns
 - `permissions` — raw ACL string appended after any generated rules
 
+#### Live application
+
+ACL changes apply to the running nodes without a pod roll. When `users` changes, the operator rewrites the aclfile Secret and each node reloads it in place, so a password rotation or a permission change takes effect without restarting the pod.
+
+The reload is eventually consistent. Kubernetes refreshes a mounted Secret lazily, so a node applies the change once its copy of the file catches up, typically within a minute. Each ValkeyNode reports where it is in that process through the `ACLApplied` condition (see [status conditions](status-conditions.md)).
+
+To rotate a password without an auth gap, use the fact that a user can hold more than one password at a time:
+
+1. Add the new password as a second key in `passwordSecret.keys`, keeping the old one.
+2. Wait for every ValkeyNode to report `ACLApplied=True`.
+3. Move your clients to the new password.
+4. Remove the old key.
+
+Both credentials are accepted for the whole window, so no client is locked out while the change propagates. Rotating in one step instead (replacing the key outright) leaves any client still holding the old password failing until it picks up the new one.
+
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)

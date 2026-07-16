@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
@@ -1053,7 +1054,8 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 	})
 
 	It("should set Ready=false with PodNotReady condition when no pod exists", func() {
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
@@ -1067,18 +1069,159 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 
 	It("should not write status when nothing has changed between calls", func() {
 		By("calling updateStatus to establish baseline status")
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
 		By("calling updateStatus again with no state change")
-		Expect(r.updateStatus(ctx, node)).To(Succeed())
+		_, err = r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
 
 		updated2 := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated2)).To(Succeed())
 		Expect(updated2.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when nothing changed")
+	})
+})
+
+var _ = Describe("ValkeyNode updateStatus role", func() {
+	var (
+		ctx  context.Context
+		node *valkeyiov1alpha1.ValkeyNode
+	)
+
+	// seedReadyWorkload creates a rolled-out StatefulSet and a Ready pod matching
+	// the node's selector so updateStatus computes Ready=true and reaches the role branch.
+	seedReadyWorkload := func(node *valkeyiov1alpha1.ValkeyNode) {
+		replicas := int32(1)
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node), Namespace: node.Namespace},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node.Name}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node.Name}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sts), sts)).To(Succeed())
+		sts.Status.ObservedGeneration = sts.Generation
+		sts.Status.Replicas = 1
+		sts.Status.ReadyReplicas = 1
+		sts.Status.CurrentRevision = "rev-1"
+		sts.Status.UpdateRevision = "rev-1"
+		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      node.Name + "-pod",
+				Namespace: node.Namespace,
+				Labels:    valkeyNodeLabels(node),
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+		pod.Status.PodIP = "10.0.0.1"
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "role-test",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    "role-test-cluster",
+					LabelShardIndex: "0",
+					LabelNodeIndex:  "0",
+				},
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
+		_ = k8sClient.Delete(ctx, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}})
+		_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-pod", Namespace: node.Namespace}})
+	})
+
+	It("sets Role from the resolver when the pod is ready", func() {
+		seedReadyWorkload(node)
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RolePrimary
+			},
+		}
+
+		failed, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(failed).To(BeFalse())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Ready).To(BeTrue())
+		Expect(updated.Status.Role).To(Equal(RolePrimary))
+	})
+
+	It("keeps the last-known Role and signals failure when the resolver returns empty on a ready pod", func() {
+		seedReadyWorkload(node)
+
+		By("seeding a known role via a successful resolve")
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RolePrimary
+			},
+		}
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("resolving empty (transient INFO failure) on the next call")
+		r.resolveRoleFunc = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+			return ""
+		}
+		failed, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(failed).To(BeTrue())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Role).To(Equal(RolePrimary), "last-known role must not be blanked on transient failure")
+	})
+
+	It("clears Role when the pod does not exist", func() {
+		By("seeding Status.Role directly")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		node.Status.Role = RolePrimary
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+		failed, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(failed).To(BeFalse())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Ready).To(BeFalse())
+		Expect(updated.Status.Role).To(BeEmpty())
 	})
 })
 
@@ -1244,5 +1387,104 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeFalse())
 		Expect(called).To(BeFalse())
+	})
+})
+
+var _ = Describe("ValkeyNode resolveRole dispatch", func() {
+	ctx := context.Background()
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "resolve-dispatch", Namespace: "default"},
+	}
+
+	It("uses the injected resolveRoleFunc when set", func() {
+		r := &ValkeyNodeReconciler{
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RolePrimary
+			},
+		}
+		Expect(r.resolveRole(ctx, node)).To(Equal(RolePrimary))
+	})
+})
+
+var _ = Describe("ValkeyNode Pod watch wiring", func() {
+	ctx := context.Background()
+
+	Describe("podToValkeyNode map function", func() {
+		r := &ValkeyNodeReconciler{}
+
+		It("maps a valkey pod to its owning ValkeyNode request", func() {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    "mycluster",
+					LabelShardIndex: "1",
+					LabelNodeIndex:  "2",
+				},
+			}}
+			reqs := r.podToValkeyNode(ctx, pod)
+			Expect(reqs).To(HaveLen(1))
+			Expect(reqs[0].Name).To(Equal(valkeyNodeName("mycluster", 1, 2)))
+			Expect(reqs[0].Namespace).To(Equal("default"))
+		})
+
+		It("returns no request when index labels are missing", func() {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Labels:    map[string]string{LabelCluster: "mycluster"},
+			}}
+			Expect(r.podToValkeyNode(ctx, pod)).To(BeEmpty())
+		})
+
+		It("returns no request when an index label is non-numeric", func() {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    "mycluster",
+					LabelShardIndex: "x",
+					LabelNodeIndex:  "2",
+				},
+			}}
+			Expect(r.podToValkeyNode(ctx, pod)).To(BeEmpty())
+		})
+	})
+
+	Describe("valkeyPodPredicate", func() {
+		p := valkeyPodPredicate()
+
+		makePod := func(ready bool, ip string, phase corev1.PodPhase) *corev1.Pod {
+			status := corev1.ConditionFalse
+			if ready {
+				status = corev1.ConditionTrue
+			}
+			return &corev1.Pod{Status: corev1.PodStatus{
+				PodIP:      ip,
+				Phase:      phase,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
+			}}
+		}
+
+		It("admits a readiness flip", func() {
+			old := makePod(false, "10.0.0.1", corev1.PodRunning)
+			neu := makePod(true, "10.0.0.1", corev1.PodRunning)
+			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
+		})
+
+		It("admits an IP change", func() {
+			old := makePod(true, "10.0.0.1", corev1.PodRunning)
+			neu := makePod(true, "10.0.0.2", corev1.PodRunning)
+			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
+		})
+
+		It("drops a no-op status update", func() {
+			old := makePod(true, "10.0.0.1", corev1.PodRunning)
+			neu := makePod(true, "10.0.0.1", corev1.PodRunning)
+			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeFalse())
+		})
+
+		It("admits create and delete events", func() {
+			pod := makePod(true, "10.0.0.1", corev1.PodRunning)
+			Expect(p.Create(event.CreateEvent{Object: pod})).To(BeTrue())
+			Expect(p.Delete(event.DeleteEvent{Object: pod})).To(BeTrue())
+		})
 	})
 })

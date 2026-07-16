@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/valkey"
 	testutils "valkey.io/valkey-operator/test/utils"
 )
 
@@ -852,6 +853,20 @@ func filterEvents(eventsList []string, reason string) []string {
 	return filtered
 }
 
+var _ = Describe("anyNodeHasPodIP", func() {
+	It("is false when no node has a PodIP", func() {
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{{}, {}}}
+		Expect(anyNodeHasPodIP(nodes)).To(BeFalse())
+	})
+	It("is true when at least one node has a PodIP", func() {
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+			{},
+			{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"}},
+		}}
+		Expect(anyNodeHasPodIP(nodes)).To(BeTrue())
+	})
+})
+
 var _ = Describe("reconcileValkeyNodes", func() {
 	const clusterName = "node-reconcile-test"
 
@@ -1283,5 +1298,85 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		}
 		node := buildClusterValkeyNode(cluster, 0, 0)
 		Expect(node.Spec.PriorityClassName).To(BeEmpty())
+	})
+})
+
+var _ = Describe("observed-role hint", func() {
+	ctx := context.Background()
+
+	stateWith := func(primaryIP, replicaIP string) *valkey.ClusterState {
+		return &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-1",
+				PrimaryId: "id-primary",
+				Nodes: []*valkey.NodeState{
+					{Id: "id-primary", Address: primaryIP},
+					{Id: "id-replica", Address: replicaIP},
+				},
+			}},
+		}
+	}
+
+	Describe("liveRoleForAddress", func() {
+		It("returns primary for the shard primary address", func() {
+			Expect(liveRoleForAddress(stateWith("10.0.0.1", "10.0.0.2"), "10.0.0.1")).To(Equal(RolePrimary))
+		})
+		It("returns replica for a non-primary shard member", func() {
+			Expect(liveRoleForAddress(stateWith("10.0.0.1", "10.0.0.2"), "10.0.0.2")).To(Equal(RoleReplica))
+		})
+		It("returns empty when the address is not in any shard", func() {
+			Expect(liveRoleForAddress(stateWith("10.0.0.1", "10.0.0.2"), "10.9.9.9")).To(BeEmpty())
+		})
+	})
+
+	Describe("hintObservedRole", func() {
+		var (
+			node *valkeyiov1alpha1.ValkeyNode
+			r    *ValkeyClusterReconciler
+		)
+
+		BeforeEach(func() {
+			node = &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "hint-node", Namespace: "default"},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			node.Status.PodIP = "10.0.0.1"
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			r = &ValkeyClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		})
+
+		AfterEach(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
+		})
+
+		It("writes the observed-role annotation on drift", func() {
+			Expect(r.hintObservedRole(ctx, node.DeepCopy(), stateWith("10.0.0.1", "10.0.0.2"))).To(Succeed())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.Annotations).To(HaveKeyWithValue(AnnotationObservedRole, RolePrimary))
+		})
+
+		It("does not write when the annotation already matches", func() {
+			fresh := node.DeepCopy()
+			Expect(r.hintObservedRole(ctx, fresh, stateWith("10.0.0.1", "10.0.0.2"))).To(Succeed())
+
+			after := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), after)).To(Succeed())
+			rv := after.ResourceVersion
+
+			Expect(r.hintObservedRole(ctx, after.DeepCopy(), stateWith("10.0.0.1", "10.0.0.2"))).To(Succeed())
+			again := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), again)).To(Succeed())
+			Expect(again.ResourceVersion).To(Equal(rv), "no patch expected when annotation already matches")
+		})
+
+		It("does not write when the address is not in the cluster state", func() {
+			Expect(r.hintObservedRole(ctx, node.DeepCopy(), stateWith("10.9.9.8", "10.9.9.9"))).To(Succeed())
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.Annotations).NotTo(HaveKey(AnnotationObservedRole))
+		})
 	})
 })

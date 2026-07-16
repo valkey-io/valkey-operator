@@ -78,6 +78,12 @@ const (
 	LabelNodeIndex = "valkey.io/node-index"
 )
 
+// AnnotationObservedRole carries the node's live replication role as observed by
+// the ValkeyCluster controller from CLUSTER NODES. It is a trigger only: writing
+// it pokes the ValkeyNode controller to re-resolve its role from INFO. The
+// ValkeyNode controller never trusts this value.
+const AnnotationObservedRole = "valkey.io/observed-role"
+
 const (
 	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
 	tlsVolumeName = "tls-certs"

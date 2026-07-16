@@ -1451,38 +1451,38 @@ var _ = Describe("ValkeyNode Pod watch wiring", func() {
 	Describe("valkeyPodPredicate", func() {
 		p := valkeyPodPredicate()
 
-		makePod := func(ready bool, ip string, phase corev1.PodPhase) *corev1.Pod {
+		makePod := func(ready bool, ip string) *corev1.Pod {
 			status := corev1.ConditionFalse
 			if ready {
 				status = corev1.ConditionTrue
 			}
 			return &corev1.Pod{Status: corev1.PodStatus{
 				PodIP:      ip,
-				Phase:      phase,
+				Phase:      corev1.PodRunning,
 				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
 			}}
 		}
 
 		It("admits a readiness flip", func() {
-			old := makePod(false, "10.0.0.1", corev1.PodRunning)
-			neu := makePod(true, "10.0.0.1", corev1.PodRunning)
+			old := makePod(false, "10.0.0.1")
+			neu := makePod(true, "10.0.0.1")
 			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
 		})
 
 		It("admits an IP change", func() {
-			old := makePod(true, "10.0.0.1", corev1.PodRunning)
-			neu := makePod(true, "10.0.0.2", corev1.PodRunning)
+			old := makePod(true, "10.0.0.1")
+			neu := makePod(true, "10.0.0.2")
 			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
 		})
 
 		It("drops a no-op status update", func() {
-			old := makePod(true, "10.0.0.1", corev1.PodRunning)
-			neu := makePod(true, "10.0.0.1", corev1.PodRunning)
+			old := makePod(true, "10.0.0.1")
+			neu := makePod(true, "10.0.0.1")
 			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeFalse())
 		})
 
 		It("admits create and delete events", func() {
-			pod := makePod(true, "10.0.0.1", corev1.PodRunning)
+			pod := makePod(true, "10.0.0.1")
 			Expect(p.Create(event.CreateEvent{Object: pod})).To(BeTrue())
 			Expect(p.Delete(event.DeleteEvent{Object: pod})).To(BeTrue())
 		})

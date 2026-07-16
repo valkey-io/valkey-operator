@@ -1062,3 +1062,29 @@ func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.
 	assert.Equal(t, &corev1.PodSecurityContext{}, pts.Spec.SecurityContext,
 		"omitting PodSecurityContext must produce the empty SecurityContext the API server defaults to")
 }
+
+// TestDefaultImagePullPolicy pins the mirror of the API server's defaulting
+// rule branch by branch — a silent divergence on any of these makes that
+// container churn on every reconcile (#315). Rule: the effective tag is the
+// explicit tag when present (even alongside a digest), "latest" when the
+// reference has neither tag nor digest, empty for digest-only; policy is
+// Always exactly when the effective tag is "latest".
+func TestDefaultImagePullPolicy(t *testing.T) {
+	cases := []struct {
+		image string
+		want  corev1.PullPolicy
+	}{
+		{"valkey/valkey:8.0.1", corev1.PullIfNotPresent},                  // plain tag
+		{"valkey/valkey:latest", corev1.PullAlways},                       // latest tag
+		{"valkey/valkey", corev1.PullAlways},                              // no tag, no digest
+		{"valkey/valkey@sha256:deadbeef", corev1.PullIfNotPresent},        // digest only
+		{"valkey/valkey:8.0.1@sha256:deadbeef", corev1.PullIfNotPresent},  // tag + digest
+		{"valkey/valkey:latest@sha256:deadbeef", corev1.PullAlways},       // latest tag wins over digest
+		{"registry:5000/valkey", corev1.PullAlways},                       // registry port is not a tag
+		{"registry:5000/valkey:8.0.1", corev1.PullIfNotPresent},           // registry port + tag
+		{"registry:5000/valkey@sha256:deadbeef", corev1.PullIfNotPresent}, // registry port + digest
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, defaultImagePullPolicy(tc.image), "image %q", tc.image)
+	}
+}

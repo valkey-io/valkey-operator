@@ -101,6 +101,25 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 
 			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
 		})
+
+		It("does not update the PDB on repeated reconciles when nothing changed", func() {
+			Expect(reconciler.reconcilePodDisruptionBudget(ctx, cluster)).To(Succeed())
+
+			pdb := &policyv1.PodDisruptionBudget{}
+			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
+			createdResourceVersion := pdb.ResourceVersion
+
+			// The PDB mutate assigns fields individually (it never replaces the
+			// whole spec), so anything the API server defaults on the stored
+			// object — e.g. unhealthyPodEvictionPolicy on newer clusters — must
+			// survive and repeated reconciles must be no-ops (#315).
+			for range 3 {
+				Expect(reconciler.reconcilePodDisruptionBudget(ctx, cluster)).To(Succeed())
+			}
+			Expect(k8sClient.Get(ctx, pdbKey, pdb)).To(Succeed())
+			Expect(pdb.ResourceVersion).To(Equal(createdResourceVersion),
+				"a reconcile with no changes must not write the PDB")
+		})
 	})
 
 	Context("when PodDisruptionBudget mode is Cluster", func() {

@@ -350,21 +350,35 @@ func applyContainerAPIDefaults(containers []corev1.Container) {
 	}
 }
 
-// defaultImagePullPolicy mirrors the API server's imagePullPolicy defaulting:
-// Always for :latest or untagged images, IfNotPresent otherwise.
+// defaultImagePullPolicy mirrors the API server's imagePullPolicy defaulting
+// (SetDefaults_Container + parsers.ParseImageName): the effective tag is the
+// explicit tag when present — even alongside a digest — "latest" when the
+// reference has neither tag nor digest, and empty for a digest-only reference.
+// The policy is Always exactly when the effective tag is "latest",
+// IfNotPresent otherwise.
 func defaultImagePullPolicy(image string) corev1.PullPolicy {
+	name := image
+	if i := strings.IndexByte(name, '@'); i >= 0 {
+		name = name[:i] // strip the digest; an explicit tag before it still counts
+	}
 	tag := ""
-	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
-		tag = image[i+1:]
+	// ':' only introduces a tag after the last '/' (a registry port such as
+	// "reg:5000/img" is not a tag).
+	if i := strings.LastIndexByte(name, ':'); i > strings.LastIndexByte(name, '/') {
+		tag = name[i+1:]
 	}
-	if strings.Contains(image, "@") {
-		// Digest-pinned images default to IfNotPresent regardless of tag.
+	switch {
+	case tag == "latest":
+		return corev1.PullAlways
+	case tag != "":
 		return corev1.PullIfNotPresent
-	}
-	if tag == "" || tag == "latest" {
+	case len(name) < len(image):
+		// Digest-only reference (no tag): IfNotPresent.
+		return corev1.PullIfNotPresent
+	default:
+		// No tag, no digest: the reference normalizes to :latest.
 		return corev1.PullAlways
 	}
-	return corev1.PullIfNotPresent
 }
 
 func buildShardTopologySpreadConstraints(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) []corev1.TopologySpreadConstraint {

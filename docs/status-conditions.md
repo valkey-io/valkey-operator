@@ -200,21 +200,21 @@ Common reasons when `LiveConfigApplied=True`:
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 #### `ACLApplied`
-Indicates whether the ACL the cluster controller wrote to the aclfile Secret is live on the running Valkey process, applied via `ACL LOAD` without rolling the pod.
+Indicates whether the passwords in the aclfile Secret are live on the running Valkey process. The node controller reloads the mounted aclfile with `ACL LOAD` on every reconcile, so ACL changes reach the server without a pod roll; this condition reports whether that reload has picked up the current Secret yet.
 
-The node controller compares the password hashes the server reports (`ACL GETUSER`) against the ones in the aclfile Secret, and only issues an `ACL LOAD` when they differ. The server, not the Secret, is the source of truth for this condition: the operator cannot read the pod's mounted file, and the mounted copy is refreshed lazily by kubelet, so an `ACL LOAD` issued right after the Secret changes can still read the previous contents.
+It tracks passwords specifically, not the whole ACL. `ACL GETUSER` returns Valkey's normalised rendering of the rules while the operator only holds the aclfile text, so the two cannot be compared exactly; password hashes can, and they are what a rotation needs to wait on. Permission edits and removed users still converge through the same unconditional reload, they are just not reflected in this condition.
 
 | Status | Meaning |
 |---|---|
-| `True` | The running server's ACL matches the aclfile Secret. |
-| `False` | The server's ACL does not match yet, either because the mounted file has not caught up or because `ACL LOAD` failed. |
+| `True` | Every password in the aclfile Secret is live on this node. |
+| `False` | The node's passwords do not match the Secret yet, either because the mounted file has not caught up or because the reload failed. |
 
 Common reasons when `ACLApplied=False`:
-- `PendingPropagation` – the mounted aclfile has not yet reflected the updated Secret, so the reload read stale contents. The node controller re-checks every 10s and this resolves on its own once kubelet refreshes the volume.
+- `PendingPropagation` – the mounted aclfile has not yet reflected the updated Secret, so the reload read stale contents. The node controller reloads again every 10s and this resolves on its own once kubelet refreshes the volume.
 - `ApplyFailed` – `ACL LOAD` or `ACL GETUSER` returned an error. The message field contains the exact error, and a `LiveACLApplyFailed` warning event is emitted.
 
 Common reasons when `ACLApplied=True`:
-- `Applied` – the server's ACL matches the desired aclfile.
+- `Applied` – the desired passwords are live on this node.
 
 > **Note:** Unlike `LiveConfigApplied`, this condition does not block the cluster controller's rolling update. A node whose ACL is still propagating keeps serving with its previous credentials, and a pod roll would load the new aclfile from the Secret regardless.
 

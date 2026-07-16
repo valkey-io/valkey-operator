@@ -222,10 +222,10 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	if !aclSynced {
-		// The mounted aclfile has not caught up with the Secret, so the LOAD
-		// read stale content. Report that rather than claiming applied, and
-		// re-check on the requeue.
-		log.V(1).Info("ACL not yet in sync, waiting for the aclfile volume to propagate")
+		// The reload ran, but the mounted aclfile had not caught up with the
+		// Secret, so it loaded stale content. Report that rather than claiming
+		// the desired passwords are live, and reload again on the requeue.
+		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
 		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation",
 			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
@@ -233,7 +233,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, "Applied", "ACL applied"); condErr != nil {
+	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, "Applied",
+		"Desired ACL passwords are live"); condErr != nil {
 		log.Error(condErr, "failed to set ACLApplied condition")
 		return ctrl.Result{}, condErr
 	}

@@ -276,7 +276,7 @@ users:
 
 ACL changes apply to the running nodes without a pod roll. When `users` changes, the operator rewrites the aclfile Secret and each node reloads it in place, so a password rotation or a permission change takes effect without restarting the pod.
 
-The reload is eventually consistent. Kubernetes refreshes a mounted Secret lazily, so a node applies the change once its copy of the file catches up, typically within a minute. Each ValkeyNode reports where it is in that process through the `ACLApplied` condition (see [status conditions](status-conditions.md)).
+The reload is eventually consistent. Kubernetes refreshes a mounted Secret lazily, so a node applies the change once its copy of the file catches up, typically within a minute. Each ValkeyNode's `ACLApplied` condition reports whether that node's passwords are live yet (see [status conditions](status-conditions.md)); permission changes converge through the same reload but are not reflected in the condition.
 
 To rotate a password without an auth gap, use the fact that a user can hold more than one password at a time:
 

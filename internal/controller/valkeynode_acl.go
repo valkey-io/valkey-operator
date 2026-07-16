@@ -54,11 +54,17 @@ func desiredUserPasswordHashes(aclFile string) map[string][]string {
 	return out
 }
 
-// aclInSync reports whether every desired user's password hashes match what the
-// server currently has. It is the authoritative check: the operator cannot read
-// the pod's mounted aclfile without an exec, so the running server is the only
-// place to observe what was actually loaded.
-func aclInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]string) (bool, error) {
+// passwordsInSync reports whether every desired user's password hashes are live
+// on the server.
+//
+// This is deliberately narrower than "the whole ACL matches". ACL GETUSER
+// returns Valkey's normalised rendering of the rules, while the operator only
+// holds the aclfile text, and normalising the two into a comparable form would
+// mean reimplementing Valkey's own ACL parser. Password hashes are the part
+// that does compare exactly, and they are what a rotation needs to observe, so
+// they drive the ACLApplied condition. Correctness of the apply itself does not
+// depend on this check: the reload is unconditional.
+func passwordsInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]string) (bool, error) {
 	for _, user := range slices.Sorted(maps.Keys(desired)) {
 		actual, err := c.UserPasswordHashes(ctx, user)
 		if err != nil {
@@ -71,17 +77,27 @@ func aclInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]s
 	return true, nil
 }
 
-// applyLiveACL brings the running server's ACL in line with the aclfile Secret
-// without rolling the pod, and reports whether it is in sync.
+// applyLiveACL reloads the mounted aclfile into the running server so ACL
+// changes take effect without a pod roll, and reports whether the desired
+// passwords are live yet.
 //
 // The aclfile is mounted read-only from the Secret, so ACL SAVE is neither
 // available nor needed: the Secret the cluster controller writes is what a
 // restarting pod loads. That leaves ACL LOAD as the live path, with one catch.
 // The projected volume is refreshed lazily by kubelet, so a LOAD fired right
 // after the Secret changes can read the pre-update file and silently no-op.
-// Verifying against the server rather than trusting the LOAD makes that
-// self-correcting: a premature LOAD leaves the node out of sync, and the
-// requeue tries again once the volume has caught up.
+//
+// The reload is therefore unconditional. The operator cannot read the pod's
+// copy of the file, and it cannot compare the whole ACL against the server
+// either (ACL GETUSER renders Valkey's normalised form, the operator holds
+// aclfile text), so there is no reliable way to know the file is current. A
+// repeated LOAD is idempotent and cheap, and it is what makes every kind of
+// change converge, including permission edits and removed users, once the
+// volume catches up.
+//
+// The returned bool only reports whether the desired password hashes are live,
+// which is the part that can be compared exactly and the part a rotation needs
+// to wait on.
 func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
 	if node.Spec.UsersACLSecretName == "" {
 		return true, nil
@@ -108,13 +124,8 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	}
 	defer c.Close()
 
-	inSync, err := aclInSync(ctx, c, desired)
-	if err != nil || inSync {
-		return inSync, err
-	}
-
 	if err := c.LoadACL(ctx); err != nil {
 		return false, err
 	}
-	return aclInSync(ctx, c, desired)
+	return passwordsInSync(ctx, c, desired)
 }

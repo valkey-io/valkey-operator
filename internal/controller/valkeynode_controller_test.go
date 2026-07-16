@@ -1274,16 +1274,19 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(fake.aclLoads).To(BeZero())
 	})
 
-	It("does not reload when the server already matches the aclfile", func() {
+	It("still reloads when the passwords already match, so non-password edits converge", func() {
+		// A permissions-only change, or a removed user, leaves every desired
+		// password hash untouched. The reload must not be skipped on that basis
+		// or those edits would never reach the server.
 		fake := &fakeConfigClient{aclHashes: desiredHashes}
 		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
-		Expect(fake.aclLoads).To(BeZero(), "a steady-state reconcile must not issue ACL LOAD")
+		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
 		Expect(fake.closed).To(BeTrue())
 	})
 
-	It("reloads and reports synced once the mounted file has caught up", func() {
+	It("reports synced once the mounted file has caught up", func() {
 		fake := &fakeConfigClient{aclHashes: staleHashes, aclOnLoad: desiredHashes}
 		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())

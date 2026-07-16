@@ -47,34 +47,34 @@ func TestDesiredUserPasswordHashesEmpty(t *testing.T) {
 	assert.Empty(t, desiredUserPasswordHashes("\n\n"))
 }
 
-func TestACLInSync(t *testing.T) {
+func TestPasswordsInSync(t *testing.T) {
 	ctx := context.Background()
 	desired := map[string][]string{"alice": {"aaa", "bbb"}, "bob": {"ccc"}}
 
 	t.Run("server matches desired", func(t *testing.T) {
 		f := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"aaa", "bbb"}, "bob": {"ccc"}}}
-		inSync, err := aclInSync(ctx, f, desired)
+		inSync, err := passwordsInSync(ctx, f, desired)
 		require.NoError(t, err)
 		assert.True(t, inSync)
 	})
 
 	t.Run("a rotated password the server has not loaded reads as out of sync", func(t *testing.T) {
 		f := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"aaa"}, "bob": {"ccc"}}}
-		inSync, err := aclInSync(ctx, f, desired)
+		inSync, err := passwordsInSync(ctx, f, desired)
 		require.NoError(t, err)
 		assert.False(t, inSync)
 	})
 
 	t.Run("a user missing on the server reads as out of sync", func(t *testing.T) {
 		f := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"aaa", "bbb"}}}
-		inSync, err := aclInSync(ctx, f, desired)
+		inSync, err := passwordsInSync(ctx, f, desired)
 		require.NoError(t, err)
 		assert.False(t, inSync)
 	})
 
 	t.Run("client errors surface", func(t *testing.T) {
 		f := &fakeConfigClient{aclErr: assert.AnError}
-		_, err := aclInSync(ctx, f, desired)
+		_, err := passwordsInSync(ctx, f, desired)
 		require.Error(t, err)
 	})
 }

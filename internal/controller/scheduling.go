@@ -28,13 +28,13 @@ import (
 // effectiveNodeSpread resolves the node-axis spread modes, defaulting every
 // unset value to Disabled (the zero value — emit nothing). A nil spec or nil
 // Node resolves entirely to Disabled.
-func effectiveNodeSpread(s *valkeyiov1alpha1.SchedulingSpec) (shards, primaries, pods valkeyiov1alpha1.SpreadMode) {
-	shards, primaries, pods = valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled
+func effectiveNodeSpread(s *valkeyiov1alpha1.SchedulingSpec) (shard, primaries, pods valkeyiov1alpha1.SpreadMode) {
+	shard, primaries, pods = valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled
 	if s == nil || s.Node == nil {
-		return shards, primaries, pods
+		return shard, primaries, pods
 	}
-	if m := s.Node.Spread.Shards.Mode; m != "" {
-		shards = m
+	if m := s.Node.Spread.Shard.Mode; m != "" {
+		shard = m
 	}
 	if m := s.Node.Spread.Primaries.Mode; m != "" {
 		primaries = m
@@ -42,7 +42,7 @@ func effectiveNodeSpread(s *valkeyiov1alpha1.SchedulingSpec) (shards, primaries,
 	if m := s.Node.Spread.Pods.Mode; m != "" {
 		pods = m
 	}
-	return shards, primaries, pods
+	return shard, primaries, pods
 }
 
 // withNodeShardAntiAffinity returns a copy of base with a node-hostname

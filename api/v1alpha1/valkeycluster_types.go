@@ -117,10 +117,10 @@ type SpreadConstraint struct {
 // NodeSpread controls how the cluster's pods are distributed across nodes
 // (topologyKey kubernetes.io/hostname).
 type NodeSpread struct {
-	// Shards keeps pods of the same shard on distinct nodes, rendered as pod
+	// Shard keeps pods of the same shard on distinct nodes, rendered as pod
 	// anti-affinity. Defaults to Disabled when unset.
 	// +optional
-	Shards SpreadConstraint `json:"shards,omitempty"`
+	Shard SpreadConstraint `json:"shard,omitempty"`
 
 	// Primaries balances each shard's node-index-0 pod across nodes, rendered as
 	// a topology spread constraint.

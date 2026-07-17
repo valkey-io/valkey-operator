@@ -3180,9 +3180,9 @@ spec:
                                 - Required
                                 type: string
                             type: object
-                          shards:
+                          shard:
                             description: |-
-                              Shards keeps pods of the same shard on distinct nodes, rendered as pod
+                              Shard keeps pods of the same shard on distinct nodes, rendered as pod
                               anti-affinity. Defaults to Disabled when unset.
                             properties:
                               mode:

@@ -772,8 +772,8 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 
 	// Curate node-axis scheduling primitives from node.spread, merged with the
 	// user's escape-hatch passthrough. Preserve nil when nothing is curated.
-	shardsMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
-	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardsMode)
+	shardMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
+	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardMode)
 	topologySpreadConstraints := scheduling.TopologySpreadConstraints
 	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode); len(curated) > 0 {
 		topologySpreadConstraints = append(

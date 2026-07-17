@@ -11,7 +11,7 @@ spec:
   scheduling:
     node:
       spread:
-        shards:
+        shard:
           mode: Required
         primaries:
           mode: Disabled

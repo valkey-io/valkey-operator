@@ -1213,7 +1213,7 @@ spec:
   scheduling:
     node:
       spread:
-        shards:
+        shard:
           mode: Required
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")

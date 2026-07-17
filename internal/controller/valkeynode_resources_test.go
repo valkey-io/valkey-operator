@@ -838,7 +838,7 @@ func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
 		Spec: valkeyv1.ValkeyClusterSpec{
 			Shards: 3, Replicas: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
-				Shards:    valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
 			}}},
 		},
@@ -870,7 +870,7 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 				Affinity:                  &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}},
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
 				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
-					Shards:    valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+					Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 					Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
 				}},
 			},

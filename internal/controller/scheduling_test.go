@@ -33,8 +33,8 @@ func TestEffectiveNodeSpread_Defaults(t *testing.T) {
 		"empty node": {Node: &valkeyiov1alpha1.NodeScheduling{}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			shards, primaries, pods := effectiveNodeSpread(s)
-			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, shards, "shards default Disabled")
+			shard, primaries, pods := effectiveNodeSpread(s)
+			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, shard, "shard default Disabled")
 			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, primaries, "primaries default Disabled")
 			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, pods, "pods default Disabled")
 		})
@@ -44,13 +44,13 @@ func TestEffectiveNodeSpread_Defaults(t *testing.T) {
 func TestEffectiveNodeSpread_Overrides(t *testing.T) {
 	s := &valkeyiov1alpha1.SchedulingSpec{Node: &valkeyiov1alpha1.NodeScheduling{
 		Spread: valkeyiov1alpha1.NodeSpread{
-			Shards:    valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadRequired},
+			Shard:     valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadRequired},
 			Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadDisabled},
 			Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadPreferred},
 		},
 	}}
-	shards, primaries, pods := effectiveNodeSpread(s)
-	assert.Equal(t, valkeyiov1alpha1.SpreadRequired, shards)
+	shard, primaries, pods := effectiveNodeSpread(s)
+	assert.Equal(t, valkeyiov1alpha1.SpreadRequired, shard)
 	assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, primaries)
 	assert.Equal(t, valkeyiov1alpha1.SpreadPreferred, pods)
 }

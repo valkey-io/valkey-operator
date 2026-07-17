@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 func pdbName(cluster *valkeyiov1alpha1.ValkeyCluster) string {

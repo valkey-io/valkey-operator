@@ -35,8 +35,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	testutils "valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {

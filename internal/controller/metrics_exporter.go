@@ -19,9 +19,9 @@ package controller
 import (
 	"fmt"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.

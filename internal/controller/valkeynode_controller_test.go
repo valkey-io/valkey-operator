@@ -33,8 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	testutils "valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyNode Controller", func() {

@@ -32,9 +32,9 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	controller "valkey.io/valkey-operator/internal/controller"
-	"valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	controller "github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster", Ordered, func() {
@@ -1241,7 +1241,7 @@ spec:
 		const clusterName = "valkeycluster-topology-spread-e2e"
 
 		It("spreads pods from the same shard across different nodes", func() {
-			By("creating a ValkeyCluster with host-level topology spread constraints")
+			By("creating a ValkeyCluster with node.spread.shards set to Required")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
@@ -1250,10 +1250,10 @@ spec:
   shards: 3
   replicas: 1
   scheduling:
-    topologySpreadConstraints:
-    - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
-      whenUnsatisfiable: DoNotSchedule
+    node:
+      spread:
+        shard:
+          mode: Required
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1339,7 +1339,10 @@ spec:
       minDomains: 2
       topologyKey: kubernetes.io/hostname
       whenUnsatisfiable: DoNotSchedule
-`, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue)
+      labelSelector:
+        matchLabels:
+          valkey.io/cluster: %s
+`, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue, unschedulableClusterName)
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
 			output, err = utils.Run(cmd)
@@ -1363,6 +1366,119 @@ spec:
 				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 			}
 			Eventually(verifyUnschedulableStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("spreads shard primaries across different nodes", func() {
+			const primariesClusterName = "vkc-tspread-primaries"
+
+			By("creating a ValkeyCluster with node.spread.primaries set to Required")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 2
+  replicas: 1
+  scheduling:
+    node:
+      spread:
+        primaries:
+          mode: Required
+`, primariesClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster with primaries spread")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", primariesClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(primariesClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying each shard's node-index-0 pod lands on a distinct node")
+			verifyPrimaryPlacement := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s,valkey.io/node-index=0", primariesClusterName),
+					"-o", "go-template={{ range .items }}{{ .spec.nodeName }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				nodes := map[string]struct{}{}
+				lines := utils.GetNonEmptyLines(output)
+				for _, line := range lines {
+					node := strings.TrimSpace(line)
+					g.Expect(node).NotTo(BeEmpty(), "expected a scheduled node name for each primary")
+					nodes[node] = struct{}{}
+				}
+
+				g.Expect(lines).To(HaveLen(2), "expected one node-index-0 pod per shard")
+				g.Expect(nodes).To(HaveLen(2), "expected the two shard primaries on distinct nodes")
+			}
+			Eventually(verifyPrimaryPlacement).Should(Succeed())
+		})
+
+		It("keeps pods schedulable when a preferred spread cannot be satisfied", func() {
+			const (
+				preferredClusterName = "vkc-tspread-preferred"
+				eligibleNodeLabelKey = "valkey.io/e2e-topology-preferred-node"
+			)
+
+			By("labeling one worker node as the only eligible node")
+			cmd := exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			eligibleNode, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node: %s", eligibleNode))
+			Expect(eligibleNode).NotTo(BeEmpty(), "expected at least one worker node")
+
+			cmd = exec.Command("kubectl", "label", "node", eligibleNode,
+				fmt.Sprintf("%s=true", eligibleNodeLabelKey), "--overwrite=true")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label worker node: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "label", "node", eligibleNode, eligibleNodeLabelKey+"-", "--overwrite=true")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating a ValkeyCluster pinned to one node with a Preferred pods spread")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  scheduling:
+    nodeSelector:
+      %s: "true"
+    node:
+      spread:
+        pods:
+          mode: Preferred
+`, preferredClusterName, eligibleNodeLabelKey)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create ValkeyCluster with preferred spread: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", preferredClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready despite only one eligible node")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(preferredClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
 		})
 	})
 

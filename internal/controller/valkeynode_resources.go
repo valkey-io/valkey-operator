@@ -19,14 +19,13 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 // valkeyNodeResourceName returns the name used for resources
@@ -381,55 +380,6 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 	}
 }
 
-func buildShardTopologySpreadConstraints(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) []corev1.TopologySpreadConstraint {
-	if len(node.Spec.TopologySpreadConstraints) == 0 {
-		return nil
-	}
-
-	constraints := make([]corev1.TopologySpreadConstraint, len(node.Spec.TopologySpreadConstraints))
-	clusterName := labels[LabelCluster]
-	shardIndex := labels[LabelShardIndex]
-
-	for i := range node.Spec.TopologySpreadConstraints {
-		constraint := *node.Spec.TopologySpreadConstraints[i].DeepCopy()
-		if constraint.LabelSelector == nil {
-			constraint.LabelSelector = &metav1.LabelSelector{}
-		}
-		if constraint.LabelSelector.MatchLabels == nil {
-			constraint.LabelSelector.MatchLabels = map[string]string{}
-		}
-		if clusterName != "" && !topologySpreadConstraintUsesKey(constraint, LabelCluster) {
-			constraint.LabelSelector.MatchLabels[LabelCluster] = clusterName
-		}
-		if shardIndex != "" && !topologySpreadConstraintUsesKey(constraint, LabelShardIndex) {
-			constraint.MatchLabelKeys = append(constraint.MatchLabelKeys, LabelShardIndex)
-		}
-		constraints[i] = constraint
-	}
-
-	return constraints
-}
-
-func topologySpreadConstraintUsesKey(constraint corev1.TopologySpreadConstraint, key string) bool {
-	return labelSelectorUsesKey(constraint.LabelSelector, key) ||
-		slices.Contains(constraint.MatchLabelKeys, key)
-}
-
-func labelSelectorUsesKey(selector *metav1.LabelSelector, key string) bool {
-	if selector == nil {
-		return false
-	}
-	if _, exists := selector.MatchLabels[key]; exists {
-		return true
-	}
-	for _, expr := range selector.MatchExpressions {
-		if expr.Key == key {
-			return true
-		}
-	}
-	return false
-}
-
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
@@ -452,7 +402,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		Affinity:                      node.Spec.Affinity,
 		Tolerations:                   node.Spec.Tolerations,
 		PriorityClassName:             node.Spec.PriorityClassName,
-		TopologySpreadConstraints:     buildShardTopologySpreadConstraints(node, labels),
+		TopologySpreadConstraints:     node.Spec.TopologySpreadConstraints,
 		SecurityContext:               node.Spec.PodSecurityContext,
 		TerminationGracePeriodSeconds: node.Spec.TerminationGracePeriodSeconds,
 		// Fields below are set to the API server's defaults. The workload

@@ -3141,6 +3141,66 @@ spec:
                             x-kubernetes-list-type: atomic
                         type: object
                     type: object
+                  node:
+                    description: |-
+                      Node groups scheduling constraints on the node axis
+                      (topologyKey kubernetes.io/hostname). When unset, every node spread is
+                      Disabled and no scheduling primitives are emitted.
+                    properties:
+                      spread:
+                        description: Spread distributes the cluster's pods across
+                          nodes.
+                        properties:
+                          pods:
+                            description: |-
+                              Pods balances all of the cluster's pods across nodes, rendered as a
+                              topology spread constraint. Defaults to Disabled when unset. Enabling this
+                              alongside an explicit primaries spread of the same strength is rejected
+                              (only one topology spread constraint per strength is permitted per node).
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          primaries:
+                            description: |-
+                              Primaries balances each shard's node-index-0 pod across nodes, rendered as
+                              a topology spread constraint.
+                              Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          shard:
+                            description: |-
+                              Shard keeps pods of the same shard on distinct nodes, rendered as pod
+                              anti-affinity. Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                        type: object
+                    type: object
                   nodeSelector:
                     additionalProperties:
                       type: string
@@ -3194,11 +3254,7 @@ spec:
                       type: object
                     type: array
                   topologySpreadConstraints:
-                    description: |-
-                      TopologySpreadConstraints defines pod topology spread constraints applied
-                      to the ValkeyNode workloads. The operator augments these constraints with
-                      shard-aware selectors so pods from the same shard can be spread across the
-                      configured topology domain.
+                    description: TopologySpreadConstraints to apply to the pods
                     items:
                       description: TopologySpreadConstraint specifies how to spread
                         matching pods among the given topology.
@@ -3533,6 +3589,52 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: 'node.spread.primaries and node.spread.pods cannot both be
+                Required: they render duplicate kubernetes.io/hostname DoNotSchedule
+                topology spread constraints'
+              rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
+                && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'node.spread.primaries and node.spread.pods cannot both be
+                Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway
+                topology spread constraints (set one to Disabled or Required)'
+              rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries
+                or node.spread.pods set to Required, which render the same hostname
+                DoNotSchedule constraint: set that node.spread mode to Disabled, or
+                remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''DoNotSchedule'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries
+                or node.spread.pods set to Preferred, which render the same hostname
+                ScheduleAnyway constraint: set that node.spread mode to Disabled or
+                Required, or remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
           status:
             default:
               readyShards: 0

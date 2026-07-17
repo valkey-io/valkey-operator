@@ -29,7 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"valkey.io/valkey-operator/test/utils"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // namespace where the project is deployed in

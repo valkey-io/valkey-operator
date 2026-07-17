@@ -268,6 +268,22 @@ func GetValkeyNodeStatus(name string) (*valkeyiov1alpha1.ValkeyNode, error) {
 	return &node, nil
 }
 
+// GetValkeyClusterNodes lists all ValkeyNodes belonging to a cluster, selected
+// by the valkey.io/cluster label.
+func GetValkeyClusterNodes(clusterName string) (*valkeyiov1alpha1.ValkeyNodeList, error) {
+	cmd := exec.Command("kubectl", "get", "valkeynodes",
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName), "-o", "json")
+	output, err := Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+	var list valkeyiov1alpha1.ValkeyNodeList
+	if err := json.Unmarshal([]byte(output), &list); err != nil {
+		return nil, err
+	}
+	return &list, nil
+}
+
 // GetEvents fetches and categorizes Kubernetes events for a given resource.
 func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
 	cmd := exec.Command("kubectl", "get", "events", "--field-selector",

@@ -525,20 +525,30 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
-	// Scrape cluster state once for proactive failover decisions, but only
-	// when at least one node actually needs a roll. During initial bootstrap
-	// no nodes exist, so state stays nil. The snapshot is safe to reuse
-	// across the loop: replicaFirstNodeOrder uses it to place the actual
-	// primary last within each shard, and after an update we requeue
-	// immediately, re-scraping fresh state before any further rolls.
+	// Scrape cluster state for proactive-failover roll decisions AND for
+	// observed-role hints. Scrape whenever a node needs a roll OR any node is
+	// running (has a PodIP): a spontaneous failover needs no roll, so gating the
+	// scrape on rolls alone would never refresh role hints, and a promoted
+	// node's Status.Role would only update on its slow backstop. During initial
+	// bootstrap no node has a PodIP yet, so state stays nil. The snapshot is safe
+	// to reuse across the loop: replicaFirstNodeOrder uses it to place the actual
+	// primary last within each shard, and after an update we requeue immediately,
+	// re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	if anyNodeRequiresRoll(cluster, nodes, configHash) {
+	needRoll := anyNodeRequiresRoll(cluster, nodes, configHash)
+	if needRoll || anyNodeHasPodIP(nodes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-		if err != nil {
+		switch {
+		case err != nil && needRoll:
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
+		case err != nil:
+			// Hint-only scrape: don't fail the reconcile if the operator password
+			// is briefly unavailable; role hints catch up on a later reconcile.
+			log.V(1).Info("skipping cluster-state scrape for role hints; operator password unavailable", "err", err)
+		default:
+			clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+			defer clusterState.CloseClients()
 		}
-		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
-		defer clusterState.CloseClients()
 	}
 
 	for shardIndex := range int(cluster.Spec.Shards) {
@@ -593,6 +603,58 @@ const (
 	nodeDeferred                    // primary roll deferred, waiting for synced replica
 )
 
+// anyNodeHasPodIP reports whether at least one node has a PodIP, i.e. there is a
+// running node worth scraping cluster state from.
+func anyNodeHasPodIP(nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	for i := range nodes.Items {
+		if nodes.Items[i].Status.PodIP != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// liveRoleForAddress returns the live replication role ("primary" or "replica")
+// of the node with the given address per the cluster state, or "" if the address
+// is not part of any shard yet.
+func liveRoleForAddress(state *valkey.ClusterState, address string) string {
+	shard := state.FindShardForAddress(address)
+	if shard == nil {
+		return ""
+	}
+	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
+		return RolePrimary
+	}
+	return RoleReplica
+}
+
+// hintObservedRole patches the node's observed-role annotation to its live role
+// when they differ, poking the ValkeyNode controller to re-resolve promptly
+// after a failover. It writes only on change (via upsertAnnotation), so a stable
+// role produces no churn. A "" live role (node not yet in topology) is a no-op.
+//
+// The change is keyed on the annotation VALUE, deliberately not on the node's
+// Status.Role: a same-value patch produces no watch event, so keying on the
+// annotation is what keeps this churn-free. The corollary is a bounded gap —
+// if Status.Role drifts while the annotation already holds the live role, no
+// re-poke fires here — which is intentionally covered by the ValkeyNode
+// controller's backstop requeue. Do not "simplify" this to compare against
+// Status.Role; that reintroduces churn without closing the gap.
+func (r *ValkeyClusterReconciler) hintObservedRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, state *valkey.ClusterState) error {
+	if node.Status.PodIP == "" {
+		return nil
+	}
+	liveRole := liveRoleForAddress(state, node.Status.PodIP)
+	if liveRole == "" {
+		return nil
+	}
+	patchBase := node.DeepCopy()
+	if upserted := upsertAnnotation(node, AnnotationObservedRole, liveRole); !upserted {
+		return nil
+	}
+	return r.Patch(ctx, node, client.MergeFrom(patchBase))
+}
+
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
 func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (nodeResult, error) {
@@ -607,37 +669,43 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Check if proactive failover is needed before updating.
+	// Check if proactive failover is needed and keep the observed-role hint in
+	// sync, both driven by the fetched current node and live cluster state.
 	if clusterState != nil {
 		current := &valkeyiov1alpha1.ValkeyNode{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 			if !apierrors.IsNotFound(err) {
-				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
+				log.V(1).Info("could not fetch current ValkeyNode for failover/hint check, skipping",
 					"name", node.Name, "err", err)
 			}
-		} else if nodeRequiresRoll(current, desired) {
-			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
-			if shard != nil {
-				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP,
-					"syncedReplicas", len(replicas))
-				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
-					log.Info("proactive failover did not complete, proceeding with roll",
-						"name", node.Name, "err", err)
-				}
-			} else if cluster.Spec.Replicas > 0 {
-				// findFailoverShard returned nil for one of three reasons:
-				// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
-				// 2. Node is in a shard but is a replica: safe to roll
-				// 3. Node isn't in any shard (isolated): safe to roll
-				// Only case 1 requires waiting; identify it's the actual primary of its shard.
-				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
-				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
-					log.Info("primary has no synced replicas, deferring roll",
+		} else {
+			if err := r.hintObservedRole(ctx, current, clusterState); err != nil {
+				log.V(1).Info("could not update observed-role hint", "name", node.Name, "err", err)
+			}
+			if nodeRequiresRoll(current, desired) {
+				shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+				if shard != nil {
+					log.Info("proactive failover before rolling primary",
 						"name", node.Name, "address", current.Status.PodIP,
-						"shardNodes", len(shardInState.Nodes),
-						"shardId", shardInState.Id)
-					return nodeDeferred, nil
+						"syncedReplicas", len(replicas))
+					if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+						log.Info("proactive failover did not complete, proceeding with roll",
+							"name", node.Name, "err", err)
+					}
+				} else if cluster.Spec.Replicas > 0 {
+					// findFailoverShard returned nil for one of three reasons:
+					// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
+					// 2. Node is in a shard but is a replica: safe to roll
+					// 3. Node isn't in any shard (isolated): safe to roll
+					// Only case 1 requires waiting; identify it's the actual primary of its shard.
+					shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+					if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+						log.Info("primary has no synced replicas, deferring roll",
+							"name", node.Name, "address", current.Status.PodIP,
+							"shardNodes", len(shardInState.Nodes),
+							"shardId", shardInState.Id)
+						return nodeDeferred, nil
+					}
 				}
 			}
 		}

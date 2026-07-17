@@ -577,6 +577,67 @@ func TestParseValkeyRole(t *testing.T) {
 	}
 }
 
+func TestParseClusterEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     string
+		expected bool
+	}{
+		{"enabled", "# Cluster\r\ncluster_enabled:1\r\n", true},
+		{"disabled", "# Cluster\r\ncluster_enabled:0\r\n", false},
+		{"absent", "# Replication\r\nrole:master\r\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseClusterEnabled(tt.info))
+		})
+	}
+}
+
+func TestParseClusterNodesRole(t *testing.T) {
+	tests := []struct {
+		name         string
+		clusterNodes string
+		expected     string
+	}{
+		{
+			// A real primary owns a slot range (fields beyond the fixed 8).
+			name:         "myself master owning slots is primary",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 5462-10922\n",
+			expected:     RolePrimary,
+		},
+		{
+			// Regression (issue #261 follow-up): a just-restarted replica reports
+			// myself,master for a few seconds before re-establishing replication,
+			// but owns no slots — it must still resolve to replica.
+			name:         "myself master owning no slots is replica (restart transient)",
+			clusterNodes: "37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,master - 0 0 1 connected\n",
+			expected:     RoleReplica,
+		},
+		{
+			name:         "myself slave is replica",
+			clusterNodes: "37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
+			expected:     RoleReplica,
+		},
+		{
+			name: "picks the myself line among peers",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n" +
+				"37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
+			expected: RoleReplica,
+		},
+		{
+			name:         "no myself line returns empty",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n",
+			expected:     "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseClusterNodesRole(tt.clusterNodes))
+		})
+	}
+}
+
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}

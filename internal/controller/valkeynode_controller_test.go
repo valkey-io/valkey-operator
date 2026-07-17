@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1213,6 +1215,13 @@ func (f *fakeConfigClient) LoadACL(_ context.Context) error {
 	return nil
 }
 
+func (f *fakeConfigClient) UserNames(_ context.Context) ([]string, error) {
+	if f.aclErr != nil {
+		return nil, f.aclErr
+	}
+	return slices.Sorted(maps.Keys(f.aclHashes)), nil
+}
+
 func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string) ([]string, error) {
 	if f.aclErr != nil {
 		return nil, f.aclErr
@@ -1221,7 +1230,7 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	if !ok {
 		return []string{}, nil
 	}
-	return hashes, nil
+	return normaliseHashes(slices.Clone(hashes)), nil
 }
 
 func (f *fakeConfigClient) Close() { f.closed = true }

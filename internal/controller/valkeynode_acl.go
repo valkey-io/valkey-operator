@@ -33,8 +33,12 @@ import (
 // desiredUserPasswordHashes parses the aclfile the ValkeyCluster controller
 // builds into each user's SHA-256 password hashes, keyed by username. The file
 // is a sequence of "user <name> on #<hash> ... " lines (see buildUserAcl), so
-// the hashes are the '#'-prefixed tokens. Hashes are sorted, since neither the
-// file nor ACL GETUSER guarantees an order.
+// the hashes are the '#'-prefixed tokens.
+//
+// Hashes are sorted and deduplicated. Order is not guaranteed by either side,
+// and Valkey keeps a user's passwords as a set: pointing two Secret keys at the
+// same password yields a repeated hash in the file but a single one back from
+// ACL GETUSER, which would otherwise never compare equal.
 func desiredUserPasswordHashes(aclFile string) map[string][]string {
 	out := map[string][]string{}
 	for line := range strings.SplitSeq(aclFile, "\n") {
@@ -48,23 +52,38 @@ func desiredUserPasswordHashes(aclFile string) map[string][]string {
 				hashes = append(hashes, h)
 			}
 		}
-		slices.Sort(hashes)
-		out[fields[1]] = hashes
+		out[fields[1]] = normaliseHashes(hashes)
 	}
 	return out
 }
 
-// passwordsInSync reports whether every desired user's password hashes are live
-// on the server.
+// normaliseHashes sorts and deduplicates password hashes so both sides of the
+// comparison are in the same shape.
+func normaliseHashes(hashes []string) []string {
+	slices.Sort(hashes)
+	return slices.Compact(hashes)
+}
+
+// aclObservablyInSync reports whether the parts of the ACL that can be compared
+// exactly are live on the server: the set of users, and each user's password
+// hashes.
 //
-// This is deliberately narrower than "the whole ACL matches". ACL GETUSER
-// returns Valkey's normalised rendering of the rules, while the operator only
-// holds the aclfile text, and normalising the two into a comparable form would
-// mean reimplementing Valkey's own ACL parser. Password hashes are the part
-// that does compare exactly, and they are what a rotation needs to observe, so
-// they drive the ACLApplied condition. Correctness of the apply itself does not
-// depend on this check: the reload is unconditional.
-func passwordsInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]string) (bool, error) {
+// Permissions are deliberately not compared. ACL GETUSER returns Valkey's
+// normalised rendering of the rules, while the operator only holds the aclfile
+// text, so comparing the two would mean reimplementing Valkey's own ACL parser
+// and keeping it in step with the server. Correctness of the apply does not
+// depend on this check either way: the reload is unconditional, so permission
+// edits converge regardless. This only scopes what ACLApplied can honestly
+// claim.
+func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]string) (bool, error) {
+	actualUsers, err := c.UserNames(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(actualUsers)), slices.Sorted(maps.Keys(desired))) {
+		// A user was added or removed and the server has not picked it up yet.
+		return false, nil
+	}
 	for _, user := range slices.Sorted(maps.Keys(desired)) {
 		actual, err := c.UserPasswordHashes(ctx, user)
 		if err != nil {
@@ -95,9 +114,8 @@ func passwordsInSync(ctx context.Context, c valkeyConfigClient, desired map[stri
 // change converge, including permission edits and removed users, once the
 // volume catches up.
 //
-// The returned bool only reports whether the desired password hashes are live,
-// which is the part that can be compared exactly and the part a rotation needs
-// to wait on.
+// The returned bool reports the parts that can be compared exactly, the user
+// set and their password hashes, which is what a rotation needs to wait on.
 func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
 	if node.Spec.UsersACLSecretName == "" {
 		return true, nil
@@ -127,5 +145,5 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	if err := c.LoadACL(ctx); err != nil {
 		return false, err
 	}
-	return passwordsInSync(ctx, c, desired)
+	return aclObservablyInSync(ctx, c, desired)
 }

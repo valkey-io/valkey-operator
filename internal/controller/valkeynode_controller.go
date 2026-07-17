@@ -54,9 +54,12 @@ type valkeyConfigClient interface {
 	SetConfig(ctx context.Context, params map[string]string) error
 	// LoadACL reloads the mounted aclfile into the running server.
 	LoadACL(ctx context.Context) error
+	// UserNames returns the names of the users the server currently has.
+	UserNames(ctx context.Context) ([]string, error)
 	// UserPasswordHashes returns the user's currently configured password
-	// hashes, sorted. An unknown user yields an empty slice rather than an
-	// error, so a user that has not been loaded yet reads as out of sync.
+	// hashes, sorted and deduplicated. An unknown user yields an empty slice
+	// rather than an error, so a user that has not been loaded yet reads as out
+	// of sync.
 	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
 	Close()
 }
@@ -84,6 +87,14 @@ func (rc *realValkeyConfigClient) LoadACL(ctx context.Context) error {
 	return nil
 }
 
+func (rc *realValkeyConfigClient) UserNames(ctx context.Context) ([]string, error) {
+	users, err := rc.client.Do(ctx, rc.client.B().AclUsers().Build()).AsStrSlice()
+	if err != nil {
+		return nil, fmt.Errorf("ACL USERS: %w", err)
+	}
+	return users, nil
+}
+
 func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, username string) ([]string, error) {
 	m, err := rc.client.Do(ctx, rc.client.B().AclGetuser().Username(username).Build()).AsMap()
 	if err != nil {
@@ -101,8 +112,9 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	if err != nil {
 		return nil, fmt.Errorf("ACL GETUSER %s passwords: %w", username, err)
 	}
-	slices.Sort(hashes)
-	return hashes, nil
+	// Valkey keeps passwords as a set, but normalise anyway so both sides of
+	// the comparison are in the same shape.
+	return normaliseHashes(hashes), nil
 }
 
 func (rc *realValkeyConfigClient) Close() { rc.client.Close() }

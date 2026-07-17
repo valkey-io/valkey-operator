@@ -22,7 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 // effectiveNodeSpread resolves the node-axis spread modes, defaulting every

@@ -9,7 +9,11 @@ spec:
   shards: 3
   replicas: 1
   scheduling:
-    topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
+    node:
+      spread:
+        shard:
+          mode: Required
+        primaries:
+          mode: Disabled
+        pods:
+          mode: Preferred

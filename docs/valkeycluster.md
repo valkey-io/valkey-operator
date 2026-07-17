@@ -174,19 +174,19 @@ scheduling:
 
 #### Topology spread constraints
 
-```yaml
-scheduling:
-  topologySpreadConstraints:
-    - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
-      whenUnsatisfiable: DoNotSchedule
-```
+`topologySpreadConstraints` is a raw escape hatch: whatever you set is rendered **verbatim** onto every Valkey pod in the cluster. The operator does not scope, augment, or shard-index it, and adds no constraints of its own by default.
 
-`topologySpreadConstraints` uses Kubernetes' native pod topology spread constraints and applies them to every Valkey pod in the cluster.
+> **You must supply your own `labelSelector`.** A topology spread constraint with no `labelSelector` matches *nothing* — Kubernetes counts zero pods and the constraint enforces nothing (a silent no-op).
+>
+> Set a `labelSelector` that selects the pods you want counted; `valkey.io/cluster: <cluster-name>` selects every pod in the cluster.
 
-By default, the operator does not add any topology spread constraints. If `topologySpreadConstraints` is omitted or empty, pods are scheduled normally using the other scheduling fields such as `nodeSelector`, `affinity`, `tolerations`, and resource requests.
+For the common intents such as keep a shard's pods on different nodes, spread each shard's primary across nodes, or spread all pods across nodes — prefer [`scheduling.node.spread`](#node-axis-spread) below. It fills in the correct label selectors for you and guarantees the constraints it emits don't collide. Reach for `topologySpreadConstraints` only when you need something `node.spread` doesn't express, such as a different `topologyKey` (for example zone spreading).
 
-For `ValkeyCluster`, when a topology spread constraint is configured, the operator makes it shard-aware. It scopes the constraint to the current cluster and shard, so pods from the same shard, for example a primary and its replica, are spread across the configured topology domain.
+> **Do not overlap a hostname constraint with `node.spread`.**
+>
+> A passthrough constraint on `topologyKey: kubernetes.io/hostname` collides with an enabled `node.spread.primaries` or `node.spread.pods` that renders the same `whenUnsatisfiable` (`Required` → `DoNotSchedule`, `Preferred` → `ScheduleAnyway`), because the pod would carry two constraints sharing that `{topologyKey, whenUnsatisfiable}` pair — which Kubernetes forbids.
+>
+> The operator rejects this combination at admission, so keep hostname spreading in `node.spread` and reserve `topologySpreadConstraints` for other topology keys (for example zones). A passthrough hostname constraint whose `whenUnsatisfiable` differs from what the enabled dimensions render is still allowed.
 
 Each constraint must include:
 
@@ -194,38 +194,71 @@ Each constraint must include:
 |---|---|
 | `maxSkew` | Maximum allowed difference in matching pod count between topology domains. `1` means Kubernetes keeps the matching pods as evenly spread as possible. |
 | `topologyKey` | Node label used as the spread domain. Use `kubernetes.io/hostname` for worker-node spreading, or labels such as `topology.kubernetes.io/zone` for zone spreading. |
+| `labelSelector` | Which pods to count. Required for the constraint to do anything (see note above). |
 | `whenUnsatisfiable` | What Kubernetes should do when the constraint cannot be satisfied. |
 
 `whenUnsatisfiable` supports:
 
 | Value | Behaviour | Impact |
 |---|---|---|
-| `DoNotSchedule` | Hard rule. Kubernetes will not schedule the pod if placement would violate the constraint. | Stronger HA placement, but pods may remain `Pending` when there are not enough eligible nodes or topology domains. The operator reports `PodUnschedulable` on the ValkeyCluster. |
-| `ScheduleAnyway` | Soft rule. Kubernetes prefers satisfying the constraint, but can still schedule the pod if it cannot. | Better scheduling availability in constrained clusters, but pods from the same shard may still land in the same topology domain. |
+| `DoNotSchedule` | Hard rule. Kubernetes will not schedule the pod if placement would violate the constraint. | Stronger placement guarantees, but pods may remain `Pending` when there are not enough eligible nodes or topology domains. The operator marks the cluster `Degraded` with reason `PodUnschedulable`. |
+| `ScheduleAnyway` | Soft rule. Kubernetes prefers satisfying the constraint, but can still schedule the pod if it cannot. | Better scheduling availability in constrained clusters, but matching pods may still share a topology domain. |
 
-Example strict node-level spreading:
-
-```yaml
-scheduling:
-  topologySpreadConstraints:
-    - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
-      whenUnsatisfiable: DoNotSchedule
-```
-
-This tries to keep pods from the same shard on different worker nodes. If the cluster does not have enough eligible worker nodes, affected pods stay `Pending`.
-
-Example preferred node-level spreading:
+Example — spread every pod in the cluster across availability zones, preferring but not requiring an even distribution:
 
 ```yaml
 scheduling:
   topologySpreadConstraints:
     - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
+      topologyKey: topology.kubernetes.io/zone
       whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          valkey.io/cluster: my-cluster
 ```
 
-This still prefers spreading pods from the same shard across worker nodes, but allows scheduling to continue if the constraint cannot be satisfied.
+Switch `whenUnsatisfiable` to `DoNotSchedule` to make it a hard rule; pods that cannot be placed within `maxSkew` then stay `Pending` rather than colocating.
+
+#### Node axis spread
+
+```yaml
+scheduling:
+  node:
+    spread:
+      shard:
+        mode: Preferred
+      primaries:
+        mode: Disabled
+      pods:
+        mode: Disabled
+```
+
+`scheduling.node.spread` groups three independent spread dimensions, each keyed on `kubernetes.io/hostname`, so you get shard- and primary-aware placement without hand-writing label selectors:
+
+| Field | Rendered as | Effect |
+|---|---|---|
+| `shard` | Pod anti-affinity | Keeps pods belonging to the same shard, for example a primary and its replica, off the same node. |
+| `primaries` | Topology spread constraint on each shard's node-index-0 pod | Spreads the pod that holds each shard's primary (at creation) across nodes. |
+| `pods` | Topology spread constraint on every cluster pod | Spreads all of the cluster's pods across nodes, regardless of shard. |
+
+Each field takes a `mode`:
+
+| Mode | Behaviour |
+|---|---|
+| `Disabled` | Emits nothing for that dimension. This is the default for all three fields. |
+| `Preferred` | Soft rule: a `preferredDuringSchedulingIgnoredDuringExecution` anti-affinity term (`shard`), or a topology spread constraint with `whenUnsatisfiable: ScheduleAnyway` (`primaries`, `pods`). Kubernetes biases placement but never leaves a pod `Pending` because of it. |
+| `Required` | Hard rule: a `requiredDuringSchedulingIgnoredDuringExecution` anti-affinity term (`shard`), or a topology spread constraint with `whenUnsatisfiable: DoNotSchedule` (`primaries`, `pods`). A pod that cannot satisfy the rule stays `Pending`. |
+
+> **`primaries` targets the primary at creation, not the live primary.** It keys its topology spread constraint on each shard's `node-index=0` pod. A topology spread constraint is only evaluated when a pod is scheduled — never re-evaluated on a running pod — so `primaries` deliberately targets this stable identity rather than a live primary-role label. After a failover the constraint keeps spreading the `node-index=0` pods, which may no longer be the primaries, until primary failback is implemented and realigns desired with actual. You should read `primaries: Required` as "spread the pods that start as primaries", not as a continuous guarantee that the current primaries sit on distinct nodes.
+
+`shard`, `primaries`, and `pods` all default to `Disabled` when `node.spread`, `scheduling.node`, or `scheduling` itself is omitted. This is opt-in and matches today's behaviour, so an existing cluster that sets no scheduling constraints at all renders byte-identical pod specs after an operator upgrade — no fleet-wide rolling restart. A cluster that already sets `topologySpreadConstraints` is not covered by that guarantee: those constraints lose the old implicit shard-scoping under verbatim rendering (see above), so it gets a one-time re-render on upgrade even without touching `node.spread`. The trade-off is that nothing stops a shard's primary and replica from landing on the same node until you opt in. For production availability, set `shard` to at least `Preferred` so that losing a single node cannot take out every copy of a shard's data.
+
+`primaries` and `pods` both render as topology spread constraints on `kubernetes.io/hostname`. Setting them to the same mode would produce two constraints of identical strength competing over the same domain, so the operator rejects the combination at admission:
+
+- `primaries: Required` together with `pods: Required` is rejected.
+- `primaries: Preferred` together with `pods: Preferred` is rejected.
+
+Mixing strengths (one `Preferred`, the other `Required`), or leaving one of them `Disabled`, is always allowed. `shard` is exempt from this rule since it renders as pod anti-affinity rather than a topology spread constraint, so it can be combined freely with any `primaries`/`pods` setting.
 
 ### TLS
 

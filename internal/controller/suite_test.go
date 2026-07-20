@@ -33,7 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

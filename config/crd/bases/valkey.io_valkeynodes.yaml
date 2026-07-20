@@ -3062,6 +3062,11 @@ spec:
                         type: string
                     type: object
                 type: object
+              priorityClassName:
+                description: |-
+                  PriorityClassName is the name of an existing PriorityClass applied to
+                  the pod, protecting it from eviction under resource pressure.
+                type: string
               resources:
                 description: Resources defines the resource requirements for the Valkey
                   container.
@@ -3134,6 +3139,14 @@ spec:
                   ServerConfigMapName specifies the name of the ConfigMap that contains the
                   scripts, and Valkey config for the ValkeyNode.
                 type: string
+              terminationGracePeriodSeconds:
+                description: |-
+                  TerminationGracePeriodSeconds is the pod termination grace period, set by
+                  the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
+                  can complete before SIGKILL.
+                format: int64
+                minimum: 1
+                type: integer
               tls:
                 description: TLS configuration for the node
                 properties:

@@ -76,6 +76,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// the pod, protecting it from eviction under resource pressure.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// TopologySpreadConstraints defines pod topology spread constraints applied
 	// to the ValkeyNode workload. The operator augments these constraints with
 	// shard-aware selectors derived from node labels.
@@ -125,6 +130,13 @@ type ValkeyNodeSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// TerminationGracePeriodSeconds is the pod termination grace period, set by
+	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
+	// can complete before SIGKILL.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

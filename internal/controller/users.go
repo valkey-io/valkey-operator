@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -64,6 +64,7 @@ var (
 			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
 			"+info",                      // node info and replication status
+			"+role",                      // current replication role
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
@@ -71,6 +72,9 @@ var (
 		replicationUser: strings.Join([]string{
 			"-@all +psync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
 			"+cluster|syncslots",           // required for atomic slot migration
+			// Today, Atomic slot migration streams the snapshot as a command stream
+			// (SELECT + type-specific write commands from the AOF-rewrite)
+			"+select +@write ~* -flushall -flushdb -swapdb",
 		}, " "),
 	}
 )

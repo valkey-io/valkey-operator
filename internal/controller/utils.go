@@ -25,11 +25,11 @@ import (
 	"slices"
 	"strconv"
 
+	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const (

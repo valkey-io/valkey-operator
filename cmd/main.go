@@ -75,6 +75,8 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces []string
+	var logLevel zapcore.LevelEnabler
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -107,12 +109,29 @@ func main() {
 		watchNamespaces = append(watchNamespaces, s)
 		return nil
 	})
+	flag.Func("log-level", "Log level for operator output (debug/info/warn/error).", func(s string) error {
+		switch strings.ToLower(s) {
+		case "debug":
+			logLevel = zapcore.DebugLevel
+		case "info", "":
+			logLevel = zapcore.InfoLevel
+		case "warn":
+			logLevel = zapcore.WarnLevel
+		case "error":
+			logLevel = zapcore.ErrorLevel
+		default:
+			return fmt.Errorf("log-level: %s, valid: debug/info/warn/error", s)
+		}
+		return nil
+	})
+	flag.Parse()
+
 	opts := zap.Options{
 		Development:     true,
 		StacktraceLevel: zapcore.FatalLevel,
+		Level:           logLevel,
 	}
 	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

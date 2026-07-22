@@ -142,7 +142,7 @@ An explicit value is honoured as-is, even if it is below the recommended minimum
 ### Private image registries
 
 ```yaml
-image: registry.example.com/valkey/valkey:9.0.0
+image: registry.example.com/valkey/valkey:9.1.1
 imagePullSecrets:
   - name: registrycredential
 ```

@@ -112,7 +112,7 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
-	log.Info("getting system users secret: " + cluster.Name)
+	log.V(1).Info("getting system users secret: " + cluster.Name)
 	var systemsAcls strings.Builder
 	systemUserSecret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{

@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,15 +50,138 @@ var ClusterStates = []ClusterState{
 	ClusterStateFailed,
 }
 
-// PDBPolicy controls whether the operator manages a PodDisruptionBudget for the cluster.
-// Values may be added in future versions; clients MUST handle unknown values gracefully.
-// +kubebuilder:validation:Enum=Managed;Disabled
-type PDBPolicy string
+// PDBMode selects how the operator manages PodDisruptionBudgets for the cluster.
+// Additional values may be added in future versions; clients MUST handle unknown
+// values gracefully by falling back to default behaviour.
+// +kubebuilder:validation:Enum=Cluster;Disabled
+type PDBMode string
 
 const (
-	PDBPolicyManaged  PDBPolicy = "Managed"
-	PDBPolicyDisabled PDBPolicy = "Disabled"
+	// PDBModeCluster manages one cluster-wide PDB with maxUnavailable: 1.
+	PDBModeCluster PDBMode = "Cluster"
+	// PDBModeDisabled manages no PDB.
+	PDBModeDisabled PDBMode = "Disabled"
 )
+
+// PodDisruptionBudgetConfig configures operator-managed PodDisruptionBudgets.
+type PodDisruptionBudgetConfig struct {
+	// Mode selects the PDB strategy. Defaults to Cluster.
+	// +kubebuilder:default=Cluster
+	// +optional
+	Mode PDBMode `json:"mode,omitempty"`
+}
+
+// UnmarshalJSON accepts both the current object form and the legacy
+// string form ("Managed"/"Disabled"). It exists only so objects still stored
+// under the old string form decode instead of failing the whole informer list
+// decode during an operator upgrade. Removable at v1beta1.
+func (c *PodDisruptionBudgetConfig) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch s {
+		case "Managed":
+			*c = PodDisruptionBudgetConfig{Mode: PDBModeCluster}
+		case "Disabled":
+			*c = PodDisruptionBudgetConfig{Mode: PDBModeDisabled}
+		default:
+			*c = PodDisruptionBudgetConfig{Mode: PDBMode(s)}
+		}
+		return nil
+	}
+	type alias PodDisruptionBudgetConfig
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*c = PodDisruptionBudgetConfig(a)
+	return nil
+}
+
+// SchedulingSpec groups pod placement configuration for the cluster's pods.
+// These fields are rendered onto each ValkeyNode workload the cluster creates.
+type SchedulingSpec struct {
+	// Tolerations to apply to the pods
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector to apply to the pods
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Affinity to apply to the pods, overrides NodeSelector if set.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// TopologySpreadConstraints to apply to the pods
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// every pod in the cluster, protecting them from eviction under resource
+	// pressure. Pod priority is a scheduling concern (preemption, scheduling-queue
+	// order), so it lives alongside the other placement fields.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// Node groups scheduling constraints on the node axis
+	// (topologyKey kubernetes.io/hostname). When unset, every node spread is
+	// Disabled and no scheduling primitives are emitted.
+	// +optional
+	Node *NodeScheduling `json:"node,omitempty"`
+}
+
+// SpreadMode selects the strength of a spread constraint.
+// +kubebuilder:validation:Enum=Disabled;Preferred;Required
+type SpreadMode string
+
+const (
+	// SpreadDisabled emits no scheduling primitive for the dimension.
+	SpreadDisabled SpreadMode = "Disabled"
+	// SpreadPreferred is best-effort: it biases placement but can never leave a
+	// pod unschedulable.
+	SpreadPreferred SpreadMode = "Preferred"
+	// SpreadRequired is a hard constraint: a pod that cannot satisfy it stays
+	// Pending.
+	SpreadRequired SpreadMode = "Required"
+)
+
+// SpreadConstraint configures one spread dimension.
+type SpreadConstraint struct {
+	// Mode selects the strength of the constraint. When unset, the dimension's
+	// documented default applies.
+	// +optional
+	Mode SpreadMode `json:"mode,omitempty"`
+}
+
+// NodeSpread controls how the cluster's pods are distributed across nodes
+// (topologyKey kubernetes.io/hostname).
+type NodeSpread struct {
+	// Shard keeps pods of the same shard on distinct nodes, rendered as pod
+	// anti-affinity. Defaults to Disabled when unset.
+	// +optional
+	Shard SpreadConstraint `json:"shard,omitempty"`
+
+	// Primaries balances each shard's node-index-0 pod across nodes, rendered as
+	// a topology spread constraint.
+	// Defaults to Disabled when unset.
+	// +optional
+	Primaries SpreadConstraint `json:"primaries,omitempty"`
+
+	// Pods balances all of the cluster's pods across nodes, rendered as a
+	// topology spread constraint. Defaults to Disabled when unset. Enabling this
+	// alongside an explicit primaries spread of the same strength is rejected
+	// (only one topology spread constraint per strength is permitted per node).
+	// +optional
+	Pods SpreadConstraint `json:"pods,omitempty"`
+}
+
+// NodeScheduling groups scheduling constraints on the node axis
+// (topologyKey kubernetes.io/hostname).
+type NodeScheduling struct {
+	// Spread distributes the cluster's pods across nodes.
+	// +optional
+	Spread NodeSpread `json:"spread,omitempty"`
+}
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
@@ -64,6 +189,10 @@ const (
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="node.spread.primaries and node.spread.pods cannot both be Required: they render duplicate kubernetes.io/hostname DoNotSchedule topology spread constraints"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="node.spread.primaries and node.spread.pods cannot both be Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway topology spread constraints (set one to Disabled or Required)"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries or node.spread.pods set to Required, which render the same hostname DoNotSchedule constraint: set that node.spread mode to Disabled, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries or node.spread.pods set to Preferred, which render the same hostname ScheduleAnyway constraint: set that node.spread mode to Disabled or Required, or remove the passthrough constraint"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -88,30 +217,11 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Tolerations to apply to the pods
+	// Scheduling groups pod placement configuration (affinity, node selector,
+	// tolerations, topology spread constraints, priority class) for the
+	// cluster's pods.
 	// +optional
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-
-	// NodeSelector to apply to the pods
-	// +optional
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Affinity to apply to the pods, overrides NodeSelector if set.
-	// +optional
-	Affinity *corev1.Affinity `json:"affinity,omitempty"`
-
-	// PriorityClassName is the name of an existing PriorityClass applied to
-	// every pod in the cluster, protecting them from eviction under resource
-	// pressure.
-	// +optional
-	PriorityClassName string `json:"priorityClassName,omitempty"`
-
-	// TopologySpreadConstraints defines pod topology spread constraints applied
-	// to the ValkeyNode workloads. The operator augments these constraints with
-	// shard-aware selectors so pods from the same shard can be spread across the
-	// configured topology domain.
-	// +optional
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
 	// Metrics exporter options
 	// +kubebuilder:default:={enabled:true}
@@ -155,11 +265,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
 
-	// PodDisruptionBudget controls whether the operator manages a PodDisruptionBudget for this cluster.
-	// Set to Disabled when the PDB is managed externally or must be suppressed during maintenance.
-	// +kubebuilder:default=Managed
+	// PodDisruptionBudget configures the operator-managed PodDisruptionBudget(s)
+	// for this cluster. When unset, the operator applies the default (Cluster) mode.
 	// +optional
-	PodDisruptionBudget PDBPolicy `json:"podDisruptionBudget,omitempty"`
+	PodDisruptionBudget *PodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
 
 	// Override the PodSecurityContext applied to each ValkeyNode pod of the cluster.
 	// When set, this overrides the default PodSecurityContext.

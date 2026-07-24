@@ -28,7 +28,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"valkey.io/valkey-operator/test/utils"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // getWorkerNodeWithoutManager returns a worker node that does NOT host the controller manager pod.
@@ -100,11 +100,12 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  tolerations:
-  - key: "dedicated"
-    operator: "Equal"
-    value: "valkey"
-    effect: "NoSchedule"
+  scheduling:
+    tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "valkey"
+      effect: "NoSchedule"
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
@@ -173,14 +174,15 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  tolerations:
-    - key: "dedicated"
-      operator: "Equal"
-      value: "valkey"
-      effect: "PreferNoSchedule"
-    - key: "high-memory"
-      operator: "Exists"
-      effect: "NoExecute"
+  scheduling:
+    tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "valkey"
+        effect: "PreferNoSchedule"
+      - key: "high-memory"
+        operator: "Exists"
+        effect: "NoExecute"
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))
@@ -251,7 +253,8 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  tolerations: []
+  scheduling:
+    tolerations: []
 `, valkeyName)
 
 			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyName))

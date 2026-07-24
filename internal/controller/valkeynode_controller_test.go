@@ -33,8 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	testutils "valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyNode Controller", func() {
@@ -190,6 +190,37 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/instance", resourceName))
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
+		})
+
+		It("should not update the StatefulSet on reconciles when nothing changed", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet on first reconcile")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			createdResourceVersion := sts.ResourceVersion
+
+			// The API server fills in defaults (podManagementPolicy,
+			// updateStrategy, imagePullPolicy, ...) when the StatefulSet is
+			// stored. The desired object built on the next pass must already
+			// carry those values, otherwise CreateOrUpdate sees a diff and
+			// issues an Update on every reconcile (#315).
+			By("reconciling again without any spec change")
+			for range 3 {
+				_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(createdResourceVersion),
+				"a reconcile with no changes must not write the StatefulSet")
 		})
 
 		It("should set Ready=false with PodNotReady condition when no pod exists", func() {

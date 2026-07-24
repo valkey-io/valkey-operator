@@ -11,7 +11,7 @@ layout:
 plugins:
   autoupdate.kubebuilder.io/v1-alpha: {}
 projectName: valkey-operator
-repo: valkey.io/valkey-operator
+repo: github.com/valkey-io/valkey-operator
 resources:
 - api:
     crdVersion: v1
@@ -19,6 +19,6 @@ resources:
   controller: true
   domain: valkey.io
   kind: ValkeyCluster
-  path: valkey.io/valkey-operator/api/v1alpha1
+  path: github.com/valkey-io/valkey-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

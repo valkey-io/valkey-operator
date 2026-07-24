@@ -40,7 +40,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 const (
@@ -393,7 +392,6 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	// Always stamp the observed generation so ValkeyCluster can detect
 	// whether the controller has processed the latest spec.
 	current.Status.ObservedGeneration = current.Generation
-	current.Status.ValkeyVersion = valkey.VersionStringFromImage(effectiveImage(node.Spec.Image))
 
 	pvc, err := r.getPersistentVolumeClaim(ctx, node)
 	if err != nil {
@@ -509,7 +507,6 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
 	node.Status.Ready = current.Status.Ready
 	node.Status.PodIP = current.Status.PodIP
-	node.Status.ValkeyVersion = current.Status.ValkeyVersion
 
 	return nil
 }

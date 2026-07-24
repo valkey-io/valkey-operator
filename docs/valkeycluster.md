@@ -139,6 +139,16 @@ When omitted, the operator picks a safe value: the larger of the Kubernetes defa
 
 An explicit value is honoured as-is, even if it is below the recommended minimum. In that case the operator sets a `ConfigurationWarning` condition (reason `GracePeriodTooShort`) on the `ValkeyCluster` and emits an event when the cluster first enters that state, rather than silently overriding the value. The value must be a positive integer; the CRD rejects zero or negative values.
 
+### Version-gated config
+
+Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator detects a directive that the selected image does not support, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
+
+The warning message names the directive, the minimum supported Valkey version, and the detected version. The operator also emits a Kubernetes `Warning` event on the transition into this state. If you later switch to a supporting image, the condition clears on the next reconcile.
+
+for example:
+
+- `tls-auto-reload-interval` requires Valkey `9.1.0` or newer
+
 ### Private image registries
 
 ```yaml

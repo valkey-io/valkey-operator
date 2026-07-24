@@ -147,12 +147,19 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		Expect(config).NotTo(ContainSubstring("tls-auto-reload-interval 86400"))
 	})
 
-	It("skips the directive when the version is below 9.1", func() {
+	It("drops a user-set directive when the version is below 9.1", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval 3600"))
+	})
+
+	It("skips the directive when the version is below 9.1 and the key is unset", func() {
 		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
 		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
 	})
 
-	It("skips the directive when the version cannot be determined", func() {
+	It("skips the directive when the version cannot be determined and the key is unset", func() {
 		cluster := newTLSCluster("valkey/valkey:latest", nil)
 		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
 	})
@@ -164,8 +171,67 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
 	})
 
-	It("defaults via the empty-image path using DefaultImage", func() {
+	It("skips the directive when TLS is enabled but the image is empty", func() {
 		cluster := newTLSCluster("", nil)
 		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
+	})
+
+	It("keeps un-gated user directives even on an old image", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"appendonly": "yes",
+		})
+		Expect(buildServerConfig(cluster)).To(ContainSubstring("appendonly yes"))
+	})
+
+	It("reports gated user keys via gatedUserKeysToSuppress on an old image", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+			"appendonly":               "yes",
+		})
+		Expect(gatedUserKeysToSuppress(cluster)).To(Equal(map[string]struct{}{
+			"tls-auto-reload-interval": {},
+		}))
+	})
+
+	It("reports gated user keys when the image tag cannot be parsed", func() {
+		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(gatedUserKeysToSuppress(cluster)).To(Equal(map[string]struct{}{
+			"tls-auto-reload-interval": {},
+		}))
+	})
+
+	It("returns no suppressed keys when no user config is set", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		Expect(gatedUserKeysToSuppress(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateWarning names the directive, its required version, and the detected version", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		msg, gated := versionGateWarning(cluster)
+		Expect(gated).To(BeTrue())
+		Expect(msg).To(ContainSubstring("tls-auto-reload-interval"))
+		Expect(msg).To(ContainSubstring("9.1.0"))
+		Expect(msg).To(ContainSubstring("9.0.0"))
+	})
+
+	It("versionGateWarning uses 'unknown' when the detected version cannot be determined", func() {
+		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		msg, gated := versionGateWarning(cluster)
+		Expect(gated).To(BeTrue())
+		Expect(msg).To(ContainSubstring("unknown"))
+	})
+
+	It("versionGateWarning returns gated=false when nothing is dropped", func() {
+		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		_, gated := versionGateWarning(cluster)
+		Expect(gated).To(BeFalse())
 	})
 })

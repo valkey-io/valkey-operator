@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,22 +34,17 @@ import (
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
-const gatedImage = "valkey/valkey:9.1.0"
+const (
+	gatedImage   = "valkey/valkey:9.1.0"
+	preGateImage = "valkey/valkey:9.0.0"
+)
 
 var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS"), func() {
 	var valkeyClusterName string
 	var tlsSecretName string
 	var tmpDir string
 
-	BeforeAll(func() {
-		var err error
-		tmpDir, err = os.MkdirTemp("", "valkey-tls-test")
-		Expect(err).NotTo(HaveOccurred())
-
-		valkeyClusterName = "cluster-tls"
-		tlsSecretName = "valkey-tls-cert"
-
-		By("creating Cert-Manager resources")
+	createCertManagerResources := func(targetClusterName, targetSecretName, certDir string) (string, error) {
 		cmManifest := fmt.Sprintf(`
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -73,9 +67,26 @@ spec:
     name: selfsigned-issuer
     kind: Issuer
     group: cert-manager.io
-`, tlsSecretName, tlsSecretName, valkeyClusterName, valkeyClusterName)
-		cmManifestFile := filepath.Join(tmpDir, "cert-manager-resources.yaml")
-		err = os.WriteFile(cmManifestFile, []byte(cmManifest), 0644)
+`, targetSecretName, targetSecretName, targetClusterName, targetClusterName)
+
+		cmManifestFile := filepath.Join(certDir, fmt.Sprintf("%s-cert-manager-resources.yaml", targetClusterName))
+		if err := os.WriteFile(cmManifestFile, []byte(cmManifest), 0644); err != nil {
+			return "", err
+		}
+
+		return cmManifestFile, nil
+	}
+
+	BeforeAll(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "valkey-tls-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		valkeyClusterName = "cluster-tls"
+		tlsSecretName = "valkey-tls-cert"
+
+		By("creating Cert-Manager resources")
+		cmManifestFile, err := createCertManagerResources(valkeyClusterName, tlsSecretName, tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("applying Cert-Manager Issuer and Certificate (retry until webhook is serving)")
@@ -88,7 +99,7 @@ spec:
 		Eventually(func() error {
 			_, err := utils.Run(exec.Command("kubectl", "get", "secret", tlsSecretName))
 			return err
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		}).Should(Succeed())
 
 		By("creating the ValkeyCluster CR with TLS and metrics exporter")
 		manifest := fmt.Sprintf(`
@@ -120,7 +131,7 @@ spec:
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 		}
-		Eventually(verifyReady, 10*time.Minute, 5*time.Second).Should(Succeed())
+		Eventually(verifyReady).Should(Succeed())
 	})
 
 	AfterAll(func() {
@@ -138,10 +149,14 @@ spec:
 	})
 
 	Context("when a Valkeycluster CR with TLS is applied", func() {
-		It("surfaces the parsed spec.image version on status.valkeyVersion", func() {
+		It("does not surface an unsupported-config warning on a supported image", func() {
 			cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cr.Status.ValkeyVersion).To(Equal("9.1.0"))
+			for _, c := range cr.Status.Conditions {
+				if c.Type == valkeyiov1alpha1.ConditionConfigurationWarning {
+					Expect(c.Reason).NotTo(Equal(valkeyiov1alpha1.ReasonUnsupportedConfigDirective))
+				}
+			}
 		})
 
 		It("defaults tls-auto-reload-interval into the rendered config when the version gate is met", func() {
@@ -231,7 +246,7 @@ spec:
 				for _, status := range strings.Fields(out) {
 					g.Expect(status).To(Equal("true"))
 				}
-			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
 			By("getting pod IP")
 			var podIP string
@@ -286,7 +301,99 @@ spec:
 				g.Expect(out).To(MatchRegexp(`redis_up\s+1`), "redis_up should be 1 when exporter connects via TLS")
 				g.Expect(out).To(ContainSubstring("redis_connected_clients"))
 				g.Expect(out).To(ContainSubstring("redis_memory_used_bytes"))
-			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
+		})
+	})
+
+	Context("when a Valkeycluster CR with TLS uses a pre-9.1 image", func() {
+		var gatedClusterName string
+		var gatedSecretName string
+		var gatedTmpDir string
+
+		BeforeAll(func() {
+			var err error
+			gatedTmpDir, err = os.MkdirTemp("", "valkey-tls-gated-test")
+			Expect(err).NotTo(HaveOccurred())
+
+			gatedClusterName = "cluster-tls-gated"
+			gatedSecretName = "valkey-tls-gated-cert"
+
+			By("creating Cert-Manager resources for the gated cluster")
+			cmManifestFile, err := createCertManagerResources(gatedClusterName, gatedSecretName, gatedTmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("applying Cert-Manager Issuer and Certificate for the gated cluster")
+			Eventually(func() error {
+				_, err := utils.Run(exec.Command("kubectl", "apply", "-f", cmManifestFile))
+				return err
+			}).Should(Succeed())
+
+			By("waiting for the gated certificate secret to be created")
+			Eventually(func() error {
+				_, err := utils.Run(exec.Command("kubectl", "get", "secret", gatedSecretName))
+				return err
+			}).Should(Succeed())
+
+			manifest := fmt.Sprintf(`
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  image: %s
+  shards: 1
+  replicas: 1
+  tls:
+    certificate:
+      secretName: %s
+  config:
+    tls-auto-reload-interval: "3600"
+`, gatedClusterName, preGateImage, gatedSecretName)
+			manifestFile := filepath.Join(gatedTmpDir, "valkeycluster-tls-gated.yaml")
+			err = os.WriteFile(manifestFile, []byte(manifest), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			utils.Run(exec.Command("kubectl", "delete", "valkeycluster", gatedClusterName, "--ignore-not-found=true"))
+			_, err = utils.Run(exec.Command("kubectl", "apply", "-f", manifestFile))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(gatedClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}).Should(Succeed())
+		})
+
+		AfterAll(func() {
+			utils.Run(exec.Command("kubectl", "delete", "valkeycluster", gatedClusterName, "--ignore-not-found=true"))
+			utils.Run(exec.Command("kubectl", "delete", "certificate", gatedSecretName, "--ignore-not-found=true"))
+			os.RemoveAll(gatedTmpDir)
+		})
+
+		It("surfaces a ConfigurationWarning with the unsupported directive details", func() {
+			cr, err := utils.GetValkeyClusterStatus(gatedClusterName)
+			Expect(err).NotTo(HaveOccurred())
+
+			var hit bool
+			for _, c := range cr.Status.Conditions {
+				if c.Type == valkeyiov1alpha1.ConditionConfigurationWarning &&
+					c.Reason == valkeyiov1alpha1.ReasonUnsupportedConfigDirective {
+					Expect(string(c.Status)).To(Equal("True"))
+					Expect(c.Message).To(ContainSubstring("tls-auto-reload-interval"))
+					Expect(c.Message).To(ContainSubstring("9.1.0"))
+					Expect(c.Message).To(ContainSubstring("9.0.0"))
+					hit = true
+				}
+			}
+			Expect(hit).To(BeTrue(), "expected ConfigurationWarning with reason UnsupportedConfigDirective")
+		})
+
+		It("drops the gated directive from the rendered config", func() {
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(gatedClusterName),
+				"-o", "jsonpath={.data.valkey\\.conf}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(ContainSubstring("tls-auto-reload-interval"))
 		})
 	})
 })

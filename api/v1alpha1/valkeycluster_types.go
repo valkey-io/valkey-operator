@@ -330,11 +330,6 @@ type ValkeyClusterStatus struct {
 	// +optional
 	Shards int32 `json:"shards,omitempty"`
 
-	// ValkeyVersion is the Valkey version parsed from spec.image's tag. It is
-	// empty when the version could not be determined.
-	// +optional
-	ValkeyVersion string `json:"valkeyVersion,omitempty"`
-
 	// ReadyShards represents the number of shards that are fully healthy.
 	// +kubebuilder:default=0
 	// +optional
@@ -368,31 +363,32 @@ const (
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing             = "Initializing"
-	ReasonReconciling              = "Reconciling"
-	ReasonClusterHealthy           = "ClusterHealthy"
-	ReasonServiceError             = "ServiceError"
-	ReasonConfigMapError           = "ConfigMapError"
-	ReasonValkeyNodeError          = "ValkeyNodeError"
-	ReasonValkeyNodeListError      = "ValkeyNodeListError"
-	ReasonAddingNodes              = "AddingNodes"
-	ReasonNodeAddFailed            = "NodeAddFailed"
-	ReasonMissingShards            = "MissingShards"
-	ReasonMissingReplicas          = "MissingReplicas"
-	ReasonReconcileComplete        = "ReconcileComplete"
-	ReasonTopologyComplete         = "TopologyComplete"
-	ReasonAllSlotsAssigned         = "AllSlotsAssigned"
-	ReasonSlotsUnassigned          = "SlotsUnassigned"
-	ReasonGracePeriodTooShort      = "GracePeriodTooShort"
-	ReasonPrimaryLost              = "PrimaryLost"
-	ReasonNoSlots                  = "NoSlotsAvailable"
-	ReasonRebalancingSlots         = "RebalancingSlots"
-	ReasonRebalanceFailed          = "RebalanceFailed"
-	ReasonUsersAclError            = "UsersACLError"
-	ReasonUpdatingNodes            = "UpdatingNodes"
-	ReasonSystemUsersAclError      = "SystemUsersACLError"
-	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
-	ReasonPodUnschedulable         = "PodUnschedulable"
+	ReasonInitializing               = "Initializing"
+	ReasonReconciling                = "Reconciling"
+	ReasonClusterHealthy             = "ClusterHealthy"
+	ReasonServiceError               = "ServiceError"
+	ReasonConfigMapError             = "ConfigMapError"
+	ReasonValkeyNodeError            = "ValkeyNodeError"
+	ReasonValkeyNodeListError        = "ValkeyNodeListError"
+	ReasonAddingNodes                = "AddingNodes"
+	ReasonNodeAddFailed              = "NodeAddFailed"
+	ReasonMissingShards              = "MissingShards"
+	ReasonMissingReplicas            = "MissingReplicas"
+	ReasonReconcileComplete          = "ReconcileComplete"
+	ReasonTopologyComplete           = "TopologyComplete"
+	ReasonAllSlotsAssigned           = "AllSlotsAssigned"
+	ReasonSlotsUnassigned            = "SlotsUnassigned"
+	ReasonGracePeriodTooShort        = "GracePeriodTooShort"
+	ReasonPrimaryLost                = "PrimaryLost"
+	ReasonNoSlots                    = "NoSlotsAvailable"
+	ReasonRebalancingSlots           = "RebalancingSlots"
+	ReasonRebalanceFailed            = "RebalanceFailed"
+	ReasonUsersAclError              = "UsersACLError"
+	ReasonUpdatingNodes              = "UpdatingNodes"
+	ReasonSystemUsersAclError        = "SystemUsersACLError"
+	ReasonPodDisruptionBudgetError   = "PodDisruptionBudgetError"
+	ReasonPodUnschedulable           = "PodUnschedulable"
+	ReasonUnsupportedConfigDirective = "UnsupportedConfigDirective"
 )
 
 // +kubebuilder:object:root=true

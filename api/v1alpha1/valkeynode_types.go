@@ -163,11 +163,6 @@ type ValkeyNodeStatus struct {
 	// +optional
 	Role string `json:"role,omitempty"`
 
-	// ValkeyVersion is the Valkey version parsed from spec.image's tag. It is
-	// empty when the version could not be determined.
-	// +optional
-	ValkeyVersion string `json:"valkeyVersion,omitempty"`
-
 	// Conditions represent the current state of the ValkeyNode.
 	// +listType=map
 	// +listMapKey=type

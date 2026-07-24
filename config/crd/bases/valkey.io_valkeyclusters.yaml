@@ -3740,11 +3740,6 @@ spec:
                 - Degraded
                 - Failed
                 type: string
-              valkeyVersion:
-                description: |-
-                  ValkeyVersion is the Valkey version parsed from spec.image's tag. It is
-                  empty when the version could not be determined.
-                type: string
             type: object
         required:
         - spec

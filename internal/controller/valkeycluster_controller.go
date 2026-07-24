@@ -172,6 +172,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort)
 	}
 
+	if msg, gated := versionGateWarning(cluster); gated {
+		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning) {
+			log.Info("dropping user-set version-gated config not supported by the detected Valkey version", "detail", msg)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonUnsupportedConfigDirective, "ReconcileValkeyCluster", "%s", msg)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonUnsupportedConfigDirective, msg, metav1.ConditionTrue)
+	} else {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonUnsupportedConfigDirective)
+	}
+
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		log.Error(err, "failed to list ValkeyNodes")
@@ -1233,8 +1243,6 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.ReadyShards = r.countReadyShards(state, cluster)
 		current.Status.Shards = int32(len(state.Shards))
 	}
-	current.Status.ValkeyVersion = valkey.VersionStringFromImage(effectiveImage(cluster.Spec.Image))
-
 	// Apply conditions from the in-memory cluster object
 	current.Status.Conditions = cluster.Status.Conditions
 

@@ -276,6 +276,41 @@ type ValkeyClusterSpec struct {
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
+// TLSAuthClients controls how Valkey treats incoming client TLS certificates.
+// It mirrors the Valkey `tls-auth-clients` directive.
+// +kubebuilder:validation:Enum=optional;yes;no
+type TLSAuthClients string
+
+const (
+	// TLSAuthClientsOptional accepts both authenticated and unauthenticated clients.
+	// Maps to `tls-auth-clients optional`.
+	TLSAuthClientsOptional TLSAuthClients = "optional"
+	// TLSAuthClientsRequired enforces mTLS - clients must present a certificate
+	// signed by the configured CA. Maps to `tls-auth-clients yes`.
+	TLSAuthClientsRequired TLSAuthClients = "yes"
+	// TLSAuthClientsDisabled disables client certificate processing entirely.
+	// Maps to `tls-auth-clients no`.
+	TLSAuthClientsDisabled TLSAuthClients = "no"
+)
+
+// TLSAuthClientsUser controls how Valkey maps an authenticated client
+// certificate to an ACL user. It mirrors the Valkey `tls-auth-clients-user` directive.
+// +kubebuilder:validation:Enum=CN;URI;off
+type TLSAuthClientsUser string
+
+const (
+	// TLSAuthClientsUserCN maps the certificate's Common Name (CN) to an
+	// ACL username. Pair with `AuthClients: Required` to enforce mTLS.
+	TLSAuthClientsUserCN TLSAuthClientsUser = "CN"
+	// TLSAuthClientsUserURI maps the first URI from the certificate's
+	// Subject Alternative Name (SAN) that natches valkey ACL username.
+	TLSAuthClientsUserURI TLSAuthClientsUser = "URI"
+	// TLSAuthClientsUserOff disables certificate-to-user mapping (default).
+	TLSAuthClientsUserOff TLSAuthClientsUser = "off"
+)
+
+// +kubebuilder:validation:XValidation:rule="!(self.authClients == 'no' && self.authClientsUser != 'off')",message="authClientsUser=CN/URI has no effect when authClients=no (Valkey ignores client certificates)"
+
 // TLSConfig defines the TLS configuration for ValkeyCluster.
 type TLSConfig struct {
 	// Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
@@ -285,6 +320,22 @@ type TLSConfig struct {
 	// - `tls.crt`: The certificate (or a chain).
 	// - `tls.key`: The private key to the first certificate in the certificate chain.
 	Certificate CertificateRef `json:"certificate,omitempty"`
+
+	// AuthClients controls whether clients must authenticate with a TLS
+	// certificate. `yes` (the default) enforces mTLS, `optional` allows
+	// both authenticated and unauthenticated clients, and `no` turns
+	// client certificate processing off entirely.
+	// +kubebuilder:default=yes
+	// +optional
+	AuthClients TLSAuthClients `json:"authClients,omitempty"`
+
+	// AuthClientsUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Set to `CN` to use the certificate's Common
+	// Name, or `URI` to use the first matching URI from the certificate's Subject Alternative
+	// Name (SAN). Defaults to `off`. Requires Valkey >= 9.0.0.
+	// +kubebuilder:default=off
+	// +optional
+	AuthClientsUser TLSAuthClientsUser `json:"authClientsUser,omitempty"`
 }
 
 // CertificateRef defines the certificate reference for ValkeyCluster.

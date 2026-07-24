@@ -40,7 +40,11 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 	var volumeMounts []corev1.VolumeMount
 
 	if tlsSpec != nil {
-		args = append(args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		args = append(args,
+			fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA),
+			fmt.Sprintf("--tls-client-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCert),
+			fmt.Sprintf("--tls-client-key-file=%s/%s", tlsCertMountPath, tlsSecretKeyKey),
+		)
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      tlsVolumeName,
 			MountPath: tlsCertMountPath,

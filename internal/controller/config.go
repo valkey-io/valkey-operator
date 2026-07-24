@@ -79,7 +79,15 @@ func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[st
 		config["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
 		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
 		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
-		config["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
+
+		if tls.AuthClients != "" {
+			config["tls-auth-clients"] = string(tls.AuthClients)
+		}
+
+		if tls.AuthClientsUser != "" {
+			// Automatically authenticate TLS clients as ACL users based on their cetificate fields.
+			config["tls-auth-clients-user"] = string(tls.AuthClientsUser)
+		}
 	}
 
 	return config

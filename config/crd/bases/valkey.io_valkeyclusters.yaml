@@ -3448,6 +3448,30 @@ spec:
               tls:
                 description: TLS configuration for the cluster
                 properties:
+                  authClients:
+                    default: "yes"
+                    description: |-
+                      AuthClients controls whether clients must authenticate with a TLS
+                      certificate. `yes` (the default) enforces mTLS, `optional` allows
+                      both authenticated and unauthenticated clients, and `no` turns
+                      client certificate processing off entirely.
+                    enum:
+                    - optional
+                    - "yes"
+                    - "no"
+                    type: string
+                  authClientsUser:
+                    default: "off"
+                    description: |-
+                      AuthClientsUser configures how Valkey maps an authenticated client
+                      certificate to an ACL user. Set to `CN` to use the certificate's Common
+                      Name, or `URI` to use the first matching URI from the certificate's Subject Alternative
+                      Name (SAN). Defaults to `off`. Requires Valkey >= 9.0.0.
+                    enum:
+                    - CN
+                    - URI
+                    - "off"
+                    type: string
                   certificate:
                     description: |-
                       Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
@@ -3462,6 +3486,10 @@ spec:
                         type: string
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: authClientsUser=CN/URI has no effect when authClients=no
+                    (Valkey ignores client certificates)
+                  rule: '!(self.authClients == ''no'' && self.authClientsUser != ''off'')'
               users:
                 description: Users, and ACL-related configuration; see valkeyacls_types.go
                 items:

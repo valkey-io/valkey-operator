@@ -181,6 +181,11 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
+	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster
+	// controller wrote to the aclfile Secret is live on the running server,
+	// applied via ACL LOAD without rolling the pod. It is False while the
+	// mounted volume has yet to catch up with the Secret.
+	ValkeyNodeConditionACLApplied = "ACLApplied"
 )
 
 const (

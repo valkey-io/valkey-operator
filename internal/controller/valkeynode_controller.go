@@ -52,6 +52,15 @@ const (
 // fake (envtest has no running Valkey server).
 type valkeyConfigClient interface {
 	SetConfig(ctx context.Context, params map[string]string) error
+	// LoadACL reloads the mounted aclfile into the running server.
+	LoadACL(ctx context.Context) error
+	// UserNames returns the names of the users the server currently has.
+	UserNames(ctx context.Context) ([]string, error)
+	// UserPasswordHashes returns the user's currently configured password
+	// hashes, sorted and deduplicated. An unknown user yields an empty slice
+	// rather than an error, so a user that has not been loaded yet reads as out
+	// of sync.
+	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
 	Close()
 }
 
@@ -69,6 +78,43 @@ func (rc *realValkeyConfigClient) SetConfig(ctx context.Context, params map[stri
 		return fmt.Errorf("CONFIG SET: %w", err)
 	}
 	return nil
+}
+
+func (rc *realValkeyConfigClient) LoadACL(ctx context.Context) error {
+	if err := rc.client.Do(ctx, rc.client.B().AclLoad().Build()).Error(); err != nil {
+		return fmt.Errorf("ACL LOAD: %w", err)
+	}
+	return nil
+}
+
+func (rc *realValkeyConfigClient) UserNames(ctx context.Context) ([]string, error) {
+	users, err := rc.client.Do(ctx, rc.client.B().AclUsers().Build()).AsStrSlice()
+	if err != nil {
+		return nil, fmt.Errorf("ACL USERS: %w", err)
+	}
+	return users, nil
+}
+
+func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, username string) ([]string, error) {
+	m, err := rc.client.Do(ctx, rc.client.B().AclGetuser().Username(username).Build()).AsMap()
+	if err != nil {
+		if vclient.IsValkeyNil(err) {
+			// User is not defined on the server yet.
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("ACL GETUSER %s: %w", username, err)
+	}
+	passwords, ok := m["passwords"]
+	if !ok {
+		return []string{}, nil
+	}
+	hashes, err := passwords.AsStrSlice()
+	if err != nil {
+		return nil, fmt.Errorf("ACL GETUSER %s passwords: %w", username, err)
+	}
+	// Valkey keeps passwords as a set, but normalise anyway so both sides of
+	// the comparison are in the same shape.
+	return normaliseHashes(hashes), nil
 }
 
 func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
@@ -98,6 +144,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -177,9 +224,57 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	aclSynced, err := r.applyLiveACL(ctx, node)
+	if err != nil {
+		log.Error(err, "failed to apply live ACL")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+			log.Error(condErr, "failed to set ACLApplied condition")
+		}
+		return ctrl.Result{}, err
+	}
+	if !aclSynced {
+		// The reload ran, but the mounted aclfile had not caught up with the
+		// Secret, so it loaded stale content. Report that rather than claiming
+		// the desired passwords are live, and reload again on the requeue.
+		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation",
+			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
+			log.Error(condErr, "failed to set ACLApplied condition")
+			return ctrl.Result{}, condErr
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, "Applied",
+		"Desired ACL passwords are live"); condErr != nil {
+		log.Error(condErr, "failed to set ACLApplied condition")
+		return ctrl.Result{}, condErr
+	}
+
 	log.V(1).Info("ValkeyNode reconciliation complete")
 	// Requeue after 60 seconds to check on the ValkeyNode role.
 	return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	patchBase := current.DeepCopy()
+	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: current.Generation,
+	}) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch ACLApplied condition: %w", err)
+	}
+	return nil
 }
 
 func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {

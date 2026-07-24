@@ -199,6 +199,25 @@ Common reasons when `LiveConfigApplied=True`:
 
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
+#### `ACLApplied`
+Indicates whether the passwords in the aclfile Secret are live on the running Valkey process. The node controller reloads the mounted aclfile with `ACL LOAD` on every reconcile, so ACL changes reach the server without a pod roll; this condition reports whether that reload has picked up the current Secret yet.
+
+It tracks the parts of the ACL that can be compared exactly: the set of users, and each user's passwords. Permission rules are not compared, because `ACL GETUSER` returns Valkey's normalised rendering of them while the operator only holds the aclfile text. Permission edits still converge through the same unconditional reload, they are just not reflected in this condition.
+
+| Status | Meaning |
+|---|---|
+| `True` | The users and passwords in the aclfile Secret are live on this node. |
+| `False` | They do not match yet, either because the mounted file has not caught up or because the reload failed. |
+
+Common reasons when `ACLApplied=False`:
+- `PendingPropagation` – the mounted aclfile has not yet reflected the updated Secret, so the reload read stale contents. The node controller reloads again every 10s and this resolves on its own once kubelet refreshes the volume.
+- `ApplyFailed` – `ACL LOAD` or `ACL GETUSER` returned an error. The message field contains the exact error, and a `LiveACLApplyFailed` warning event is emitted.
+
+Common reasons when `ACLApplied=True`:
+- `Applied` – the desired passwords are live on this node.
+
+> **Note:** Unlike `LiveConfigApplied`, this condition does not block the cluster controller's rolling update. A node whose ACL is still propagating keeps serving with its previous credentials, and a pod roll would load the new aclfile from the Secret regardless.
+
 Example commands:
 
 ```bash

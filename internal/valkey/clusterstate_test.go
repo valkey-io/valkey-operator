@@ -504,3 +504,139 @@ func TestHighestOffsetReplica(t *testing.T) {
 		}
 	})
 }
+
+func TestClusterState_FindStaleAddressPeers(t *testing.T) {
+	// Node table template: viewer knows itself at its new address and its
+	// peers at whatever address the persisted nodes.conf recorded.
+	node := func(id, address, clusterNodes string) *NodeState {
+		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+	}
+
+	t.Run("full restart: all peers stale", func(t *testing.T) {
+		// Both members restarted with new IPs; each table still holds the
+		// other's old IP, flagged fail?.
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb 10.0.0.2:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "10.0.1.2",
+			"bbb 10.0.1.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 2 {
+			t.Fatalf("expected 2 stale pairs, got %d", len(stale))
+		}
+		if stale[0].Viewer.Id != "aaa" || stale[0].Live.Id != "bbb" {
+			t.Errorf("expected aaa->bbb, got %s->%s", stale[0].Viewer.Id, stale[0].Live.Id)
+		}
+		if stale[1].Viewer.Id != "bbb" || stale[1].Live.Id != "aaa" {
+			t.Errorf("expected bbb->aaa, got %s->%s", stale[1].Viewer.Id, stale[1].Live.Id)
+		}
+	})
+
+	t.Run("fail flag also detected", func(t *testing.T) {
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb 10.0.0.2:6379@16379 slave,fail aaa 0 0 2 connected\n")
+		b := node("bbb", "10.0.1.2",
+			"bbb 10.0.1.2:6379@16379 myself,slave aaa 0 0 2 connected\n"+
+				"aaa 10.0.1.1:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a, b}},
+		}}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 1 || stale[0].Viewer.Id != "aaa" || stale[0].Live.Id != "bbb" {
+			t.Fatalf("expected exactly aaa->bbb, got %v", stale)
+		}
+	})
+
+	t.Run("genuinely dead peer is not a stale pair", func(t *testing.T) {
+		// Peer ID matches no live node — that's forgetStaleNodes territory.
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+				"ded 10.0.0.9:6379@16379 master,fail - 0 0 2 connected\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs, got %d", len(stale))
+		}
+	})
+
+	t.Run("failing peer at its current address is not stale", func(t *testing.T) {
+		// Transient pfail during normal operation: address still correct,
+		// nothing to heal.
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb 10.0.1.2:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "10.0.1.2",
+			"bbb 10.0.1.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa 10.0.1.1:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs, got %d", len(stale))
+		}
+	})
+
+	t.Run("healthy peer at an old address is not stale", func(t *testing.T) {
+		// Gossip already rebinding (no fail flags): don't interfere.
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "10.0.1.2",
+			"bbb 10.0.1.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa 10.0.1.1:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs, got %d", len(stale))
+		}
+	})
+
+	t.Run("pending nodes participate as viewers and live targets", func(t *testing.T) {
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+				"ppp 10.0.0.7:6379@16379 master,fail? - 0 0 2 connected\n")
+		p := node("ppp", "10.0.1.7",
+			"ppp 10.0.1.7:6379@16379 myself,master - 0 0 2 connected\n"+
+				"aaa 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\n")
+		state := &ClusterState{
+			Shards:       []*ShardState{{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}}},
+			PendingNodes: []*NodeState{p},
+		}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 2 {
+			t.Fatalf("expected 2 stale pairs, got %d", len(stale))
+		}
+	})
+}
+
+func TestClusterState_FindNodeById(t *testing.T) {
+	state := &ClusterState{
+		Shards:       []*ShardState{{Nodes: []*NodeState{{Id: "aaa"}}}},
+		PendingNodes: []*NodeState{{Id: "ppp"}},
+	}
+	if state.FindNodeById("aaa") == nil {
+		t.Error("expected shard node found")
+	}
+	if state.FindNodeById("ppp") == nil {
+		t.Error("expected pending node found")
+	}
+	if state.FindNodeById("zzz") != nil {
+		t.Error("expected nil for unknown id")
+	}
+}

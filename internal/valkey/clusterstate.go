@@ -375,6 +375,85 @@ func (n *NodeState) PrimaryIdFromSelf() string {
 	return ""
 }
 
+// AllNodes returns every reachable node in the state: shard members first,
+// then pending nodes.
+func (s *ClusterState) AllNodes() []*NodeState {
+	var nodes []*NodeState
+	for _, shard := range s.Shards {
+		nodes = append(nodes, shard.Nodes...)
+	}
+	return append(nodes, s.PendingNodes...)
+}
+
+// FindNodeById returns the reachable node with the given cluster node ID, or
+// nil if no such node was scraped.
+func (s *ClusterState) FindNodeById(id string) *NodeState {
+	for _, node := range s.AllNodes() {
+		if node.Id == id {
+			return node
+		}
+	}
+	return nil
+}
+
+// StaleAddressPeer pairs a viewer node with a live cluster member whose
+// address in the viewer's node table is outdated.
+type StaleAddressPeer struct {
+	Viewer *NodeState // node whose table holds the stale entry
+	Live   *NodeState // the same member, reachable at its current address
+}
+
+// FindStaleAddressPeers detects cluster members that restarted with a new
+// address while other nodes' tables (persisted in nodes.conf) still point at
+// the old one. This happens when many pods restart at once — e.g. a full
+// Kubernetes cluster restart — leaving no surviving member to gossip the new
+// addresses from, so the cluster stays partitioned until the peers are
+// re-introduced (see valkey-io/valkey-operator#275).
+//
+// A peer entry is stale when it is flagged failing (fail, fail? or noaddr)
+// in the viewer's node table, but a node with the same cluster ID was
+// scraped alive at a different address. Entries whose ID matches no live
+// node are genuinely dead and left for forgetStaleNodes.
+func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
+	all := s.AllNodes()
+	live := make(map[string]*NodeState, len(all))
+	for _, node := range all {
+		live[node.Id] = node
+	}
+	var stale []StaleAddressPeer
+	for _, viewer := range all {
+		for line := range strings.SplitSeq(viewer.ClusterNodes, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			flags := strings.Split(fields[2], ",")
+			if slices.Contains(flags, "myself") {
+				continue
+			}
+			// fail? is included: promoting pfail to fail needs gossip
+			// between a majority of primaries, which is exactly what a
+			// cluster-wide address change breaks — entries can stay at
+			// fail? indefinitely.
+			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !slices.Contains(flags, "noaddr") {
+				continue
+			}
+			peer, ok := live[fields[0]]
+			if !ok {
+				continue
+			}
+			idx := strings.LastIndex(fields[1], ":")
+			if idx == -1 {
+				continue
+			}
+			if address := fields[1][:idx]; address != peer.Address {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
+			}
+		}
+	}
+	return stale
+}
+
 // GetFailingNodes returns all known nodes that are failing.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}

@@ -213,6 +213,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return result, nil
 	}
 
+	// Re-introduce members whose addresses changed while every peer's
+	// nodes.conf still points at the old ones (full restart with
+	// persistence — #275). Must run before forgetStaleNodes: those same
+	// entries look failing, and CLUSTER FORGET would ban the live node
+	// from rejoining for a minute.
+	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
 
 	// --- Phase 1: MEET all isolated nodes in one batch ---
@@ -847,6 +860,43 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
 }
 
+// healStaleAddressPeers re-introduces live cluster members to nodes whose
+// gossip tables still point at addresses the members no longer hold.
+//
+// When every pod restarts at the same time (full Kubernetes cluster restart,
+// node pool replacement) with persistence enabled, each node comes back with
+// a new pod IP but a nodes.conf listing its peers' old IPs. A single restarted
+// member is re-discovered through the survivors, but with no survivors there
+// is no gossip path at all: every node keeps dialing dead addresses, all peers
+// stay fail?/fail, and the cluster never re-forms on its own (#275).
+//
+// The operator knows both sides — the live address of every member (scraped
+// via ValkeyNode pod IPs) and each node's stale view (CLUSTER NODES) — so it
+// re-introduces the live member to the viewer with CLUSTER MEET. The
+// handshake carries the member's node ID; since the ID is already known, the
+// viewer rebinds the existing entry to the new address and gossip propagates
+// it from there. MEET is idempotent, and each symmetric stale pair heals the
+// reverse direction, so one MEET per (viewer, peer) pair is enough.
+//
+// Returns the number of MEETs issued; per-pair failures are logged and
+// skipped so one unreachable node doesn't block healing the rest.
+func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+	log := logf.FromContext(ctx)
+	healed := 0
+	for _, pair := range state.FindStaleAddressPeers() {
+		viewer, live := pair.Viewer, pair.Live
+		log.Info("re-introducing peer whose address changed",
+			"viewer", viewer.Address, "peer", live.Address, "peerId", live.Id)
+		if err := viewer.Client.Do(ctx, viewer.Client.B().ClusterMeet().Ip(live.Address).Port(int64(live.Port)).Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER MEET failed", "from", viewer.Address, "to", live.Address)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", viewer.Address, live.Address, err)
+			continue
+		}
+		healed++
+	}
+	return healed
+}
+
 // findMeetTarget picks the best node to MEET all isolated nodes against.
 // Priority: (1) a shard primary, it owns slots and is an established cluster
 // member even if cluster_known_nodes is 1 (e.g. a single-node cluster being
@@ -1194,6 +1244,16 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 					return n.Status.PodIP == failing.Address
 				})
 				if idx != -1 {
+					continue
+				}
+				// The address match above misses a live member whose pod IP
+				// changed while this node's table still holds the old one
+				// (full restart with persistence — #275). Forgetting it
+				// would ban the live node from rejoining for a minute;
+				// healStaleAddressPeers re-MEETs it instead.
+				if state.FindNodeById(failing.Id) != nil {
+					log.V(1).Info("skipping forget; node is alive at a new address",
+						"staleAddress", failing.Address, "Id", failing.Id)
 					continue
 				}
 				// A live replica still considers this failing node its

@@ -63,7 +63,12 @@ jobs:
 
       - name: Get version info
         id: version
-        run: echo "$(make print-version-ldflags)" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "ldflags=$(make print-version-ldflags VERSION=${GITHUB_REF_NAME} BRANCH=${GITHUB_REF_NAME})" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "ldflags=$(make print-version-ldflags BRANCH=${GITHUB_REF_NAME})" | tee -a "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and publish container
         id: publish
@@ -71,7 +76,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          build-args: VERSION_LDFLAGS=${{ steps.version.outputs.result }}
+          build-args: VERSION_LDFLAGS=${{ steps.version.outputs.ldflags }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

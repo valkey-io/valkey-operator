@@ -791,6 +791,14 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		)
 	}
 
+	zoneShardMode, zonePrimariesMode, zonePodsMode := effectiveZoneSpread(cluster.Spec.Scheduling)
+	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode); len(curated) > 0 {
+		topologySpreadConstraints = append(
+			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
+			curated...,
+		)
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),

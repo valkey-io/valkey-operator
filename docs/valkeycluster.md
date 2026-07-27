@@ -180,13 +180,13 @@ scheduling:
 >
 > Set a `labelSelector` that selects the pods you want counted; `valkey.io/cluster: <cluster-name>` selects every pod in the cluster.
 
-For the common intents such as keep a shard's pods on different nodes, spread each shard's primary across nodes, or spread all pods across nodes — prefer [`scheduling.node.spread`](#node-axis-spread) below. It fills in the correct label selectors for you and guarantees the constraints it emits don't collide. Reach for `topologySpreadConstraints` only when you need something `node.spread` doesn't express, such as a different `topologyKey` (for example zone spreading).
+For the common intents such as keep a shard's pods on different nodes, spread each shard's primary across nodes, or spread all pods across nodes — prefer [`scheduling.node.spread`](#node-axis-spread) below, and for the zone equivalents prefer [`scheduling.zone.spread`](#zone-axis-spread). Both fill in the correct label selectors for you and guarantee the constraints they emit don't collide. Reach for `topologySpreadConstraints` only when you need something neither axis expresses, such as a topology key other than `kubernetes.io/hostname` or `topology.kubernetes.io/zone`.
 
-> **Do not overlap a hostname constraint with `node.spread`.**
+> **Do not overlap a hostname or zone constraint with `node.spread`/`zone.spread`.**
 >
-> A passthrough constraint on `topologyKey: kubernetes.io/hostname` collides with an enabled `node.spread.primaries` or `node.spread.pods` that renders the same `whenUnsatisfiable` (`Required` → `DoNotSchedule`, `Preferred` → `ScheduleAnyway`), because the pod would carry two constraints sharing that `{topologyKey, whenUnsatisfiable}` pair — which Kubernetes forbids.
+> A passthrough constraint on `topologyKey: kubernetes.io/hostname` collides with an enabled `node.spread.primaries` or `node.spread.pods` that renders the same `whenUnsatisfiable` (`Required` → `DoNotSchedule`, `Preferred` → `ScheduleAnyway`), because the pod would carry two constraints sharing that `{topologyKey, whenUnsatisfiable}` pair — which Kubernetes forbids. The same is true on `topologyKey: topology.kubernetes.io/zone`: a passthrough constraint there collides with an enabled `zone.spread.shard`, `zone.spread.primaries`, or `zone.spread.pods` of matching `whenUnsatisfiable`.
 >
-> The operator rejects this combination at admission, so keep hostname spreading in `node.spread` and reserve `topologySpreadConstraints` for other topology keys (for example zones). A passthrough hostname constraint whose `whenUnsatisfiable` differs from what the enabled dimensions render is still allowed.
+> The operator rejects both combinations at admission, so keep hostname spreading in `node.spread`, keep zone spreading in `zone.spread`, and reserve `topologySpreadConstraints` for other topology keys. A passthrough constraint whose `whenUnsatisfiable` differs from what the enabled dimensions render is still allowed.
 
 Each constraint must include:
 
@@ -204,13 +204,13 @@ Each constraint must include:
 | `DoNotSchedule` | Hard rule. Kubernetes will not schedule the pod if placement would violate the constraint. | Stronger placement guarantees, but pods may remain `Pending` when there are not enough eligible nodes or topology domains. The operator marks the cluster `Degraded` with reason `PodUnschedulable`. |
 | `ScheduleAnyway` | Soft rule. Kubernetes prefers satisfying the constraint, but can still schedule the pod if it cannot. | Better scheduling availability in constrained clusters, but matching pods may still share a topology domain. |
 
-Example — spread every pod in the cluster across availability zones, preferring but not requiring an even distribution:
+Example — spread pods across rack failure domains, a topology that neither `node.spread` nor `zone.spread` expresses (your nodes must carry the label):
 
 ```yaml
 scheduling:
   topologySpreadConstraints:
     - maxSkew: 1
-      topologyKey: topology.kubernetes.io/zone
+      topologyKey: topology.example.com/rack   # a custom node label; neither node.spread nor zone.spread covers it
       whenUnsatisfiable: ScheduleAnyway
       labelSelector:
         matchLabels:
@@ -259,6 +259,32 @@ Each field takes a `mode`:
 - `primaries: Preferred` together with `pods: Preferred` is rejected.
 
 Mixing strengths (one `Preferred`, the other `Required`), or leaving one of them `Disabled`, is always allowed. `shard` is exempt from this rule since it renders as pod anti-affinity rather than a topology spread constraint, so it can be combined freely with any `primaries`/`pods` setting.
+
+#### Zone axis spread
+
+```yaml
+scheduling:
+  zone:
+    spread:
+      shard:
+        mode: Preferred
+```
+
+`scheduling.zone.spread` mirrors `node.spread`'s three dimensions, but keyed on `topology.kubernetes.io/zone` instead of `kubernetes.io/hostname`:
+
+| Field | Rendered as | Effect |
+|---|---|---|
+| `shard` | Topology spread constraint scoped to each shard's pods | Balances a shard's pods across zones. |
+| `primaries` | Topology spread constraint on each shard's node-index-0 pod | Balances the pod that holds each shard's primary (at creation) across zones. |
+| `pods` | Topology spread constraint on every cluster pod | Balances all of the cluster's pods across zones, regardless of shard. |
+
+On the node axis, `shard` renders as pod anti-affinity: a hard `Required` setting can leave pods `Pending` rather than colocate them. On the zone axis, `shard` is a topology spread constraint instead, because forbidding same-zone placement outright would make a shard unschedulable in any cluster with fewer zones than shard members. So zone `shard` balances rather than forbids: it keeps a shard's replicas as evenly spread across zones as `maxSkew` allows, but two members of the same shard may still land in the same zone once the shard is larger than the number of available zones.
+
+Each field takes the same `Disabled` / `Preferred` / `Required` modes as `node.spread`, with the same soft/hard semantics. All three default to `Disabled` when `zone.spread`, `scheduling.zone`, or `scheduling` itself is omitted, so the zone axis is opt-in and emits nothing until you enable it.
+
+`shard`, `primaries`, and `pods` all render as topology spread constraints on `topology.kubernetes.io/zone`. On the node axis `shard` is exempt from the slot limit because it renders as anti-affinity, but on the zone axis all three dimensions compete for the same two slots (`DoNotSchedule` and `ScheduleAnyway`) per zone. The operator rejects any combination where more than one of the three is `Required`, or more than one is `Preferred`, at admission; leaving at least two of the three `Disabled` (as in the sample above, which enables only `shard`) is the common case.
+
+The zone axis is independent of the node axis. `node.spread` and `zone.spread` key on different topology keys, so a cluster can enable both at once, for example `node.spread.shard: Required` alongside `zone.spread.shard: Preferred`, to keep shard members off the same node while also biasing them across zones.
 
 ### TLS
 

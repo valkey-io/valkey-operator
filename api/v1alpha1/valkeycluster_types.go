@@ -128,6 +128,12 @@ type SchedulingSpec struct {
 	// Disabled and no scheduling primitives are emitted.
 	// +optional
 	Node *NodeScheduling `json:"node,omitempty"`
+
+	// Zone groups scheduling constraints on the zone axis
+	// (topologyKey topology.kubernetes.io/zone). When unset, every zone spread is
+	// Disabled and no scheduling primitives are emitted.
+	// +optional
+	Zone *ZoneScheduling `json:"zone,omitempty"`
 }
 
 // SpreadMode selects the strength of a spread constraint.
@@ -183,6 +189,38 @@ type NodeScheduling struct {
 	Spread NodeSpread `json:"spread,omitempty"`
 }
 
+// ZoneSpread controls how the cluster's pods are distributed across zones
+// (topologyKey topology.kubernetes.io/zone). Every dimension renders as a
+// topology spread constraint — balancing, not anti-affinity — so zone shard
+// members may share a zone when the shard is larger than the zone count.
+type ZoneSpread struct {
+	// Shard balances the pods of each shard across zones, rendered as a topology
+	// spread constraint. Defaults to Disabled when unset.
+	// +optional
+	Shard SpreadConstraint `json:"shard,omitempty"`
+
+	// Primaries balances each shard's node-index-0 pod across zones, rendered as
+	// a topology spread constraint. Defaults to Disabled when unset.
+	// +optional
+	Primaries SpreadConstraint `json:"primaries,omitempty"`
+
+	// Pods balances all of the cluster's pods across zones, rendered as a
+	// topology spread constraint. Defaults to Disabled when unset. Enabling this
+	// alongside an explicit shard or primaries spread of the same strength is
+	// rejected (only one topology spread constraint per strength is permitted per
+	// zone).
+	// +optional
+	Pods SpreadConstraint `json:"pods,omitempty"`
+}
+
+// ZoneScheduling groups scheduling constraints on the zone axis
+// (topologyKey topology.kubernetes.io/zone).
+type ZoneScheduling struct {
+	// Spread distributes the cluster's pods across zones.
+	// +optional
+	Spread ZoneSpread `json:"spread,omitempty"`
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
@@ -193,6 +231,10 @@ type NodeScheduling struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="node.spread.primaries and node.spread.pods cannot both be Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway topology spread constraints (set one to Disabled or Required)"
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries or node.spread.pods set to Required, which render the same hostname DoNotSchedule constraint: set that node.spread mode to Disabled, or remove the passthrough constraint"
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries or node.spread.pods set to Preferred, which render the same hostname ScheduleAnyway constraint: set that node.spread mode to Disabled or Required, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Required: they render duplicate topology.kubernetes.io/zone DoNotSchedule topology spread constraints"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Preferred: they render duplicate topology.kubernetes.io/zone ScheduleAnyway topology spread constraints (set one to Disabled or Required)"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable DoNotSchedule collides with zone.spread.shard, primaries, or pods set to Required, which render the same zone DoNotSchedule constraint: set that zone.spread mode to Disabled, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard, primaries, or pods set to Preferred, which render the same zone ScheduleAnyway constraint: set that zone.spread mode to Disabled or Required, or remove the passthrough constraint"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image

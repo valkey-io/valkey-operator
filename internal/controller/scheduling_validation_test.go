@@ -83,6 +83,53 @@ func schedulingClusterWithPassthrough(name, topologyKey string, action corev1.Un
 	}
 }
 
+// zoneSchedulingCluster builds a minimal ValkeyCluster with explicit
+// zone.spread.shard/primaries/pods modes, for exercising the zone two-slot CEL
+// validation on ValkeyClusterSpec.
+func zoneSchedulingCluster(name string, shard, primaries, pods valkeyiov1alpha1.SpreadMode) *valkeyiov1alpha1.ValkeyCluster {
+	return &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+				Zone: &valkeyiov1alpha1.ZoneScheduling{
+					Spread: valkeyiov1alpha1.ZoneSpread{
+						Shard:     valkeyiov1alpha1.SpreadConstraint{Mode: shard},
+						Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: primaries},
+						Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: pods},
+					},
+				},
+			},
+		},
+	}
+}
+
+// zoneSchedulingClusterWithPassthrough builds a ValkeyCluster with a raw
+// topologySpreadConstraints entry alongside explicit zone.spread modes, for
+// exercising the zone passthrough-vs-curated collision CEL validation.
+func zoneSchedulingClusterWithPassthrough(name, topologyKey string, action corev1.UnsatisfiableConstraintAction, shard, primaries, pods valkeyiov1alpha1.SpreadMode) *valkeyiov1alpha1.ValkeyCluster {
+	return &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+					{MaxSkew: 1, TopologyKey: topologyKey, WhenUnsatisfiable: action},
+				},
+				Zone: &valkeyiov1alpha1.ZoneScheduling{
+					Spread: valkeyiov1alpha1.ZoneSpread{
+						Shard:     valkeyiov1alpha1.SpreadConstraint{Mode: shard},
+						Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: primaries},
+						Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: pods},
+					},
+				},
+			},
+		},
+	}
+}
+
 var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 	var ctx context.Context
 
@@ -198,5 +245,106 @@ var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	})
+})
+
+var _ = Describe("ValkeyClusterSpec zone.spread CEL validation", func() {
+	var ctx context.Context
+
+	BeforeEach(func() { ctx = context.Background() })
+
+	It("rejects zone.spread.shard and zone.spread.primaries both Required", func() {
+		err := k8sClient.Create(ctx, zoneSchedulingCluster("zone-shard-primaries-required", valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("may be Required"))
+	})
+
+	It("rejects zone.spread.primaries and zone.spread.pods both Preferred", func() {
+		err := k8sClient.Create(ctx, zoneSchedulingCluster("zone-primaries-pods-preferred", valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadPreferred))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("may be Preferred"))
+	})
+
+	It("accepts one Required and one Preferred across three zone dimensions", func() {
+		Expect(k8sClient.Create(ctx, zoneSchedulingCluster("zone-mixed", valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled))).To(Succeed())
+	})
+
+	It("accepts zone.spread.shard Required with primaries and pods omitted entirely (CEL fallback treats absent fields as Disabled)", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "zone-shard-only-omitted-rest",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   3,
+				Replicas: 1,
+				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+					Zone: &valkeyiov1alpha1.ZoneScheduling{
+						Spread: valkeyiov1alpha1.ZoneSpread{
+							Shard:     valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadRequired},
+							Primaries: valkeyiov1alpha1.SpreadConstraint{},
+							Pods:      valkeyiov1alpha1.SpreadConstraint{},
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	})
+
+	It("accepts zone.spread.pods Preferred with shard and primaries omitted entirely (CEL fallback treats absent fields as Disabled)", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "zone-pods-only-omitted-rest",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   3,
+				Replicas: 1,
+				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+					Zone: &valkeyiov1alpha1.ZoneScheduling{
+						Spread: valkeyiov1alpha1.ZoneSpread{
+							Shard:     valkeyiov1alpha1.SpreadConstraint{},
+							Primaries: valkeyiov1alpha1.SpreadConstraint{},
+							Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadPreferred},
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	})
+
+	It("rejects a zone DoNotSchedule passthrough with zone.spread.shard Required", func() {
+		err := k8sClient.Create(ctx, zoneSchedulingClusterWithPassthrough("zone-passthrough-shard-required", corev1.LabelTopologyZone, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("DoNotSchedule collides"))
+	})
+
+	It("rejects a zone DoNotSchedule passthrough with zone.spread.primaries Required", func() {
+		err := k8sClient.Create(ctx, zoneSchedulingClusterWithPassthrough("zone-passthrough-primaries-required", corev1.LabelTopologyZone, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("DoNotSchedule collides"))
+	})
+
+	It("rejects a zone ScheduleAnyway passthrough with zone.spread.pods Preferred", func() {
+		err := k8sClient.Create(ctx, zoneSchedulingClusterWithPassthrough("zone-passthrough-pods-preferred", corev1.LabelTopologyZone, corev1.ScheduleAnyway, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("ScheduleAnyway collides"))
+	})
+
+	It("accepts a hostname passthrough with zone.spread.shard Required (different topologyKey, no collision)", func() {
+		Expect(k8sClient.Create(ctx, zoneSchedulingClusterWithPassthrough("zone-passthrough-hostname", corev1.LabelHostname, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))).To(Succeed())
+	})
+
+	It("accepts a zone DoNotSchedule passthrough when all zone.spread modes are Disabled", func() {
+		Expect(k8sClient.Create(ctx, zoneSchedulingClusterWithPassthrough("zone-passthrough-no-curated", corev1.LabelTopologyZone, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))).To(Succeed())
+	})
+
+	It("accepts node.spread Required alongside a zone passthrough (independent axes)", func() {
+		// Regression guard: the existing node-axis test at line ~156 sets a zone
+		// passthrough + node.spread.pods Required; with only node.spread enabled
+		// (zone.spread all Disabled) the zone collision rule must not fire.
+		Expect(k8sClient.Create(ctx, schedulingClusterWithPassthrough("zone-independent-of-node", corev1.LabelTopologyZone, corev1.DoNotSchedule, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired))).To(Succeed())
 	})
 })

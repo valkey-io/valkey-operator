@@ -29,6 +29,7 @@ import (
 	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -327,7 +328,11 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	// Heal live drift whenever templates differ; do not skip on a stale
 	// last-applied annotation (that can hide real STS edits).
 	if !podTemplateWouldRoll(sts.Spec.Template, desired.Spec.Template) {
-		log.V(1).Info("StatefulSet pod template already matches desired", "name", sts.Name)
+		// Template is stable: still reconcile labels, owner, and non-template
+		// Spec fields. This does not require a roll permit because pods are not replaced.
+		if err := r.syncStatefulSetWithoutRoll(ctx, node, sts, desired); err != nil {
+			return err
+		}
 		return r.finishWorkloadRollIfDone(ctx, node)
 	}
 
@@ -353,6 +358,30 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
 		"Applied pod template update (hash %s)", desiredHash)
 	return r.markWorkloadRollApplied(ctx, node, desiredHash)
+}
+
+// syncStatefulSetWithoutRoll updates labels, owner, and Spec when the pod
+// template would not roll. Used so non-template controller-owned fields do not
+// go stale while waiting for unrelated template changes.
+func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+	before := sts.DeepCopy()
+	sts.Labels = desired.Labels
+	sts.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
+		return err
+	}
+	if equality.Semantic.DeepEqual(before.Labels, sts.Labels) &&
+		equality.Semantic.DeepEqual(before.Spec, sts.Spec) &&
+		equality.Semantic.DeepEqual(before.OwnerReferences, sts.OwnerReferences) {
+		log.V(1).Info("StatefulSet already matches desired (no pod template roll)", "name", sts.Name)
+		return nil
+	}
+	if err := r.Update(ctx, sts); err != nil {
+		return err
+	}
+	log.V(1).Info("synced StatefulSet without pod template roll", "name", sts.Name)
+	return nil
 }
 
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.
@@ -391,7 +420,10 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 
 	desiredHash := podTemplateRollHash(desired.Spec.Template)
 	if !podTemplateWouldRoll(dep.Spec.Template, desired.Spec.Template) {
-		log.V(1).Info("Deployment pod template already matches desired", "name", dep.Name)
+		// Template is stable: still reconcile labels, owner, and non-template Spec.
+		if err := r.syncDeploymentWithoutRoll(ctx, node, dep, desired); err != nil {
+			return err
+		}
 		return r.finishWorkloadRollIfDone(ctx, node)
 	}
 
@@ -417,6 +449,29 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
 		"Applied pod template update (hash %s)", desiredHash)
 	return r.markWorkloadRollApplied(ctx, node, desiredHash)
+}
+
+// syncDeploymentWithoutRoll updates labels, owner, and Spec when the pod
+// template would not roll.
+func (r *ValkeyNodeReconciler) syncDeploymentWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, dep *appsv1.Deployment, desired *appsv1.Deployment) error {
+	log := logf.FromContext(ctx)
+	before := dep.DeepCopy()
+	dep.Labels = desired.Labels
+	dep.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+		return err
+	}
+	if equality.Semantic.DeepEqual(before.Labels, dep.Labels) &&
+		equality.Semantic.DeepEqual(before.Spec, dep.Spec) &&
+		equality.Semantic.DeepEqual(before.OwnerReferences, dep.OwnerReferences) {
+		log.V(1).Info("Deployment already matches desired (no pod template roll)", "name", dep.Name)
+		return nil
+	}
+	if err := r.Update(ctx, dep); err != nil {
+		return err
+	}
+	log.V(1).Info("synced Deployment without pod template roll", "name", dep.Name)
+	return nil
 }
 
 func (r *ValkeyNodeReconciler) getACLSecret(ctx context.Context, clusterName, namespace string) (*corev1.Secret, error) {

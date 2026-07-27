@@ -143,19 +143,6 @@ func anyNodeRequiresWorkloadRoll(nodeList *valkeyiov1alpha1.ValkeyNodeList) bool
 	return false
 }
 
-// anyNodeHasInFlightWorkloadRoll reports whether any node currently holds a roll permit.
-func anyNodeHasInFlightWorkloadRoll(nodeList *valkeyiov1alpha1.ValkeyNodeList) bool {
-	if nodeList == nil {
-		return false
-	}
-	for i := range nodeList.Items {
-		if nodeHasInFlightWorkloadRoll(&nodeList.Items[i]) {
-			return true
-		}
-	}
-	return false
-}
-
 // setNodeAnnotation ensures annotations map exists and sets key to value.
 // Returns true if the annotation changed.
 func setNodeAnnotation(node *valkeyiov1alpha1.ValkeyNode, key, value string) bool {

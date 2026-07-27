@@ -541,7 +541,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// primary last within each shard, and after an update we requeue
 	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	if anyNodeRequiresRoll(cluster, nodes, configHash) {
+	// Scrape topology for Spec rolls and for workload-template rolls (operator
+	// builder drift) so proactive failover still runs before killing a primary.
+	if anyNodeRequiresRoll(cluster, nodes, configHash) || anyNodeRequiresWorkloadRoll(nodes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -616,45 +618,70 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Check if proactive failover is needed before updating.
-	if clusterState != nil {
-		current := &valkeyiov1alpha1.ValkeyNode{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-			if !apierrors.IsNotFound(err) {
-				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
-					"name", node.Name, "err", err)
+	// Load current node (if any) for failover + workload-drift decisions.
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	currentExists := true
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nodeUnchanged, err
+		}
+		currentExists = false
+	}
+
+	needsSpecRoll := currentExists && nodeRequiresRoll(current, desired)
+	needsWorkloadPermit := currentExists && nodeNeedsWorkloadPermit(current)
+	inFlightWorkloadRoll := currentExists && nodeHasInFlightWorkloadRoll(current)
+	// Failover / ordered roll applies to Spec changes and workload template rolls.
+	needsWorkloadRoll := needsWorkloadPermit || inFlightWorkloadRoll
+
+	// Check if proactive failover is needed before a Spec or workload roll.
+	if clusterState != nil && (needsSpecRoll || needsWorkloadRoll) {
+		shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+		if shard != nil {
+			log.Info("proactive failover before rolling primary",
+				"name", current.Name, "address", current.Status.PodIP,
+				"syncedReplicas", len(replicas))
+			if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+				log.Info("proactive failover did not complete, proceeding with roll",
+					"name", current.Name, "err", err)
 			}
-		} else if nodeRequiresRoll(current, desired) {
-			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
-			if shard != nil {
-				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP,
-					"syncedReplicas", len(replicas))
-				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
-					log.Info("proactive failover did not complete, proceeding with roll",
-						"name", node.Name, "err", err)
-				}
-			} else if cluster.Spec.Replicas > 0 {
-				// findFailoverShard returned nil for one of three reasons:
-				// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
-				// 2. Node is in a shard but is a replica: safe to roll
-				// 3. Node isn't in any shard (isolated): safe to roll
-				// Only case 1 requires waiting; identify it's the actual primary of its shard.
-				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
-				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
-					log.Info("primary has no synced replicas, deferring roll",
-						"name", node.Name, "address", current.Status.PodIP,
-						"shardNodes", len(shardInState.Nodes),
-						"shardId", shardInState.Id)
-					return nodeDeferred, nil
-				}
+		} else if cluster.Spec.Replicas > 0 {
+			// findFailoverShard returned nil for one of three reasons:
+			// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
+			// 2. Node is in a shard but is a replica: safe to roll
+			// 3. Node isn't in any shard (isolated): safe to roll
+			// Only case 1 requires waiting; identify it's the actual primary of its shard.
+			shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+			if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+				log.Info("primary has no synced replicas, deferring roll",
+					"name", current.Name, "address", current.Status.PodIP,
+					"shardNodes", len(shardInState.Nodes),
+					"shardId", shardInState.Id)
+				return nodeDeferred, nil
 			}
+		}
+	}
+
+	// One-at-a-time for Spec and workload rolls: never grant a new permit or
+	// Spec update while another node still holds an in-flight allow annotation.
+	if needsSpecRoll || needsWorkloadPermit {
+		if other, err := r.otherNodeHasInFlightWorkloadRoll(ctx, cluster, node.Name); err != nil {
+			return nodeUnchanged, err
+		} else if other {
+			log.V(1).Info("another ValkeyNode already holds a workload roll permit, waiting", "name", node.Name)
+			return nodeRequeued, nil
 		}
 	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
 		node.Labels = desired.Labels
 		node.Spec = desired.Spec
+		// Spec-driven rolls: grant a one-shot permit so the node controller may
+		// apply the new pod template. Workload-only drift uses the desired hash
+		// path below (CreateOrUpdate result None).
+		if needsSpecRoll {
+			setNodeAnnotation(node, allowWorkloadRevisionAnnotation, allowWorkloadRevisionAny)
+		}
 		return controllerutil.SetControllerReference(cluster, node, r.Scheme)
 	})
 	if err != nil {
@@ -673,6 +700,37 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
 		return nodeRequeued, nil
 	case controllerutil.OperationResultNone:
+		// In-flight permitted roll: wait until the node clears the permit
+		// (after the workload revision is live) and is Ready.
+		if inFlightWorkloadRoll {
+			log.V(1).Info("ValkeyNode workload roll in flight, waiting", "name", node.Name)
+			return nodeRequeued, nil
+		}
+		// Builder/template drift without Spec change: grant permit for this node.
+		// Sibling in-flight was already checked above.
+		if needsWorkloadPermit {
+			desiredHash := ""
+			if node.Annotations != nil {
+				desiredHash = node.Annotations[desiredWorkloadRevisionAnnotation]
+			}
+			if desiredHash == "" {
+				// Condition True but annotation not yet set; wait for node controller.
+				log.V(1).Info("ValkeyNode workload drift pending without desired hash, waiting", "name", node.Name)
+				return nodeRequeued, nil
+			}
+			if !workloadPermitAllows(node, desiredHash) {
+				patchBase := node.DeepCopy()
+				if setNodeAnnotation(node, allowWorkloadRevisionAnnotation, desiredHash) {
+					if err := r.Patch(ctx, node, client.MergeFrom(patchBase)); err != nil {
+						return nodeUnchanged, err
+					}
+					log.Info("granted workload roll permit", "name", node.Name, "hash", desiredHash)
+					r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "WorkloadRollPermitted", "PermitWorkloadRoll",
+						"Granted workload roll permit for %s (hash %s)", node.Name, desiredHash)
+				}
+			}
+			return nodeRequeued, nil
+		}
 		if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
 			log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
 				"name", node.Name,
@@ -696,6 +754,25 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
 	return nodeUnchanged, nil
+}
+
+// otherNodeHasInFlightWorkloadRoll reports whether any ValkeyNode in this cluster
+// other than excludeName currently holds a workload roll permit.
+func (r *ValkeyClusterReconciler) otherNodeHasInFlightWorkloadRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, excludeName string) (bool, error) {
+	list := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, list, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		n := &list.Items[i]
+		if n.Name == excludeName {
+			continue
+		}
+		if nodeHasInFlightWorkloadRoll(n) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 const (

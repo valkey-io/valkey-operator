@@ -146,6 +146,22 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// Re-read annotations after ensureWorkload may have written drift/permit state.
+	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	// In-flight node needs a short poll to clear the permit after rollout.
+	// Waiters rely on watches when the cluster grants allow; use a longer
+	// backoff so they do not spam the API every few seconds.
+	if nodeHasInFlightWorkloadRoll(node) {
+		log.V(1).Info("ValkeyNode workload roll in flight, requeuing", "name", node.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if nodeNeedsWorkloadPermit(node) {
+		log.V(1).Info("ValkeyNode awaiting workload roll permit, requeuing", "name", node.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	if !node.Status.Ready {
 		log.V(1).Info("ValkeyNode not ready, requeuing")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -279,33 +295,64 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	if err != nil {
 		return err
 	}
+	aclSecret, err := r.getACLSecret(ctx, desired.Labels[LabelCluster], desired.Namespace)
+	if err != nil {
+		return err
+	}
+	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
 			Namespace: desired.Namespace,
 		},
 	}
-	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
-	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
-	aclSecret := &corev1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{
-		Name:      aclSecretName,
-		Namespace: desired.Namespace,
-	}, aclSecret)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sts), sts); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		// Create path: no live pod to protect.
+		sts = desired.DeepCopy()
+		if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, sts); err != nil {
+			return err
+		}
+		log.V(1).Info("created StatefulSet", "name", sts.Name)
+		return r.clearWorkloadDrift(ctx, node)
+	}
+
+	desiredHash := podTemplateRollHash(desired.Spec.Template)
+	// Heal live drift whenever templates differ; do not skip on a stale
+	// last-applied annotation (that can hide real STS edits).
+	if !podTemplateWouldRoll(sts.Spec.Template, desired.Spec.Template) {
+		log.V(1).Info("StatefulSet pod template already matches desired", "name", sts.Name)
+		return r.finishWorkloadRollIfDone(ctx, node)
+	}
+
+	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
 	if err != nil {
 		return err
 	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		sts.Labels = desired.Labels
-		sts.Spec = desired.Spec
-		sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		return controllerutil.SetControllerReference(node, sts, r.Scheme)
-	})
-	if err != nil {
+	if !allowed {
+		log.V(1).Info("deferring StatefulSet template update pending cluster roll permit",
+			"name", sts.Name, "desiredHash", desiredHash)
+		return nil
+	}
+
+	sts.Labels = desired.Labels
+	sts.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
 		return err
 	}
-	log.V(1).Info("reconciled StatefulSet", "result", result, "name", sts.Name)
-	return nil
+	if err := r.Update(ctx, sts); err != nil {
+		return err
+	}
+	log.Info("updated StatefulSet pod template", "name", sts.Name, "desiredHash", desiredHash)
+	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
+		"Applied pod template update (hash %s)", desiredHash)
+	return r.markWorkloadRollApplied(ctx, node, desiredHash)
 }
 
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.
@@ -315,33 +362,223 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	if err != nil {
 		return err
 	}
+	aclSecret, err := r.getACLSecret(ctx, desired.Labels[LabelCluster], desired.Namespace)
+	if err != nil {
+		return err
+	}
+	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
 			Namespace: desired.Namespace,
 		},
 	}
-	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
-	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
-	aclSecret := &corev1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{
-		Name:      aclSecretName,
-		Namespace: desired.Namespace,
-	}, aclSecret)
-	if err != nil {
-		return err
+	if err := r.Get(ctx, client.ObjectKeyFromObject(dep), dep); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		dep = desired.DeepCopy()
+		if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, dep); err != nil {
+			return err
+		}
+		log.V(1).Info("created Deployment", "name", dep.Name)
+		return r.clearWorkloadDrift(ctx, node)
 	}
 
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
-		dep.Labels = desired.Labels
-		dep.Spec = desired.Spec
-		dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		return controllerutil.SetControllerReference(node, dep, r.Scheme)
-	})
+	desiredHash := podTemplateRollHash(desired.Spec.Template)
+	if !podTemplateWouldRoll(dep.Spec.Template, desired.Spec.Template) {
+		log.V(1).Info("Deployment pod template already matches desired", "name", dep.Name)
+		return r.finishWorkloadRollIfDone(ctx, node)
+	}
+
+	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
 	if err != nil {
 		return err
 	}
-	log.V(1).Info("reconciled Deployment", "result", result, "name", dep.Name)
+	if !allowed {
+		log.V(1).Info("deferring Deployment template update pending cluster roll permit",
+			"name", dep.Name, "desiredHash", desiredHash)
+		return nil
+	}
+
+	dep.Labels = desired.Labels
+	dep.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Update(ctx, dep); err != nil {
+		return err
+	}
+	log.Info("updated Deployment pod template", "name", dep.Name, "desiredHash", desiredHash)
+	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
+		"Applied pod template update (hash %s)", desiredHash)
+	return r.markWorkloadRollApplied(ctx, node, desiredHash)
+}
+
+func (r *ValkeyNodeReconciler) getACLSecret(ctx context.Context, clusterName, namespace string) (*corev1.Secret, error) {
+	log := logf.FromContext(ctx)
+	aclSecretName := getInternalSecretName(clusterName)
+	aclSecret := &corev1.Secret{}
+	log.V(1).Info("getting internal secret", "name", aclSecretName)
+	if err := r.Get(ctx, types.NamespacedName{Name: aclSecretName, Namespace: namespace}, aclSecret); err != nil {
+		return nil, err
+	}
+	return aclSecret, nil
+}
+
+// gateRollingWorkloadUpdate decides whether a rolling pod-template update may be
+// applied for a cluster-owned node. Standalone nodes always apply. Re-fetches
+// the node so a just-granted permit is visible.
+func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
+	ctx context.Context,
+	node *valkeyiov1alpha1.ValkeyNode,
+	desiredHash string,
+) (bool, error) {
+	if !isClusterOwned(node) {
+		return true, nil
+	}
+	// Fresh read: cluster may have granted the permit after this reconcile started.
+	fresh := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), fresh); err != nil {
+		return false, err
+	}
+	node.Annotations = fresh.Annotations
+	if workloadPermitAllows(fresh, desiredHash) {
+		return true, nil
+	}
+	transitioned, err := r.markWorkloadDrift(ctx, node, desiredHash)
+	if err != nil {
+		return false, err
+	}
+	// Event only on first transition into drift to avoid spam every requeue.
+	if transitioned {
+		r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollDeferred", "GateWorkloadRoll",
+			"Deferred pod template update (hash %s); waiting for ValkeyCluster roll permit", desiredHash)
+	}
+	return false, nil
+}
+
+// markWorkloadDrift records desired hash + WorkloadDrift=True. Returns true when
+// the condition newly transitioned to True (callers use this to emit events once).
+func (r *ValkeyNodeReconciler) markWorkloadDrift(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) (bool, error) {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return false, err
+	}
+	metaChanged := setNodeAnnotation(current, desiredWorkloadRevisionAnnotation, desiredHash)
+	// Drop a stale permit that does not match this desired hash.
+	if current.Annotations != nil {
+		if p := current.Annotations[allowWorkloadRevisionAnnotation]; p != "" && p != allowWorkloadRevisionAny && p != desiredHash {
+			if clearNodeAnnotation(current, allowWorkloadRevisionAnnotation) {
+				metaChanged = true
+			}
+		}
+	}
+	if metaChanged {
+		if err := r.Update(ctx, current); err != nil {
+			return false, fmt.Errorf("annotate desired workload revision: %w", err)
+		}
+		node.Annotations = current.Annotations
+	}
+
+	current = &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return false, err
+	}
+	alreadyDrifting := meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)
+	patchBase := current.DeepCopy()
+	changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift,
+		Status:             metav1.ConditionTrue,
+		Reason:             valkeyiov1alpha1.ValkeyNodeReasonAwaitingRollPermit,
+		Message:            fmt.Sprintf("desired workload template hash %s awaits cluster roll permit", desiredHash),
+		ObservedGeneration: current.Generation,
+	})
+	if changed {
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+			return false, fmt.Errorf("patch WorkloadDrift condition: %w", err)
+		}
+	}
+	// Event when first entering drift, or when the desired hash annotation changes.
+	return (!alreadyDrifting && changed) || metaChanged, nil
+}
+
+// markWorkloadRollApplied clears the "desired" side of drift bookkeeping after
+// the STS/Deployment template is written, but keeps the allow annotation until
+// the workload has fully rolled out so the cluster controller does not grant
+// the next node early.
+func (r *ValkeyNodeReconciler) markWorkloadRollApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	metaChanged := clearNodeAnnotation(current, desiredWorkloadRevisionAnnotation)
+	// Keep allow until finishWorkloadRollIfDone; ensure it still matches.
+	if current.Annotations == nil || current.Annotations[allowWorkloadRevisionAnnotation] == "" {
+		metaChanged = setNodeAnnotation(current, allowWorkloadRevisionAnnotation, desiredHash) || metaChanged
+	}
+	if metaChanged {
+		if err := r.Update(ctx, current); err != nil {
+			return fmt.Errorf("update workload roll annotations after apply: %w", err)
+		}
+		node.Annotations = current.Annotations
+	}
+
+	current = &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	patchBase := current.DeepCopy()
+	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+			return fmt.Errorf("clear WorkloadDrift condition after apply: %w", err)
+		}
+	}
+	return r.finishWorkloadRollIfDone(ctx, node)
+}
+
+// finishWorkloadRollIfDone clears permit/desired annotations once the live
+// workload revision matches and the node is no longer drifting.
+func (r *ValkeyNodeReconciler) finishWorkloadRollIfDone(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	rolledOut, err := r.isWorkloadRolledOut(ctx, node)
+	if err != nil {
+		return err
+	}
+	if !rolledOut {
+		// Keep allow annotation so the cluster waits on this node.
+		return nil
+	}
+	return r.clearWorkloadDrift(ctx, node)
+}
+
+func (r *ValkeyNodeReconciler) clearWorkloadDrift(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	metaChanged := clearNodeAnnotation(current, desiredWorkloadRevisionAnnotation)
+	metaChanged = clearNodeAnnotation(current, allowWorkloadRevisionAnnotation) || metaChanged
+	if metaChanged {
+		if err := r.Update(ctx, current); err != nil {
+			return fmt.Errorf("clear workload roll annotations: %w", err)
+		}
+		node.Annotations = current.Annotations
+	}
+
+	current = &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	patchBase := current.DeepCopy()
+	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+			return fmt.Errorf("clear WorkloadDrift condition: %w", err)
+		}
+	}
 	return nil
 }
 

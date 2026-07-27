@@ -181,6 +181,11 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
+	// ValkeyNodeConditionWorkloadDrift indicates the desired pod template built
+	// by the operator differs from the live StatefulSet/Deployment template, and
+	// the ValkeyNode controller is waiting for a ValkeyCluster roll permit before
+	// applying the change. Status True means a rolling update is deferred.
+	ValkeyNodeConditionWorkloadDrift = "WorkloadDrift"
 )
 
 const (
@@ -188,6 +193,10 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonAwaitingRollPermit indicates a pod-template change is ready
+	// but blocked until the ValkeyCluster controller grants
+	// valkey.io/allow-workload-revision.
+	ValkeyNodeReasonAwaitingRollPermit = "AwaitingRollPermit"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.

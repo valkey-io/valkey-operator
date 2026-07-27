@@ -673,6 +673,82 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
 				"updated config hash must be propagated to trigger pod restart")
 		})
+
+		It("should defer rolling template updates for cluster-owned nodes until a roll permit is granted", func() {
+			By("recreating a cluster-owned ValkeyNode")
+			ctrl := true
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Image:        "valkey/valkey:9.0.0",
+			})
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "valkey.io/v1alpha1",
+				Kind:       "ValkeyCluster",
+				Name:       "parent-cluster",
+				UID:        "parent-uid",
+				Controller: &ctrl,
+			}}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet on first reconcile")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
+			initialGen := sts.Generation
+
+			By("changing Spec.Image without a roll permit")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Image = "valkey/valkey:9.0.1"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("StatefulSet template must stay on the old image")
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
+			Expect(sts.Generation).To(Equal(initialGen))
+
+			By("node is marked WorkloadDrift with desired revision annotation")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			Expect(node.Annotations).To(HaveKey(desiredWorkloadRevisionAnnotation))
+			desiredHash := node.Annotations[desiredWorkloadRevisionAnnotation]
+			Expect(desiredHash).NotTo(BeEmpty())
+			drift := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)
+			Expect(drift).NotTo(BeNil())
+			Expect(drift.Status).To(Equal(metav1.ConditionTrue))
+			Expect(drift.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonAwaitingRollPermit))
+
+			By("granting the roll permit and reconciling")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			if node.Annotations == nil {
+				node.Annotations = map[string]string{}
+			}
+			node.Annotations[allowWorkloadRevisionAnnotation] = desiredHash
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("StatefulSet template advances to the new image; desired/drift clear; allow stays until rollout")
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.1"))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			Expect(node.Annotations).NotTo(HaveKey(desiredWorkloadRevisionAnnotation))
+			// Permit is held until isWorkloadRolledOut; envtest has no STS controller
+			// to advance revisions, so allow may remain. Drift condition must clear.
+			Expect(testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)).To(BeNil())
+		})
 	})
 
 	Context("When WorkloadType is Deployment", func() {

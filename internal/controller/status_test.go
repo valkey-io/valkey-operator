@@ -16,6 +16,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -62,6 +63,7 @@ func TestSetCondition(t *testing.T) {
 func TestApplyConfigurationWarnings(t *testing.T) {
 	g := NewWithT(t)
 
+	ctx := context.Background()
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	recorder := events.NewFakeRecorder(10)
 	r := &ValkeyClusterReconciler{Recorder: recorder}
@@ -69,7 +71,7 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 	g.Expect(cluster.Status.Conditions).To(BeEmpty())
 
 	// Add a warning and ensure the condition is updated
-	r.applyConfigurationWarnings(cluster, []configWarning{{
+	r.applyConfigurationWarnings(ctx, cluster, []configWarning{{
 		reason:  valkeyiov1alpha1.ReasonGracePeriodTooShort,
 		message: "grace warning",
 	}})
@@ -82,7 +84,7 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 	g.Expect(<-recorder.Events).To(ContainSubstring(valkeyiov1alpha1.ReasonGracePeriodTooShort))
 
 	// Add another warning and ensure the condition is updated with multiple warnings
-	r.applyConfigurationWarnings(cluster, []configWarning{
+	r.applyConfigurationWarnings(ctx, cluster, []configWarning{
 		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: "grace warning"},
 		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "directive warning"},
 	})
@@ -94,14 +96,30 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 	g.Expect(<-recorder.Events).To(ContainSubstring(valkeyiov1alpha1.ReasonUnsupportedConfigDirective))
 
-	// Reapplying the exact same warning set should not duplicate events
-	r.applyConfigurationWarnings(cluster, []configWarning{
+	// Warnings that share the same reason should keep that reason.
+	r.applyConfigurationWarnings(ctx, cluster, []configWarning{
+		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "directive warning"},
+		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "another directive warning"},
+	})
+
+	cond = meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+	g.Expect(cond).NotTo(BeNil())
+	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonUnsupportedConfigDirective))
+	g.Expect(cond.Message).To(Equal("another directive warning; directive warning"))
+	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+
+	// Reapplying the exact same warning set should keep the condition stable.
+	before := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+	r.applyConfigurationWarnings(ctx, cluster, []configWarning{
 		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: "grace warning"},
 		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "directive warning"},
 	})
-	g.Expect(recorder.Events).NotTo(Receive())
+	after := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+	g.Expect(after).NotTo(BeNil())
+	g.Expect(after.Reason).To(Equal(before.Reason))
+	g.Expect(after.Message).To(Equal(before.Message))
 
 	// remove all warnings and ensure the condition is removed
-	r.applyConfigurationWarnings(cluster, nil)
+	r.applyConfigurationWarnings(ctx, cluster, nil)
 	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)).To(BeNil())
 }

@@ -200,16 +200,21 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
 	})
 
-	It("versionGateConfigWarnings uses 'unknown' when the detected version cannot be determined", func() {
+	It("versionGateConfigWarnings says so when the detected version cannot be determined", func() {
 		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
 			"tls-auto-reload-interval": "3600",
 		})
 		warnings := versionGateConfigWarnings(cluster)
 		Expect(warnings).To(HaveLen(1))
-		Expect(warnings[0].message).To(ContainSubstring("unknown"))
+		Expect(warnings[0].message).To(ContainSubstring("no version could be detected from spec.image \"valkey/valkey:latest\""))
 	})
 
-	It("versionGateWarning returns gated=false when nothing is dropped", func() {
+	It("versionGateConfigWarnings stays silent for a gated directive the user never set", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		Expect(versionGateConfigWarnings(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateConfigWarnings returns nothing when the image supports every directive", func() {
 		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
 			"tls-auto-reload-interval": "3600",
 		})

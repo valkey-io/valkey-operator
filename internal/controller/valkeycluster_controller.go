@@ -170,7 +170,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
-	r.applyConfigurationWarnings(cluster, configWarnings)
+	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {

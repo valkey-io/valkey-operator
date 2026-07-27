@@ -116,6 +116,8 @@ spec:
       secretName: %s
   exporter:
     enabled: true
+  config:
+    tls-auto-reload-interval: "3600"
 `, valkeyClusterName, gatedImage, tlsSecretName)
 		manifestFile := filepath.Join(tmpDir, "valkeycluster-tls.yaml")
 		err = os.WriteFile(manifestFile, []byte(manifest), 0644)
@@ -378,6 +380,31 @@ spec:
 				}
 			}
 			Expect(hit).To(BeTrue(), "expected ConfigurationWarning with reason UnsupportedConfigDirective")
+		})
+
+		It("stops warning once the gated directive is removed from spec.config", func() {
+			By("removing the directive while staying on the pre-9.1 image")
+
+			_, err := utils.Run(exec.Command(
+				"kubectl",
+				"patch",
+				"valkeycluster",
+				gatedClusterName,
+				"--type=merge",
+				"-p",
+				`{"spec":{"config":{"tls-auto-reload-interval":null}}}`,
+			))
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(gatedClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				for _, c := range cr.Status.Conditions {
+					g.Expect(c.Type).NotTo(Equal(valkeyiov1alpha1.ConditionConfigurationWarning),
+						"the image is still pre-9.1, but a directive the user never set must not be reported as unsupported")
+				}
+			}).Should(Succeed())
 		})
 
 		It("drops the gated directive from the rendered config", func() {

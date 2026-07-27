@@ -147,7 +147,7 @@ If more than one configuration warning is active at the same time, the operator 
 
 The warning message names the directive, the minimum supported Valkey version, and the detected version. The operator also emits a Kubernetes `Warning` event on the transition into this state. If you later switch to a supporting image, the condition clears on the next reconcile.
 
-For example, `tls-auto-reload-interval` requires Valkey `9.1.0` or newer
+For example, `tls-auto-reload-interval` requires Valkey `9.1.0` or newer.
 
 ### Private image registries
 
@@ -286,7 +286,7 @@ tls:
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
 
-Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of certificates (for example from cert-manager) without a restart. it requires Valkey `9.1.0` or newer; on older images the directive is ignored and a `ConfigurationWarning` condition is emitted.
+Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of certificates (for example certificates auto-renewed from cert-manager) without a restart. it requires Valkey `9.1.0` or newer; on older images the directive is ignored and a `ConfigurationWarning` condition is emitted.
 
 ```yaml
 config:

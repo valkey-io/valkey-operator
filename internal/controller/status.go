@@ -55,12 +55,13 @@ type configWarning struct {
 // It updates the ConditionConfigurationWarning condition based on the provided warnings.
 // If there are no warnings, it removes the condition. If there are warnings,
 // it sorts them, constructs a message, and sets the condition with the reason and message.
-func (r *ValkeyClusterReconciler) applyConfigurationWarnings(cluster *valkeyiov1alpha1.ValkeyCluster, warnings []configWarning) {
+func (r *ValkeyClusterReconciler) applyConfigurationWarnings(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, warnings []configWarning) {
 	if len(warnings) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
 		return
 	}
 
+	log := logf.FromContext(ctx)
 	existing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
 	reported := ""
 	if existing != nil && existing.Status == metav1.ConditionTrue {
@@ -83,12 +84,12 @@ func (r *ValkeyClusterReconciler) applyConfigurationWarnings(cluster *valkeyiov1
 		if strings.Contains(reported, warning.message) {
 			continue
 		}
-		logf.FromContext(context.Background()).Info("configuration warning", "reason", warning.reason, "detail", warning.message)
+		log.Info("configuration warning", "reason", warning.reason, "detail", warning.message)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, warning.reason, "ReconcileValkeyCluster", "%s", warning.message)
 	}
 
 	reason := warnings[0].reason
-	if len(warnings) > 1 {
+	if slices.ContainsFunc(warnings, func(w configWarning) bool { return w.reason != reason }) {
 		reason = valkeyiov1alpha1.ReasonMultipleConfigurationWarnings
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, reason, strings.Join(messages, "; "), metav1.ConditionTrue)

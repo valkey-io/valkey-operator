@@ -156,24 +156,26 @@ func liveConfigToApply(config map[string]string) map[string]string {
 }
 
 // versionGateConfigWarnings returns warnings when user-set directives are not
-// supported by the detected Valkey version.
+// supported by the detected Valkey version. It reports exactly the directives
+// the renderer drops.
 func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	image := effectiveImage(cluster.Spec.Image)
-	version := valkey.VersionStringFromImage(image)
-	if version == "" {
-		version = "unknown"
+	droppedKeys := gatedUserKeysToSuppress(cluster)
+	if len(droppedKeys) == 0 {
+		return nil
 	}
 
-	warnings := make([]configWarning, 0, len(versionGatedConfig))
-	for _, key := range slices.Sorted(maps.Keys(versionGatedConfig)) {
+	image := effectiveImage(cluster.Spec.Image)
+	versionDetail := fmt.Sprintf("no version could be detected from spec.image %q", image)
+	if version, ok := valkey.VersionFromImage(image); ok {
+		versionDetail = fmt.Sprintf("detected %s from spec.image %q", version, image)
+	}
+
+	warnings := make([]configWarning, 0, len(droppedKeys))
+	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
 		minVersion := versionGatedConfig[key]
-		if valkey.MeetsMinVersion(image, minVersion) {
-			// The user-set directive is supported by the detected Valkey version.
-			continue
-		}
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
-			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, detected %s from spec.image %q", key, minVersion, version, image),
+			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, %s", key, minVersion, versionDetail),
 		})
 	}
 

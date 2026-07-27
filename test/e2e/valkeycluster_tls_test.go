@@ -159,14 +159,6 @@ spec:
 			}
 		})
 
-		It("defaults tls-auto-reload-interval into the rendered config when the version gate is met", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("tls-auto-reload-interval 86400"))
-		})
-
 		It("mounts TLS certs into the server container", func() {
 			cmd := exec.Command("kubectl", "get", "pod",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),

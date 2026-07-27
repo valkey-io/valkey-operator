@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	semver "github.com/Masterminds/semver/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -128,25 +129,6 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		}
 	}
 
-	It("sets the default when TLS is enabled and the version meets 9.1", func() {
-		cluster := newTLSCluster("valkey/valkey:9.1.0", nil)
-		Expect(buildServerConfig(cluster)).To(ContainSubstring("tls-auto-reload-interval 86400"))
-	})
-
-	It("sets the default for distro-suffixed tags that meet the gate", func() {
-		cluster := newTLSCluster("valkey/valkey:9.1.0-alpine", nil)
-		Expect(buildServerConfig(cluster)).To(ContainSubstring("tls-auto-reload-interval 86400"))
-	})
-
-	It("does not override a user-supplied value", func() {
-		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
-			"tls-auto-reload-interval": "3600",
-		})
-		config := buildServerConfig(cluster)
-		Expect(config).To(ContainSubstring("tls-auto-reload-interval 3600"))
-		Expect(config).NotTo(ContainSubstring("tls-auto-reload-interval 86400"))
-	})
-
 	It("drops a user-set directive when the version is below 9.1", func() {
 		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
 			"tls-auto-reload-interval": "3600",
@@ -207,31 +189,51 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		Expect(gatedUserKeysToSuppress(cluster)).To(BeEmpty())
 	})
 
-	It("versionGateWarning names the directive, its required version, and the detected version", func() {
+	It("versionGateConfigWarnings names the directive, its required version, and the detected version", func() {
 		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
 			"tls-auto-reload-interval": "3600",
 		})
-		msg, gated := versionGateWarning(cluster)
-		Expect(gated).To(BeTrue())
-		Expect(msg).To(ContainSubstring("tls-auto-reload-interval"))
-		Expect(msg).To(ContainSubstring("9.1.0"))
-		Expect(msg).To(ContainSubstring("9.0.0"))
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("tls-auto-reload-interval"))
+		Expect(warnings[0].message).To(ContainSubstring("9.1.0"))
+		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
 	})
 
-	It("versionGateWarning uses 'unknown' when the detected version cannot be determined", func() {
+	It("versionGateConfigWarnings uses 'unknown' when the detected version cannot be determined", func() {
 		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
 			"tls-auto-reload-interval": "3600",
 		})
-		msg, gated := versionGateWarning(cluster)
-		Expect(gated).To(BeTrue())
-		Expect(msg).To(ContainSubstring("unknown"))
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("unknown"))
 	})
 
 	It("versionGateWarning returns gated=false when nothing is dropped", func() {
 		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
 			"tls-auto-reload-interval": "3600",
 		})
-		_, gated := versionGateWarning(cluster)
-		Expect(gated).To(BeFalse())
+		Expect(versionGateConfigWarnings(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateConfigWarnings returns unsupported directives in sorted order", func() {
+		original := versionGatedConfig
+		versionGatedConfig = map[string]*semver.Version{
+			"beta-directive":  semver.MustParse("9.3.0"),
+			"alpha-directive": semver.MustParse("9.2.0"),
+		}
+		defer func() {
+			versionGatedConfig = original
+		}()
+
+		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
+			"alpha-directive": "one",
+			"beta-directive":  "two",
+		})
+
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(2))
+		Expect(warnings[0].message).To(ContainSubstring("alpha-directive"))
+		Expect(warnings[1].message).To(ContainSubstring("beta-directive"))
 	})
 })

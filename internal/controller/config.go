@@ -47,8 +47,7 @@ const (
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 
-	tlsAutoReloadIntervalKey     = "tls-auto-reload-interval"
-	defaultTLSAutoReloadInterval = "86400"
+	tlsAutoReloadIntervalKey = "tls-auto-reload-interval"
 )
 
 var minTLSAutoReloadVersion = semver.MustParse("9.1.0")
@@ -133,13 +132,6 @@ func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 		"shutdown-on-sigterm": "failover",
 	})
 
-	if cluster.Spec.TLS != nil {
-		if _, userSet := cluster.Spec.Config[tlsAutoReloadIntervalKey]; !userSet &&
-			valkey.MeetsMinVersion(effectiveImage(cluster.Spec.Image), minTLSAutoReloadVersion) {
-			baseConfig[tlsAutoReloadIntervalKey] = defaultTLSAutoReloadInterval
-		}
-	}
-
 	return baseConfig
 }
 
@@ -163,26 +155,29 @@ func liveConfigToApply(config map[string]string) map[string]string {
 	return out
 }
 
-// versionGateWarning returns a warning message when a user-set directive is not
+// versionGateConfigWarnings returns warnings when user-set directives are not
 // supported by the detected Valkey version.
-func versionGateWarning(cluster *valkeyiov1alpha1.ValkeyCluster) (string, bool) {
+func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
 	image := effectiveImage(cluster.Spec.Image)
 	version := valkey.VersionStringFromImage(image)
 	if version == "" {
 		version = "unknown"
 	}
 
-	for key, minVersion := range versionGatedConfig {
-		if _, userSet := cluster.Spec.Config[key]; !userSet {
-			continue
-		}
+	warnings := make([]configWarning, 0, len(versionGatedConfig))
+	for _, key := range slices.Sorted(maps.Keys(versionGatedConfig)) {
+		minVersion := versionGatedConfig[key]
 		if valkey.MeetsMinVersion(image, minVersion) {
+			// The user-set directive is supported by the detected Valkey version.
 			continue
 		}
-		return fmt.Sprintf("spec.config.%s requires Valkey %s+, detected %s from spec.image %q", key, minVersion, version, image), true
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
+			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, detected %s from spec.image %q", key, minVersion, version, image),
+		})
 	}
 
-	return "", false
+	return warnings
 }
 
 // gatedUserKeysToSuppress returns user-set directives that should be omitted

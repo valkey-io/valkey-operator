@@ -875,16 +875,25 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 // re-introduces the live member to the viewer with CLUSTER MEET. The
 // handshake carries the member's node ID; since the ID is already known, the
 // viewer rebinds the existing entry to the new address and gossip propagates
-// it from there. MEET is idempotent, and each symmetric stale pair heals the
-// reverse direction, so one MEET per (viewer, peer) pair is enough.
+// it from there.
 //
-// Returns the number of MEETs issued; per-pair failures are logged and
-// skipped so one unreachable node doesn't block healing the rest.
+// One successful MEET per moved member is enough: the handshake also
+// registers the viewer's current address on the target, and gossip carries
+// both new addresses to the remaining nodes. Without the dedupe a full
+// N-node restart would issue ~N² MEETs (every node's table lists every peer
+// as stale) — needless churn on a large cluster.
+//
+// Returns the number of MEETs issued; failures are logged and skipped (and
+// don't count as met) so one unreachable node doesn't block healing the rest.
 func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
 	log := logf.FromContext(ctx)
 	healed := 0
+	met := map[string]bool{}
 	for _, pair := range state.FindStaleAddressPeers() {
 		viewer, live := pair.Viewer, pair.Live
+		if met[live.Id] {
+			continue
+		}
 		log.Info("re-introducing peer whose address changed",
 			"viewer", viewer.Address, "peer", live.Address, "peerId", live.Id)
 		if err := viewer.Client.Do(ctx, viewer.Client.B().ClusterMeet().Ip(live.Address).Port(int64(live.Port)).Build()).Error(); err != nil {
@@ -892,6 +901,7 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", viewer.Address, live.Address, err)
 			continue
 		}
+		met[live.Id] = true
 		healed++
 	}
 	return healed

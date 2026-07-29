@@ -198,7 +198,7 @@ To run end-to-end tests locally, you can execute the below command.
 make test-e2e
 ```
 
-To run specific e2e tests locally use the `Focus` decorator of the GinkGo library (see [docs](https://onsi.github.io/ginkgo/#focused-specs)). <br/>
+To run specific e2e tests locally use the `Focus` decorator of the Ginkgo library (see [docs](https://onsi.github.io/ginkgo/#focused-specs)). <br/>
 Select a test case e.g.
 ```go
 It("creates a cluster with custom users", func() {...}

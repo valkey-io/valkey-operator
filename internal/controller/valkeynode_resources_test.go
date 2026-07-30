@@ -887,6 +887,62 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "curated appended")
 }
 
+func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+			}}},
+		},
+	}
+
+	// node-index 0 (a primary): zone shard TSC + zone primaries TSC, no affinity.
+	primary := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, primary.Spec.Affinity, "zone axis never renders anti-affinity")
+	require.Len(t, primary.Spec.TopologySpreadConstraints, 2)
+	for _, tsc := range primary.Spec.TopologySpreadConstraints {
+		assert.Equal(t, "topology.kubernetes.io/zone", tsc.TopologyKey)
+	}
+	assert.Equal(t, "1", primary.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex], "shard TSC first")
+	assert.Equal(t, "0", primary.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels[LabelNodeIndex], "primaries TSC second")
+
+	// node-index 1 (a replica): zone shard TSC only.
+	replica := buildClusterValkeyNode(cluster, 1, 1)
+	require.Len(t, replica.Spec.TopologySpreadConstraints, 1, "replica carries only the shard TSC")
+	assert.Equal(t, "1", replica.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex])
+}
+
+func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
+	userTSC := corev1.TopologySpreadConstraint{
+		MaxSkew: 1, TopologyKey: "custom-key", WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 1, Replicas: 0,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
+				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				}},
+				Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+				}},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	// passthrough first, then node curation, then zone curation.
+	require.Len(t, node.Spec.TopologySpreadConstraints, 3)
+	assert.Equal(t, "custom-key", node.Spec.TopologySpreadConstraints[0].TopologyKey, "passthrough first")
+	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "node curation second")
+	assert.Equal(t, "topology.kubernetes.io/zone", node.Spec.TopologySpreadConstraints[2].TopologyKey, "zone curation last")
+}
+
 func TestBuildValkeyNodePodTemplateSpec_ImagePullSecrets(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "registrycredential"}}

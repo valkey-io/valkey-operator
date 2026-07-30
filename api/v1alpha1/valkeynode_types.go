@@ -137,6 +137,15 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
+	// controller authorizes this node to apply. The ValkeyCluster controller sets
+	// it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
+	// controller applies a rolling StatefulSet/Deployment template update only
+	// when the template it builds hashes to this value. Standalone nodes ignore
+	// the field and apply immediately.
+	// +optional
+	WorkloadRevision string `json:"workloadRevision,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
@@ -183,8 +192,9 @@ const (
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 	// ValkeyNodeConditionWorkloadDrift indicates the desired pod template built
 	// by the operator differs from the live StatefulSet/Deployment template, and
-	// the ValkeyNode controller is waiting for a ValkeyCluster roll permit before
-	// applying the change. Status True means a rolling update is deferred.
+	// Spec.WorkloadRevision has not yet authorized that template. Status True
+	// means a rolling update is deferred until the ValkeyCluster controller
+	// advances Spec.WorkloadRevision (one node at a time today).
 	ValkeyNodeConditionWorkloadDrift = "WorkloadDrift"
 )
 
@@ -193,10 +203,9 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
-	// ValkeyNodeReasonAwaitingRollPermit indicates a pod-template change is ready
-	// but blocked until the ValkeyCluster controller grants
-	// valkey.io/allow-workload-revision.
-	ValkeyNodeReasonAwaitingRollPermit = "AwaitingRollPermit"
+	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
+	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
+	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.

@@ -541,9 +541,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// primary last within each shard, and after an update we requeue
 	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	// Scrape topology for Spec rolls and for workload-template rolls (operator
+	// Scrape topology when a Spec roll (including WorkloadRevision) is needed (operator
 	// builder drift) so proactive failover still runs before killing a primary.
-	if anyNodeRequiresRoll(cluster, nodes, configHash) || anyNodeRequiresWorkloadRoll(nodes) {
+	if anyNodeRequiresRoll(cluster, nodes, configHash) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -611,6 +611,16 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 	desired.Spec.ServerConfigHash = configHash
+	aclSecret, err := r.getClusterACLSecret(ctx, cluster)
+	if err != nil {
+		// Secret may not exist yet during bootstrap; hash without ACL annotations.
+		log.V(1).Info("ACL secret not ready for workload revision, hashing without it", "err", err)
+		aclSecret = nil
+	}
+	if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
+		return nodeUnchanged, err
+	}
+
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -618,7 +628,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Load current node (if any) for failover + workload-drift decisions.
+	// Load current node (if any) for failover decisions.
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	currentExists := true
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
@@ -629,35 +639,14 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	}
 
 	needsSpecRoll := currentExists && nodeRequiresRoll(current, desired)
-	needsWorkloadPermit := currentExists && nodeNeedsWorkloadPermit(current)
-	inFlightWorkloadRoll := currentExists && nodeHasInFlightWorkloadRoll(current)
-	// Failover / ordered roll applies to Spec changes and workload template rolls.
-	needsWorkloadRoll := needsWorkloadPermit || inFlightWorkloadRoll
 
-	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsSpecRoll || needsWorkloadRoll); deferred {
+	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsSpecRoll); deferred {
 		return nodeDeferred, nil
-	}
-
-	// One-at-a-time for Spec and workload rolls: never grant a new permit or
-	// Spec update while another node still holds an in-flight allow annotation.
-	if needsSpecRoll || needsWorkloadPermit {
-		if other, err := r.otherNodeHasInFlightWorkloadRoll(ctx, cluster, node.Name); err != nil {
-			return nodeUnchanged, err
-		} else if other {
-			log.V(1).Info("another ValkeyNode already holds a workload roll permit, waiting", "name", node.Name)
-			return nodeRequeued, nil
-		}
 	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
 		node.Labels = desired.Labels
 		node.Spec = desired.Spec
-		// Spec-driven rolls: grant a one-shot permit so the node controller may
-		// apply the new pod template. Workload-only drift uses the desired hash
-		// path below (CreateOrUpdate result None).
-		if needsSpecRoll {
-			setNodeAnnotation(node, allowWorkloadRevisionAnnotation, allowWorkloadRevisionAny)
-		}
 		return controllerutil.SetControllerReference(cluster, node, r.Scheme)
 	})
 	if err != nil {
@@ -669,14 +658,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d", shardIndex, nodeIndex)
 		return nodeCreated, nil
 	case controllerutil.OperationResultUpdated:
-		// A spec change was applied. Requeue unconditionally so the node has
-		// time to settle before we advance to the next one (one-at-a-time
-		// rolling update).
+		// A spec change was applied (including WorkloadRevision advances). Requeue
+		// so the node settles before the next one (one-at-a-time rolling update).
 		log.V(1).Info("updated ValkeyNode, waiting for it to become ready", "name", node.Name)
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
 		return nodeRequeued, nil
 	case controllerutil.OperationResultNone:
-		return r.handleUnchangedValkeyNode(ctx, cluster, node, inFlightWorkloadRoll, needsWorkloadPermit)
+		return r.handleUnchangedValkeyNode(ctx, node)
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
@@ -720,22 +708,9 @@ func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.C
 	return false
 }
 
-// handleUnchangedValkeyNode handles CreateOrUpdate OperationResultNone: grant
-// a workload permit if needed, or wait until the node is settled and Ready.
-func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode, inFlightWorkloadRoll, needsWorkloadPermit bool) (nodeResult, error) {
+// handleUnchangedValkeyNode waits until a settled node is Ready before advancing.
+func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (nodeResult, error) {
 	log := logf.FromContext(ctx)
-
-	// In-flight permitted roll: wait until the node clears the permit
-	// (after the workload revision is live) and is Ready.
-	if inFlightWorkloadRoll {
-		log.V(1).Info("ValkeyNode workload roll in flight, waiting", "name", node.Name)
-		return nodeRequeued, nil
-	}
-	// Builder/template drift without Spec change: grant permit for this node.
-	// Sibling in-flight was already checked by the caller.
-	if needsWorkloadPermit {
-		return r.grantWorkloadRollPermit(ctx, cluster, node)
-	}
 	if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
 		log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
 			"name", node.Name,
@@ -758,50 +733,14 @@ func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context,
 	return nodeUnchanged, nil
 }
 
-// grantWorkloadRollPermit writes allow-workload-revision for a node waiting on
-// builder/template drift. Always requeues so the node controller can apply.
-func (r *ValkeyClusterReconciler) grantWorkloadRollPermit(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode) (nodeResult, error) {
-	log := logf.FromContext(ctx)
-	desiredHash := ""
-	if node.Annotations != nil {
-		desiredHash = node.Annotations[desiredWorkloadRevisionAnnotation]
+// getClusterACLSecret loads the cluster internal ACL secret used for template annotations.
+func (r *ValkeyClusterReconciler) getClusterACLSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
+	aclSecret := &corev1.Secret{}
+	name := getInternalSecretName(cluster.Name)
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: cluster.Namespace}, aclSecret); err != nil {
+		return nil, err
 	}
-	if desiredHash == "" {
-		// Condition True but annotation not yet set; wait for node controller.
-		log.V(1).Info("ValkeyNode workload drift pending without desired hash, waiting", "name", node.Name)
-		return nodeRequeued, nil
-	}
-	if !workloadPermitAllows(node, desiredHash) {
-		patchBase := node.DeepCopy()
-		if setNodeAnnotation(node, allowWorkloadRevisionAnnotation, desiredHash) {
-			if err := r.Patch(ctx, node, client.MergeFrom(patchBase)); err != nil {
-				return nodeUnchanged, err
-			}
-			log.Info("granted workload roll permit", "name", node.Name, "hash", desiredHash)
-			r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "WorkloadRollPermitted", "PermitWorkloadRoll",
-				"Granted workload roll permit for %s (hash %s)", node.Name, desiredHash)
-		}
-	}
-	return nodeRequeued, nil
-}
-
-// otherNodeHasInFlightWorkloadRoll reports whether any ValkeyNode in this cluster
-// other than excludeName currently holds a workload roll permit.
-func (r *ValkeyClusterReconciler) otherNodeHasInFlightWorkloadRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, excludeName string) (bool, error) {
-	list := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, list, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
-		return false, err
-	}
-	for i := range list.Items {
-		n := &list.Items[i]
-		if n.Name == excludeName {
-			continue
-		}
-		if nodeHasInFlightWorkloadRoll(n) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return aclSecret, nil
 }
 
 const (

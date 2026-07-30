@@ -3387,6 +3387,15 @@ spec:
                   file. When set, mounts a users-acl volume from this Secret so the
                   container can load aclfile /config/users/users.acl.
                 type: string
+              workloadRevision:
+                description: |-
+                  WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
+                  controller authorizes this node to apply. The ValkeyCluster controller sets
+                  it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
+                  controller applies a rolling StatefulSet/Deployment template update only
+                  when the template it builds hashes to this value. Standalone nodes ignore
+                  the field and apply immediately.
+                type: string
               workloadType:
                 default: StatefulSet
                 description: |-

@@ -20,29 +20,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-const (
-	// allowWorkloadRevisionAnnotation is set by the ValkeyCluster controller on a
-	// ValkeyNode to permit exactly one rolling workload template update. Value is
-	// either the desired pod-template roll hash, or allowWorkloadRevisionAny for
-	// Spec-driven rolls where the cluster does not know the hash yet.
-	allowWorkloadRevisionAnnotation = "valkey.io/allow-workload-revision"
-
-	// desiredWorkloadRevisionAnnotation is set by the ValkeyNode controller when
-	// a cluster-owned node has a pod-template drift but no permit yet. Value is
-	// the desired template roll hash the cluster controller should grant.
-	desiredWorkloadRevisionAnnotation = "valkey.io/desired-workload-revision"
-
-	// allowWorkloadRevisionAny permits one rolling update for whatever the node
-	// controller currently builds as desired (used after a ValkeyNode Spec change).
-	allowWorkloadRevisionAny = "*"
 )
 
 // podTemplateRollHash returns a stable hash of the pod template fields that
@@ -89,84 +72,53 @@ func isClusterOwned(node *valkeyiov1alpha1.ValkeyNode) bool {
 	return false
 }
 
-// workloadPermitAllows returns true when the node annotation permits applying
-// a rolling template update for desiredHash.
-func workloadPermitAllows(node *valkeyiov1alpha1.ValkeyNode, desiredHash string) bool {
-	if node.Annotations == nil {
-		return false
+// computeWorkloadRevision builds the pod template for the node (using the same
+// builders as the ValkeyNode controller) and returns its roll hash. When
+// aclSecret is non-nil, template annotations match ensureStatefulSet/Deployment.
+func computeWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) (string, error) {
+	tmpl, err := buildNodePodTemplate(node, aclSecret)
+	if err != nil {
+		return "", err
 	}
-	permit := node.Annotations[allowWorkloadRevisionAnnotation]
-	return permit == allowWorkloadRevisionAny || (desiredHash != "" && permit == desiredHash)
+	return podTemplateRollHash(tmpl), nil
 }
 
-// nodeNeedsWorkloadPermit reports that the node is waiting for the cluster to
-// grant allow-workload-revision (desired hash known or drift condition set, and
-// no matching permit yet).
-func nodeNeedsWorkloadPermit(node *valkeyiov1alpha1.ValkeyNode) bool {
-	desired := ""
-	if node.Annotations != nil {
-		desired = node.Annotations[desiredWorkloadRevisionAnnotation]
-	}
-	if desired != "" {
-		return !workloadPermitAllows(node, desired)
-	}
-	// Condition can appear a beat before the annotation is written.
-	return meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)
-}
-
-// nodeHasInFlightWorkloadRoll reports a permit is outstanding (granted and not
-// yet fully cleared after the pod has rolled).
-func nodeHasInFlightWorkloadRoll(node *valkeyiov1alpha1.ValkeyNode) bool {
-	if node.Annotations == nil {
-		return false
-	}
-	return node.Annotations[allowWorkloadRevisionAnnotation] != ""
-}
-
-// nodeHasPendingWorkloadDrift is true when the node still needs a permit or has
-// an in-flight permitted roll. Used to scrape cluster state for failover.
-func nodeHasPendingWorkloadDrift(node *valkeyiov1alpha1.ValkeyNode) bool {
-	return nodeNeedsWorkloadPermit(node) || nodeHasInFlightWorkloadRoll(node)
-}
-
-// anyNodeRequiresWorkloadRoll is true when any listed node is waiting on a
-// workload template permit or has an in-flight permitted roll.
-func anyNodeRequiresWorkloadRoll(nodeList *valkeyiov1alpha1.ValkeyNodeList) bool {
-	if nodeList == nil {
-		return false
-	}
-	for i := range nodeList.Items {
-		if nodeHasPendingWorkloadDrift(&nodeList.Items[i]) {
-			return true
+// buildNodePodTemplate returns the desired pod template for a ValkeyNode.
+func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) (corev1.PodTemplateSpec, error) {
+	switch node.Spec.WorkloadType {
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		dep, err := buildValkeyNodeDeployment(node)
+		if err != nil {
+			return corev1.PodTemplateSpec{}, err
 		}
+		if aclSecret != nil {
+			dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+		}
+		return dep.Spec.Template, nil
+	default:
+		sts, err := buildValkeyNodeStatefulSet(node)
+		if err != nil {
+			return corev1.PodTemplateSpec{}, err
+		}
+		if aclSecret != nil {
+			sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+		}
+		return sts.Spec.Template, nil
 	}
-	return false
 }
 
-// setNodeAnnotation ensures annotations map exists and sets key to value.
-// Returns true if the annotation changed.
-func setNodeAnnotation(node *valkeyiov1alpha1.ValkeyNode, key, value string) bool {
-	if node.Annotations == nil {
-		node.Annotations = map[string]string{}
-	}
-	if node.Annotations[key] == value {
-		return false
-	}
-	node.Annotations[key] = value
-	return true
+// workloadRevisionAllows reports whether Spec.WorkloadRevision authorizes applying
+// a rolling template whose hash is desiredHash.
+func workloadRevisionAllows(node *valkeyiov1alpha1.ValkeyNode, desiredHash string) bool {
+	return desiredHash != "" && node.Spec.WorkloadRevision == desiredHash
 }
 
-// clearNodeAnnotation removes key if present. Returns true if removed.
-func clearNodeAnnotation(node *valkeyiov1alpha1.ValkeyNode, key string) bool {
-	if node.Annotations == nil {
-		return false
+// setDesiredWorkloadRevision sets Spec.WorkloadRevision from the built template.
+func setDesiredWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) error {
+	rev, err := computeWorkloadRevision(node, aclSecret)
+	if err != nil {
+		return fmt.Errorf("compute workload revision for %s: %w", node.Name, err)
 	}
-	if _, ok := node.Annotations[key]; !ok {
-		return false
-	}
-	delete(node.Annotations, key)
-	if len(node.Annotations) == 0 {
-		node.Annotations = nil
-	}
-	return true
+	node.Spec.WorkloadRevision = rev
+	return nil
 }

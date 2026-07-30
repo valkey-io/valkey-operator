@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -63,18 +62,6 @@ func TestPodTemplateWouldRoll(t *testing.T) {
 	assert.NotEqual(t, podTemplateRollHash(base), podTemplateRollHash(*changed))
 }
 
-func TestWorkloadPermitAllows(t *testing.T) {
-	node := &valkeyiov1alpha1.ValkeyNode{}
-	assert.False(t, workloadPermitAllows(node, "abc"))
-
-	node.Annotations = map[string]string{allowWorkloadRevisionAnnotation: allowWorkloadRevisionAny}
-	assert.True(t, workloadPermitAllows(node, "abc"))
-
-	node.Annotations[allowWorkloadRevisionAnnotation] = "abc"
-	assert.True(t, workloadPermitAllows(node, "abc"))
-	assert.False(t, workloadPermitAllows(node, "def"))
-}
-
 func TestIsClusterOwned(t *testing.T) {
 	node := &valkeyiov1alpha1.ValkeyNode{}
 	assert.False(t, isClusterOwned(node))
@@ -94,38 +81,32 @@ func TestIsClusterOwned(t *testing.T) {
 	assert.False(t, isClusterOwned(node))
 }
 
-func TestNodeNeedsWorkloadPermitAndInFlight(t *testing.T) {
+func TestWorkloadRevisionAllows(t *testing.T) {
 	node := &valkeyiov1alpha1.ValkeyNode{}
-	assert.False(t, nodeNeedsWorkloadPermit(node))
-	assert.False(t, nodeHasInFlightWorkloadRoll(node))
-	assert.False(t, nodeHasPendingWorkloadDrift(node))
+	assert.False(t, workloadRevisionAllows(node, "abc"))
 
-	node.Annotations = map[string]string{desiredWorkloadRevisionAnnotation: "abc"}
-	assert.True(t, nodeNeedsWorkloadPermit(node))
-	assert.False(t, nodeHasInFlightWorkloadRoll(node))
-	assert.True(t, nodeHasPendingWorkloadDrift(node))
-
-	node.Annotations[allowWorkloadRevisionAnnotation] = "abc"
-	assert.False(t, nodeNeedsWorkloadPermit(node))
-	assert.True(t, nodeHasInFlightWorkloadRoll(node))
-	assert.True(t, nodeHasPendingWorkloadDrift(node))
-
-	node2 := &valkeyiov1alpha1.ValkeyNode{}
-	require.True(t, meta.SetStatusCondition(&node2.Status.Conditions, metav1.Condition{
-		Type:   valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift,
-		Status: metav1.ConditionTrue,
-		Reason: valkeyiov1alpha1.ValkeyNodeReasonAwaitingRollPermit,
-	}))
-	assert.True(t, nodeNeedsWorkloadPermit(node2))
+	node.Spec.WorkloadRevision = "abc"
+	assert.True(t, workloadRevisionAllows(node, "abc"))
+	assert.False(t, workloadRevisionAllows(node, "def"))
+	assert.False(t, workloadRevisionAllows(node, ""))
 }
 
-func TestAnyNodeRequiresWorkloadRoll(t *testing.T) {
-	list := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
-		{ObjectMeta: metav1.ObjectMeta{Name: "a"}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "b", Annotations: map[string]string{
-			desiredWorkloadRevisionAnnotation: "h",
-		}}},
-	}}
-	assert.True(t, anyNodeRequiresWorkloadRoll(list))
-	assert.False(t, anyNodeRequiresWorkloadRoll(&valkeyiov1alpha1.ValkeyNodeList{}))
+func TestComputeWorkloadRevisionStable(t *testing.T) {
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "n", Namespace: "ns"},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image:        "valkey/valkey:9.0.0",
+			WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+		},
+	}
+	h1, err := computeWorkloadRevision(node, nil)
+	require.NoError(t, err)
+	h2, err := computeWorkloadRevision(node, nil)
+	require.NoError(t, err)
+	assert.Equal(t, h1, h2)
+
+	node.Spec.Image = "valkey/valkey:9.0.1"
+	h3, err := computeWorkloadRevision(node, nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, h1, h3)
 }

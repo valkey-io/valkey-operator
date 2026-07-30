@@ -149,7 +149,12 @@ func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1a
 // what reconcileValkeyNode actually applies; omitting it would make every
 // settled node (which carries the hash) report a spurious diff and defeat the
 // purpose of this pre-flight check.
-func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string) bool {
+//
+// aclSecret is used to compute Spec.WorkloadRevision the same way
+// reconcileValkeyNode does. Passing nil hashes without ACL template annotations
+// (bootstrap); once the secret exists, pass it so settled nodes with a
+// WorkloadRevision do not spuriously look like they need a roll.
+func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, aclSecret *corev1.Secret) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -159,6 +164,12 @@ func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valk
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 			desired.Spec.ServerConfigHash = configHash
+			// Match reconcileValkeyNode: desired must include WorkloadRevision or
+			// every settled node (with a hash set) looks like a perpetual roll.
+			if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
+				// Cannot hash: treat as needs roll so we still scrape for failover.
+				return true
+			}
 			if current, ok := byName[desired.Name]; ok && nodeRequiresRoll(current, desired) {
 				return true
 			}

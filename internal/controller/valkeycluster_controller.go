@@ -541,9 +541,15 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// primary last within each shard, and after an update we requeue
 	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	// Scrape topology when a Spec roll (including WorkloadRevision) is needed (operator
-	// builder drift) so proactive failover still runs before killing a primary.
-	if anyNodeRequiresRoll(cluster, nodes, configHash) {
+	// Scrape topology when a Spec roll (including WorkloadRevision) is needed so
+	// proactive failover still runs before killing a primary.
+	aclSecret, err := r.getClusterACLSecret(ctx, cluster)
+	if err != nil {
+		// Bootstrap: secret may not exist yet; hash without ACL annotations.
+		log.V(1).Info("ACL secret not ready for roll preflight, hashing without it", "err", err)
+		aclSecret = nil
+	}
+	if anyNodeRequiresRoll(cluster, nodes, configHash, aclSecret) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)

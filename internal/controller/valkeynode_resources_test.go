@@ -1056,3 +1056,25 @@ func TestDefaultImagePullPolicy(t *testing.T) {
 		assert.Equal(t, tc.want, defaultImagePullPolicy(tc.image), "image %q", tc.image)
 	}
 }
+
+func TestApplyProbeAPIDefaults(t *testing.T) {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
+		},
+	}
+	applyProbeAPIDefaults(probe)
+	assert.Equal(t, int32(1), probe.TimeoutSeconds)
+	assert.Equal(t, int32(10), probe.PeriodSeconds)
+	assert.Equal(t, int32(1), probe.SuccessThreshold)
+	assert.Equal(t, int32(3), probe.FailureThreshold)
+	assert.Equal(t, corev1.URISchemeHTTP, probe.HTTPGet.Scheme)
+
+	// Explicit values are preserved.
+	custom := &corev1.Probe{TimeoutSeconds: 5, PeriodSeconds: 2, SuccessThreshold: 2, FailureThreshold: 9}
+	applyProbeAPIDefaults(custom)
+	assert.Equal(t, int32(5), custom.TimeoutSeconds)
+	assert.Equal(t, int32(2), custom.PeriodSeconds)
+	assert.Equal(t, int32(2), custom.SuccessThreshold)
+	assert.Equal(t, int32(9), custom.FailureThreshold)
+}

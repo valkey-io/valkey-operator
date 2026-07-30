@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -181,23 +182,39 @@ func TestAnyNodeRequiresRoll(t *testing.T) {
 	const configHash = "abc123"
 
 	// steadyStateNode returns the node the cluster would build for (0,0) in a
-	// settled cluster: matching spec, the current config hash, and a pod IP.
+	// settled cluster: matching spec (including WorkloadRevision), the current
+	// config hash, and a pod IP. Mirrors what reconcileValkeyNode persists.
 	steadyStateNode := func() valkeyiov1alpha1.ValkeyNode {
 		n := buildClusterValkeyNode(cluster, 0, 0)
 		n.Spec.ServerConfigHash = configHash
+		require.NoError(t, setDesiredWorkloadRevision(n, nil))
 		n.Status.PodIP = "10.0.0.1"
 		return *n
 	}
 
-	t.Run("settled node with matching config hash does not require roll", func(t *testing.T) {
+	t.Run("settled node with matching config hash and workload revision does not require roll", func(t *testing.T) {
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{steadyStateNode()}}
-		assert.False(t, anyNodeRequiresRoll(cluster, nodes, configHash))
+		assert.False(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+	})
+
+	t.Run("node with empty WorkloadRevision requires roll once desired sets it", func(t *testing.T) {
+		n := steadyStateNode()
+		n.Spec.WorkloadRevision = ""
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
+		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
 	})
 
 	t.Run("node with stale config hash requires roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.ServerConfigHash = "stale"
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash))
+		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+	})
+
+	t.Run("node with stale WorkloadRevision requires roll", func(t *testing.T) {
+		n := steadyStateNode()
+		n.Spec.WorkloadRevision = "not-the-real-hash"
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
+		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
 	})
 }

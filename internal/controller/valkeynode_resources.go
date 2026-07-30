@@ -318,7 +318,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 // applyContainerAPIDefaults fills the container fields the API server would
 // otherwise default (imagePullPolicy, terminationMessagePath/Policy, port
-// protocol, env fieldRef apiVersion, probe thresholds/scheme). The workload
+// protocol, env fieldRef apiVersion, probe period/timeout/thresholds/scheme). The workload
 // reconcilers assign the whole desired spec in their CreateOrUpdate mutate
 // functions, so a field left unset here is clobbered to its zero value on
 // every pass and the operator updates the workload on every reconcile even
@@ -356,6 +356,14 @@ func applyContainerAPIDefaults(containers []corev1.Container) {
 func applyProbeAPIDefaults(probe *corev1.Probe) {
 	if probe == nil {
 		return
+	}
+	// Match API-server Probe defaults so user-supplied container patches that
+	// omit these fields do not look like perpetual pod-template drift.
+	if probe.TimeoutSeconds == 0 {
+		probe.TimeoutSeconds = 1
+	}
+	if probe.PeriodSeconds == 0 {
+		probe.PeriodSeconds = 10
 	}
 	if probe.SuccessThreshold == 0 {
 		probe.SuccessThreshold = 1

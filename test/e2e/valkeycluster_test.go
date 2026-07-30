@@ -491,10 +491,14 @@ spec:
 			}
 			Eventually(verifyReady).Should(Succeed())
 
-			By("validating internal secret was created")
+			By("validating internal secrets were created")
 			verifyInternalSecretExists := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
 				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords")
+				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 			Eventually(verifyInternalSecretExists).Should(Succeed())
@@ -549,6 +553,121 @@ spec:
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
+
+			By("verifying allowed commands succeed for operator user")
+			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+					"-o", "jsonpath={.data._operator}",
+				)
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				operatorPassword := string(decoded)
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				// Only commands without arguments will be tested
+				cmd = exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never",
+					"--", "sh", "-c",
+					fmt.Sprintf(
+						`valkey-cli -c -h "%s" --user _operator --pass "%s" <<EOF
+PING
+CLUSTER INFO
+CLUSTER MYID
+CLUSTER MYSHARDID
+CLUSTER NODES
+CLUSTER FAILOVER
+INFO
+ROLE 
+EOF`,
+						clusterFqdn,
+						operatorPassword,
+					),
+				)
+
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).NotTo(ContainSubstring("NOPERM"))
+			}
+			Eventually(verifyAllowedPermissionsOfOperatorUser).Should(Succeed())
+
+			By("verifying denied commands fail for operator user")
+			verifyDeniedPermissionsOfOperatorUser := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+					"-o", "jsonpath={.data._operator}",
+				)
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				operatorPassword := string(decoded)
+
+				disallowedCommands := []string{
+					"SET foo bar",
+					"GET foo",
+					"DEL foo",
+					"KEYS *",
+					"CONFIG GET *",
+					"ACL LIST",
+				}
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				cmd = exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never",
+					"--", "sh", "-c",
+					fmt.Sprintf(
+						`valkey-cli -c -h "%s" --user _operator --pass "%s" <<EOF
+%s
+EOF`,
+						clusterFqdn, operatorPassword, strings.Join(disallowedCommands, "\n"),
+					))
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				g.Expect(strings.Count(output, "NOPERM")).To(Equal(len(disallowedCommands)),
+					"expected all %d disallowed commands to be denied but got: %s",
+					len(disallowedCommands), output)
+			}
+			Eventually(verifyDeniedPermissionsOfOperatorUser).Should(Succeed())
+
 		})
 
 		It("rebalances slots on scale out", func() {

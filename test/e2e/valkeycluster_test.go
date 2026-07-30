@@ -1496,14 +1496,25 @@ spec:
 			zones := []string{"e2e-az-a", "e2e-az-b"}
 			for i := 0; i < 2; i++ {
 				w := strings.TrimSpace(workers[i])
+				// Preserve any pre-existing zone label so cleanup restores it rather
+				// than blindly removing it.
+				original, _ := utils.Run(exec.Command("kubectl", "get", "node", w,
+					"-o", "jsonpath={.metadata.labels['topology.kubernetes.io/zone']}"))
+				original = strings.TrimSpace(original)
 				c := exec.Command("kubectl", "label", "node", w,
 					fmt.Sprintf("topology.kubernetes.io/zone=%s", zones[i]), "--overwrite=true")
 				o, e := utils.Run(c)
 				Expect(e).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label node %s: %s", w, o))
-				defer func(node string) {
-					c := exec.Command("kubectl", "label", "node", node, "topology.kubernetes.io/zone-", "--overwrite=true")
+				defer func(node, original string) {
+					var c *exec.Cmd
+					if original != "" {
+						c = exec.Command("kubectl", "label", "node", node,
+							"topology.kubernetes.io/zone="+original, "--overwrite=true")
+					} else {
+						c = exec.Command("kubectl", "label", "node", node, "topology.kubernetes.io/zone-")
+					}
 					_, _ = utils.Run(c)
-				}(w)
+				}(w, original)
 			}
 
 			By("creating a ValkeyCluster with zone.spread.shard set to Required")

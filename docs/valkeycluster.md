@@ -82,6 +82,24 @@ exporter:
   enabled: false
 ```
 
+#### Operator metrics
+
+Separate from the per-pod exporter above, the operator exposes its own controller metrics on its `/metrics` endpoint. Among them:
+
+- `valkey_operator_cluster_condition{valkey_cluster, target_namespace, type, status}` — a projection of the cluster's [status conditions](status-conditions.md), in the same shape as kube-state-metrics' `kube_pod_status_condition`. For each condition `type` there are three series (`status="true"`, `"false"`, `"unknown"`); the condition's current status reads `1` and the other two `0`. A condition the operator has not reported (for example on a brand-new cluster, or one whose reconcile fails before the condition's check runs) reads `0` on all three series.
+
+To alert on a condition, match its `status="false"` (or `"true"`, for abnormal-true conditions) series — this way an unreported condition raises no alert. The operator reports instantaneous state; choose your own "stuck for how long" threshold in the alert's `for:` clause. For example, for [`SchedulingSatisfied`](status-conditions.md#schedulingsatisfied):
+
+```yaml
+- alert: ValkeyClusterPodsUnschedulable
+  expr: valkey_operator_cluster_condition{type="SchedulingSatisfied", status="false"} == 1
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "ValkeyCluster {{ $labels.valkey_cluster }} has pods that cannot be scheduled"
+```
+
 ### Persistence
 
 ```yaml

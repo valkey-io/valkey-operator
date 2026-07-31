@@ -417,7 +417,27 @@ const (
 	// considers risky, for example a terminationGracePeriodSeconds too short for
 	// graceful failover.
 	ConditionConfigurationWarning = "ConfigurationWarning"
+	// ConditionSchedulingSatisfied reports whether every in-scope pod in the
+	// cluster is scheduled. It is False while any pod is Pending with the
+	// scheduler's Unschedulable reason. The operator reports the instantaneous
+	// state only; the "stuck for how long" threshold for alerting is left to
+	// the consumer's Prometheus rule (via its `for:` clause).
+	ConditionSchedulingSatisfied = "SchedulingSatisfied"
 )
+
+// ClusterConditionTypes lists the ValkeyCluster condition types exported by the
+// valkey_operator_cluster_condition metric. Keep in sync with the constants
+// above; a type missing from this list is still exported once present in
+// status.conditions, but its series are not pre-created at zero.
+var ClusterConditionTypes = []string{
+	ConditionReady,
+	ConditionProgressing,
+	ConditionDegraded,
+	ConditionClusterFormed,
+	ConditionSlotsAssigned,
+	ConditionConfigurationWarning,
+	ConditionSchedulingSatisfied,
+}
 
 const (
 	// Common reasons for conditions
@@ -446,6 +466,8 @@ const (
 	ReasonSystemUsersAclError      = "SystemUsersACLError"
 	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
 	ReasonPodUnschedulable         = "PodUnschedulable"
+	ReasonAllPodsScheduled         = "AllPodsScheduled"
+	ReasonPodsPendingScheduling    = "PodsPendingScheduling"
 )
 
 // +kubebuilder:object:root=true

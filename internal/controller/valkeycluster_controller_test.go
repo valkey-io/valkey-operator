@@ -361,6 +361,13 @@ var _ = Describe("pod scheduling issue handling", func() {
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 
+		satisfied := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionSchedulingSatisfied)
+		Expect(satisfied).NotTo(BeNil())
+		Expect(satisfied.Status).To(Equal(metav1.ConditionFalse))
+		Expect(satisfied.Reason).To(Equal(valkeyiov1alpha1.ReasonPodsPendingScheduling))
+		Expect(satisfied.Message).To(ContainSubstring("pod topology spread constraints not satisfied"))
+		Expect(satisfied.ObservedGeneration).To(Equal(updated.Generation))
+
 		events := collectEvents(fakeRecorder)
 		Expect(events).To(ContainElement(ContainSubstring("Warning")))
 		Expect(events).To(ContainElement(ContainSubstring(valkeyiov1alpha1.ReasonPodUnschedulable)))
@@ -394,6 +401,11 @@ var _ = Describe("pod scheduling issue handling", func() {
 		Expect(result).To(Equal(reconcile.Result{}))
 		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeNil())
 		Expect(testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+
+		satisfied := testutils.FindCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionSchedulingSatisfied)
+		Expect(satisfied).NotTo(BeNil())
+		Expect(satisfied.Status).To(Equal(metav1.ConditionTrue))
+		Expect(satisfied.Reason).To(Equal(valkeyiov1alpha1.ReasonAllPodsScheduled))
 	})
 
 	It("ignores pods that are already scheduled", func() {

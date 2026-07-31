@@ -25,21 +25,24 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
-func conditionGaugeValue(t *testing.T, name, ns, condType, status string) float64 {
+// testNamespace is the namespace used by all metrics tests.
+const testNamespace = "default"
+
+func conditionGaugeValue(t *testing.T, name, condType, status string) float64 {
 	t.Helper()
-	return testutil.ToFloat64(clusterCondition.WithLabelValues(name, ns, condType, status))
+	return testutil.ToFloat64(clusterCondition.WithLabelValues(name, testNamespace, condType, status))
 }
 
 // expectConditionSeries asserts the three status series for a condition type.
-func expectConditionSeries(t *testing.T, name, ns, condType string, wantTrue, wantFalse, wantUnknown float64) {
+func expectConditionSeries(t *testing.T, name, condType string, wantTrue, wantFalse, wantUnknown float64) {
 	t.Helper()
-	if got := conditionGaugeValue(t, name, ns, condType, "true"); got != wantTrue {
+	if got := conditionGaugeValue(t, name, condType, "true"); got != wantTrue {
 		t.Errorf("%s{status=true} = %v, want %v", condType, got, wantTrue)
 	}
-	if got := conditionGaugeValue(t, name, ns, condType, "false"); got != wantFalse {
+	if got := conditionGaugeValue(t, name, condType, "false"); got != wantFalse {
 		t.Errorf("%s{status=false} = %v, want %v", condType, got, wantFalse)
 	}
-	if got := conditionGaugeValue(t, name, ns, condType, "unknown"); got != wantUnknown {
+	if got := conditionGaugeValue(t, name, condType, "unknown"); got != wantUnknown {
 		t.Errorf("%s{status=unknown} = %v, want %v", condType, got, wantUnknown)
 	}
 }
@@ -72,24 +75,24 @@ func TestUpdateClusterMetrics_ClusterCondition(t *testing.T) {
 
 	// Condition absent -> all three status series read 0.
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 0, 0, 0)
+	expectConditionSeries(t, name, condType, 0, 0, 0)
 
 	setCondition(cluster, condType, valkeyiov1alpha1.ReasonAllPodsScheduled, "ok", metav1.ConditionTrue)
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 1, 0, 0)
+	expectConditionSeries(t, name, condType, 1, 0, 0)
 
 	setCondition(cluster, condType, valkeyiov1alpha1.ReasonPodsPendingScheduling, "pending", metav1.ConditionFalse)
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 0, 1, 0)
+	expectConditionSeries(t, name, condType, 0, 1, 0)
 
 	setCondition(cluster, condType, valkeyiov1alpha1.ReasonPodsPendingScheduling, "unknown", metav1.ConditionUnknown)
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 0, 0, 1)
+	expectConditionSeries(t, name, condType, 0, 0, 1)
 
 	// Condition removed again -> back to all zeros.
 	cluster.Status.Conditions = nil
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 0, 0, 0)
+	expectConditionSeries(t, name, condType, 0, 0, 0)
 }
 
 func TestUpdateClusterMetrics_UnregisteredConditionType(t *testing.T) {
@@ -104,5 +107,5 @@ func TestUpdateClusterMetrics_UnregisteredConditionType(t *testing.T) {
 	setCondition(cluster, condType, "SomeReason", "some message", metav1.ConditionTrue)
 
 	updateClusterMetrics(cluster)
-	expectConditionSeries(t, name, ns, condType, 1, 0, 0)
+	expectConditionSeries(t, name, condType, 1, 0, 0)
 }

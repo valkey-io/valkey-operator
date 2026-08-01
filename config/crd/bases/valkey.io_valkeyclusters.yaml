@@ -1591,6 +1591,12 @@ spec:
                   enabled: true
                 description: Metrics exporter options
                 properties:
+                  args:
+                    description: Additional cmdline arguments passed to exporter sidecar
+                      container.
+                    items:
+                      type: string
+                    type: array
                   enabled:
                     description: Enable or disable the exporter sidecar container
                     type: boolean

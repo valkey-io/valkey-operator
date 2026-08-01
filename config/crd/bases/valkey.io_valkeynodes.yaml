@@ -2513,6 +2513,12 @@ spec:
               exporter:
                 description: Exporter defines the metrics exporter sidecar configuration.
                 properties:
+                  args:
+                    description: Additional cmdline arguments passed to exporter sidecar
+                      container.
+                    items:
+                      type: string
+                    type: array
                   enabled:
                     description: Enable or disable the exporter sidecar container
                     type: boolean

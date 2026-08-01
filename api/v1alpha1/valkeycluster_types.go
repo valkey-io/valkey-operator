@@ -108,7 +108,9 @@ type SchedulingSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// Affinity to apply to the pods, overrides NodeSelector if set.
+	// Affinity to apply to the pods. Kubernetes ANDs nodeAffinity with
+	// NodeSelector rather than one overriding the other: a node must satisfy
+	// both for the pod to be scheduled there.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
@@ -219,6 +221,49 @@ type ZoneScheduling struct {
 	// Spread distributes the cluster's pods across zones.
 	// +optional
 	Spread ZoneSpread `json:"spread,omitempty"`
+
+	// Pinning assigns every pod a deterministic zone by round-robin over an
+	// ordered zone list. Mutually exclusive with any non-Disabled Spread field
+	// on this axis: pinning already fixes each pod's zone, so a zone spread
+	// constraint can only contradict it. Unset means no pinning.
+	// +optional
+	Pinning *ZonePinning `json:"pinning,omitempty"`
+}
+
+// ZonePinning assigns every pod a deterministic zone. Rendered as a
+// topology.kubernetes.io/zone entry in the pod's nodeSelector, which Kubernetes
+// ANDs with any affinity the user supplies through the escape hatch.
+// +kubebuilder:validation:XValidation:rule="self.zones.all(z, self.zones.exists_one(y, y == z))",message="zone.pinning.zones entries must be unique: a repeated zone silently biases the round-robin"
+type ZonePinning struct {
+	// Zones is the ordered round-robin sequence. A pod's zone is
+	// zones[(shardIndex + nodeIndex) % len(zones)], so each shard's pods walk
+	// the list from a different starting point, and while there are at least
+	// as many zones as shards, primaries land in distinct zones as a side
+	// effect. When replicas+1 exceeds the zone count, some members of a shard
+	// necessarily share a zone.
+	//
+	// Adding shards or replicas never moves an existing pod, because a pod's
+	// indices never change. Changing this list would move nearly all of them,
+	// so it is immutable while set: remove pinning, reconcile, then re-add it
+	// with the new sequence. On a cluster with persistence, note that zonal
+	// volumes cannot follow a pod to a new zone.
+	//
+	// The list is ordered, so it is atomic rather than a set: a set list is
+	// unordered under server-side apply, which would scramble the assignment.
+	// Uniqueness is enforced by CEL for the same reason.
+	//
+	// Each entry must be a valid Kubernetes label value, because it is rendered
+	// as the value of a topology.kubernetes.io/zone nodeSelector entry. Without
+	// that constraint an entry such as "eu-west-1a!" is accepted here and then
+	// rejected when the StatefulSet is created, surfacing on the ValkeyNode
+	// rather than on the ValkeyCluster the user edited.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +listType=atomic
+	Zones []string `json:"zones"`
 }
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
@@ -251,6 +296,15 @@ type ZoneScheduling struct {
 //
 // zone.spread: reject a user zone ScheduleAnyway TSC that collides with a Preferred shard/primaries/pods spread.
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard, primaries, or pods set to Preferred, which render the same zone ScheduleAnyway constraint: set that zone.spread mode to Disabled or Required, or remove the passthrough constraint"
+//
+// zone.pinning: reject pinning combined with any non-Disabled zone spread (pinning already fixes each pod's zone).
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.zone.spread) || ( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Disabled' )",message="zone.pinning cannot be combined with a non-Disabled zone.spread.shard, primaries, or pods: pinning already assigns every pod a fixed zone, which a zone spread constraint can contradict"
+//
+// zone.pinning: the zone list is immutable while set (changing it reassigns nearly every pod); removal and re-adding are allowed.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.scheduling) || !has(oldSelf.scheduling.zone) || !has(oldSelf.scheduling.zone.pinning) || !has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || self.scheduling.zone.pinning.zones == oldSelf.scheduling.zone.pinning.zones",message="zone.pinning.zones is immutable while set: changing it reassigns nearly every pod. Remove zone.pinning, reconcile, then re-add it with the new list"
+//
+// zone.pinning: reject a passthrough nodeSelector that sets the zone key the pinning render owns.
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.nodeSelector) || !('topology.kubernetes.io/zone' in self.scheduling.nodeSelector)",message="scheduling.nodeSelector cannot set topology.kubernetes.io/zone while zone.pinning is set: pinning renders that key itself, and the curated value would overwrite yours"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image

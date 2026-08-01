@@ -584,6 +584,7 @@ CLUSTER MYSHARDID
 CLUSTER NODES
 CLUSTER FAILOVER
 INFO
+CONFIG GET maxmemory
 ROLE 
 EOF`,
 						clusterFqdn,
@@ -631,7 +632,6 @@ EOF`,
 					"GET foo",
 					"DEL foo",
 					"KEYS *",
-					"CONFIG GET *",
 					"ACL LIST",
 				}
 

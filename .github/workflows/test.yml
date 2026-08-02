@@ -5,6 +5,7 @@ on:
     branches:
       - 'main'
   pull_request:
+  merge_group:
 
 jobs:
   test:
@@ -23,3 +24,4 @@ jobs:
         run: |
           go mod tidy
           make test
+

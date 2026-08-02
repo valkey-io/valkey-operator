@@ -457,11 +457,19 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 			// between a majority of primaries, which is exactly what a
 			// cluster-wide address change breaks — entries can stay at
 			// fail? indefinitely.
-			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !slices.Contains(flags, "noaddr") {
+			noaddr := slices.Contains(flags, "noaddr")
+			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !noaddr {
 				continue
 			}
 			peer, ok := live[fields[0]]
 			if !ok {
+				continue
+			}
+			// A noaddr entry carries no endpoint at all (:0@0) — the ID is
+			// known but no address ever completed a handshake. A live node
+			// with that ID always needs re-introduction.
+			if noaddr {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
 				continue
 			}
 			if address := hostFromClusterNodesEndpoint(fields[1]); address != "" && address != peer.Address {

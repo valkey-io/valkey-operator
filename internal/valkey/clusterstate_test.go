@@ -699,3 +699,101 @@ func TestClusterState_FindStaleAddressPeers_IPv6(t *testing.T) {
 		}
 	})
 }
+
+func TestHostFromClusterNodesEndpoint_UnbracketedIPv6(t *testing.T) {
+	// CLUSTER NODES reports IPv6 endpoints without brackets
+	// (fd00::2:6379@16379); net.SplitHostPort rejects those, so they take
+	// the last-colon fallback path.
+	cases := []struct{ in, want string }{
+		{"fd00::2:6379@16379", "fd00::2"},
+		{"fd00::2:6379@16379,node-1.example", "fd00::2"},
+		{"fd00::2:6379", "fd00::2"},
+		{"2001:db8::10:6379@16379", "2001:db8::10"},
+		{":0@0", ""}, // noaddr placeholder — no host to extract
+	}
+	for _, c := range cases {
+		if got := hostFromClusterNodesEndpoint(c.in); got != c.want {
+			t.Errorf("hostFromClusterNodesEndpoint(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestClusterState_FindStaleAddressPeers_UnbracketedIPv6(t *testing.T) {
+	node := func(id, address, clusterNodes string) *NodeState {
+		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+	}
+
+	t.Run("failing unbracketed IPv6 peer at its current address is not stale", func(t *testing.T) {
+		a := node("aaa", "fd00::1",
+			"aaa fd00::1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb fd00::2:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "fd00::2",
+			"bbb fd00::2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa fd00::1:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs for current unbracketed IPv6 address, got %d", len(stale))
+		}
+	})
+
+	t.Run("moved unbracketed IPv6 peer is stale", func(t *testing.T) {
+		a := node("aaa", "fd00::11",
+			"aaa fd00::11:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb fd00::2:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "fd00::12",
+			"bbb fd00::12:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa fd00::11:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 1 || stale[0].Viewer.Id != "aaa" || stale[0].Live.Id != "bbb" {
+			t.Fatalf("expected exactly aaa->bbb, got %v", stale)
+		}
+	})
+}
+
+func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
+	node := func(id, address, clusterNodes string) *NodeState {
+		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+	}
+
+	t.Run("noaddr entry with a live node is stale despite empty endpoint", func(t *testing.T) {
+		// noaddr entries carry the :0@0 placeholder — no address to
+		// compare, but a live node with that ID always needs a MEET.
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb :0@0 master,noaddr - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "10.0.1.2",
+			"bbb 10.0.1.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa 10.0.1.1:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 1 || stale[0].Viewer.Id != "aaa" || stale[0].Live.Id != "bbb" {
+			t.Fatalf("expected exactly aaa->bbb for noaddr entry, got %v", stale)
+		}
+	})
+
+	t.Run("noaddr entry with no live node is left to forgetStaleNodes", func(t *testing.T) {
+		a := node("aaa", "10.0.1.1",
+			"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+				"ded :0@0 master,noaddr - 0 0 2 connected\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs, got %d", len(stale))
+		}
+	})
+}

@@ -640,3 +640,62 @@ func TestClusterState_FindNodeById(t *testing.T) {
 		t.Error("expected nil for unknown id")
 	}
 }
+
+func TestHostFromClusterNodesEndpoint(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"10.0.1.2:6379@16379", "10.0.1.2"},
+		{"10.0.1.2:6379@16379,node-1.example", "10.0.1.2"},
+		{"[fd00::2]:6379@16379", "fd00::2"},
+		{"[fd00::2]:6379@16379,node-1.example", "fd00::2"},
+		{"[fd00::2]:6379", "fd00::2"},
+		{"10.0.1.2:6379", "10.0.1.2"},
+		{"garbage", ""},
+	}
+	for _, c := range cases {
+		if got := hostFromClusterNodesEndpoint(c.in); got != c.want {
+			t.Errorf("hostFromClusterNodesEndpoint(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestClusterState_FindStaleAddressPeers_IPv6(t *testing.T) {
+	node := func(id, address, clusterNodes string) *NodeState {
+		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+	}
+
+	t.Run("failing IPv6 peer at its current address is not stale", func(t *testing.T) {
+		// Bracketed table entry vs bare pod IP must compare equal.
+		a := node("aaa", "fd00::1",
+			"aaa [fd00::1]:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb [fd00::2]:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "fd00::2",
+			"bbb [fd00::2]:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa [fd00::1]:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		if stale := state.FindStaleAddressPeers(); len(stale) != 0 {
+			t.Fatalf("expected no stale pairs for current bracketed IPv6 address, got %d", len(stale))
+		}
+	})
+
+	t.Run("moved IPv6 peer is stale", func(t *testing.T) {
+		a := node("aaa", "fd00::11",
+			"aaa [fd00::11]:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"bbb [fd00::2]:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n")
+		b := node("bbb", "fd00::12",
+			"bbb [fd00::12]:6379@16379 myself,master - 0 0 2 connected 8192-16383\n"+
+				"aaa [fd00::11]:6379@16379 master - 0 0 1 connected 0-8191\n")
+		state := &ClusterState{Shards: []*ShardState{
+			{Id: "s1", PrimaryId: "aaa", Nodes: []*NodeState{a}},
+			{Id: "s2", PrimaryId: "bbb", Nodes: []*NodeState{b}},
+		}}
+
+		stale := state.FindStaleAddressPeers()
+		if len(stale) != 1 || stale[0].Viewer.Id != "aaa" || stale[0].Live.Id != "bbb" {
+			t.Fatalf("expected exactly aaa->bbb, got %v", stale)
+		}
+	})
+}

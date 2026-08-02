@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -396,6 +397,27 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 	return nil
 }
 
+// hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
+// endpoint field (<ip:port@cport[,hostname]>). IPv6 hosts appear bracketed
+// ([fd00::2]:6379@16379); net.SplitHostPort unbrackets them so the result
+// compares equal to the bare pod IP Kubernetes reports. Returns "" when the
+// field has no parsable host:port part.
+func hostFromClusterNodesEndpoint(endpoint string) string {
+	// Drop the cluster-bus suffix and the optional ,hostname after it.
+	if i := strings.Index(endpoint, "@"); i != -1 {
+		endpoint = endpoint[:i]
+	}
+	if host, _, err := net.SplitHostPort(endpoint); err == nil {
+		return host
+	}
+	// Fallback for entries with no port (shouldn't occur in CLUSTER NODES,
+	// but keep the previous last-colon behavior rather than dropping them).
+	if i := strings.LastIndex(endpoint, ":"); i != -1 {
+		return strings.Trim(endpoint[:i], "[]")
+	}
+	return ""
+}
+
 // StaleAddressPeer pairs a viewer node with a live cluster member whose
 // address in the viewer's node table is outdated.
 type StaleAddressPeer struct {
@@ -442,11 +464,7 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 			if !ok {
 				continue
 			}
-			idx := strings.LastIndex(fields[1], ":")
-			if idx == -1 {
-				continue
-			}
-			if address := fields[1][:idx]; address != peer.Address {
+			if address := hostFromClusterNodesEndpoint(fields[1]); address != "" && address != peer.Address {
 				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
 			}
 		}

@@ -583,8 +583,9 @@ CLUSTER MYID
 CLUSTER MYSHARDID
 CLUSTER NODES
 CLUSTER FAILOVER
+CONFIG GET maxmemory
 INFO
-ROLE 
+ROLE
 EOF`,
 						clusterFqdn,
 						operatorPassword,
@@ -626,12 +627,16 @@ EOF`,
 				g.Expect(err).NotTo(HaveOccurred())
 				operatorPassword := string(decoded)
 
+				// CONFIG GET is intentionally absent: the _operator user is
+				// granted +config|get for auditability (#341), covered by the
+				// allowed-commands check above (+config|set is granted too,
+				// so neither CONFIG subcommand belongs here).
 				disallowedCommands := []string{
 					"SET foo bar",
 					"GET foo",
 					"DEL foo",
 					"KEYS *",
-					"CONFIG GET *",
+					"FLUSHALL",
 					"ACL LIST",
 				}
 

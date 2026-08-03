@@ -128,6 +128,13 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
 
+func effectiveImage(image string) string {
+	if image == "" {
+		return DefaultImage
+	}
+	return image
+}
+
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
 // and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated

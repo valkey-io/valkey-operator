@@ -133,6 +133,8 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
+- `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version.
+- `MultipleConfigurationWarnings` – warnings with more than one of the reasons above are active at the same time. The condition message carries a single reason, so the message lists all of them, and an event is emitted per warning.
 
 ---
 

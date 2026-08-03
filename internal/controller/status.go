@@ -16,9 +16,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"slices"
+	"strings"
+
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // setCondition is a helper to set a condition with ObservedGeneration
@@ -37,4 +43,54 @@ func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason st
 	if condition != nil && condition.Reason == reason {
 		meta.RemoveStatusCondition(conditions, condType)
 	}
+}
+
+// configWarning is a entry that represents a configuration warning with a reason and message.
+type configWarning struct {
+	reason  string
+	message string
+}
+
+// applyConfigurationWarnings applies configuration warnings to the ValkeyCluster status.
+// It updates the ConditionConfigurationWarning condition based on the provided warnings.
+// If there are no warnings, it removes the condition. If there are warnings,
+// it sorts them, constructs a message, and sets the condition with the reason and message.
+func (r *ValkeyClusterReconciler) applyConfigurationWarnings(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, warnings []configWarning) {
+	if len(warnings) == 0 {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+		return
+	}
+
+	log := logf.FromContext(ctx)
+	existing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+	reported := ""
+	if existing != nil && existing.Status == metav1.ConditionTrue {
+		reported = existing.Message
+	}
+
+	slices.SortStableFunc(warnings, func(a, b configWarning) int {
+		if a.reason != b.reason {
+			return strings.Compare(a.reason, b.reason)
+		}
+		if a.message != b.message {
+			return strings.Compare(a.message, b.message)
+		}
+		return 0
+	})
+
+	messages := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		messages = append(messages, warning.message)
+		if strings.Contains(reported, warning.message) {
+			continue
+		}
+		log.Info("configuration warning", "reason", warning.reason, "detail", warning.message)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, warning.reason, "ReconcileValkeyCluster", "%s", warning.message)
+	}
+
+	reason := warnings[0].reason
+	if slices.ContainsFunc(warnings, func(w configWarning) bool { return w.reason != reason }) {
+		reason = valkeyiov1alpha1.ReasonMultipleConfigurationWarnings
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, reason, strings.Join(messages, "; "), metav1.ConditionTrue)
 }

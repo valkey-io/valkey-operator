@@ -3151,28 +3151,29 @@ spec:
                 description: TLS configuration for the node
                 properties:
                   authClients:
-                    default: "yes"
+                    default: Optional
                     description: |-
                       AuthClients controls whether clients must authenticate with a TLS
-                      certificate. `yes` (the default) enforces mTLS, `optional` allows
-                      both authenticated and unauthenticated clients, and `no` turns
-                      client certificate processing off entirely.
+                      certificate. `Required` enforces mTLS, `Optional` allows both authenticated
+                      and unauthenticated clients, and `Disabled` turns client certificate
+                      processing off entirely.
+                      Defaults to `Optional`.
                     enum:
-                    - optional
-                    - "yes"
-                    - "no"
+                    - Required
+                    - Optional
+                    - Disabled
                     type: string
                   authClientsUser:
-                    default: "off"
+                    default: Disabled
                     description: |-
                       AuthClientsUser configures how Valkey maps an authenticated client
                       certificate to an ACL user. Set to `CN` to use the certificate's Common
-                      Name, or `URI` to use the first matching URI from the certificate's Subject Alternative
-                      Name (SAN). Defaults to `off`. Requires Valkey >= 9.0.0.
+                      Name, or `URI` to use the first matching URI from the certificate's Subject
+                      Alternative Name (SAN). Defaults to `Disabled`. Requires Valkey >= 9.0.0.
                     enum:
                     - CN
                     - URI
-                    - "off"
+                    - Disabled
                     type: string
                   certificate:
                     description: |-
@@ -3189,9 +3190,10 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: authClientsUser=CN/URI has no effect when authClients=no
+                - message: authClientsUser=CN/URI has no effect when authClients=Disabled
                     (Valkey ignores client certificates)
-                  rule: '!(self.authClients == ''no'' && self.authClientsUser != ''off'')'
+                  rule: '!(self.authClients == ''Disabled'' && self.authClientsUser
+                    != ''Disabled'')'
               tolerations:
                 description: Tolerations defines the pod tolerations.
                 items:

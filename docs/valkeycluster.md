@@ -276,6 +276,8 @@ tls:
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
 
+For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
+
 ### Users
 
 ```yaml

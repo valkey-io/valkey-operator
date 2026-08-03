@@ -277,25 +277,40 @@ type ValkeyClusterSpec struct {
 }
 
 // TLSAuthClients controls how Valkey treats incoming client TLS certificates.
-// It mirrors the Valkey `tls-auth-clients` directive.
-// +kubebuilder:validation:Enum=optional;yes;no
+// API enum values are mapped to Valkey `tls-auth-clients` directive values.
+// +kubebuilder:validation:Enum=Required;Optional;Disabled
 type TLSAuthClients string
 
 const (
 	// TLSAuthClientsOptional accepts both authenticated and unauthenticated clients.
 	// Maps to `tls-auth-clients optional`.
-	TLSAuthClientsOptional TLSAuthClients = "optional"
+	TLSAuthClientsOptional TLSAuthClients = "Optional"
 	// TLSAuthClientsRequired enforces mTLS - clients must present a certificate
 	// signed by the configured CA. Maps to `tls-auth-clients yes`.
-	TLSAuthClientsRequired TLSAuthClients = "yes"
+	TLSAuthClientsRequired TLSAuthClients = "Required"
 	// TLSAuthClientsDisabled disables client certificate processing entirely.
 	// Maps to `tls-auth-clients no`.
-	TLSAuthClientsDisabled TLSAuthClients = "no"
+	TLSAuthClientsDisabled TLSAuthClients = "Disabled"
 )
+
+// tlsAuthClientsDirective maps the valkey CRD API spec field onto the values the
+// `tls-auth-clients` directive accepts.
+var tlsAuthClientsDirective = map[TLSAuthClients]string{
+	TLSAuthClientsRequired: "yes",
+	TLSAuthClientsOptional: "optional",
+	TLSAuthClientsDisabled: "no",
+}
+
+// AuthClientsDirective returns the `tls-auth-clients` value for input, and whether
+// the input is a value the operator knows how to render.
+func (input TLSAuthClients) AuthClientsDirective() (string, bool) {
+	v, ok := tlsAuthClientsDirective[input]
+	return v, ok
+}
 
 // TLSAuthClientsUser controls how Valkey maps an authenticated client
 // certificate to an ACL user. It mirrors the Valkey `tls-auth-clients-user` directive.
-// +kubebuilder:validation:Enum=CN;URI;off
+// +kubebuilder:validation:Enum=CN;URI;Disabled
 type TLSAuthClientsUser string
 
 const (
@@ -303,13 +318,28 @@ const (
 	// ACL username. Pair with `AuthClients: Required` to enforce mTLS.
 	TLSAuthClientsUserCN TLSAuthClientsUser = "CN"
 	// TLSAuthClientsUserURI maps the first URI from the certificate's
-	// Subject Alternative Name (SAN) that natches valkey ACL username.
+	// Subject Alternative Name (SAN) that matches a Valkey ACL username.
 	TLSAuthClientsUserURI TLSAuthClientsUser = "URI"
-	// TLSAuthClientsUserOff disables certificate-to-user mapping (default).
-	TLSAuthClientsUserOff TLSAuthClientsUser = "off"
+	// TLSAuthClientsUserDisabled disables certificate-to-user mapping (default).
+	TLSAuthClientsUserDisabled TLSAuthClientsUser = "Disabled"
 )
 
-// +kubebuilder:validation:XValidation:rule="!(self.authClients == 'no' && self.authClientsUser != 'off')",message="authClientsUser=CN/URI has no effect when authClients=no (Valkey ignores client certificates)"
+// tlsAuthClientsUserDirective maps the valkey CRD API spec field onto the values the
+// `tls-auth-clients-user` directive accepts.
+var tlsAuthClientsUserDirective = map[TLSAuthClientsUser]string{
+	TLSAuthClientsUserCN:       "CN",
+	TLSAuthClientsUserURI:      "URI",
+	TLSAuthClientsUserDisabled: "off",
+}
+
+// AuthClientsUserDirective returns the `tls-auth-clients-user` value for input,
+// and whether input is a value the operator knows how to render.
+func (input TLSAuthClientsUser) AuthClientsUserDirective() (string, bool) {
+	v, ok := tlsAuthClientsUserDirective[input]
+	return v, ok
+}
+
+// +kubebuilder:validation:XValidation:rule="!(self.authClients == 'Disabled' && self.authClientsUser != 'Disabled')",message="authClientsUser=CN/URI has no effect when authClients=Disabled (Valkey ignores client certificates)"
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
 type TLSConfig struct {
@@ -322,18 +352,19 @@ type TLSConfig struct {
 	Certificate CertificateRef `json:"certificate,omitempty"`
 
 	// AuthClients controls whether clients must authenticate with a TLS
-	// certificate. `yes` (the default) enforces mTLS, `optional` allows
-	// both authenticated and unauthenticated clients, and `no` turns
-	// client certificate processing off entirely.
-	// +kubebuilder:default=yes
+	// certificate. `Required` enforces mTLS, `Optional` allows both authenticated
+	// and unauthenticated clients, and `Disabled` turns client certificate
+	// processing off entirely.
+	// Defaults to `Optional`.
+	// +kubebuilder:default=Optional
 	// +optional
 	AuthClients TLSAuthClients `json:"authClients,omitempty"`
 
 	// AuthClientsUser configures how Valkey maps an authenticated client
 	// certificate to an ACL user. Set to `CN` to use the certificate's Common
-	// Name, or `URI` to use the first matching URI from the certificate's Subject Alternative
-	// Name (SAN). Defaults to `off`. Requires Valkey >= 9.0.0.
-	// +kubebuilder:default=off
+	// Name, or `URI` to use the first matching URI from the certificate's Subject
+	// Alternative Name (SAN). Defaults to `Disabled`. Requires Valkey >= 9.0.0.
+	// +kubebuilder:default=Disabled
 	// +optional
 	AuthClientsUser TLSAuthClientsUser `json:"authClientsUser,omitempty"`
 }

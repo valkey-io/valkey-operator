@@ -141,20 +141,34 @@ func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1a
 	return !equality.Semantic.DeepEqual(currentSpec, desiredSpec)
 }
 
-// anyNodeRequiresRoll returns true if any existing ValkeyNode in the list has
-// a spec diff against what the cluster would build for it. Used as a cheap
-// pre-flight check to avoid opening Valkey connections on steady-state reconciles.
-//
-// configHash must be the current server config hash so the desired spec matches
-// what reconcileValkeyNode actually applies; omitting it would make every
-// settled node (which carries the hash) report a spurious diff and defeat the
-// purpose of this pre-flight check.
-//
-// aclSecret is used to compute Spec.WorkloadRevision the same way
-// reconcileValkeyNode does. Passing nil hashes without ACL template annotations
-// (bootstrap); once the secret exists, pass it so settled nodes with a
-// WorkloadRevision do not spuriously look like they need a roll.
-func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, aclSecret *corev1.Secret) bool {
+// needsProactiveFailoverForRoll reports whether a Spec update should run
+// proactive failover before applying. First-time WorkloadRevision backfill
+// (empty -> computed) with no other Spec field changes does not restart pods
+// by itself and must not fail over primaries solely to write bookkeeping.
+func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode) bool {
+	if !nodeRequiresRoll(current, desired) {
+		return false
+	}
+	// Other Spec fields differ (image, config hash, resources, …): real roll.
+	c, d := current.Spec, desired.Spec
+	c.WorkloadRevision, d.WorkloadRevision = "", ""
+	c.Config, d.Config = nil, nil
+	if !equality.Semantic.DeepEqual(c, d) {
+		return true
+	}
+	// Only WorkloadRevision differs.
+	// Empty current revision is first-time backfill, not a pod template roll.
+	if current.Spec.WorkloadRevision == "" {
+		return false
+	}
+	// Non-empty A -> B: Spec authorizes a new template (e.g. ACL annotation hash).
+	return current.Spec.WorkloadRevision != desired.Spec.WorkloadRevision
+}
+
+// anyNodeRequiresFailoverAwareRoll is true when at least one node needs a Spec
+// update that should scrape live topology for proactive failover / replica-first
+// primary placement. Revision-only backfill does not qualify.
+func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, aclSecret *corev1.Secret) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -164,13 +178,10 @@ func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valk
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 			desired.Spec.ServerConfigHash = configHash
-			// Match reconcileValkeyNode: desired must include WorkloadRevision or
-			// every settled node (with a hash set) looks like a perpetual roll.
 			if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
-				// Cannot hash: treat as needs roll so we still scrape for failover.
 				return true
 			}
-			if current, ok := byName[desired.Name]; ok && nodeRequiresRoll(current, desired) {
+			if current, ok := byName[desired.Name]; ok && needsProactiveFailoverForRoll(current, desired) {
 				return true
 			}
 		}

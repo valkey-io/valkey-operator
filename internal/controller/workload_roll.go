@@ -84,6 +84,7 @@ func computeWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev
 }
 
 // buildNodePodTemplate returns the desired pod template for a ValkeyNode.
+// Empty WorkloadType is treated as StatefulSet (CRD default).
 func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) (corev1.PodTemplateSpec, error) {
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
@@ -95,7 +96,7 @@ func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.S
 			dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
 		}
 		return dep.Spec.Template, nil
-	default:
+	case valkeyiov1alpha1.WorkloadTypeStatefulSet, "":
 		sts, err := buildValkeyNodeStatefulSet(node)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
@@ -104,6 +105,8 @@ func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.S
 			sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
 		}
 		return sts.Spec.Template, nil
+	default:
+		return corev1.PodTemplateSpec{}, fmt.Errorf("unsupported workload type %q", node.Spec.WorkloadType)
 	}
 }
 

@@ -324,6 +324,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("get the original ACL hash")
 			cmd = exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 				"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
 			)
 			aclHash, err := utils.Run(cmd)
@@ -356,6 +357,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			By("validating pod is recreated with new ACL")
 			verifyPodRoll := func(g Gomega) {
 				cmd = exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 					"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
 				)
 				newAclHash, err := utils.Run(cmd)

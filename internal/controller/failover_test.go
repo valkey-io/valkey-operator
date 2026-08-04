@@ -174,16 +174,13 @@ func TestNodeRequiresRollIgnoresConfig(t *testing.T) {
 	})
 }
 
-func TestAnyNodeRequiresRoll(t *testing.T) {
+func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
 	}
 	const configHash = "abc123"
 
-	// steadyStateNode returns the node the cluster would build for (0,0) in a
-	// settled cluster: matching spec (including WorkloadRevision), the current
-	// config hash, and a pod IP. Mirrors what reconcileValkeyNode persists.
 	steadyStateNode := func() valkeyiov1alpha1.ValkeyNode {
 		n := buildClusterValkeyNode(cluster, 0, 0)
 		n.Spec.ServerConfigHash = configHash
@@ -192,29 +189,71 @@ func TestAnyNodeRequiresRoll(t *testing.T) {
 		return *n
 	}
 
-	t.Run("settled node with matching config hash and workload revision does not require roll", func(t *testing.T) {
+	t.Run("settled node does not need failover-aware roll", func(t *testing.T) {
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{steadyStateNode()}}
-		assert.False(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
 	})
 
-	t.Run("node with empty WorkloadRevision requires roll once desired sets it", func(t *testing.T) {
+	t.Run("empty WorkloadRevision backfill does not need failover-aware roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.WorkloadRevision = ""
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
+		assert.True(t, nodeRequiresRoll(&n, func() *valkeyiov1alpha1.ValkeyNode {
+			d := buildClusterValkeyNode(cluster, 0, 0)
+			d.Spec.ServerConfigHash = configHash
+			require.NoError(t, setDesiredWorkloadRevision(d, nil))
+			return d
+		}()))
 	})
 
-	t.Run("node with stale config hash requires roll", func(t *testing.T) {
+	t.Run("stale config hash needs failover-aware roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.ServerConfigHash = "stale"
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
 	})
 
-	t.Run("node with stale WorkloadRevision requires roll", func(t *testing.T) {
+	t.Run("stale WorkloadRevision needs failover-aware roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.WorkloadRevision = "not-the-real-hash"
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresRoll(cluster, nodes, configHash, nil))
+		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
+	})
+}
+
+func TestNeedsProactiveFailoverForRoll(t *testing.T) {
+	base := func() (*valkeyiov1alpha1.ValkeyNode, *valkeyiov1alpha1.ValkeyNode) {
+		current := &valkeyiov1alpha1.ValkeyNode{
+			Spec:   valkeyiov1alpha1.ValkeyNodeSpec{Image: "valkey:8", WorkloadRevision: "rev-a"},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
+		}
+		desired := current.DeepCopy()
+		return current, desired
+	}
+
+	t.Run("no spec change does not need failover", func(t *testing.T) {
+		current, desired := base()
+		assert.False(t, needsProactiveFailoverForRoll(current, desired))
+	})
+
+	t.Run("empty revision backfill does not need failover", func(t *testing.T) {
+		current, desired := base()
+		current.Spec.WorkloadRevision = ""
+		desired.Spec.WorkloadRevision = "rev-b"
+		assert.True(t, nodeRequiresRoll(current, desired))
+		assert.False(t, needsProactiveFailoverForRoll(current, desired))
+	})
+
+	t.Run("revision A to B needs failover", func(t *testing.T) {
+		current, desired := base()
+		desired.Spec.WorkloadRevision = "rev-b"
+		assert.True(t, needsProactiveFailoverForRoll(current, desired))
+	})
+
+	t.Run("image change needs failover", func(t *testing.T) {
+		current, desired := base()
+		desired.Spec.Image = "valkey:9"
+		assert.True(t, needsProactiveFailoverForRoll(current, desired))
 	})
 }

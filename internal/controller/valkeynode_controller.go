@@ -504,46 +504,46 @@ func (r *ValkeyNodeReconciler) clearWorkloadDrift(ctx context.Context, node *val
 // syncStatefulSetWithoutRoll updates labels, owner, and Spec when the pod
 // template would not roll.
 func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
-	log := logf.FromContext(ctx)
 	before := sts.DeepCopy()
 	sts.Labels = desired.Labels
 	sts.Spec = desired.Spec
 	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
 		return err
 	}
-	if equality.Semantic.DeepEqual(before.Labels, sts.Labels) &&
-		equality.Semantic.DeepEqual(before.Spec, sts.Spec) &&
-		equality.Semantic.DeepEqual(before.OwnerReferences, sts.OwnerReferences) {
-		log.V(1).Info("StatefulSet already matches desired (no pod template roll)", "name", sts.Name)
-		return nil
-	}
-	if err := r.Update(ctx, sts); err != nil {
-		return err
-	}
-	log.V(1).Info("synced StatefulSet without pod template roll", "name", sts.Name)
-	return nil
+	return r.maybeUpdateWorkloadWithoutRoll(ctx, sts, before.Labels, sts.Labels, before.Spec, sts.Spec, before.OwnerReferences, sts.OwnerReferences, "StatefulSet", sts.Name)
 }
 
 // syncDeploymentWithoutRoll updates labels, owner, and Spec when the pod
 // template would not roll.
 func (r *ValkeyNodeReconciler) syncDeploymentWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, dep *appsv1.Deployment, desired *appsv1.Deployment) error {
-	log := logf.FromContext(ctx)
 	before := dep.DeepCopy()
 	dep.Labels = desired.Labels
 	dep.Spec = desired.Spec
 	if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
 		return err
 	}
-	if equality.Semantic.DeepEqual(before.Labels, dep.Labels) &&
-		equality.Semantic.DeepEqual(before.Spec, dep.Spec) &&
-		equality.Semantic.DeepEqual(before.OwnerReferences, dep.OwnerReferences) {
-		log.V(1).Info("Deployment already matches desired (no pod template roll)", "name", dep.Name)
+	return r.maybeUpdateWorkloadWithoutRoll(ctx, dep, before.Labels, dep.Labels, before.Spec, dep.Spec, before.OwnerReferences, dep.OwnerReferences, "Deployment", dep.Name)
+}
+
+func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
+	ctx context.Context,
+	obj client.Object,
+	beforeLabels, afterLabels map[string]string,
+	beforeSpec, afterSpec any,
+	beforeOwners, afterOwners []metav1.OwnerReference,
+	kind, name string,
+) error {
+	log := logf.FromContext(ctx)
+	if equality.Semantic.DeepEqual(beforeLabels, afterLabels) &&
+		equality.Semantic.DeepEqual(beforeSpec, afterSpec) &&
+		equality.Semantic.DeepEqual(beforeOwners, afterOwners) {
+		log.V(1).Info(kind+" already matches desired (no pod template roll)", "name", name)
 		return nil
 	}
-	if err := r.Update(ctx, dep); err != nil {
+	if err := r.Update(ctx, obj); err != nil {
 		return err
 	}
-	log.V(1).Info("synced Deployment without pod template roll", "name", dep.Name)
+	log.V(1).Info("synced "+kind+" without pod template roll", "name", name)
 	return nil
 }
 

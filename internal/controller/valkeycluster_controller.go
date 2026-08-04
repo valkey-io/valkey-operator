@@ -549,7 +549,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		log.V(1).Info("ACL secret not ready for roll preflight, hashing without it", "err", err)
 		aclSecret = nil
 	}
-	if anyNodeRequiresRoll(cluster, nodes, configHash, aclSecret) {
+	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, aclSecret) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -644,9 +644,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		currentExists = false
 	}
 
-	needsSpecRoll := currentExists && nodeRequiresRoll(current, desired)
+	// Proactive failover only when the Spec update implies a real pod template
+	// change, not first-time WorkloadRevision backfill.
+	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired)
 
-	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsSpecRoll); deferred {
+	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); deferred {
 		return nodeDeferred, nil
 	}
 

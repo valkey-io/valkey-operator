@@ -69,11 +69,15 @@ containers:
 exporter:
   enabled: true   # default
   image: oliver006/redis_exporter:v1.80.0
+  args: # optional command-line flags for exporter
+    - -ping-on-connect
   resources:
     requests:
       memory: "64Mi"
       cpu: "50m"
 ```
+
+NOTE: `oliver006/redis_exporter` command-line arguments have higher priority than the environment variables passed by default, so `exporter.args` can override them when needed.
 
 Each pod runs a `metrics-exporter` sidecar by default, exposing Prometheus metrics on port `9121`. To disable it:
 

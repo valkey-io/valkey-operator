@@ -47,7 +47,7 @@ const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
 	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
+	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.

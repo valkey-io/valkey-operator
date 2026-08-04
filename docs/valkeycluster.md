@@ -68,7 +68,7 @@ containers:
 ```yaml
 exporter:
   enabled: true   # default
-  image: oliver006/redis_exporter:v1.80.0
+  image: oliver006/redis_exporter:v1.88.0
   resources:
     requests:
       memory: "64Mi"
@@ -380,3 +380,4 @@ graph TD
 `ValkeyNode` is an internal CRD — do not create or modify ValkeyNodes directly. All configuration goes through `ValkeyCluster`. See [ValkeyNode design](./valkeynode-design.md) for why this abstraction exists.
 
 For status conditions and events, see [status-conditions.md](./status-conditions.md).
+

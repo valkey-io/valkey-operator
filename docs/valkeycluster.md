@@ -380,4 +380,3 @@ graph TD
 `ValkeyNode` is an internal CRD — do not create or modify ValkeyNodes directly. All configuration goes through `ValkeyCluster`. See [ValkeyNode design](./valkeynode-design.md) for why this abstraction exists.
 
 For status conditions and events, see [status-conditions.md](./status-conditions.md).
-

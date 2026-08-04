@@ -366,6 +366,10 @@ type ExporterSpec struct {
 	// Override the SecurityContext applied to the exporter sidecar container.
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// Additional cmdline arguments passed to exporter sidecar container.
+	// +optional
+	Args []string `json:"args,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

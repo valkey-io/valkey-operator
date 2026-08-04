@@ -151,18 +151,15 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
-	// Spec, with a long backoff so waiters do not spam the API.
-	if meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
-		log.V(1).Info("ValkeyNode awaiting Spec.WorkloadRevision, requeuing", "name", node.Name)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
 
 	if !node.Status.Ready {
 		log.V(1).Info("ValkeyNode not ready, requeuing")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// Apply live config before WorkloadDrift requeue so a node waiting on
+	// Spec.WorkloadRevision can still clear LiveConfigApplied and not block
+	// the cluster controller on an unrelated condition.
 	applied, err := r.applyLiveConfig(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to apply live config")
@@ -187,6 +184,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.Error(condErr, "failed to clear LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
 		}
+	}
+
+	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
+	// Spec, with a long backoff so waiters do not spam the API.
+	if meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+		log.V(1).Info("ValkeyNode awaiting Spec.WorkloadRevision, requeuing", "name", node.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")

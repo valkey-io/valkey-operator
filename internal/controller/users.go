@@ -64,6 +64,9 @@ var (
 			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
 			"+config|get",                // verify applied config / audit current state
+			"+acl|load",                  // reload the aclfile live to apply ACL changes without a pod roll
+			"+acl|getuser",               // read back a user's password hashes to verify the reload landed
+			"+acl|users",                 // read the user set to verify membership after a reload
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
 		}, " "),

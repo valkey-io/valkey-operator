@@ -725,12 +725,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
 			Expect(sts.Generation).To(Equal(initialGen))
 
-			By("node is marked WorkloadDrift awaiting Spec.WorkloadRevision")
+			By("node is marked WorkloadRollPending awaiting Spec.WorkloadRevision")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			drift := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)
-			Expect(drift).NotTo(BeNil())
-			Expect(drift.Status).To(Equal(metav1.ConditionTrue))
-			Expect(drift.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision))
+			pending := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
+			Expect(pending).NotTo(BeNil())
+			Expect(pending.Status).To(Equal(metav1.ConditionTrue))
+			Expect(pending.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision))
 
 			By("advancing Spec.WorkloadRevision to the new template hash")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
@@ -743,11 +743,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("StatefulSet template advances to the new image and drift clears")
+			By("StatefulSet template advances to the new image and pending clears")
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.1"))
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			Expect(testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)).To(BeNil())
+			Expect(testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)).To(BeNil())
 		})
 	})
 

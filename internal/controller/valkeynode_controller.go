@@ -147,7 +147,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// Re-read after ensureWorkload may have written WorkloadDrift status.
+	// Re-read after ensureWorkload may have written WorkloadRollPending status.
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -157,7 +157,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Apply live config before WorkloadDrift requeue so a node waiting on
+	// Apply live config before WorkloadRollPending requeue so a node waiting on
 	// Spec.WorkloadRevision can still clear LiveConfigApplied and not block
 	// the cluster controller on an unrelated condition.
 	applied, err := r.applyLiveConfig(ctx, node)
@@ -188,7 +188,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
 	// Spec, with a long backoff so waiters do not spam the API.
-	if meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+	if meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
 		log.V(1).Info("ValkeyNode awaiting Spec.WorkloadRevision, requeuing", "name", node.Name)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -320,7 +320,7 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 			return err
 		}
 		log.V(1).Info("created StatefulSet", "name", sts.Name)
-		return r.clearWorkloadDrift(ctx, node)
+		return r.clearWorkloadRollPending(ctx, node)
 	}
 
 	desiredHash := podTemplateRollHash(desired.Spec.Template)
@@ -330,7 +330,7 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		if err := r.syncStatefulSetWithoutRoll(ctx, node, sts, desired); err != nil {
 			return err
 		}
-		return r.clearWorkloadDrift(ctx, node)
+		return r.clearWorkloadRollPending(ctx, node)
 	}
 
 	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
@@ -354,7 +354,7 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	log.Info("updated StatefulSet pod template", "name", sts.Name, "desiredHash", desiredHash)
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
 		"Applied pod template update (hash %s)", desiredHash)
-	return r.clearWorkloadDrift(ctx, node)
+	return r.clearWorkloadRollPending(ctx, node)
 }
 
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.
@@ -388,7 +388,7 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 			return err
 		}
 		log.V(1).Info("created Deployment", "name", dep.Name)
-		return r.clearWorkloadDrift(ctx, node)
+		return r.clearWorkloadRollPending(ctx, node)
 	}
 
 	desiredHash := podTemplateRollHash(desired.Spec.Template)
@@ -396,7 +396,7 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 		if err := r.syncDeploymentWithoutRoll(ctx, node, dep, desired); err != nil {
 			return err
 		}
-		return r.clearWorkloadDrift(ctx, node)
+		return r.clearWorkloadRollPending(ctx, node)
 	}
 
 	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
@@ -420,7 +420,7 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	log.Info("updated Deployment pod template", "name", dep.Name, "desiredHash", desiredHash)
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
 		"Applied pod template update (hash %s)", desiredHash)
-	return r.clearWorkloadDrift(ctx, node)
+	return r.clearWorkloadRollPending(ctx, node)
 }
 
 func (r *ValkeyNodeReconciler) getACLSecret(ctx context.Context, clusterName, namespace string) (*corev1.Secret, error) {
@@ -454,7 +454,7 @@ func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
 	if workloadRevisionAllows(fresh, desiredHash) {
 		return true, nil
 	}
-	transitioned, err := r.markWorkloadDrift(ctx, node, desiredHash)
+	transitioned, err := r.markWorkloadRollPending(ctx, node, desiredHash)
 	if err != nil {
 		return false, err
 	}
@@ -465,16 +465,16 @@ func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
 	return false, nil
 }
 
-// markWorkloadDrift sets WorkloadDrift=True. Returns true when newly transitioned.
-func (r *ValkeyNodeReconciler) markWorkloadDrift(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) (bool, error) {
+// markWorkloadRollPending sets WorkloadRollPending=True. Returns true when newly transitioned.
+func (r *ValkeyNodeReconciler) markWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) (bool, error) {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return false, err
 	}
-	alreadyDrifting := meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift)
+	alreadyPending := meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
 	patchBase := current.DeepCopy()
 	changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift,
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending,
 		Status:             metav1.ConditionTrue,
 		Reason:             valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision,
 		Message:            fmt.Sprintf("desired workload template hash %s awaits Spec.WorkloadRevision (have %q)", desiredHash, current.Spec.WorkloadRevision),
@@ -482,24 +482,24 @@ func (r *ValkeyNodeReconciler) markWorkloadDrift(ctx context.Context, node *valk
 	})
 	if changed {
 		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-			return false, fmt.Errorf("patch WorkloadDrift condition: %w", err)
+			return false, fmt.Errorf("patch WorkloadRollPending condition: %w", err)
 		}
 	}
-	return !alreadyDrifting && changed, nil
+	return !alreadyPending && changed, nil
 }
 
-func (r *ValkeyNodeReconciler) clearWorkloadDrift(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+	if !meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
 		return nil
 	}
 	patchBase := current.DeepCopy()
-	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadDrift) {
+	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
 		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-			return fmt.Errorf("clear WorkloadDrift condition: %w", err)
+			return fmt.Errorf("clear WorkloadRollPending condition: %w", err)
 		}
 	}
 	return nil

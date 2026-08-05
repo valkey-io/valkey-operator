@@ -190,12 +190,12 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
-	// ValkeyNodeConditionWorkloadDrift indicates the desired pod template built
-	// by the operator differs from the live StatefulSet/Deployment template, and
-	// Spec.WorkloadRevision has not yet authorized that template. Status True
-	// means a rolling update is deferred until the ValkeyCluster controller
-	// advances Spec.WorkloadRevision (one node at a time today).
-	ValkeyNodeConditionWorkloadDrift = "WorkloadDrift"
+	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
+	// is intentionally deferred: the desired template differs from live, and
+	// Spec.WorkloadRevision has not yet authorized that template. Status True means
+	// waiting for the ValkeyCluster controller to advance Spec.WorkloadRevision
+	// (one node at a time today). Expected staging, not an error.
+	ValkeyNodeConditionWorkloadRollPending = "WorkloadRollPending"
 )
 
 const (

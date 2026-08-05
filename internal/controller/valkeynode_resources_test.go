@@ -31,6 +31,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return &envVars[i]
+		}
+	}
+	require.Failf(t, "env var not found", "expected env var %q to be present", name)
+	return nil
+}
+
 func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 	return &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -602,24 +613,33 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, resources, c.Resources)
 	})
 
-	t.Run("args contain redis addr", func(t *testing.T) {
+	t.Run("env contains redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
-		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "redis://localhost:6379", redisAddr.Value)
+		assert.Empty(t, c.Args)
 		assert.Empty(t, c.VolumeMounts)
 	})
 
-	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+	t.Run("env contains rediss addr with tls", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
-		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
-		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
+		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
+		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("args set from spec", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true, Args: []string{"-append-instance-role-label"}}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, []string{"-append-instance-role-label"}, c.Args)
 	})
 
 	t.Run("security context passthrough", func(t *testing.T) {
@@ -885,6 +905,62 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	require.Len(t, node.Spec.TopologySpreadConstraints, 2)
 	assert.Equal(t, "topology.kubernetes.io/zone", node.Spec.TopologySpreadConstraints[0].TopologyKey, "passthrough first")
 	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "curated appended")
+}
+
+func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+			}}},
+		},
+	}
+
+	// node-index 0 (a primary): zone shard TSC + zone primaries TSC, no affinity.
+	primary := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, primary.Spec.Affinity, "zone axis never renders anti-affinity")
+	require.Len(t, primary.Spec.TopologySpreadConstraints, 2)
+	for _, tsc := range primary.Spec.TopologySpreadConstraints {
+		assert.Equal(t, "topology.kubernetes.io/zone", tsc.TopologyKey)
+	}
+	assert.Equal(t, "1", primary.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex], "shard TSC first")
+	assert.Equal(t, "0", primary.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels[LabelNodeIndex], "primaries TSC second")
+
+	// node-index 1 (a replica): zone shard TSC only.
+	replica := buildClusterValkeyNode(cluster, 1, 1)
+	require.Len(t, replica.Spec.TopologySpreadConstraints, 1, "replica carries only the shard TSC")
+	assert.Equal(t, "1", replica.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex])
+}
+
+func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
+	userTSC := corev1.TopologySpreadConstraint{
+		MaxSkew: 1, TopologyKey: "custom-key", WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 1, Replicas: 0,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
+				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				}},
+				Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+				}},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	// passthrough first, then node curation, then zone curation.
+	require.Len(t, node.Spec.TopologySpreadConstraints, 3)
+	assert.Equal(t, "custom-key", node.Spec.TopologySpreadConstraints[0].TopologyKey, "passthrough first")
+	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "node curation second")
+	assert.Equal(t, "topology.kubernetes.io/zone", node.Spec.TopologySpreadConstraints[2].TopologyKey, "zone curation last")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ImagePullSecrets(t *testing.T) {

@@ -63,6 +63,7 @@ var (
 			"+cluster|migrateslots",      // migrate slots between shards
 			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
+			"+config|get",                // verify applied config / audit current state
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
 		}, " "),
@@ -70,8 +71,8 @@ var (
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 
 		replicationUser: strings.Join([]string{
-			"-@all +psync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
-			"+cluster|syncslots",           // required for atomic slot migration
+			"-@all +psync +sync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas; +sync is required for dual-channel replication
+			"+cluster|syncslots",                 // required for atomic slot migration
 			// Today, Atomic slot migration streams the snapshot as a command stream
 			// (SELECT + type-specific write commands from the AOF-rewrite)
 			"+select +@write ~* -flushall -flushdb -swapdb",

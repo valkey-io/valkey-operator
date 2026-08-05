@@ -898,6 +898,14 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		)
 	}
 
+	zoneShardMode, zonePrimariesMode, zonePodsMode := effectiveZoneSpread(cluster.Spec.Scheduling)
+	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode); len(curated) > 0 {
+		topologySpreadConstraints = append(
+			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
+			curated...,
+		)
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -919,7 +927,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
-			TLS:                           cluster.Spec.TLS,
+			TLS:                           cluster.GetTLS(),
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
@@ -936,9 +944,9 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 		ips = append(ips, node.Status.PodIP)
 	}
 	var tlsConfig *tls.Config
-	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
+	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificate.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
-		cfg, err := getTLSConfig(ctx, r.APIReader, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg
 		}

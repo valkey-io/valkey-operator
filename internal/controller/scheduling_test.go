@@ -117,3 +117,72 @@ func TestNodeSpreadTSCs(t *testing.T) {
 		assert.NotContains(t, got[1].LabelSelector.MatchLabels, LabelNodeIndex, "pods second")
 	})
 }
+
+func TestEffectiveZoneSpread_Defaults(t *testing.T) {
+	for name, s := range map[string]*valkeyiov1alpha1.SchedulingSpec{
+		"nil spec":   nil,
+		"nil zone":   {},
+		"empty zone": {Zone: &valkeyiov1alpha1.ZoneScheduling{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			shard, primaries, pods := effectiveZoneSpread(s)
+			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, shard, "shard default Disabled")
+			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, primaries, "primaries default Disabled")
+			assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, pods, "pods default Disabled")
+		})
+	}
+}
+
+func TestEffectiveZoneSpread_Overrides(t *testing.T) {
+	s := &valkeyiov1alpha1.SchedulingSpec{Zone: &valkeyiov1alpha1.ZoneScheduling{
+		Spread: valkeyiov1alpha1.ZoneSpread{
+			Shard:     valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadRequired},
+			Primaries: valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadDisabled},
+			Pods:      valkeyiov1alpha1.SpreadConstraint{Mode: valkeyiov1alpha1.SpreadPreferred},
+		},
+	}}
+	shard, primaries, pods := effectiveZoneSpread(s)
+	assert.Equal(t, valkeyiov1alpha1.SpreadRequired, shard)
+	assert.Equal(t, valkeyiov1alpha1.SpreadDisabled, primaries)
+	assert.Equal(t, valkeyiov1alpha1.SpreadPreferred, pods)
+}
+
+func TestZoneSpreadTSCs(t *testing.T) {
+	t.Run("all Disabled renders nothing", func(t *testing.T) {
+		assert.Empty(t, zoneSpreadTSCs("c", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))
+	})
+
+	t.Run("shard Required: zone TSC on all pods, shard-index selector", func(t *testing.T) {
+		got := zoneSpreadTSCs("mycluster", 2, 1, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled)
+		require.Len(t, got, 1)
+		assert.Equal(t, corev1.DoNotSchedule, got[0].WhenUnsatisfiable)
+		assert.Equal(t, int32(1), got[0].MaxSkew)
+		assert.Equal(t, "topology.kubernetes.io/zone", got[0].TopologyKey)
+		assert.Equal(t, map[string]string{LabelCluster: "mycluster", LabelShardIndex: "2"}, got[0].LabelSelector.MatchLabels)
+	})
+
+	t.Run("primaries only emitted on node-index 0", func(t *testing.T) {
+		on0 := zoneSpreadTSCs("mycluster", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		require.Len(t, on0, 1)
+		assert.Equal(t, corev1.ScheduleAnyway, on0[0].WhenUnsatisfiable)
+		assert.Equal(t, map[string]string{LabelCluster: "mycluster", LabelNodeIndex: "0"}, on0[0].LabelSelector.MatchLabels)
+
+		on1 := zoneSpreadTSCs("mycluster", 0, 1, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		assert.Empty(t, on1, "primaries suppressed on non-zero node index")
+	})
+
+	t.Run("pods Required: cluster-wide zone TSC on every index", func(t *testing.T) {
+		got := zoneSpreadTSCs("mycluster", 1, 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired)
+		require.Len(t, got, 1)
+		assert.Equal(t, map[string]string{LabelCluster: "mycluster"}, got[0].LabelSelector.MatchLabels)
+	})
+
+	t.Run("all three on node-index 0: shard, primaries, pods in order", func(t *testing.T) {
+		got := zoneSpreadTSCs("mycluster", 1, 0, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadPreferred)
+		require.Len(t, got, 3)
+		assert.Equal(t, "1", got[0].LabelSelector.MatchLabels[LabelShardIndex], "shard first")
+		assert.Equal(t, "0", got[1].LabelSelector.MatchLabels[LabelNodeIndex], "primaries second")
+		assert.NotContains(t, got[2].LabelSelector.MatchLabels, LabelShardIndex, "pods last")
+		assert.NotContains(t, got[2].LabelSelector.MatchLabels, LabelNodeIndex, "pods last")
+	})
+}

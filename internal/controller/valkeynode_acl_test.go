@@ -25,7 +25,7 @@ import (
 )
 
 func TestDesiredUserPasswordHashes(t *testing.T) {
-	acl := `user alice on #aaa #bbb ~* +@all
+	acl := `user alice on #bbb #aaa ~* +@all
 user bob on #ccc ~key:* +get
 user nopass-user on nopass ~* +@read
 

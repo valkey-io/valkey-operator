@@ -170,6 +170,31 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
 
+			By("validating live ACL converges with only the unmanaged default user")
+			// This cluster sets no custom users, so the only user on the server is
+			// Valkey's own `default`, which the aclfile does not manage. The node
+			// must still reach ACLApplied=True: aclObservablyInSync has to ignore
+			// the unmanaged `default` rather than loop forever waiting for it to
+			// match a spec.users entry that does not exist.
+			verifyACLApplied := func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[*].metadata.name}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				names := strings.Fields(out)
+				g.Expect(names).To(HaveLen(6))
+				for _, name := range names {
+					node, err := utils.GetValkeyNodeStatus(name)
+					g.Expect(err).NotTo(HaveOccurred())
+					cond := utils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+					g.Expect(cond).NotTo(BeNil(), "ACLApplied condition should be set on %s", name)
+					g.Expect(cond.Status).To(Equal(metav1.ConditionTrue), "ACLApplied should converge to True on %s", name)
+				}
+			}
+			// ACLApplied is only set once a node reports Ready, so give it the same
+			// budget as cluster startup rather than a single pass.
+			Eventually(verifyACLApplied, 5*time.Minute, 5*time.Second).Should(Succeed())
+
 			// NOTE: Kubernetes Events are best-effort and may be rate-limited, delayed by
 			// `kubectl get events` / `kubectl describe` when many events are emitted for the same Custom Resource.
 			// In particular, kubectl output can appear capped (~15–20) and events can show up late; see:

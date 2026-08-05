@@ -29,6 +29,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -547,14 +548,30 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
+	// One ACL secret snapshot for preflight and per-node WorkloadRevision so the
+	// scrape decision and authorized hash cannot disagree mid-reconcile.
+	aclSecret, err := r.getClusterACLSecret(ctx, cluster)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("get ACL secret for workload revision: %w", err)
+		}
+		// Bootstrap: secret may not exist yet; hash without ACL annotations.
+		log.V(1).Info("ACL secret not ready for roll preflight, hashing without it", "err", err)
+		aclSecret = nil
+	}
+
 	// Scrape cluster state once for proactive failover decisions, but only
-	// when at least one node actually needs a roll. During initial bootstrap
-	// no nodes exist, so state stays nil. The snapshot is safe to reuse
-	// across the loop: replicaFirstNodeOrder uses it to place the actual
+	// when at least one node needs a failover-aware roll. During initial
+	// bootstrap no nodes exist, so state stays nil. The snapshot is safe to
+	// reuse across the loop: replicaFirstNodeOrder uses it to place the actual
 	// primary last within each shard, and after an update we requeue
 	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	if anyNodeRequiresRoll(cluster, nodes, configHash) {
+	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
+	if err != nil {
+		return false, err
+	}
+	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, aclSecret, liveHashes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -576,7 +593,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash, aclSecret, liveHashes)
 			if err != nil {
 				return false, err
 			}
@@ -617,11 +634,17 @@ const (
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (nodeResult, error) {
+// aclSecret and liveTemplateHashes are the reconcileValkeyNodes snapshot so
+// WorkloadRevision and failover decisions stay consistent for the whole pass.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string, aclSecret *corev1.Secret, liveTemplateHashes map[string]string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 	desired.Spec.ServerConfigHash = configHash
+	if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
+		return nodeUnchanged, err
+	}
+
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -629,40 +652,26 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Check if proactive failover is needed before updating.
-	if clusterState != nil {
-		current := &valkeyiov1alpha1.ValkeyNode{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-			if !apierrors.IsNotFound(err) {
-				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
-					"name", node.Name, "err", err)
-			}
-		} else if nodeRequiresRoll(current, desired) {
-			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
-			if shard != nil {
-				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP,
-					"syncedReplicas", len(replicas))
-				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
-					log.Info("proactive failover did not complete, proceeding with roll",
-						"name", node.Name, "err", err)
-				}
-			} else if cluster.Spec.Replicas > 0 {
-				// findFailoverShard returned nil for one of three reasons:
-				// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
-				// 2. Node is in a shard but is a replica: safe to roll
-				// 3. Node isn't in any shard (isolated): safe to roll
-				// Only case 1 requires waiting; identify it's the actual primary of its shard.
-				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
-				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
-					log.Info("primary has no synced replicas, deferring roll",
-						"name", node.Name, "address", current.Status.PodIP,
-						"shardNodes", len(shardInState.Nodes),
-						"shardId", shardInState.Id)
-					return nodeDeferred, nil
-				}
-			}
+	// Load current node (if any) for failover decisions.
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	currentExists := true
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nodeUnchanged, err
 		}
+		currentExists = false
+	}
+
+	liveHash := ""
+	if liveTemplateHashes != nil {
+		liveHash = liveTemplateHashes[desired.Name]
+	}
+	// Proactive failover only when the Spec update implies a real pod template
+	// change, not pure WorkloadRevision backfill when live already matches.
+	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
+
+	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); deferred {
+		return nodeDeferred, nil
 	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
@@ -679,36 +688,134 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d", shardIndex, nodeIndex)
 		return nodeCreated, nil
 	case controllerutil.OperationResultUpdated:
-		// A spec change was applied. Requeue unconditionally so the node has
-		// time to settle before we advance to the next one (one-at-a-time
-		// rolling update).
+		// A spec change was applied (including WorkloadRevision advances). Requeue
+		// so the node settles before the next one (one-at-a-time rolling update).
 		log.V(1).Info("updated ValkeyNode, waiting for it to become ready", "name", node.Name)
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
 		return nodeRequeued, nil
 	case controllerutil.OperationResultNone:
-		if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
-			log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
-				"name", node.Name,
-				"generation", node.Generation,
-				"observedGeneration", node.Status.ObservedGeneration)
-			return nodeRequeued, nil
-		}
-		if !node.Status.Ready {
-			// No spec change, but the node hasn't reached Ready yet (e.g.
-			// still starting after a prior update). Unlike Updated above, we
-			// only wait when not-ready; a ready unchanged node is safe to
-			// advance past.
-			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
-			return nodeRequeued, nil
-		}
-		if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
-			log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
-			return nodeRequeued, nil
-		}
+		return r.handleUnchangedValkeyNode(ctx, node)
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
 	return nodeUnchanged, nil
+}
+
+// maybeProactiveFailoverBeforeRoll runs proactive failover when rolling a
+// primary. Returns true when the primary has no synced replica yet (defer).
+func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, current *valkeyiov1alpha1.ValkeyNode, rolling bool) bool {
+	log := logf.FromContext(ctx)
+	if clusterState == nil || !rolling {
+		return false
+	}
+	shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+	if shard != nil {
+		log.Info("proactive failover before rolling primary",
+			"name", current.Name, "address", current.Status.PodIP,
+			"syncedReplicas", len(replicas))
+		if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+			// Do not authorize the Spec update (and pod roll) until failover succeeds
+			// or the primary no longer needs failover (checked on next reconcile).
+			log.Info("proactive failover did not complete, deferring roll",
+				"name", current.Name, "err", err)
+			return true
+		}
+		return false
+	}
+	if cluster.Spec.Replicas == 0 {
+		return false
+	}
+	// findFailoverShard returned nil for one of three reasons:
+	// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
+	// 2. Node is in a shard but is a replica: safe to roll
+	// 3. Node isn't in any shard (isolated): safe to roll
+	// Only case 1 requires waiting; identify it's the actual primary of its shard.
+	shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+	if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+		log.Info("primary has no synced replicas, deferring roll",
+			"name", current.Name, "address", current.Status.PodIP,
+			"shardNodes", len(shardInState.Nodes),
+			"shardId", shardInState.Id)
+		return true
+	}
+	return false
+}
+
+// handleUnchangedValkeyNode waits until a settled node is Ready before advancing.
+func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (nodeResult, error) {
+	log := logf.FromContext(ctx)
+	if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
+		log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
+			"name", node.Name,
+			"generation", node.Generation,
+			"observedGeneration", node.Status.ObservedGeneration)
+		return nodeRequeued, nil
+	}
+	if !node.Status.Ready {
+		// No spec change, but the node hasn't reached Ready yet (e.g.
+		// still starting after a prior update). Unlike Updated above, we
+		// only wait when not-ready; a ready unchanged node is safe to
+		// advance past.
+		log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
+		return nodeRequeued, nil
+	}
+	if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
+		log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
+		return nodeRequeued, nil
+	}
+	return nodeUnchanged, nil
+}
+
+// liveWorkloadTemplateHashes returns podTemplateRollHash of each cluster node's
+// live StatefulSet or Deployment template (empty string when missing).
+func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]string, error) {
+	out := make(map[string]string, len(nodes.Items))
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		hash, err := r.livePodTemplateHash(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		if hash != "" {
+			out[n.Name] = hash
+		}
+	}
+	return out, nil
+}
+
+func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
+	switch node.Spec.WorkloadType {
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		dep := &appsv1.Deployment{}
+		if err := r.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		return podTemplateRollHash(dep.Spec.Template), nil
+	default:
+		// StatefulSet or empty (CRD default).
+		sts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, key, sts); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		return podTemplateRollHash(sts.Spec.Template), nil
+	}
+}
+
+// getClusterACLSecret loads the cluster internal ACL secret used for template annotations.
+func (r *ValkeyClusterReconciler) getClusterACLSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
+	aclSecret := &corev1.Secret{}
+	name := getInternalSecretName(cluster.Name)
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: cluster.Namespace}, aclSecret); err != nil {
+		return nil, err
+	}
+	return aclSecret, nil
 }
 
 const (
@@ -833,7 +940,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
-			TLS:                           cluster.Spec.TLS,
+			TLS:                           cluster.GetTLS(),
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
@@ -850,9 +957,9 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 		ips = append(ips, node.Status.PodIP)
 	}
 	var tlsConfig *tls.Config
-	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
+	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificate.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
-		cfg, err := getTLSConfig(ctx, r.APIReader, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg
 		}

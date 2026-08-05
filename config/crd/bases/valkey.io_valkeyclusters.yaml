@@ -1591,6 +1591,12 @@ spec:
                   enabled: true
                 description: Metrics exporter options
                 properties:
+                  args:
+                    description: Additional cmdline arguments passed to exporter sidecar
+                      container.
+                    items:
+                      type: string
+                    type: array
                   enabled:
                     description: Enable or disable the exporter sidecar container
                     type: boolean
@@ -1876,6 +1882,35 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              networking:
+                description: |-
+                  Networking groups how clients and peers reach cluster nodes (TLS today;
+                  discovery and external access land in follow-ups under this object).
+                properties:
+                  tls:
+                    description: TLS configuration for the cluster.
+                    properties:
+                      certificate:
+                        description: |-
+                          Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
+                          The referenced secret should contain the following:
+
+                          - `ca.crt`: The certificate authority.
+                          - `tls.crt`: The certificate (or a chain).
+                          - `tls.key`: The private key to the first certificate in the certificate chain.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
+                    required:
+                    - certificate
+                    type: object
+                type: object
               persistence:
                 description: Persistence defines durable storage that is propagated
                   to each ValkeyNode.
@@ -3505,23 +3540,6 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
-              tls:
-                description: TLS configuration for the cluster
-                properties:
-                  certificate:
-                    description: |-
-                      Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
-                      The referenced secret should contain the following:
-
-                      - `ca.crt`: The certificate authority.
-                      - `tls.crt`: The certificate (or a chain).
-                      - `tls.key`: The private key to the first certificate in the certificate chain.
-                    properties:
-                      secretName:
-                        description: SecretName is the name of the secret.
-                        type: string
-                    type: object
-                type: object
               users:
                 description: Users, and ACL-related configuration; see valkeyacls_types.go
                 items:

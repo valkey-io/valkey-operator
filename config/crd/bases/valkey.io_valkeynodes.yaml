@@ -3167,8 +3167,14 @@ spec:
                     properties:
                       secretName:
                         description: SecretName is the name of the secret.
+                        maxLength: 253
+                        minLength: 1
                         type: string
+                    required:
+                    - secretName
                     type: object
+                required:
+                - certificate
                 type: object
               tolerations:
                 description: Tolerations defines the pod tolerations.

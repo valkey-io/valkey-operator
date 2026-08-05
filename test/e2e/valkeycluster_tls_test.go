@@ -96,9 +96,10 @@ metadata:
 spec:
   shards: 1
   replicas: 1
-  tls:
-    certificate:
-      secretName: %s
+  networking:
+    tls:
+      certificate:
+        secretName: %s
   exporter:
     enabled: true
 `, valkeyClusterName, tlsSecretName)

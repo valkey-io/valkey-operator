@@ -1510,8 +1510,49 @@ spec:
 				g.Expect(degradedCond).NotTo(BeNil(), "Degraded condition not found")
 				g.Expect(degradedCond.Status).To(Equal(metav1.ConditionTrue))
 				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+
+				satisfiedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionSchedulingSatisfied)
+				g.Expect(satisfiedCond).NotTo(BeNil(), "SchedulingSatisfied condition not found")
+				g.Expect(satisfiedCond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(satisfiedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonPodsPendingScheduling))
 			}
 			Eventually(verifyUnschedulableStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("labeling a second worker node so the spread constraint can be satisfied")
+			cmd = exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "jsonpath={.items[*].metadata.name}")
+			workerNodes, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to list worker nodes: %s", workerNodes))
+			secondNode := ""
+			for _, node := range strings.Fields(workerNodes) {
+				if node != eligibleNode {
+					secondNode = node
+					break
+				}
+			}
+			Expect(secondNode).NotTo(BeEmpty(), "expected a second worker node")
+
+			cmd = exec.Command("kubectl", "label", "node", secondNode,
+				fmt.Sprintf("%s=%s", eligibleNodeLabelKey, eligibleNodeLabelValue), "--overwrite=true")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label second worker node: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "label", "node", secondNode, eligibleNodeLabelKey+"-", "--overwrite=true")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for SchedulingSatisfied to recover to True")
+			verifyRecoveredStatus := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(unschedulableClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				satisfiedCond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionSchedulingSatisfied)
+				g.Expect(satisfiedCond).NotTo(BeNil(), "SchedulingSatisfied condition not found")
+				g.Expect(satisfiedCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(satisfiedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonAllPodsScheduled))
+			}
+			Eventually(verifyRecoveredStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
 		It("spreads shard primaries across different nodes", func() {

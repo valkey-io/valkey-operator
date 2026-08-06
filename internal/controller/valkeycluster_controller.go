@@ -416,6 +416,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	if issue == nil {
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable)
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSchedulingSatisfied, valkeyiov1alpha1.ReasonAllPodsScheduled, "All pods are scheduled", metav1.ConditionTrue)
 		return ctrl.Result{}, false, nil
 	}
 
@@ -427,6 +428,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionSchedulingSatisfied, valkeyiov1alpha1.ReasonPodsPendingScheduling, message, metav1.ConditionFalse)
 	if err := r.updateStatus(ctx, cluster, nil); err != nil {
 		return ctrl.Result{}, false, err
 	}

@@ -94,6 +94,22 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 
+#### `SchedulingSatisfied`
+Indicates whether every in-scope pod in the cluster is currently schedulable.
+
+| Status | Meaning |
+|---|---|
+| `True` | All in-scope pods are scheduled. |
+| `False` | At least one pod is Pending because the Kubernetes scheduler reported it unschedulable. The message names the pod and the scheduler's detail. |
+
+Reasons:
+- `AllPodsScheduled` – every in-scope pod is scheduled (status `True`)
+- `PodsPendingScheduling` – at least one pod is unschedulable (status `False`)
+
+The operator reports the instantaneous state only — it does not wait out a threshold. Decide how long "stuck" is too long in your Prometheus alert's `for:` clause against the [`valkey_operator_cluster_condition`](valkeycluster.md#operator-metrics) metric (`type="SchedulingSatisfied"`).
+
+This overlaps with `Degraded`'s and `Ready`'s `PodUnschedulable` reason (all surface the same scheduler signal); `SchedulingSatisfied` is the dedicated, alertable surface.
+
 ---
 
 ### Valkey-specific conditions

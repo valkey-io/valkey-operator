@@ -352,6 +352,8 @@ users:
 - `channels` — pub/sub channel patterns
 - `permissions` — raw ACL string appended after any generated rules
 
+ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server.
+
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)

@@ -319,9 +319,10 @@ type ValkeyClusterSpec struct {
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
-	// TLS configuration for the cluster
+	// Networking groups how clients and peers reach cluster nodes (TLS today;
+	// discovery and external access land in follow-ups under this object).
 	// +optional
-	TLS *TLSConfig `json:"tls,omitempty"`
+	Networking *NetworkingSpec `json:"networking,omitempty"`
 
 	// PodDisruptionBudget configures the operator-managed PodDisruptionBudget(s)
 	// for this cluster. When unset, the operator applies the default (Cluster) mode.
@@ -334,6 +335,15 @@ type ValkeyClusterSpec struct {
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
+// NetworkingSpec groups connectivity configuration for the cluster.
+// Phase 1 of the networking API (#318): TLS only. Discovery (in-cluster
+// endpoint announcement) and external access will nest here later.
+type NetworkingSpec struct {
+	// TLS configuration for the cluster.
+	// +optional
+	TLS *TLSConfig `json:"tls,omitempty"`
+}
+
 // TLSConfig defines the TLS configuration for ValkeyCluster.
 type TLSConfig struct {
 	// Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
@@ -342,13 +352,25 @@ type TLSConfig struct {
 	// - `ca.crt`: The certificate authority.
 	// - `tls.crt`: The certificate (or a chain).
 	// - `tls.key`: The private key to the first certificate in the certificate chain.
-	Certificate CertificateRef `json:"certificate,omitempty"`
+	// +kubebuilder:validation:Required
+	Certificate CertificateRef `json:"certificate"`
+}
+
+// GetTLS returns the cluster TLS config from spec.networking.tls, or nil.
+func (c *ValkeyCluster) GetTLS() *TLSConfig {
+	if c == nil || c.Spec.Networking == nil {
+		return nil
+	}
+	return c.Spec.Networking.TLS
 }
 
 // CertificateRef defines the certificate reference for ValkeyCluster.
 type CertificateRef struct {
 	// SecretName is the name of the secret.
-	SecretName string `json:"secretName,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 type ExporterSpec struct {
@@ -366,6 +388,10 @@ type ExporterSpec struct {
 	// Override the SecurityContext applied to the exporter sidecar container.
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// Additional cmdline arguments passed to exporter sidecar container.
+	// +optional
+	Args []string `json:"args,omitempty"`
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

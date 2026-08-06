@@ -199,6 +199,21 @@ Common reasons when `LiveConfigApplied=True`:
 
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
+#### `WorkloadRollPending`
+Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
+
+The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully built pod template). It advances the field one node at a time (replicas first, with proactive failover before primaries when the update implies a real pod roll). Cluster-owned nodes only apply a rolling template update when the hash they compute matches `spec.workloadRevision`. Standalone ValkeyNodes ignore the field and apply immediately.
+
+| Status | Meaning |
+|---|---|
+| `True` | Desired template hash does not match `spec.workloadRevision`; rolling update is waiting for authorization. |
+| `False` or absent | No pending workload template roll. |
+
+Common reasons when `WorkloadRollPending=True`:
+- `AwaitingWorkloadRevision` – waiting for the ValkeyCluster controller to set `spec.workloadRevision` to the desired template hash.
+
+> **Note:** First-time backfill of an empty `spec.workloadRevision` (operator upgrade onto this feature) is bookkeeping only and does not fail over primaries. A non-empty revision change (for example after an ACL secret hash or image-driven template change) is staged like any other Spec roll.
+
 Example commands:
 
 ```bash

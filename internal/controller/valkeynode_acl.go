@@ -52,14 +52,14 @@ func desiredUserPasswordHashes(aclFile string) map[string][]string {
 				hashes = append(hashes, h)
 			}
 		}
-		out[fields[1]] = normaliseHashes(hashes)
+		out[fields[1]] = normalizeHashes(hashes)
 	}
 	return out
 }
 
-// normaliseHashes sorts and deduplicates password hashes so both sides of the
+// normalizeHashes sorts and deduplicates password hashes so both sides of the
 // comparison are in the same shape.
-func normaliseHashes(hashes []string) []string {
+func normalizeHashes(hashes []string) []string {
 	slices.Sort(hashes)
 	return slices.Compact(hashes)
 }
@@ -69,7 +69,7 @@ func normaliseHashes(hashes []string) []string {
 // hashes.
 //
 // Permissions are deliberately not compared. ACL GETUSER returns Valkey's
-// normalised rendering of the rules, while the operator only holds the aclfile
+// normalized rendering of the rules, while the operator only holds the aclfile
 // text, so comparing the two would mean reimplementing Valkey's own ACL parser
 // and keeping it in step with the server. Correctness of the apply does not
 // depend on this check either way: the reload is unconditional, so permission
@@ -116,7 +116,7 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 //
 // The reload is therefore unconditional. The operator cannot read the pod's
 // copy of the file, and it cannot compare the whole ACL against the server
-// either (ACL GETUSER renders Valkey's normalised form, the operator holds
+// either (ACL GETUSER renders Valkey's normalized form, the operator holds
 // aclfile text), so there is no reliable way to know the file is current. A
 // repeated LOAD is idempotent and cheap, and it is what makes every kind of
 // change converge, including permission edits and removed users, once the

@@ -1335,7 +1335,7 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	if !ok {
 		return []string{}, nil
 	}
-	return normaliseHashes(slices.Clone(hashes)), nil
+	return normalizeHashes(slices.Clone(hashes)), nil
 }
 
 func (f *fakeConfigClient) Close() { f.closed = true }

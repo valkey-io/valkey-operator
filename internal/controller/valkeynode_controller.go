@@ -115,9 +115,9 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	if err != nil {
 		return nil, fmt.Errorf("ACL GETUSER %s passwords: %w", username, err)
 	}
-	// Valkey keeps passwords as a set, but normalise anyway so both sides of
+	// Valkey keeps passwords as a set, but normalize anyway so both sides of
 	// the comparison are in the same shape.
-	return normaliseHashes(hashes), nil
+	return normalizeHashes(hashes), nil
 }
 
 func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
@@ -377,9 +377,6 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 	}
 }
 
-// buildPodTemplateAnnotations assembles the annotations that must be present on
-// the pod template spec to trigger rolling updates when the ACL secret or the
-// server config changes.
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
 // template, and therefore the ones that feed the WorkloadRevision roll hash.
 // Only the server-config hash lives here: a config change that is not

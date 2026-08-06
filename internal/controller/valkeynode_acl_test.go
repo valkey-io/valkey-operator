@@ -114,7 +114,7 @@ func TestACLObservablyInSync(t *testing.T) {
 	t.Run("a password repeated in the aclfile still matches the server's set", func(t *testing.T) {
 		// Valkey stores passwords as a set, so pointing two Secret keys at the
 		// same password must not leave the node permanently out of sync.
-		dup := map[string][]string{"alice": normaliseHashes([]string{"aaa", "aaa"})}
+		dup := map[string][]string{"alice": normalizeHashes([]string{"aaa", "aaa"})}
 		f := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"aaa"}}}
 		inSync, err := aclObservablyInSync(ctx, f, dup)
 		require.NoError(t, err)

@@ -216,7 +216,7 @@ Common reasons when `ACLApplied=False`:
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired users and passwords are live.
 
-> **Note:** `ACLApplied` compares the user set and password hashes, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. Permission changes are applied by the same unconditional `ACL LOAD`, so they converge on the running server as well.
+> **Note:** `ACLApplied` compares the user set and password hashes, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. Permission changes are applied by the same unconditional `ACL LOAD`, so they converge on the running server as well. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
@@ -391,6 +391,7 @@ These events are emitted during ACL user management.
 | `InternalSecretsUpdated` | Normal | Internal ACL secret synchronized |
 | `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
 | `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
+| `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
 
 ### Viewing events
 

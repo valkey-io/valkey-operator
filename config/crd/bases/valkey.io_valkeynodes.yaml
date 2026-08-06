@@ -2513,6 +2513,12 @@ spec:
               exporter:
                 description: Exporter defines the metrics exporter sidecar configuration.
                 properties:
+                  args:
+                    description: Additional cmdline arguments passed to exporter sidecar
+                      container.
+                    items:
+                      type: string
+                    type: array
                   enabled:
                     description: Enable or disable the exporter sidecar container
                     type: boolean
@@ -3139,6 +3145,14 @@ spec:
                   ServerConfigMapName specifies the name of the ConfigMap that contains the
                   scripts, and Valkey config for the ValkeyNode.
                 type: string
+              terminationGracePeriodSeconds:
+                description: |-
+                  TerminationGracePeriodSeconds is the pod termination grace period, set by
+                  the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
+                  can complete before SIGKILL.
+                format: int64
+                minimum: 1
+                type: integer
               tls:
                 description: TLS configuration for the node
                 properties:
@@ -3153,8 +3167,14 @@ spec:
                     properties:
                       secretName:
                         description: SecretName is the name of the secret.
+                        maxLength: 253
+                        minLength: 1
                         type: string
+                    required:
+                    - secretName
                     type: object
+                required:
+                - certificate
                 type: object
               tolerations:
                 description: Tolerations defines the pod tolerations.
@@ -3378,6 +3398,15 @@ spec:
                   UsersACLSecretName is the name of the Secret containing the ACL user
                   file. When set, mounts a users-acl volume from this Secret so the
                   container can load aclfile /config/users/users.acl.
+                type: string
+              workloadRevision:
+                description: |-
+                  WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
+                  controller authorizes this node to apply. The ValkeyCluster controller sets
+                  it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
+                  controller applies a rolling StatefulSet/Deployment template update only
+                  when the template it builds hashes to this value. Standalone nodes ignore
+                  the field and apply immediately.
                 type: string
               workloadType:
                 default: StatefulSet

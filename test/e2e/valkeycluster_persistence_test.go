@@ -26,9 +26,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/controller"
-	"valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "Persistence"), func() {

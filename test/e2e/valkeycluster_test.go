@@ -32,9 +32,9 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	controller "valkey.io/valkey-operator/internal/controller"
-	"valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	controller "github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster", Ordered, func() {
@@ -324,6 +324,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("get the original ACL hash")
 			cmd = exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 				"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
 			)
 			aclHash, err := utils.Run(cmd)
@@ -353,14 +354,40 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyAuthFallback).Should(Succeed())
 
-			By("validating pod is recreated with new ACL")
+			// ACL secret hash changes rewrite the pod template. Under
+			// Spec.WorkloadRevision that is a staged roll (one node at a time),
+			// so assert any cluster pod picked up the new hash, not only items[0].
+			By("validating at least one pod rolled with the new ACL hash")
 			verifyPodRoll := func(g Gomega) {
-				cmd = exec.Command("kubectl", "get", "pod",
-					"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.annotations.valkey\\.io/internal-acl-hash}{\"\\n\"}{end}",
 				)
-				newAclHash, err := utils.Run(cmd)
+				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(newAclHash).NotTo(Equal(aclHash))
+				var hashes []string
+				for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					parts := strings.SplitN(line, "=", 2)
+					if len(parts) != 2 || parts[1] == "" {
+						continue
+					}
+					hashes = append(hashes, parts[1])
+				}
+				g.Expect(hashes).NotTo(BeEmpty(), "no ACL hashes on cluster pods; output:\n%s", out)
+				foundNew := false
+				for _, h := range hashes {
+					if h != aclHash {
+						foundNew = true
+						break
+					}
+				}
+				g.Expect(foundNew).To(BeTrue(),
+					"expected at least one pod with ACL hash != %s after staged roll; got %v",
+					aclHash, hashes)
 			}
 			Eventually(verifyPodRoll, 5*time.Minute, 5*time.Second).Should(Succeed())
 		})
@@ -491,10 +518,14 @@ spec:
 			}
 			Eventually(verifyReady).Should(Succeed())
 
-			By("validating internal secret was created")
+			By("validating internal secrets were created")
 			verifyInternalSecretExists := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
 				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords")
+				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
 			Eventually(verifyInternalSecretExists).Should(Succeed())
@@ -549,11 +580,127 @@ spec:
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
+
+			By("verifying allowed commands succeed for operator user")
+			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+					"-o", "jsonpath={.data._operator}",
+				)
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				operatorPassword := string(decoded)
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				// Only commands without arguments will be tested
+				cmd = exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never",
+					"--", "sh", "-c",
+					fmt.Sprintf(
+						`valkey-cli -c -h "%s" --user _operator --pass "%s" <<EOF
+PING
+CLUSTER INFO
+CLUSTER MYID
+CLUSTER MYSHARDID
+CLUSTER NODES
+CLUSTER FAILOVER
+INFO
+CONFIG GET maxmemory
+ROLE 
+EOF`,
+						clusterFqdn,
+						operatorPassword,
+					),
+				)
+
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "delete", "pod", "client",
+					"--wait=true", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				g.Expect(output).NotTo(ContainSubstring("NOPERM"))
+			}
+			Eventually(verifyAllowedPermissionsOfOperatorUser).Should(Succeed())
+
+			By("verifying denied commands fail for operator user")
+			verifyDeniedPermissionsOfOperatorUser := func(g Gomega) {
+				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
+
+				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+					"-o", "jsonpath={.data._operator}",
+				)
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				operatorPassword := string(decoded)
+
+				disallowedCommands := []string{
+					"SET foo bar",
+					"GET foo",
+					"DEL foo",
+					"KEYS *",
+					"ACL LIST",
+				}
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				cmd = exec.Command("kubectl", "run", "client",
+					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never",
+					"--", "sh", "-c",
+					fmt.Sprintf(
+						`valkey-cli -c -h "%s" --user _operator --pass "%s" <<EOF
+%s
+EOF`,
+						clusterFqdn, operatorPassword, strings.Join(disallowedCommands, "\n"),
+					))
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "wait", "pod/client",
+					"--for=jsonpath={.status.phase}=Succeeded", "--timeout=30s")
+				_, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				cmd = exec.Command("kubectl", "logs", "client")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				_ = exec.Command("kubectl", "delete", "pod", "client",
+					"--ignore-not-found=true", "--wait=true", "--timeout=30s").Run()
+
+				g.Expect(strings.Count(output, "NOPERM")).To(Equal(len(disallowedCommands)),
+					"expected all %d disallowed commands to be denied but got: %s",
+					len(disallowedCommands), output)
+			}
+			Eventually(verifyDeniedPermissionsOfOperatorUser).Should(Succeed())
+
 		})
 
 		It("rebalances slots on scale out", func() {
 			const baseShards = 2
 			const scaleOutShards = 3
+			const seedKeys = 500
 			valkeyClusterName = "valkeycluster-scaleout"
 
 			By("creating a smaller ValkeyCluster for scale-out")
@@ -588,6 +735,26 @@ spec:
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(baseShards)))
 			}
 			Eventually(verifyReadyForScaleOut, 10*time.Minute).Should(Succeed())
+
+			By("populating the cluster with data so slot migration snapshots real keys")
+			// the _replication user must be allowed to run SELECT and write commands
+			// or the slot migration will loop forever.
+			seedData := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
+					"sh", "-c",
+					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seed writes should succeed across shards")
+			}
+			Eventually(seedData).Should(Succeed())
 
 			By(fmt.Sprintf("scaling the cluster to %d shards", scaleOutShards))
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", valkeyClusterName,
@@ -634,6 +801,24 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 			}
 			Eventually(verifyScaledOut).Should(Succeed())
+
+			By("verifying all seeded keys remain readable after slot migration")
+			verifySeededData := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(podName)).NotTo(BeEmpty(), "Expected a valkey pod")
+
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
+					"sh", "-c",
+					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seeded keys should survive after rebalance")
+			}
+			Eventually(verifySeededData).Should(Succeed())
 		})
 
 		It("drains slots on scale in", func() {
@@ -1285,7 +1470,7 @@ spec:
 		const clusterName = "valkeycluster-topology-spread-e2e"
 
 		It("spreads pods from the same shard across different nodes", func() {
-			By("creating a ValkeyCluster with host-level topology spread constraints")
+			By("creating a ValkeyCluster with node.spread.shards set to Required")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
@@ -1293,10 +1478,11 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
+  scheduling:
+    node:
+      spread:
+        shard:
+          mode: Required
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1374,14 +1560,18 @@ metadata:
 spec:
   shards: 1
   replicas: 1
-  nodeSelector:
-    %s: "%s"
-  topologySpreadConstraints:
-  - maxSkew: 1
-    minDomains: 2
-    topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: DoNotSchedule
-`, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue)
+  scheduling:
+    nodeSelector:
+      %s: "%s"
+    topologySpreadConstraints:
+    - maxSkew: 1
+      minDomains: 2
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          valkey.io/cluster: %s
+`, unschedulableClusterName, eligibleNodeLabelKey, eligibleNodeLabelValue, unschedulableClusterName)
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
 			output, err = utils.Run(cmd)
@@ -1405,6 +1595,276 @@ spec:
 				g.Expect(degradedCond.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 			}
 			Eventually(verifyUnschedulableStatus, 5*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("spreads shard primaries across different nodes", func() {
+			const primariesClusterName = "vkc-tspread-primaries"
+
+			By("creating a ValkeyCluster with node.spread.primaries set to Required")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 2
+  replicas: 1
+  scheduling:
+    node:
+      spread:
+        primaries:
+          mode: Required
+`, primariesClusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster with primaries spread")
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", primariesClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(primariesClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying each shard's node-index-0 pod lands on a distinct node")
+			verifyPrimaryPlacement := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s,valkey.io/node-index=0", primariesClusterName),
+					"-o", "go-template={{ range .items }}{{ .spec.nodeName }}{{ \"\\n\" }}{{ end }}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				nodes := map[string]struct{}{}
+				lines := utils.GetNonEmptyLines(output)
+				for _, line := range lines {
+					node := strings.TrimSpace(line)
+					g.Expect(node).NotTo(BeEmpty(), "expected a scheduled node name for each primary")
+					nodes[node] = struct{}{}
+				}
+
+				g.Expect(lines).To(HaveLen(2), "expected one node-index-0 pod per shard")
+				g.Expect(nodes).To(HaveLen(2), "expected the two shard primaries on distinct nodes")
+			}
+			Eventually(verifyPrimaryPlacement).Should(Succeed())
+		})
+
+		It("keeps pods schedulable when a preferred spread cannot be satisfied", func() {
+			const (
+				preferredClusterName = "vkc-tspread-preferred"
+				eligibleNodeLabelKey = "valkey.io/e2e-topology-preferred-node"
+			)
+
+			By("labeling one worker node as the only eligible node")
+			cmd := exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			eligibleNode, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node: %s", eligibleNode))
+			Expect(eligibleNode).NotTo(BeEmpty(), "expected at least one worker node")
+
+			cmd = exec.Command("kubectl", "label", "node", eligibleNode,
+				fmt.Sprintf("%s=true", eligibleNodeLabelKey), "--overwrite=true")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label worker node: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "label", "node", eligibleNode, eligibleNodeLabelKey+"-", "--overwrite=true")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("creating a ValkeyCluster pinned to one node with a Preferred pods spread")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  scheduling:
+    nodeSelector:
+      %s: "true"
+    node:
+      spread:
+        pods:
+          mode: Preferred
+`, preferredClusterName, eligibleNodeLabelKey)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create ValkeyCluster with preferred spread: %s", output))
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "valkeycluster", preferredClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready despite only one eligible node")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(preferredClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("spreads a shard's pods across availability zones", func() {
+			const zoneClusterName = "vkc-tspread-zone"
+
+			By("labeling the two worker nodes with distinct zones")
+			cmd := exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "go-template={{ range .items }}{{ .metadata.name }}{{ \"\\n\" }}{{ end }}")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to list worker nodes: %s", out))
+			workers := utils.GetNonEmptyLines(out)
+			Expect(len(workers)).To(BeNumerically(">=", 2), "expected at least two worker nodes")
+
+			zones := []string{"e2e-az-a", "e2e-az-b"}
+			for i := 0; i < 2; i++ {
+				w := strings.TrimSpace(workers[i])
+				// Preserve any pre-existing zone label so cleanup restores it rather
+				// than blindly removing it.
+				original, _ := utils.Run(exec.Command("kubectl", "get", "node", w,
+					"-o", "jsonpath={.metadata.labels['topology.kubernetes.io/zone']}"))
+				original = strings.TrimSpace(original)
+				c := exec.Command("kubectl", "label", "node", w,
+					fmt.Sprintf("topology.kubernetes.io/zone=%s", zones[i]), "--overwrite=true")
+				o, e := utils.Run(c)
+				Expect(e).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label node %s: %s", w, o))
+				defer func(node, original string) {
+					var c *exec.Cmd
+					if original != "" {
+						c = exec.Command("kubectl", "label", "node", node,
+							"topology.kubernetes.io/zone="+original, "--overwrite=true")
+					} else {
+						c = exec.Command("kubectl", "label", "node", node, "topology.kubernetes.io/zone-")
+					}
+					_, _ = utils.Run(c)
+				}(w, original)
+			}
+
+			By("creating a ValkeyCluster with zone.spread.shard set to Required")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  scheduling:
+    zone:
+      spread:
+        shard:
+          mode: Required
+`, zoneClusterName)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			out, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create zone-spread ValkeyCluster: %s", out))
+			defer func() {
+				c := exec.Command("kubectl", "delete", "valkeycluster", zoneClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(c)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(zoneClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("verifying the shard's two pods land in distinct zones")
+			verifyZoneSpread := func(g Gomega) {
+				c := exec.Command("kubectl", "get", "nodes",
+					"-o", "go-template={{ range .items }}{{ .metadata.name }} {{ index .metadata.labels \"topology.kubernetes.io/zone\" }}{{ \"\\n\" }}{{ end }}")
+				o, e := utils.Run(c)
+				g.Expect(e).NotTo(HaveOccurred())
+				nodeZone := map[string]string{}
+				for _, line := range utils.GetNonEmptyLines(o) {
+					f := strings.Fields(line)
+					if len(f) == 2 {
+						nodeZone[f[0]] = f[1]
+					}
+				}
+
+				c = exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s,valkey.io/shard-index=0", zoneClusterName),
+					"-o", "go-template={{ range .items }}{{ .spec.nodeName }}{{ \"\\n\" }}{{ end }}")
+				o, e = utils.Run(c)
+				g.Expect(e).NotTo(HaveOccurred())
+				podNodes := utils.GetNonEmptyLines(o)
+				g.Expect(podNodes).To(HaveLen(2), "expected two pods for the shard")
+
+				seenZones := map[string]struct{}{}
+				for _, n := range podNodes {
+					z := nodeZone[strings.TrimSpace(n)]
+					g.Expect(z).NotTo(BeEmpty(), "pod's node must carry a zone label")
+					seenZones[z] = struct{}{}
+				}
+				g.Expect(seenZones).To(HaveLen(2), "expected the shard's pods in two distinct zones")
+			}
+			Eventually(verifyZoneSpread).Should(Succeed())
+		})
+
+		It("keeps pods schedulable when a preferred zone spread cannot be satisfied", func() {
+			const (
+				zonePreferredClusterName = "vkc-tspread-zone-preferred"
+				eligibleNodeLabelKey     = "valkey.io/e2e-zone-preferred-node"
+			)
+
+			By("labeling one worker node as the only eligible node")
+			cmd := exec.Command("kubectl", "get", "nodes",
+				"--selector=!node-role.kubernetes.io/control-plane",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			eligibleNode, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to get worker node: %s", eligibleNode))
+			Expect(eligibleNode).NotTo(BeEmpty(), "expected at least one worker node")
+
+			cmd = exec.Command("kubectl", "label", "node", eligibleNode,
+				fmt.Sprintf("%s=true", eligibleNodeLabelKey), "--overwrite=true")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to label worker node: %s", output))
+			defer func() {
+				c := exec.Command("kubectl", "label", "node", eligibleNode, eligibleNodeLabelKey+"-", "--overwrite=true")
+				_, _ = utils.Run(c)
+			}()
+
+			By("creating a ValkeyCluster pinned to one node with a Preferred zone pods spread")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  scheduling:
+    nodeSelector:
+      %s: "true"
+    zone:
+      spread:
+        pods:
+          mode: Preferred
+`, zonePreferredClusterName, eligibleNodeLabelKey)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to create ValkeyCluster with preferred zone spread: %s", output))
+			defer func() {
+				c := exec.Command("kubectl", "delete", "valkeycluster", zonePreferredClusterName, "--ignore-not-found=true", "--wait=false")
+				_, _ = utils.Run(c)
+			}()
+
+			By("waiting for the ValkeyCluster to become ready despite the unsatisfiable preferred spread")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(zonePreferredClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
 		})
 	})
 

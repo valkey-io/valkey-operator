@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🙏 Ask a question
+    url: https://github.com/valkey-io/valkey-operator/discussions/categories/q-a
+    about: Use Discussions for usage and how-to questions.
+  - name: 💡 Share an idea
+    url: https://github.com/valkey-io/valkey-operator/discussions/categories/ideas
+    about: Suggest a small idea before opening a feature request.
+  - name: 💬 Slack - #valkey-k8s-operator
+    url: https://valkey.io/slack
+    about: Chat with the operator community in real time.

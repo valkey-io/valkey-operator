@@ -224,12 +224,12 @@ func zoneForPod(zones []string, shardIndex, nodeIndex int) string {
 // zone key, the curated value wins; admission rejects a passthrough
 // nodeSelector that sets it while pinning is on (the scheduling.nodeSelector
 // CEL rule on ValkeyClusterSpec), so that collision should be unreachable here.
-func withZonePin(base map[string]string, zone string) map[string]string {
+func withZonePin(nodeSelector map[string]string, zone string) map[string]string {
 	if zone == "" {
-		return base
+		return nodeSelector
 	}
-	out := make(map[string]string, len(base)+1)
-	maps.Copy(out, base)
-	out[corev1.LabelTopologyZone] = zone
-	return out
+	enrichedNodeSelector := make(map[string]string, len(nodeSelector)+1)
+	maps.Copy(enrichedNodeSelector, nodeSelector)
+	enrichedNodeSelector[corev1.LabelTopologyZone] = zone
+	return enrichedNodeSelector
 }

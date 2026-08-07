@@ -238,27 +238,27 @@ func TestWithZonePin(t *testing.T) {
 	})
 
 	t.Run("user entries are preserved and the input is not mutated", func(t *testing.T) {
-		base := map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}
-		got := withZonePin(base, "az2")
+		nodeSelector := map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}
+		got := withZonePin(nodeSelector, "az2")
 		assert.Equal(t, map[string]string{
 			"node.kubernetes.io/instance-type": "m6i.xlarge",
 			"topology.kubernetes.io/zone":      "az2",
 		}, got)
-		assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}, base,
+		assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}, nodeSelector,
 			"the caller's map must not be mutated")
 	})
 
 	t.Run("empty zone returns the base unchanged, preserving nil", func(t *testing.T) {
 		assert.Nil(t, withZonePin(nil, ""), "nil must stay nil so unpinned clusters are not rolled")
-		base := map[string]string{"a": "b"}
-		assert.Equal(t, base, withZonePin(base, ""))
+		nodeSelector := map[string]string{"a": "b"}
+		assert.Equal(t, nodeSelector, withZonePin(nodeSelector, ""))
 	})
 
 	t.Run("curated zone wins when base already carries the key", func(t *testing.T) {
-		base := map[string]string{"topology.kubernetes.io/zone": "user-supplied"}
-		got := withZonePin(base, "az2")
+		nodeSelector := map[string]string{"topology.kubernetes.io/zone": "user-supplied"}
+		got := withZonePin(nodeSelector, "az2")
 		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az2"}, got)
-		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "user-supplied"}, base,
+		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "user-supplied"}, nodeSelector,
 			"the caller's map must not be mutated")
 	})
 }

@@ -13,11 +13,17 @@ permissions:
   contents: read
   packages: write
 
+# Serialize publish runs per ref so mutable tags (e.g. :main) apply in order.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Build each architecture on a native runner (no QEMU emulation).
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -122,6 +128,7 @@ jobs:
   publish:
     name: Publish multi-arch manifest
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [build]
     if: github.event_name != 'pull_request'
     steps:

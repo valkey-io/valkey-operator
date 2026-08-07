@@ -15,7 +15,7 @@ permissions:
 
 # Serialize publish runs per ref so mutable tags (e.g. :main) apply in order.
 concurrency:
-  group: publish-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

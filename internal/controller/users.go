@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -63,6 +63,7 @@ var (
 			"+cluster|migrateslots",      // migrate slots between shards
 			"+cluster|set-config-epoch",  // set epoch on new nodes
 			"+config|set",                // apply live config changes
+			"+config|get",                // verify applied config / audit current state
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
 		}, " "),
@@ -70,8 +71,8 @@ var (
 		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 
 		replicationUser: strings.Join([]string{
-			"-@all +psync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas
-			"+cluster|syncslots",           // required for atomic slot migration
+			"-@all +psync +sync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas; +sync is required for dual-channel replication
+			"+cluster|syncslots",                 // required for atomic slot migration
 			// Today, Atomic slot migration streams the snapshot as a command stream
 			// (SELECT + type-specific write commands from the AOF-rewrite)
 			"+select +@write ~* -flushall -flushdb -swapdb",
@@ -112,7 +113,7 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
-	log.Info("getting system users secret: " + cluster.Name)
+	log.V(1).Info("getting system users secret: " + cluster.Name)
 	var systemsAcls strings.Builder
 	systemUserSecret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{

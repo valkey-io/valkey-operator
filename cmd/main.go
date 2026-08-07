@@ -47,8 +47,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/controller"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

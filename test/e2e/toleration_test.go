@@ -28,7 +28,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"valkey.io/valkey-operator/test/utils"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // getWorkerNodeWithoutManager returns a worker node that does NOT host the controller manager pod.

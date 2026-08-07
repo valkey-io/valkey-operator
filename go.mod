@@ -1,4 +1,4 @@
-module valkey.io/valkey-operator
+module github.com/valkey-io/valkey-operator
 
 go 1.25.0
 

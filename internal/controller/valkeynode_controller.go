@@ -30,6 +30,7 @@ import (
 	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,7 +45,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -156,11 +157,19 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// Re-read after ensureWorkload may have written WorkloadRollPending status.
+	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
 	if !node.Status.Ready {
 		log.V(1).Info("ValkeyNode not ready, requeuing")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// Apply live config before WorkloadRollPending requeue so a node waiting on
+	// Spec.WorkloadRevision can still clear LiveConfigApplied and not block
+	// the cluster controller on an unrelated condition.
 	applied, err := r.applyLiveConfig(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to apply live config")
@@ -185,6 +194,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.Error(condErr, "failed to clear LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
 		}
+	}
+
+	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
+	// Spec, with a long backoff so waiters do not spam the API.
+	if meta.IsStatusConditionTrue(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
+		log.V(1).Info("ValkeyNode awaiting Spec.WorkloadRevision, requeuing", "name", node.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
@@ -294,33 +310,66 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	if err != nil {
 		return err
 	}
+	aclSecret, err := r.getACLSecret(ctx, desired.Labels[LabelCluster], desired.Namespace)
+	if err != nil {
+		return err
+	}
+	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
 			Namespace: desired.Namespace,
 		},
 	}
-	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
-	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
-	aclSecret := &corev1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{
-		Name:      aclSecretName,
-		Namespace: desired.Namespace,
-	}, aclSecret)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sts), sts); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		// Create path: no live pod to protect.
+		sts = desired.DeepCopy()
+		if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, sts); err != nil {
+			return err
+		}
+		log.V(1).Info("created StatefulSet", "name", sts.Name)
+		return r.clearWorkloadRollPending(ctx, node)
+	}
+
+	desiredHash := podTemplateRollHash(desired.Spec.Template)
+	// Heal live drift whenever templates differ; do not skip on a stale
+	// last-applied annotation (that can hide real STS edits).
+	if !podTemplateWouldRoll(sts.Spec.Template, desired.Spec.Template) {
+		if err := r.syncStatefulSetWithoutRoll(ctx, node, sts, desired); err != nil {
+			return err
+		}
+		return r.clearWorkloadRollPending(ctx, node)
+	}
+
+	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
 	if err != nil {
 		return err
 	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		sts.Labels = desired.Labels
-		sts.Spec = desired.Spec
-		sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		return controllerutil.SetControllerReference(node, sts, r.Scheme)
-	})
-	if err != nil {
+	if !allowed {
+		log.V(1).Info("deferring StatefulSet template update until Spec.WorkloadRevision matches",
+			"name", sts.Name, "desiredHash", desiredHash, "specRevision", node.Spec.WorkloadRevision)
+		return nil
+	}
+
+	sts.Labels = desired.Labels
+	sts.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
 		return err
 	}
-	log.V(1).Info("reconciled StatefulSet", "result", result, "name", sts.Name)
-	return nil
+	if err := r.Update(ctx, sts); err != nil {
+		return err
+	}
+	log.Info("updated StatefulSet pod template", "name", sts.Name, "desiredHash", desiredHash)
+	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
+		"Applied pod template update (hash %s)", desiredHash)
+	return r.clearWorkloadRollPending(ctx, node)
 }
 
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.
@@ -330,33 +379,190 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	if err != nil {
 		return err
 	}
+	aclSecret, err := r.getACLSecret(ctx, desired.Labels[LabelCluster], desired.Namespace)
+	if err != nil {
+		return err
+	}
+	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
 			Namespace: desired.Namespace,
 		},
 	}
-	log.V(1).Info("getting internal secret", "node-labels", desired.Labels)
-	aclSecretName := getInternalSecretName(desired.Labels[LabelCluster])
-	aclSecret := &corev1.Secret{}
-	err = r.Get(ctx, types.NamespacedName{
-		Name:      aclSecretName,
-		Namespace: desired.Namespace,
-	}, aclSecret)
-	if err != nil {
-		return err
+	if err := r.Get(ctx, client.ObjectKeyFromObject(dep), dep); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return err
+		}
+		dep = desired.DeepCopy()
+		if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, dep); err != nil {
+			return err
+		}
+		log.V(1).Info("created Deployment", "name", dep.Name)
+		return r.clearWorkloadRollPending(ctx, node)
 	}
 
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
-		dep.Labels = desired.Labels
-		dep.Spec = desired.Spec
-		dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		return controllerutil.SetControllerReference(node, dep, r.Scheme)
-	})
+	desiredHash := podTemplateRollHash(desired.Spec.Template)
+	if !podTemplateWouldRoll(dep.Spec.Template, desired.Spec.Template) {
+		if err := r.syncDeploymentWithoutRoll(ctx, node, dep, desired); err != nil {
+			return err
+		}
+		return r.clearWorkloadRollPending(ctx, node)
+	}
+
+	allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
 	if err != nil {
 		return err
 	}
-	log.V(1).Info("reconciled Deployment", "result", result, "name", dep.Name)
+	if !allowed {
+		log.V(1).Info("deferring Deployment template update until Spec.WorkloadRevision matches",
+			"name", dep.Name, "desiredHash", desiredHash, "specRevision", node.Spec.WorkloadRevision)
+		return nil
+	}
+
+	dep.Labels = desired.Labels
+	dep.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Update(ctx, dep); err != nil {
+		return err
+	}
+	log.Info("updated Deployment pod template", "name", dep.Name, "desiredHash", desiredHash)
+	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
+		"Applied pod template update (hash %s)", desiredHash)
+	return r.clearWorkloadRollPending(ctx, node)
+}
+
+func (r *ValkeyNodeReconciler) getACLSecret(ctx context.Context, clusterName, namespace string) (*corev1.Secret, error) {
+	log := logf.FromContext(ctx)
+	aclSecretName := getInternalSecretName(clusterName)
+	aclSecret := &corev1.Secret{}
+	log.V(1).Info("getting internal secret", "name", aclSecretName)
+	if err := r.Get(ctx, types.NamespacedName{Name: aclSecretName, Namespace: namespace}, aclSecret); err != nil {
+		return nil, err
+	}
+	return aclSecret, nil
+}
+
+// gateRollingWorkloadUpdate decides whether a rolling pod-template update may be
+// applied. Standalone nodes always apply. Cluster-owned nodes apply only when
+// Spec.WorkloadRevision matches the desired template hash (set by ValkeyCluster).
+func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
+	ctx context.Context,
+	node *valkeyiov1alpha1.ValkeyNode,
+	desiredHash string,
+) (bool, error) {
+	if !isClusterOwned(node) {
+		return true, nil
+	}
+	// Fresh read: cluster may have advanced Spec.WorkloadRevision after this reconcile started.
+	fresh := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), fresh); err != nil {
+		return false, err
+	}
+	node.Spec = fresh.Spec
+	if workloadRevisionAllows(fresh, desiredHash) {
+		return true, nil
+	}
+	transitioned, err := r.markWorkloadRollPending(ctx, node, desiredHash)
+	if err != nil {
+		return false, err
+	}
+	if transitioned {
+		r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollDeferred", "GateWorkloadRoll",
+			"Deferred pod template update (hash %s); waiting for Spec.WorkloadRevision", desiredHash)
+	}
+	return false, nil
+}
+
+// markWorkloadRollPending sets WorkloadRollPending=True. Returns true when newly transitioned.
+func (r *ValkeyNodeReconciler) markWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) (bool, error) {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return false, err
+	}
+	alreadyPending := meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
+	patchBase := current.DeepCopy()
+	changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending,
+		Status:             metav1.ConditionTrue,
+		Reason:             valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision,
+		Message:            fmt.Sprintf("desired workload template hash %s awaits Spec.WorkloadRevision (have %q)", desiredHash, current.Spec.WorkloadRevision),
+		ObservedGeneration: current.Generation,
+	})
+	if changed {
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+			return false, fmt.Errorf("patch WorkloadRollPending condition: %w", err)
+		}
+	}
+	return !alreadyPending && changed, nil
+}
+
+func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
+		return nil
+	}
+	patchBase := current.DeepCopy()
+	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+			return fmt.Errorf("clear WorkloadRollPending condition: %w", err)
+		}
+	}
+	return nil
+}
+
+// syncStatefulSetWithoutRoll updates labels, owner, and Spec when the pod
+// template would not roll.
+func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
+	before := sts.DeepCopy()
+	sts.Labels = desired.Labels
+	sts.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
+		return err
+	}
+	return r.maybeUpdateWorkloadWithoutRoll(ctx, sts, before.Labels, sts.Labels, before.Spec, sts.Spec, before.OwnerReferences, sts.OwnerReferences, "StatefulSet", sts.Name)
+}
+
+// syncDeploymentWithoutRoll updates labels, owner, and Spec when the pod
+// template would not roll.
+func (r *ValkeyNodeReconciler) syncDeploymentWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, dep *appsv1.Deployment, desired *appsv1.Deployment) error {
+	before := dep.DeepCopy()
+	dep.Labels = desired.Labels
+	dep.Spec = desired.Spec
+	if err := controllerutil.SetControllerReference(node, dep, r.Scheme); err != nil {
+		return err
+	}
+	return r.maybeUpdateWorkloadWithoutRoll(ctx, dep, before.Labels, dep.Labels, before.Spec, dep.Spec, before.OwnerReferences, dep.OwnerReferences, "Deployment", dep.Name)
+}
+
+func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
+	ctx context.Context,
+	obj client.Object,
+	beforeLabels, afterLabels map[string]string,
+	beforeSpec, afterSpec any,
+	beforeOwners, afterOwners []metav1.OwnerReference,
+	kind, name string,
+) error {
+	log := logf.FromContext(ctx)
+	if equality.Semantic.DeepEqual(beforeLabels, afterLabels) &&
+		equality.Semantic.DeepEqual(beforeSpec, afterSpec) &&
+		equality.Semantic.DeepEqual(beforeOwners, afterOwners) {
+		log.V(1).Info(kind+" already matches desired (no pod template roll)", "name", name)
+		return nil
+	}
+	if err := r.Update(ctx, obj); err != nil {
+		return err
+	}
+	log.V(1).Info("synced "+kind+" without pod template roll", "name", name)
 	return nil
 }
 

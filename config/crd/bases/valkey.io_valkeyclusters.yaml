@@ -1591,6 +1591,12 @@ spec:
                   enabled: true
                 description: Metrics exporter options
                 properties:
+                  args:
+                    description: Additional cmdline arguments passed to exporter sidecar
+                      container.
+                    items:
+                      type: string
+                    type: array
                   enabled:
                     description: Enable or disable the exporter sidecar container
                     type: boolean
@@ -1876,6 +1882,35 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              networking:
+                description: |-
+                  Networking groups how clients and peers reach cluster nodes (TLS today;
+                  discovery and external access land in follow-ups under this object).
+                properties:
+                  tls:
+                    description: TLS configuration for the cluster.
+                    properties:
+                      certificate:
+                        description: |-
+                          Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
+                          The referenced secret should contain the following:
+
+                          - `ca.crt`: The certificate authority.
+                          - `tls.crt`: The certificate (or a chain).
+                          - `tls.key`: The private key to the first certificate in the certificate chain.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
+                    required:
+                    - certificate
+                    type: object
+                type: object
               persistence:
                 description: Persistence defines durable storage that is propagated
                   to each ValkeyNode.
@@ -3141,6 +3176,66 @@ spec:
                             x-kubernetes-list-type: atomic
                         type: object
                     type: object
+                  node:
+                    description: |-
+                      Node groups scheduling constraints on the node axis
+                      (topologyKey kubernetes.io/hostname). When unset, every node spread is
+                      Disabled and no scheduling primitives are emitted.
+                    properties:
+                      spread:
+                        description: Spread distributes the cluster's pods across
+                          nodes.
+                        properties:
+                          pods:
+                            description: |-
+                              Pods balances all of the cluster's pods across nodes, rendered as a
+                              topology spread constraint. Defaults to Disabled when unset. Enabling this
+                              alongside an explicit primaries spread of the same strength is rejected
+                              (only one topology spread constraint per strength is permitted per node).
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          primaries:
+                            description: |-
+                              Primaries balances each shard's node-index-0 pod across nodes, rendered as
+                              a topology spread constraint.
+                              Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          shard:
+                            description: |-
+                              Shard keeps pods of the same shard on distinct nodes, rendered as pod
+                              anti-affinity. Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                        type: object
+                    type: object
                   nodeSelector:
                     additionalProperties:
                       type: string
@@ -3194,11 +3289,7 @@ spec:
                       type: object
                     type: array
                   topologySpreadConstraints:
-                    description: |-
-                      TopologySpreadConstraints defines pod topology spread constraints applied
-                      to the ValkeyNode workloads. The operator augments these constraints with
-                      shard-aware selectors so pods from the same shard can be spread across the
-                      configured topology domain.
+                    description: TopologySpreadConstraints to apply to the pods
                     items:
                       description: TopologySpreadConstraint specifies how to spread
                         matching pods among the given topology.
@@ -3371,6 +3462,66 @@ spec:
                       - whenUnsatisfiable
                       type: object
                     type: array
+                  zone:
+                    description: |-
+                      Zone groups scheduling constraints on the zone axis
+                      (topologyKey topology.kubernetes.io/zone). When unset, every zone spread is
+                      Disabled and no scheduling primitives are emitted.
+                    properties:
+                      spread:
+                        description: Spread distributes the cluster's pods across
+                          zones.
+                        properties:
+                          pods:
+                            description: |-
+                              Pods balances all of the cluster's pods across zones, rendered as a
+                              topology spread constraint. Defaults to Disabled when unset. Enabling this
+                              alongside an explicit shard or primaries spread of the same strength is
+                              rejected (only one topology spread constraint per strength is permitted per
+                              zone).
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          primaries:
+                            description: |-
+                              Primaries balances each shard's node-index-0 pod across zones, rendered as
+                              a topology spread constraint. Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                          shard:
+                            description: |-
+                              Shard balances the pods of each shard across zones, rendered as a topology
+                              spread constraint. Defaults to Disabled when unset.
+                            properties:
+                              mode:
+                                description: |-
+                                  Mode selects the strength of the constraint. When unset, the dimension's
+                                  documented default applies.
+                                enum:
+                                - Disabled
+                                - Preferred
+                                - Required
+                                type: string
+                            type: object
+                        type: object
+                    type: object
                 type: object
               shards:
                 description: The number of shards groups. Each shard group contains
@@ -3389,23 +3540,6 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
-              tls:
-                description: TLS configuration for the cluster
-                properties:
-                  certificate:
-                    description: |-
-                      Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
-                      The referenced secret should contain the following:
-
-                      - `ca.crt`: The certificate authority.
-                      - `tls.crt`: The certificate (or a chain).
-                      - `tls.key`: The private key to the first certificate in the certificate chain.
-                    properties:
-                      secretName:
-                        description: SecretName is the name of the secret.
-                        type: string
-                    type: object
-                type: object
               users:
                 description: Users, and ACL-related configuration; see valkeyacls_types.go
                 items:
@@ -3533,6 +3667,119 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: 'node.spread.primaries and node.spread.pods cannot both be
+                Required: they render duplicate kubernetes.io/hostname DoNotSchedule
+                topology spread constraints'
+              rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
+                && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'node.spread.primaries and node.spread.pods cannot both be
+                Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway
+                topology spread constraints (set one to Disabled or Required)'
+              rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries
+                or node.spread.pods set to Required, which render the same hostname
+                DoNotSchedule constraint: set that node.spread mode to Disabled, or
+                remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''DoNotSchedule'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+                with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries
+                or node.spread.pods set to Preferred, which render the same hostname
+                ScheduleAnyway constraint: set that node.spread mode to Disabled or
+                Required, or remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
+                || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
+                || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
+                ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
+                ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
+            - message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
+                may be Required: they render duplicate topology.kubernetes.io/zone
+                DoNotSchedule topology spread constraints'
+              rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
+                || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Required''
+                && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Required'')
+                || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Required''
+                && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Required'')
+                || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Required''
+                && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Required'')
+                )'
+            - message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
+                may be Preferred: they render duplicate topology.kubernetes.io/zone
+                ScheduleAnyway topology spread constraints (set one to Disabled or
+                Required)'
+              rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
+                || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Preferred''
+                && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Preferred'')
+                || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Preferred''
+                && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Preferred'')
+                || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Preferred'')
+                )'
+            - message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
+                with whenUnsatisfiable DoNotSchedule collides with zone.spread.shard,
+                primaries, or pods set to Required, which render the same zone DoNotSchedule
+                constraint: set that zone.spread mode to Disabled, or remove the passthrough
+                constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''topology.kubernetes.io/zone'' && c.whenUnsatisfiable == ''DoNotSchedule'')
+                || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
+                || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Required''
+                || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Required''
+                || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Required''
+                )'
+            - message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
+                with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard,
+                primaries, or pods set to Preferred, which render the same zone ScheduleAnyway
+                constraint: set that zone.spread mode to Disabled or Required, or
+                remove the passthrough constraint'
+              rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
+                || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
+                == ''topology.kubernetes.io/zone'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
+                || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
+                || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
+                ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Preferred''
+                || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode))
+                ? self.scheduling.zone.spread.primaries.mode : ''Disabled'') == ''Preferred''
+                || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
+                ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Preferred''
+                )'
           status:
             default:
               readyShards: 0

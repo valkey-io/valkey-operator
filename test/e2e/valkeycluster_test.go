@@ -324,6 +324,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 			By("get the original ACL hash")
 			cmd = exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
 				"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
 			)
 			aclHash, err := utils.Run(cmd)
@@ -353,14 +354,40 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyAuthFallback).Should(Succeed())
 
-			By("validating pod is recreated with new ACL")
+			// ACL secret hash changes rewrite the pod template. Under
+			// Spec.WorkloadRevision that is a staged roll (one node at a time),
+			// so assert any cluster pod picked up the new hash, not only items[0].
+			By("validating at least one pod rolled with the new ACL hash")
 			verifyPodRoll := func(g Gomega) {
-				cmd = exec.Command("kubectl", "get", "pod",
-					"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.annotations.valkey\\.io/internal-acl-hash}{\"\\n\"}{end}",
 				)
-				newAclHash, err := utils.Run(cmd)
+				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(newAclHash).NotTo(Equal(aclHash))
+				var hashes []string
+				for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					parts := strings.SplitN(line, "=", 2)
+					if len(parts) != 2 || parts[1] == "" {
+						continue
+					}
+					hashes = append(hashes, parts[1])
+				}
+				g.Expect(hashes).NotTo(BeEmpty(), "no ACL hashes on cluster pods; output:\n%s", out)
+				foundNew := false
+				for _, h := range hashes {
+					if h != aclHash {
+						foundNew = true
+						break
+					}
+				}
+				g.Expect(foundNew).To(BeTrue(),
+					"expected at least one pod with ACL hash != %s after staged roll; got %v",
+					aclHash, hashes)
 			}
 			Eventually(verifyPodRoll, 5*time.Minute, 5*time.Second).Should(Succeed())
 		})
@@ -584,6 +611,7 @@ CLUSTER MYSHARDID
 CLUSTER NODES
 CLUSTER FAILOVER
 INFO
+CONFIG GET maxmemory
 ROLE 
 EOF`,
 						clusterFqdn,
@@ -631,7 +659,6 @@ EOF`,
 					"GET foo",
 					"DEL foo",
 					"KEYS *",
-					"CONFIG GET *",
 					"ACL LIST",
 				}
 

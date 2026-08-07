@@ -137,6 +137,15 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
+	// controller authorizes this node to apply. The ValkeyCluster controller sets
+	// it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
+	// controller applies a rolling StatefulSet/Deployment template update only
+	// when the template it builds hashes to this value. Standalone nodes ignore
+	// the field and apply immediately.
+	// +optional
+	WorkloadRevision string `json:"workloadRevision,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
@@ -181,6 +190,12 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
+	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
+	// is intentionally deferred: the desired template differs from live, and
+	// Spec.WorkloadRevision has not yet authorized that template. Status True means
+	// waiting for the ValkeyCluster controller to advance Spec.WorkloadRevision
+	// (one node at a time today). Expected staging, not an error.
+	ValkeyNodeConditionWorkloadRollPending = "WorkloadRollPending"
 )
 
 const (
@@ -188,6 +203,9 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
+	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
+	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.

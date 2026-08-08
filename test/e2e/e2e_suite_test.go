@@ -45,7 +45,7 @@ const metricsServiceName = "valkey-operator-controller-manager-metrics-service"
 const metricsRoleBindingName = "valkey-operator-metrics-binding"
 
 // valkeyClientImage is the image used to verify cluster access.
-const valkeyClientImage = "valkey/valkey:9.0.0"
+const valkeyClientImage = "valkey/valkey:9.1.1"
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.

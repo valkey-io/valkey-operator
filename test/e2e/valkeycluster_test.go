@@ -21,6 +21,7 @@ package e2e
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1788,7 +1789,252 @@ spec:
 	Context("rolling update", func() {
 		const clusterName = "valkeycluster-rolling-e2e"
 
+		createReadyCluster := func(manifest string, readyShards int32) {
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			_, _ = utils.Run(cmd)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(readyShards))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+		}
+
+		deleteCluster := func() {
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			_, _ = utils.Run(cmd)
+		}
+
+		podUIDs := func(expectedPods int) map[string]string {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{\"\\n\"}{end}")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			uids := make(map[string]string, expectedPods)
+			for _, line := range utils.GetNonEmptyLines(out) {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				uids[parts[0]] = parts[1]
+			}
+			Expect(uids).To(HaveLen(expectedPods))
+			return uids
+		}
+
+		getNodeWorkloadRevisions := func() (map[string]string, error) {
+			cmd := exec.Command("kubectl", "get", "valkeynodes",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			if err != nil {
+				return nil, err
+			}
+
+			var nodeList struct {
+				Items []struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+					Spec struct {
+						WorkloadRevision string `json:"workloadRevision"`
+					} `json:"spec"`
+				} `json:"items"`
+			}
+			if err := json.Unmarshal([]byte(out), &nodeList); err != nil {
+				return nil, err
+			}
+
+			revs := make(map[string]string, len(nodeList.Items))
+			for _, item := range nodeList.Items {
+				revs[item.Metadata.Name] = item.Spec.WorkloadRevision
+			}
+			return revs, nil
+		}
+
+		nodeWorkloadRevisions := func(g Gomega) map[string]string {
+			revs, err := getNodeWorkloadRevisions()
+			g.Expect(err).NotTo(HaveOccurred())
+			return revs
+		}
+
+		countAwaitingWorkloadRevision := func(g Gomega) int {
+			cmd := exec.Command("kubectl", "get", "valkeynodes",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var nodeList struct {
+				Items []struct {
+					Status struct {
+						Conditions []struct {
+							Type   string `json:"type"`
+							Status string `json:"status"`
+							Reason string `json:"reason"`
+						} `json:"conditions"`
+					} `json:"status"`
+				} `json:"items"`
+			}
+			g.Expect(json.Unmarshal([]byte(out), &nodeList)).To(Succeed())
+
+			awaiting := 0
+			for _, item := range nodeList.Items {
+				for _, cond := range item.Status.Conditions {
+					if cond.Type == string(valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) &&
+						cond.Status == string(metav1.ConditionTrue) &&
+						cond.Reason == valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision {
+						awaiting++
+						break
+					}
+				}
+			}
+			return awaiting
+		}
+
+		countStatefulSetsWithExporterArg := func(g Gomega, arg string) int {
+			cmd := exec.Command("kubectl", "get", "statefulsets",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var stsList struct {
+				Items []struct {
+					Spec struct {
+						Template struct {
+							Spec struct {
+								Containers []struct {
+									Name string   `json:"name"`
+									Args []string `json:"args"`
+								} `json:"containers"`
+							} `json:"spec"`
+						} `json:"template"`
+					} `json:"spec"`
+				} `json:"items"`
+			}
+			g.Expect(json.Unmarshal([]byte(out), &stsList)).To(Succeed())
+
+			updated := 0
+			for _, item := range stsList.Items {
+				for _, c := range item.Spec.Template.Spec.Containers {
+					if c.Name != "metrics-exporter" {
+						continue
+					}
+					for _, a := range c.Args {
+						if a == arg {
+							updated++
+							break
+						}
+					}
+				}
+			}
+			return updated
+		}
+
+		countStatefulSetsWithServerImage := func(g Gomega, image string) int {
+			cmd := exec.Command("kubectl", "get", "statefulsets",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var stsList struct {
+				Items []struct {
+					Spec struct {
+						Template struct {
+							Spec struct {
+								Containers []struct {
+									Name  string `json:"name"`
+									Image string `json:"image"`
+								} `json:"containers"`
+							} `json:"spec"`
+						} `json:"template"`
+					} `json:"spec"`
+				} `json:"items"`
+			}
+			g.Expect(json.Unmarshal([]byte(out), &stsList)).To(Succeed())
+
+			updated := 0
+			for _, item := range stsList.Items {
+				for _, c := range item.Spec.Template.Spec.Containers {
+					if c.Name == "server" && c.Image == image {
+						updated++
+						break
+					}
+				}
+			}
+			return updated
+		}
+
+		assertStagedRoll := func(baselineUIDs map[string]string, expectedPods int, baselineRevs map[string]string, updatedSTs func(g Gomega) int) {
+			maxConcurrentRestarts := 0
+			sawPartial := false
+
+			Eventually(func(g Gomega) {
+				updated := updatedSTs(g)
+				if updated > 0 && updated < expectedPods {
+					sawPartial = true
+				}
+
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+					"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{\"\\n\"}{end}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				restarted := 0
+				for _, line := range utils.GetNonEmptyLines(out) {
+					parts := strings.SplitN(line, "=", 2)
+					if len(parts) != 2 {
+						continue
+					}
+					if old, ok := baselineUIDs[parts[0]]; ok && old != parts[1] {
+						restarted++
+					}
+				}
+				if restarted > maxConcurrentRestarts {
+					maxConcurrentRestarts = restarted
+				}
+				if restarted > 0 && restarted < expectedPods {
+					sawPartial = true
+				}
+
+				if len(baselineRevs) > 0 {
+					currentRevs := nodeWorkloadRevisions(g)
+					advanced := 0
+					for name, baselineRev := range baselineRevs {
+						if rev, ok := currentRevs[name]; ok && rev != "" && rev != baselineRev {
+							advanced++
+						}
+					}
+					if advanced > 0 && advanced < expectedPods {
+						sawPartial = true
+					}
+				}
+
+				if countAwaitingWorkloadRevision(g) > 0 {
+					sawPartial = true
+				}
+
+				g.Expect(sawPartial).To(BeTrue(), "expected staged roll signal before finish")
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			Expect(maxConcurrentRestarts).To(BeNumerically("<=", 1),
+				"expected at most one concurrent pod restart, saw %d", maxConcurrentRestarts)
+		}
+
 		It("propagates spec changes one node at a time and returns to Ready", func() {
+			defer deleteCluster()
+
 			By("creating a ValkeyCluster with 2 shards and 1 replica")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -1798,28 +2044,13 @@ spec:
   shards: 2
   replicas: 1
 `, clusterName)
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(manifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
-			defer func() {
-				cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
-			}()
-
-			By("waiting for the cluster to become Ready")
-			Eventually(func(g Gomega) {
-				cr, err := utils.GetValkeyClusterStatus(clusterName)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
-				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
-			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			createReadyCluster(manifest, 2)
 
 			By("patching the cluster with new memory requests to trigger a rolling update")
 			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
 				"--type=merge", "-p",
 				`{"spec":{"resources":{"requests":{"cpu":"100m","memory":"384Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}}`)
-			_, err = utils.Run(patchCmd)
+			_, err := utils.Run(patchCmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster resources")
 
 			By("waiting for the cluster to enter the UpdatingNodes progressing state")
@@ -1856,6 +2087,92 @@ spec:
 				g.Expect(progressingCond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonReconcileComplete))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("updates the exporter template one node at a time", Label("WorkloadRoll"), func() {
+			defer deleteCluster()
+
+			const expectedPods = 6
+			By("creating a ValkeyCluster with 3 shards and 1 replica")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+`, clusterName)
+			createReadyCluster(manifest, 3)
+
+			baselineUIDs := podUIDs(expectedPods)
+			baselineRevs, err := getNodeWorkloadRevisions()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(baselineRevs).To(HaveLen(expectedPods))
+
+			By("patching exporter args to force a pod-template-only change")
+			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", `{"spec":{"exporter":{"args":["--include-system-metrics"]}}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			assertStagedRoll(baselineUIDs, expectedPods, baselineRevs, func(g Gomega) int {
+				return countStatefulSetsWithExporterArg(g, "--include-system-metrics")
+			})
+
+			By("waiting for workloadRevision to advance on every node and WorkloadRollPending to clear")
+			Eventually(func(g Gomega) {
+				revs := nodeWorkloadRevisions(g)
+				g.Expect(revs).To(HaveLen(expectedPods))
+				for name, baselineRev := range baselineRevs {
+					g.Expect(revs[name]).NotTo(Equal(baselineRev))
+					g.Expect(revs[name]).NotTo(BeEmpty())
+				}
+				g.Expect(countAwaitingWorkloadRevision(g)).To(Equal(0))
+			}).Should(Succeed())
+		})
+
+		It("updates Valkey 9.0.0 to 9.1.0 one node at a time", Label("ImageUpgrade"), func() {
+			defer deleteCluster()
+
+			const (
+				expectedPods = 6
+				oldImage     = "valkey/valkey:9.0.0"
+				newImage     = "valkey/valkey:9.1.0"
+			)
+
+			By("creating a ValkeyCluster pinned to Valkey 9.0.0")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  image: %s
+  shards: 3
+  replicas: 1
+`, clusterName, oldImage)
+			createReadyCluster(manifest, 3)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+					"-o", `jsonpath={.items[*].spec.containers[?(@.name=="server")].image}`)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				for _, img := range strings.Fields(out) {
+					g.Expect(img).To(Equal(oldImage))
+				}
+			}).Should(Succeed())
+
+			baselineUIDs := podUIDs(expectedPods)
+			By("upgrading the cluster image to Valkey 9.1.0")
+			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"image":"%s"}}`, newImage))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			assertStagedRoll(baselineUIDs, expectedPods, nil, func(g Gomega) int {
+				return countStatefulSetsWithServerImage(g, newImage)
+			})
 		})
 	})
 

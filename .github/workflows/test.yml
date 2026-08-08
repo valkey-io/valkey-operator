@@ -23,3 +23,6 @@ jobs:
         run: |
           go mod tidy
           make test
+
+      - name: Verify that chaos tests compiles
+        run: go test -tags=chaos -c ./test/chaos/ -o /dev/null

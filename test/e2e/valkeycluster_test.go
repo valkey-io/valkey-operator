@@ -170,6 +170,27 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
 
+			By("validating each ValkeyNode reports a resolved role, one primary per shard")
+			verifyNodeRoles := func(g Gomega) {
+				nodes, err := utils.GetValkeyClusterNodes(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(nodes.Items).To(HaveLen(6), "Expected 6 ValkeyNodes")
+
+				primariesPerShard := map[string]int{}
+				for _, node := range nodes.Items {
+					g.Expect(node.Status.Role).To(BeElementOf("primary", "replica"),
+						"ValkeyNode %s should report a resolved role", node.Name)
+					if node.Status.Role == "primary" {
+						primariesPerShard[node.Labels["valkey.io/shard-index"]]++
+					}
+				}
+				g.Expect(primariesPerShard).To(HaveLen(3), "expected all 3 shards to have a primary")
+				for shard, count := range primariesPerShard {
+					g.Expect(count).To(Equal(1), "shard %s should report exactly one primary", shard)
+				}
+			}
+			Eventually(verifyNodeRoles).Should(Succeed())
+
 			// NOTE: Kubernetes Events are best-effort and may be rate-limited, delayed by
 			// `kubectl get events` / `kubectl describe` when many events are emitted for the same Custom Resource.
 			// In particular, kubectl output can appear capped (~15–20) and events can show up late; see:

@@ -2119,4 +2119,135 @@ spec:
 			}, 30*time.Second, 5*time.Second).Should(Succeed())
 		})
 	})
+
+	Context("acl-hash annotation migration", func() {
+		const clusterName = "valkeycluster-aclhash-migration-e2e"
+		const usersSecret = "valkey-aclhash-users"
+		const (
+			defaultPassword = "aclhash-default-pw"
+			alicePassword   = "aclhash-alice-pw"
+		)
+
+		manifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+type: Opaque
+stringData:
+  defaultpw: %s
+  alicepw: %s
+---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  users:
+    - name: default
+      enabled: true
+      permissions: "+@all ~* &*"
+      passwordSecret:
+        name: %s
+        keys: [defaultpw]
+    - name: alice
+      enabled: true
+      passwordSecret:
+        name: %s
+        keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+      keys:
+        readWrite: ["app:*"]
+`, usersSecret, defaultPassword, alicePassword, clusterName, usersSecret, usersSecret)
+
+		serverStatefulSets := func(g Gomega) []string {
+			out, err := utils.Run(exec.Command("kubectl", "get", "statefulset",
+				"-l", "valkey.io/cluster="+clusterName,
+				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			return utils.GetNonEmptyLines(out)
+		}
+
+		expectACLAppliedTrue := func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
+				"-l", "valkey.io/cluster="+clusterName,
+				"-o", "jsonpath={.items[*].metadata.name}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			names := strings.Fields(out)
+			g.Expect(names).To(HaveLen(6))
+			for _, name := range names {
+				node, err := utils.GetValkeyNodeStatus(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := utils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+				g.Expect(cond).NotTo(BeNil(), "ACLApplied condition should be set on %s", name)
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue), "ACLApplied should be True on %s", name)
+			}
+		}
+
+		It("removes a legacy internal-acl-hash annotation so an upgraded cluster migrates to live ACL", Label("acl-hash-migration"), func() {
+			defer func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
+			}()
+
+			By("creating a ValkeyCluster with a custom user set")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the cluster to become Ready with live ACL applied")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
+			// Operator versions before live ACL stamped the ACL hash on the pod
+			// template. Reproduce that pre-upgrade state, then assert the current
+			// operator migrates off it: removing the annotation is the one-time
+			// roll that reloads the aclfile and grants _operator the ACL commands.
+			var stsNames []string
+			Eventually(func(g Gomega) {
+				stsNames = serverStatefulSets(g)
+				g.Expect(stsNames).To(HaveLen(6))
+			}).Should(Succeed())
+			for _, sts := range stsNames {
+				_, err := utils.Run(exec.Command("kubectl", "patch", "statefulset", sts, "--type", "merge",
+					"-p", `{"spec":{"template":{"metadata":{"annotations":{"valkey.io/internal-acl-hash":"simulated-legacy"}}}}}`))
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("the operator strips the annotation from every StatefulSet (the migration roll)")
+			Eventually(func(g Gomega) {
+				for _, sts := range serverStatefulSets(g) {
+					out, err := utils.Run(exec.Command("kubectl", "get", "statefulset", sts,
+						"-o", "jsonpath={.spec.template.metadata.annotations.valkey\\.io/internal-acl-hash}"))
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(strings.TrimSpace(out)).To(BeEmpty(),
+						"operator must strip the legacy ACL-hash annotation from %s", sts)
+				}
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("the cluster returns to Ready and ACL stays live after the migration")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
+		})
+	})
 })

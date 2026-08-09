@@ -1790,8 +1790,13 @@ spec:
 		const clusterName = "valkeycluster-rolling-e2e"
 
 		createReadyCluster := func(manifest string, readyShards int32) {
-			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=true", "--timeout=5m")
 			_, _ = utils.Run(cmd)
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", clusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}).Should(Succeed())
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1900,7 +1905,7 @@ spec:
 			return awaiting
 		}
 
-		countStatefulSetsWithExporterArg := func(g Gomega, arg string) int {
+		countStatefulSetContainers := func(g Gomega, match func(name, image string, args []string) bool) int {
 			cmd := exec.Command("kubectl", "get", "statefulsets",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
 				"-o", "json")
@@ -1913,8 +1918,9 @@ spec:
 						Template struct {
 							Spec struct {
 								Containers []struct {
-									Name string   `json:"name"`
-									Args []string `json:"args"`
+									Name  string   `json:"name"`
+									Image string   `json:"image"`
+									Args  []string `json:"args"`
 								} `json:"containers"`
 							} `json:"spec"`
 						} `json:"template"`
@@ -1926,47 +1932,7 @@ spec:
 			updated := 0
 			for _, item := range stsList.Items {
 				for _, c := range item.Spec.Template.Spec.Containers {
-					if c.Name != "metrics-exporter" {
-						continue
-					}
-					for _, a := range c.Args {
-						if a == arg {
-							updated++
-							break
-						}
-					}
-				}
-			}
-			return updated
-		}
-
-		countStatefulSetsWithServerImage := func(g Gomega, image string) int {
-			cmd := exec.Command("kubectl", "get", "statefulsets",
-				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-				"-o", "json")
-			out, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			var stsList struct {
-				Items []struct {
-					Spec struct {
-						Template struct {
-							Spec struct {
-								Containers []struct {
-									Name  string `json:"name"`
-									Image string `json:"image"`
-								} `json:"containers"`
-							} `json:"spec"`
-						} `json:"template"`
-					} `json:"spec"`
-				} `json:"items"`
-			}
-			g.Expect(json.Unmarshal([]byte(out), &stsList)).To(Succeed())
-
-			updated := 0
-			for _, item := range stsList.Items {
-				for _, c := range item.Spec.Template.Spec.Containers {
-					if c.Name == "server" && c.Image == image {
+					if match(c.Name, c.Image, c.Args) {
 						updated++
 						break
 					}
@@ -1975,9 +1941,32 @@ spec:
 			return updated
 		}
 
+		countStatefulSetsWithExporterArg := func(g Gomega, arg string) int {
+			return countStatefulSetContainers(g, func(name, _ string, args []string) bool {
+				if name != "metrics-exporter" {
+					return false
+				}
+				for _, a := range args {
+					if a == arg {
+						return true
+					}
+				}
+				return false
+			})
+		}
+
+		countStatefulSetsWithServerImage := func(g Gomega, image string) int {
+			return countStatefulSetContainers(g, func(name, img string, _ []string) bool {
+				return name == "server" && img == image
+			})
+		}
+
 		assertStagedRoll := func(baselineUIDs map[string]string, expectedPods int, baselineRevs map[string]string, updatedSTs func(g Gomega) int) {
 			maxConcurrentRestarts := 0
 			sawPartial := false
+			rollComplete := func(updated, restarted int) bool {
+				return updated == expectedPods && restarted == expectedPods
+			}
 
 			Eventually(func(g Gomega) {
 				updated := updatedSTs(g)
@@ -1991,18 +1980,35 @@ spec:
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				restarted := 0
-				for _, line := range utils.GetNonEmptyLines(out) {
+				lines := utils.GetNonEmptyLines(out)
+				nameToUID := make(map[string]string, len(lines))
+				for _, line := range lines {
 					parts := strings.SplitN(line, "=", 2)
 					if len(parts) != 2 {
 						continue
 					}
-					if old, ok := baselineUIDs[parts[0]]; ok && old != parts[1] {
+					nameToUID[parts[0]] = parts[1]
+				}
+
+				missing := 0
+				restarted := 0
+				for name, oldUID := range baselineUIDs {
+					uid, ok := nameToUID[name]
+					if !ok {
+						missing++
+						continue
+					}
+					if uid != oldUID {
 						restarted++
 					}
 				}
-				if restarted > maxConcurrentRestarts {
-					maxConcurrentRestarts = restarted
+				inFlight := missing
+				if inFlight > maxConcurrentRestarts {
+					maxConcurrentRestarts = inFlight
+				}
+				if !rollComplete(updated, restarted) {
+					g.Expect(inFlight).To(BeNumerically("<=", 1),
+						"expected at most one concurrent pod restart, saw %d", inFlight)
 				}
 				if restarted > 0 && restarted < expectedPods {
 					sawPartial = true
@@ -2012,22 +2018,32 @@ spec:
 					currentRevs := nodeWorkloadRevisions(g)
 					advanced := 0
 					for name, baselineRev := range baselineRevs {
-						if rev, ok := currentRevs[name]; ok && rev != "" && rev != baselineRev {
+						if rev, ok := currentRevs[name]; ok && rev != baselineRev && rev != "" {
 							advanced++
 						}
 					}
 					if advanced > 0 && advanced < expectedPods {
 						sawPartial = true
 					}
+					if countAwaitingWorkloadRevision(g) > 0 {
+						sawPartial = true
+					}
 				}
 
-				if countAwaitingWorkloadRevision(g) > 0 {
-					sawPartial = true
+				g.Expect(updated).To(Equal(expectedPods), "not all workloads updated yet")
+				g.Expect(restarted).To(Equal(expectedPods), "not all pods replaced yet")
+				if len(baselineRevs) > 0 {
+					currentRevs := nodeWorkloadRevisions(g)
+					g.Expect(countAwaitingWorkloadRevision(g)).To(Equal(0), "nodes still awaiting workload revision")
+					for name, baselineRev := range baselineRevs {
+						g.Expect(currentRevs[name]).NotTo(Equal(baselineRev))
+						g.Expect(currentRevs[name]).NotTo(BeEmpty())
+					}
 				}
 
-				g.Expect(sawPartial).To(BeTrue(), "expected staged roll signal before finish")
-			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+			}).Should(Succeed())
 
+			Expect(sawPartial).To(BeTrue(), "expected to observe a partially rolled state")
 			Expect(maxConcurrentRestarts).To(BeNumerically("<=", 1),
 				"expected at most one concurrent pod restart, saw %d", maxConcurrentRestarts)
 		}
@@ -2118,17 +2134,6 @@ spec:
 			assertStagedRoll(baselineUIDs, expectedPods, baselineRevs, func(g Gomega) int {
 				return countStatefulSetsWithExporterArg(g, "--include-system-metrics")
 			})
-
-			By("waiting for workloadRevision to advance on every node and WorkloadRollPending to clear")
-			Eventually(func(g Gomega) {
-				revs := nodeWorkloadRevisions(g)
-				g.Expect(revs).To(HaveLen(expectedPods))
-				for name, baselineRev := range baselineRevs {
-					g.Expect(revs[name]).NotTo(Equal(baselineRev))
-					g.Expect(revs[name]).NotTo(BeEmpty())
-				}
-				g.Expect(countAwaitingWorkloadRevision(g)).To(Equal(0))
-			}).Should(Succeed())
 		})
 
 		It("updates Valkey 9.0.0 to 9.1.0 one node at a time", Label("ImageUpgrade"), func() {
@@ -2158,7 +2163,9 @@ spec:
 					"-o", `jsonpath={.items[*].spec.containers[?(@.name=="server")].image}`)
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				for _, img := range strings.Fields(out) {
+				images := strings.Fields(out)
+				g.Expect(images).To(HaveLen(expectedPods), "expected one server image per pod")
+				for _, img := range images {
 					g.Expect(img).To(Equal(oldImage))
 				}
 			}).Should(Succeed())

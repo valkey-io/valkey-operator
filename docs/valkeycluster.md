@@ -69,11 +69,15 @@ containers:
 exporter:
   enabled: true   # default
   image: oliver006/redis_exporter:v1.80.0
+  args: # optional command-line flags for exporter
+    - -ping-on-connect
   resources:
     requests:
       memory: "64Mi"
       cpu: "50m"
 ```
+
+NOTE: `oliver006/redis_exporter` command-line arguments have higher priority than the environment variables passed by default, so `exporter.args` can override them when needed.
 
 Each pod runs a `metrics-exporter` sidecar by default, exposing Prometheus metrics on port `9121`. To disable it:
 
@@ -301,18 +305,23 @@ The zone axis is independent of the node axis. `node.spread` and `zone.spread` k
 ### TLS
 
 ```yaml
-tls:
-  certificate:
-    secretName: valkey-tls
+networking:
+  tls:
+    certificate:
+      secretName: valkey-tls
 ```
 
-`tls` enables TLS for all cluster communication. The Secret must contain:
+`networking.tls` enables TLS for all cluster communication. When set, `certificate.secretName` is required. The Secret must contain:
 
 | Key | Description |
 |---|---|
 | `ca.crt` | Certificate authority |
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
+
+> **Breaking (alpha):** top-level `spec.tls` is removed in favour of `spec.networking.tls`.
+>
+> **Upgrade order:** move every ValkeyCluster to `spec.networking.tls` **before** rolling the new CRD. If you upgrade with only top-level `spec.tls` still set, the API server drops the unknown field and the cluster comes back up **with TLS off** (plaintext). That is not a silent field rename; migrate first, then CRD/operator.
 
 ### Users
 

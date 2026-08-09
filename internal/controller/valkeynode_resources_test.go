@@ -31,6 +31,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return &envVars[i]
+		}
+	}
+	require.Failf(t, "env var not found", "expected env var %q to be present", name)
+	return nil
+}
+
 func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 	return &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -602,24 +613,33 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, resources, c.Resources)
 	})
 
-	t.Run("args contain redis addr", func(t *testing.T) {
+	t.Run("env contains redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
-		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "redis://localhost:6379", redisAddr.Value)
+		assert.Empty(t, c.Args)
 		assert.Empty(t, c.VolumeMounts)
 	})
 
-	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+	t.Run("env contains rediss addr with tls", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
-		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
-		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
+		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
+		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("args set from spec", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true, Args: []string{"-append-instance-role-label"}}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, []string{"-append-instance-role-label"}, c.Args)
 	})
 
 	t.Run("security context passthrough", func(t *testing.T) {
@@ -1111,4 +1131,26 @@ func TestDefaultImagePullPolicy(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, defaultImagePullPolicy(tc.image), "image %q", tc.image)
 	}
+}
+
+func TestApplyProbeAPIDefaults(t *testing.T) {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
+		},
+	}
+	applyProbeAPIDefaults(probe)
+	assert.Equal(t, int32(1), probe.TimeoutSeconds)
+	assert.Equal(t, int32(10), probe.PeriodSeconds)
+	assert.Equal(t, int32(1), probe.SuccessThreshold)
+	assert.Equal(t, int32(3), probe.FailureThreshold)
+	assert.Equal(t, corev1.URISchemeHTTP, probe.HTTPGet.Scheme)
+
+	// Explicit values are preserved.
+	custom := &corev1.Probe{TimeoutSeconds: 5, PeriodSeconds: 2, SuccessThreshold: 2, FailureThreshold: 9}
+	applyProbeAPIDefaults(custom)
+	assert.Equal(t, int32(5), custom.TimeoutSeconds)
+	assert.Equal(t, int32(2), custom.PeriodSeconds)
+	assert.Equal(t, int32(2), custom.SuccessThreshold)
+	assert.Equal(t, int32(9), custom.FailureThreshold)
 }

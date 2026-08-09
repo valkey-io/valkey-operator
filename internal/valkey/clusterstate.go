@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -373,6 +374,110 @@ func (n *NodeState) PrimaryIdFromSelf() string {
 		}
 	}
 	return ""
+}
+
+// AllNodes returns every reachable node in the state: shard members first,
+// then pending nodes.
+func (s *ClusterState) AllNodes() []*NodeState {
+	var nodes []*NodeState
+	for _, shard := range s.Shards {
+		nodes = append(nodes, shard.Nodes...)
+	}
+	return append(nodes, s.PendingNodes...)
+}
+
+// FindNodeById returns the reachable node with the given cluster node ID, or
+// nil if no such node was scraped.
+func (s *ClusterState) FindNodeById(id string) *NodeState {
+	for _, node := range s.AllNodes() {
+		if node.Id == id {
+			return node
+		}
+	}
+	return nil
+}
+
+// hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
+// endpoint field (<ip:port@cport[,hostname]>). IPv6 hosts appear bracketed
+// ([fd00::2]:6379@16379); net.SplitHostPort unbrackets them so the result
+// compares equal to the bare pod IP Kubernetes reports. Returns "" when the
+// field has no parsable host:port part.
+func hostFromClusterNodesEndpoint(endpoint string) string {
+	// Drop the cluster-bus suffix and the optional ,hostname after it.
+	if i := strings.Index(endpoint, "@"); i != -1 {
+		endpoint = endpoint[:i]
+	}
+	if host, _, err := net.SplitHostPort(endpoint); err == nil {
+		return host
+	}
+	// Fallback for entries with no port (shouldn't occur in CLUSTER NODES,
+	// but keep the previous last-colon behavior rather than dropping them).
+	if i := strings.LastIndex(endpoint, ":"); i != -1 {
+		return strings.Trim(endpoint[:i], "[]")
+	}
+	return ""
+}
+
+// StaleAddressPeer pairs a viewer node with a live cluster member whose
+// address in the viewer's node table is outdated.
+type StaleAddressPeer struct {
+	Viewer *NodeState // node whose table holds the stale entry
+	Live   *NodeState // the same member, reachable at its current address
+}
+
+// FindStaleAddressPeers detects cluster members that restarted with a new
+// address while other nodes' tables (persisted in nodes.conf) still point at
+// the old one. This happens when many pods restart at once — e.g. a full
+// Kubernetes cluster restart — leaving no surviving member to gossip the new
+// addresses from, so the cluster stays partitioned until the peers are
+// re-introduced (see valkey-io/valkey-operator#275).
+//
+// A peer entry is stale when it is flagged failing (fail, fail? or noaddr)
+// in the viewer's node table, but a node with the same cluster ID was
+// scraped alive at a different address. Entries whose ID matches no live
+// node are genuinely dead and left for forgetStaleNodes.
+func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
+	all := s.AllNodes()
+	live := make(map[string]*NodeState, len(all))
+	for _, node := range all {
+		live[node.Id] = node
+	}
+	var stale []StaleAddressPeer
+	for _, viewer := range all {
+		for line := range strings.SplitSeq(viewer.ClusterNodes, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			flags := strings.Split(fields[2], ",")
+			if slices.Contains(flags, "myself") {
+				continue
+			}
+			// fail? is included: promoting pfail to fail needs gossip
+			// between a majority of primaries, which is exactly what a
+			// cluster-wide address change breaks — entries can stay at
+			// fail? indefinitely.
+			noaddr := slices.Contains(flags, "noaddr")
+			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !noaddr {
+				continue
+			}
+			peer, ok := live[fields[0]]
+			if !ok {
+				continue
+			}
+			// A noaddr entry carries no endpoint at all (:0@0) — the ID is
+			// known but no address ever completed a handshake. A live node
+			// with that ID always needs re-introduction.
+			if noaddr {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
+				continue
+			}
+			if address := hostFromClusterNodesEndpoint(fields[1]); address != "" && address != peer.Address {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
+			}
+		}
+	}
+	return stale
 }
 
 // GetFailingNodes returns all known nodes that are failing.

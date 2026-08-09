@@ -318,12 +318,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 // applyContainerAPIDefaults fills the container fields the API server would
 // otherwise default (imagePullPolicy, terminationMessagePath/Policy, port
-// protocol, env fieldRef apiVersion). The workload reconcilers assign the
-// whole desired spec in their CreateOrUpdate mutate functions, so a field
-// left unset here is clobbered to its zero value on every pass and the
-// operator updates the workload on every reconcile even though nothing
-// changed (#315). Runs after mergePatchContainers so user-supplied container
-// patches are normalized the same way the API server would normalize them.
+// protocol, env fieldRef apiVersion, probe period/timeout/thresholds/scheme). The workload
+// reconcilers assign the whole desired spec in their CreateOrUpdate mutate
+// functions, so a field left unset here is clobbered to its zero value on
+// every pass and the operator updates the workload on every reconcile even
+// though nothing changed (#315). Runs after mergePatchContainers so
+// user-supplied container patches are normalized the same way the API server
+// would normalize them.
 func applyContainerAPIDefaults(containers []corev1.Container) {
 	for i := range containers {
 		c := &containers[i]
@@ -346,6 +347,32 @@ func applyContainerAPIDefaults(containers []corev1.Container) {
 				vf.FieldRef.APIVersion = "v1"
 			}
 		}
+		applyProbeAPIDefaults(c.LivenessProbe)
+		applyProbeAPIDefaults(c.ReadinessProbe)
+		applyProbeAPIDefaults(c.StartupProbe)
+	}
+}
+
+func applyProbeAPIDefaults(probe *corev1.Probe) {
+	if probe == nil {
+		return
+	}
+	// Match API-server Probe defaults so user-supplied container patches that
+	// omit these fields do not look like perpetual pod-template drift.
+	if probe.TimeoutSeconds == 0 {
+		probe.TimeoutSeconds = 1
+	}
+	if probe.PeriodSeconds == 0 {
+		probe.PeriodSeconds = 10
+	}
+	if probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = 1
+	}
+	if probe.FailureThreshold == 0 {
+		probe.FailureThreshold = 3
+	}
+	if probe.HTTPGet != nil && probe.HTTPGet.Scheme == "" {
+		probe.HTTPGet.Scheme = corev1.URISchemeHTTP
 	}
 }
 

@@ -1808,7 +1808,7 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.ReadyShards).To(Equal(readyShards))
-			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			}).Should(Succeed())
 		}
 
 		deleteCluster := func() {

@@ -897,6 +897,11 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		)
 	}
 
+	// Pin the pod to its deterministic zone, ANDed with the user's passthrough
+	// nodeSelector. Kubernetes ANDs nodeSelector with any nodeAffinity the user
+	// supplies, so the escape hatch is left verbatim.
+	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex))
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -909,7 +914,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			WorkloadType:                  cluster.Spec.WorkloadType,
 			Persistence:                   cluster.Spec.Persistence,
 			Resources:                     cluster.Spec.Resources,
-			NodeSelector:                  scheduling.NodeSelector,
+			NodeSelector:                  nodeSelector,
 			Affinity:                      affinity,
 			Tolerations:                   scheduling.Tolerations,
 			PriorityClassName:             scheduling.PriorityClassName,

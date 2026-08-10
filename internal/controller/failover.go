@@ -180,7 +180,7 @@ func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode
 // matches) does not qualify.
 //
 // liveTemplateHashes maps ValkeyNode name -> hash of live pod template.
-func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, aclSecret *corev1.Secret, liveTemplateHashes map[string]string) bool {
+func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, liveTemplateHashes map[string]string) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -190,7 +190,7 @@ func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, n
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 			desired.Spec.ServerConfigHash = configHash
-			if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
+			if err := setDesiredWorkloadRevision(desired); err != nil {
 				return true
 			}
 			if current, ok := byName[desired.Name]; ok {

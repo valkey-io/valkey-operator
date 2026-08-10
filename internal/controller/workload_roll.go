@@ -73,37 +73,35 @@ func isClusterOwned(node *valkeyiov1alpha1.ValkeyNode) bool {
 }
 
 // computeWorkloadRevision builds the pod template for the node (using the same
-// builders as the ValkeyNode controller) and returns its roll hash. When
-// aclSecret is non-nil, template annotations match ensureStatefulSet/Deployment.
-func computeWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) (string, error) {
-	tmpl, err := buildNodePodTemplate(node, aclSecret)
+// builders as the ValkeyNode controller) and returns its roll hash. ACL is not
+// part of the template (it is applied live, see applyLiveACL), so it does not
+// enter this revision and an ACL edit never rolls the pod.
+func computeWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	tmpl, err := buildNodePodTemplate(node)
 	if err != nil {
 		return "", err
 	}
 	return podTemplateRollHash(tmpl), nil
 }
 
-// buildNodePodTemplate returns the desired pod template for a ValkeyNode.
+// buildNodePodTemplate returns the desired pod template for a ValkeyNode,
+// including the same template annotations ensureStatefulSet/Deployment stamp.
 // Empty WorkloadType is treated as StatefulSet (CRD default).
-func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) (corev1.PodTemplateSpec, error) {
+func buildNodePodTemplate(node *valkeyiov1alpha1.ValkeyNode) (corev1.PodTemplateSpec, error) {
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		dep, err := buildValkeyNodeDeployment(node)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		if aclSecret != nil {
-			dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		}
+		dep.Spec.Template.Annotations = buildPodTemplateAnnotations(node)
 		return dep.Spec.Template, nil
 	case valkeyiov1alpha1.WorkloadTypeStatefulSet, "":
 		sts, err := buildValkeyNodeStatefulSet(node)
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		if aclSecret != nil {
-			sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node, aclSecret)
-		}
+		sts.Spec.Template.Annotations = buildPodTemplateAnnotations(node)
 		return sts.Spec.Template, nil
 	default:
 		return corev1.PodTemplateSpec{}, fmt.Errorf("unsupported workload type %q", node.Spec.WorkloadType)
@@ -117,8 +115,8 @@ func workloadRevisionAllows(node *valkeyiov1alpha1.ValkeyNode, desiredHash strin
 }
 
 // setDesiredWorkloadRevision sets Spec.WorkloadRevision from the built template.
-func setDesiredWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode, aclSecret *corev1.Secret) error {
-	rev, err := computeWorkloadRevision(node, aclSecret)
+func setDesiredWorkloadRevision(node *valkeyiov1alpha1.ValkeyNode) error {
+	rev, err := computeWorkloadRevision(node)
 	if err != nil {
 		return fmt.Errorf("compute workload revision for %s: %w", node.Name, err)
 	}

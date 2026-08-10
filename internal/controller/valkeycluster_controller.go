@@ -548,18 +548,6 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
-	// One ACL secret snapshot for preflight and per-node WorkloadRevision so the
-	// scrape decision and authorized hash cannot disagree mid-reconcile.
-	aclSecret, err := r.getClusterACLSecret(ctx, cluster)
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("get ACL secret for workload revision: %w", err)
-		}
-		// Bootstrap: secret may not exist yet; hash without ACL annotations.
-		log.V(1).Info("ACL secret not ready for roll preflight, hashing without it", "err", err)
-		aclSecret = nil
-	}
-
 	// Scrape cluster state once for proactive failover decisions, but only
 	// when at least one node needs a failover-aware roll. During initial
 	// bootstrap no nodes exist, so state stays nil. The snapshot is safe to
@@ -571,7 +559,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	if err != nil {
 		return false, err
 	}
-	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, aclSecret, liveHashes) {
+	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, liveHashes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -593,7 +581,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash, aclSecret, liveHashes)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash, liveHashes)
 			if err != nil {
 				return false, err
 			}
@@ -634,14 +622,14 @@ const (
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
-// aclSecret and liveTemplateHashes are the reconcileValkeyNodes snapshot so
-// WorkloadRevision and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string, aclSecret *corev1.Secret, liveTemplateHashes map[string]string) (nodeResult, error) {
+// liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
+// and failover decisions stay consistent for the whole pass.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string, liveTemplateHashes map[string]string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 	desired.Spec.ServerConfigHash = configHash
-	if err := setDesiredWorkloadRevision(desired, aclSecret); err != nil {
+	if err := setDesiredWorkloadRevision(desired); err != nil {
 		return nodeUnchanged, err
 	}
 
@@ -806,16 +794,6 @@ func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node 
 		}
 		return podTemplateRollHash(sts.Spec.Template), nil
 	}
-}
-
-// getClusterACLSecret loads the cluster internal ACL secret used for template annotations.
-func (r *ValkeyClusterReconciler) getClusterACLSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
-	aclSecret := &corev1.Secret{}
-	name := getInternalSecretName(cluster.Name)
-	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: cluster.Namespace}, aclSecret); err != nil {
-		return nil, err
-	}
-	return aclSecret, nil
 }
 
 const (

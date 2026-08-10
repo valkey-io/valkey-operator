@@ -29,10 +29,10 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-build-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-${{ github.sha }}
+          key: go-build-test-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-${{ github.sha }}
           restore-keys: |
-            go-build-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-
-            go-build-${{ runner.os }}-
+            go-build-test-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-
+            go-build-test-${{ runner.os }}-
 
       - name: Running Tests
         run: make test

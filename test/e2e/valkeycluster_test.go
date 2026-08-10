@@ -2276,7 +2276,7 @@ spec:
 			}
 		}
 
-		It("removes a legacy internal-acl-hash annotation so an upgraded cluster migrates to live ACL", Label("acl-hash-migration"), func() {
+		It("removes a legacy internal-acl-hash annotation from the pod template", Label("acl-hash-migration"), func() {
 			defer func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
@@ -2299,9 +2299,13 @@ spec:
 
 			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
 			// Operator versions before live ACL stamped the ACL hash on the pod
-			// template. Reproduce that pre-upgrade state, then assert the current
-			// operator migrates off it: removing the annotation is the one-time
-			// roll that reloads the aclfile and grants _operator the ACL commands.
+			// template. Reproduce that pre-upgrade state and assert the current
+			// operator reconciles it away. Removing the annotation is the one-time
+			// roll that, on a real version upgrade, restarts the pod onto the new
+			// aclfile and thereby grants _operator the ACL commands. This spec runs
+			// against the current operator (which already grants them), so it pins
+			// the reconcile trigger and that ACL stays live across the roll, not
+			// the permission bootstrap itself, which needs the old operator build.
 			var stsNames []string
 			Eventually(func(g Gomega) {
 				stsNames = serverStatefulSets(g)

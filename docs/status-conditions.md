@@ -216,7 +216,9 @@ Common reasons when `ACLApplied=False`:
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired users and passwords are live.
 
-> **Note:** `ACLApplied` compares the user set and password hashes, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. Permission changes are applied by the same unconditional `ACL LOAD`, so they converge on the running server as well. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+> **Note:** `ACLApplied` compares the user set and password hashes exactly, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+>
+> **Limitation:** Only the user set and password hashes drive the condition, so only those changes move it through `PendingPropagation` back to `True`: adding or removing a user or a password. A change to a user's `enabled` flag or permissions still takes effect on the server (the reload is unconditional), but the condition does not report a transient `PendingPropagation` for it, so it is not a signal to wait on for those fields. Comparing rules directly would mean reimplementing Valkey's normalized ACL rendering; making the condition track every field is left as a follow-up.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

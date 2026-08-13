@@ -121,27 +121,9 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 test-e2e-matrix: ## Emit the e2e label buckets as a JSON array for the CI matrix
 	@jq -nc '$$ARGS.positional' --args $(E2E_BUCKETS) "$(E2E_CATCHALL)"
 
-# Guard against a test matching two buckets (via its own or inherited
-# Describe/Context labels), which would run it twice across the matrix. Fails
-# with the offending file:line. Coverage is guaranteed by the derived catch-all.
 .PHONY: test-e2e-verify-buckets
 test-e2e-verify-buckets: ## Verify no e2e test matches two buckets (would run twice in the matrix)
-	@echo ">> checking e2e label buckets"
-	@go test -tags=e2e ./test/e2e/ -ginkgo.dry-run --ginkgo.json-report=/tmp/e2e-all.json >/dev/null 2>&1 || true
-	@jq -r '.[].SpecReports[] | select(.LeafNodeType=="It") | "\(.LeafNodeLocation.FileName):\(.LeafNodeLocation.LineNumber)\t\((((.LeafNodeLabels // []) + [.ContainerHierarchyLabels[]?[]?]) | unique) | join(","))"' /tmp/e2e-all.json > /tmp/e2e-spec-labels.txt
-	@: > /tmp/e2e-assign.txt
-	@for b in $(E2E_BUCKETS); do \
-	  n=$$(awk -F'\t' -v b="$$b" '{split($$2,a,","); for(i in a) if(a[i]==b){print $$1; break}}' /tmp/e2e-spec-labels.txt | tee -a /tmp/e2e-assign.txt | grep -c .); \
-	  printf '  %3d  %s\n' "$$n" "$$b"; \
-	done
-	@catchall=$$(awk -F'\t' 'BEGIN{split("$(E2E_BUCKETS)",bk," ")} {hit=0; split($$2,a,","); for(i in a) for(j in bk) if(a[i]==bk[j]) hit=1; if(!hit) print $$1}' /tmp/e2e-spec-labels.txt | tee -a /tmp/e2e-assign.txt | grep -c .); \
-	printf '  %3d  %s\n' "$$catchall" "$(E2E_CATCHALL)"
-	@overlap=$$(sort /tmp/e2e-assign.txt | uniq -d); \
-	if [ -n "$$overlap" ]; then echo "FAIL: test(s) in more than one bucket:"; echo "$$overlap" | sed 's/^/  OVERLAP /'; exit 1; fi; \
-	assigned=$$(grep -c . /tmp/e2e-assign.txt); \
-	total=$$(grep -c . /tmp/e2e-spec-labels.txt); \
-	if [ "$$assigned" -ne "$$total" ]; then echo "FAIL: buckets cover $$assigned of $$total tests"; exit 1; fi; \
-	echo "OK: every e2e test is in exactly one bucket"
+	@hack/verify-e2e-buckets.sh $(E2E_BUCKETS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

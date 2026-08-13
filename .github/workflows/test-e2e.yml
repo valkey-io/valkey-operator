@@ -12,12 +12,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: .go-version
+          cache: false  # using actions/cache below for the Go build cache
+
+      # Cache: setup-go's built-in cache saves only once per go.mod hash and
+      # won't update it on subsequent runs, so it can't keep a warm build
+      # cache. github.sha key saves every run; restore-keys reuses the latest.
+      - name: Cache Go build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-
+            go-build-e2e-${{ runner.os }}-
 
       - name: Install the latest version of kind
         run: |
@@ -29,6 +44,4 @@ jobs:
         run: kind version
 
       - name: Running Test e2e
-        run: |
-          go mod tidy
-          make test-e2e
+        run: make test-e2e

@@ -118,8 +118,10 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e-matrix
-test-e2e-matrix: ## Emit the e2e label buckets as a JSON array for the CI matrix
-	@jq -nc '$$ARGS.positional' --args $(E2E_BUCKETS) "$(E2E_CATCHALL)"
+test-e2e-matrix: ## Emit the e2e matrix as JSON objects {name, filter} for the CI matrix
+	@jq -nc --arg catchall "$(E2E_CATCHALL)" \
+		'[$$ARGS.positional[] | {name: ("\"" + . + "\""), filter: .}] + [{name: "remaining tests", filter: $$catchall}]' \
+		--args $(E2E_BUCKETS)
 
 .PHONY: test-e2e-verify-buckets
 test-e2e-verify-buckets: ## Verify no e2e test matches two buckets (would run twice in the matrix)

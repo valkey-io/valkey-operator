@@ -186,3 +186,79 @@ func TestZoneSpreadTSCs(t *testing.T) {
 		assert.NotContains(t, got[2].LabelSelector.MatchLabels, LabelNodeIndex, "pods last")
 	})
 }
+
+func TestEffectiveZonePinning(t *testing.T) {
+	assert.Nil(t, effectiveZonePinning(nil), "nil spec resolves to off")
+	assert.Nil(t, effectiveZonePinning(&valkeyiov1alpha1.SchedulingSpec{}), "nil Zone resolves to off")
+	assert.Nil(t, effectiveZonePinning(&valkeyiov1alpha1.SchedulingSpec{
+		Zone: &valkeyiov1alpha1.ZoneScheduling{},
+	}), "nil Pinning resolves to off")
+	assert.Equal(t, []string{"az1", "az2"}, effectiveZonePinning(&valkeyiov1alpha1.SchedulingSpec{
+		Zone: &valkeyiov1alpha1.ZoneScheduling{
+			Pinning: &valkeyiov1alpha1.ZonePinning{Zones: []string{"az1", "az2"}},
+		},
+	}))
+}
+
+func TestZoneForPod(t *testing.T) {
+	zones := []string{"az1", "az2", "az3"}
+
+	t.Run("round-robin over shard and node index", func(t *testing.T) {
+		// The worked example from the design doc: 3 shards x 2 nodes x 3 zones.
+		for _, tc := range []struct {
+			shard, node int
+			want        string
+		}{
+			{0, 0, "az1"}, {0, 1, "az2"},
+			{1, 0, "az2"}, {1, 1, "az3"},
+			{2, 0, "az3"}, {2, 1, "az1"},
+		} {
+			assert.Equal(t, tc.want, zoneForPod(zones, tc.shard, tc.node),
+				"shard %d node %d", tc.shard, tc.node)
+		}
+	})
+
+	t.Run("single zone pins every pod to it", func(t *testing.T) {
+		for shard := range 3 {
+			for node := range 2 {
+				assert.Equal(t, "az1", zoneForPod([]string{"az1"}, shard, node))
+			}
+		}
+	})
+
+	t.Run("pinning off returns the empty string", func(t *testing.T) {
+		assert.Equal(t, "", zoneForPod(nil, 1, 1))
+		assert.Equal(t, "", zoneForPod([]string{}, 1, 1))
+	})
+}
+
+func TestWithZonePin(t *testing.T) {
+	t.Run("nil base gains the zone key", func(t *testing.T) {
+		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az3"}, withZonePin(nil, "az3"))
+	})
+
+	t.Run("user entries are preserved and the input is not mutated", func(t *testing.T) {
+		nodeSelector := map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}
+		got := withZonePin(nodeSelector, "az2")
+		assert.Equal(t, map[string]string{
+			"node.kubernetes.io/instance-type": "m6i.xlarge",
+			"topology.kubernetes.io/zone":      "az2",
+		}, got)
+		assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}, nodeSelector,
+			"the caller's map must not be mutated")
+	})
+
+	t.Run("empty zone returns the base unchanged, preserving nil", func(t *testing.T) {
+		assert.Nil(t, withZonePin(nil, ""), "nil must stay nil so unpinned clusters are not rolled")
+		nodeSelector := map[string]string{"a": "b"}
+		assert.Equal(t, nodeSelector, withZonePin(nodeSelector, ""))
+	})
+
+	t.Run("curated zone wins when base already carries the key", func(t *testing.T) {
+		nodeSelector := map[string]string{"topology.kubernetes.io/zone": "user-supplied"}
+		got := withZonePin(nodeSelector, "az2")
+		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az2"}, got)
+		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "user-supplied"}, nodeSelector,
+			"the caller's map must not be mutated")
+	})
+}

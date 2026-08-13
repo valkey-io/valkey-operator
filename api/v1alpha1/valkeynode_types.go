@@ -190,6 +190,11 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
+	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
+	// wrote to the mounted Secret is live on the server. It is applied via ACL
+	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// means the desired user set and their password hashes are live.
+	ValkeyNodeConditionACLApplied = "ACLApplied"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means

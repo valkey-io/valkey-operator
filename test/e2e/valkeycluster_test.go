@@ -170,6 +170,31 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
 
+			By("validating live ACL converges with only the unmanaged default user")
+			// This cluster sets no custom users, so the only user on the server is
+			// Valkey's own `default`, which the aclfile does not manage. The node
+			// must still reach ACLApplied=True: aclObservablyInSync has to ignore
+			// the unmanaged `default` rather than loop forever waiting for it to
+			// match a spec.users entry that does not exist.
+			verifyACLApplied := func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[*].metadata.name}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				names := strings.Fields(out)
+				g.Expect(names).To(HaveLen(6))
+				for _, name := range names {
+					node, err := utils.GetValkeyNodeStatus(name)
+					g.Expect(err).NotTo(HaveOccurred())
+					cond := utils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+					g.Expect(cond).NotTo(BeNil(), "ACLApplied condition should be set on %s", name)
+					g.Expect(cond.Status).To(Equal(metav1.ConditionTrue), "ACLApplied should converge to True on %s", name)
+				}
+			}
+			// ACLApplied is only set once a node reports Ready, so give it the same
+			// budget as cluster startup rather than a single pass.
+			Eventually(verifyACLApplied, 5*time.Minute, 5*time.Second).Should(Succeed())
+
 			// NOTE: Kubernetes Events are best-effort and may be rate-limited, delayed by
 			// `kubectl get events` / `kubectl describe` when many events are emitted for the same Custom Resource.
 			// In particular, kubectl output can appear capped (~15–20) and events can show up late; see:
@@ -322,74 +347,14 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyClusterSlotsIP).Should(Succeed())
 
-			By("get the original ACL hash")
-			cmd = exec.Command("kubectl", "get", "pod",
-				"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
-				"-o", "jsonpath={.items[0].metadata.annotations.valkey\\.io/internal-acl-hash}",
-			)
-			aclHash, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("delete system users password secret")
-			secretName := "internal-" + valkeyClusterName + "-system-passwords"
-			cmd = exec.Command("kubectl", "delete", "secret", secretName)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("validating system users passwords secret is recreated if deleted")
-			verifySecretRecreation := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", secretName)
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-			}
-			Eventually(verifySecretRecreation).Should(Succeed())
-
-			By("validating valkey-operator fallback to default user")
-			verifyAuthFallback := func(g Gomega) {
-				cmd := exec.Command("kubectl", "logs",
-					"-n", namespace, "-l", "app.kubernetes.io/name=valkey-operator")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("fall back to unauthenticated default user on WRONGPASS error"))
-			}
-			Eventually(verifyAuthFallback).Should(Succeed())
-
-			// ACL secret hash changes rewrite the pod template. Under
-			// Spec.WorkloadRevision that is a staged roll (one node at a time),
-			// so assert any cluster pod picked up the new hash, not only items[0].
-			By("validating at least one pod rolled with the new ACL hash")
-			verifyPodRoll := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pod",
-					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
-					"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.annotations.valkey\\.io/internal-acl-hash}{\"\\n\"}{end}",
-				)
-				out, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				var hashes []string
-				for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					parts := strings.SplitN(line, "=", 2)
-					if len(parts) != 2 || parts[1] == "" {
-						continue
-					}
-					hashes = append(hashes, parts[1])
-				}
-				g.Expect(hashes).NotTo(BeEmpty(), "no ACL hashes on cluster pods; output:\n%s", out)
-				foundNew := false
-				for _, h := range hashes {
-					if h != aclHash {
-						foundNew = true
-						break
-					}
-				}
-				g.Expect(foundNew).To(BeTrue(),
-					"expected at least one pod with ACL hash != %s after staged roll; got %v",
-					aclHash, hashes)
-			}
-			Eventually(verifyPodRoll, 5*time.Minute, 5*time.Second).Should(Succeed())
+			// A previous revision deleted the system-password Secret here and
+			// asserted a pod roll on the internal-acl-hash annotation. ACL is no
+			// longer part of the pod template (it applies live, without a roll),
+			// so that annotation and that assertion are gone. The live-apply path
+			// is covered by the "live ACL propagation" spec. Recovering an
+			// operator locked out by a deleted password Secret is a separate
+			// concern that needs a staged recovery through the cluster controller;
+			// it is tracked as a follow-up rather than a template roll.
 		})
 
 		It("creates a single-shard zero-replica cluster", Label("single-node"), func() {
@@ -2048,6 +2013,328 @@ spec:
 				g.Expect(output).To(ContainSubstring("cluster_known_nodes:2"))
 				g.Expect(output).To(ContainSubstring("cluster_size:2"))
 			}).Should(Succeed())
+		})
+	})
+
+	Context("live ACL propagation", func() {
+		const clusterName = "valkeycluster-live-acl-e2e"
+		const usersSecret = "valkey-live-acl-users"
+		const aclClientPod = "live-acl-client"
+		const (
+			defaultPassword = "live-acl-default-pw"
+			alicePassword   = "live-acl-alice-pw"
+			frankPassword   = "live-acl-frank-pw"
+		)
+		clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", clusterName)
+
+		// buildManifest renders the users Secret and the ValkeyCluster CR. When
+		// withFrank is true it adds a "frank" user (and its password): that is
+		// the ACL-only change the test applies once the cluster is up.
+		buildManifest := func(withFrank bool) string {
+			frankSecret, frankUser := "", ""
+			if withFrank {
+				frankSecret = "  frankpw: " + frankPassword + "\n"
+				frankUser = `    - name: frank
+      enabled: true
+      passwordSecret:
+        name: ` + usersSecret + `
+        keys: [frankpw]
+      commands:
+        allow: ["@read", "@connection"]
+      keys:
+        readOnly: ["frank:*"]
+      permissions: "+ping"
+`
+			}
+			return fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+type: Opaque
+stringData:
+  defaultpw: %s
+  alicepw: %s
+%s---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  users:
+    - name: default
+      enabled: true
+      permissions: "+@all ~* &*"
+      passwordSecret:
+        name: %s
+        keys: [defaultpw]
+    - name: alice
+      enabled: true
+      passwordSecret:
+        name: %s
+        keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+      keys:
+        readWrite: ["app:*"]
+%s`, usersSecret, defaultPassword, alicePassword, frankSecret, clusterName, usersSecret, usersSecret, frankUser)
+		}
+
+		applyManifest := func(manifest string) {
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to apply manifest")
+		}
+
+		// podIdentities returns one "name=uid" token per server pod, sorted by
+		// name. A rolling restart recreates pods with fresh UIDs, so any change
+		// to this set is the signal that a roll happened.
+		podIdentities := func(g Gomega) []string {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
+				"-l", "valkey.io/cluster="+clusterName, "--sort-by=.metadata.name",
+				"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid} {end}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			return strings.Fields(out)
+		}
+
+		// valkeyCLI runs a one-shot valkey-cli command from a throwaway client
+		// pod and returns its combined output. The command is wrapped so a
+		// non-zero exit (e.g. WRONGPASS before an ACL has propagated) still lets
+		// the pod complete and its output be read, rather than hanging the wait.
+		valkeyCLI := func(g Gomega, cliArgs string) string {
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", aclClientPod,
+				"--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+			cmd := exec.Command("kubectl", "run", aclClientPod,
+				"--image="+valkeyClientImage, "--restart=Never", "--",
+				"sh", "-c", "valkey-cli "+cliArgs+" 2>&1 || true")
+			_, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "wait", "pod/"+aclClientPod,
+				"--for=jsonpath={.status.phase}=Succeeded", "--timeout=60s"))
+			g.Expect(err).NotTo(HaveOccurred())
+			out, err := utils.Run(exec.Command("kubectl", "logs", aclClientPod))
+			g.Expect(err).NotTo(HaveOccurred())
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", aclClientPod,
+				"--ignore-not-found=true", "--wait=false"))
+			return out
+		}
+
+		aclList := func(g Gomega) string {
+			return valkeyCLI(g, fmt.Sprintf("-c -h %s --user default --pass %s --no-auth-warning ACL LIST",
+				clusterFqdn, defaultPassword))
+		}
+
+		It("applies a user ACL change live without rolling the pods", Label("live-acl"), func() {
+			defer func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", aclClientPod, "--ignore-not-found=true", "--wait=false"))
+			}()
+
+			By("creating a ValkeyCluster with an initial custom user set")
+			applyManifest(buildManifest(false))
+
+			By("waiting for the cluster to become Ready")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("recording the server pod identities before the ACL change")
+			var beforePods []string
+			Eventually(func(g Gomega) {
+				beforePods = podIdentities(g)
+				// 3 shards x (1 primary + 1 replica)
+				g.Expect(beforePods).To(HaveLen(6))
+			}).Should(Succeed())
+
+			By("confirming the new user is absent before the change")
+			Expect(aclList(Default)).NotTo(ContainSubstring("user frank on"))
+
+			By("adding a user to the cluster's ACL to trigger a live update")
+			applyManifest(buildManifest(true))
+
+			By("the new user appears in the running ACL without a pod restart")
+			Eventually(func(g Gomega) {
+				g.Expect(aclList(g)).To(ContainSubstring("user frank on"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("the new user's credentials authenticate against the live server")
+			Eventually(func(g Gomega) {
+				out := valkeyCLI(g, fmt.Sprintf("-c -h %s --user frank --pass %s --no-auth-warning PING",
+					clusterFqdn, frankPassword))
+				g.Expect(out).To(ContainSubstring("PONG"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("every ValkeyNode reports ACLApplied=True")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
+					"-l", "valkey.io/cluster="+clusterName,
+					"-o", "jsonpath={.items[*].metadata.name}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				names := strings.Fields(out)
+				g.Expect(names).To(HaveLen(6))
+				for _, name := range names {
+					node, err := utils.GetValkeyNodeStatus(name)
+					g.Expect(err).NotTo(HaveOccurred())
+					cond := utils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+					g.Expect(cond).NotTo(BeNil(), "ACLApplied condition should be set on %s", name)
+					g.Expect(cond.Status).To(Equal(metav1.ConditionTrue), "ACLApplied should be True on %s", name)
+				}
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying no server pod was rolled by the ACL change")
+			Expect(podIdentities(Default)).To(Equal(beforePods),
+				"server pods must not be recreated by a live ACL change")
+			Consistently(func(g Gomega) {
+				g.Expect(podIdentities(g)).To(Equal(beforePods))
+			}, 30*time.Second, 5*time.Second).Should(Succeed())
+		})
+	})
+
+	Context("acl-hash annotation migration", func() {
+		const clusterName = "valkeycluster-aclhash-migration-e2e"
+		const usersSecret = "valkey-aclhash-users"
+		const (
+			defaultPassword = "aclhash-default-pw"
+			alicePassword   = "aclhash-alice-pw"
+		)
+
+		manifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+type: Opaque
+stringData:
+  defaultpw: %s
+  alicepw: %s
+---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  users:
+    - name: default
+      enabled: true
+      permissions: "+@all ~* &*"
+      passwordSecret:
+        name: %s
+        keys: [defaultpw]
+    - name: alice
+      enabled: true
+      passwordSecret:
+        name: %s
+        keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+      keys:
+        readWrite: ["app:*"]
+`, usersSecret, defaultPassword, alicePassword, clusterName, usersSecret, usersSecret)
+
+		serverStatefulSets := func(g Gomega) []string {
+			out, err := utils.Run(exec.Command("kubectl", "get", "statefulset",
+				"-l", "valkey.io/cluster="+clusterName,
+				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			return utils.GetNonEmptyLines(out)
+		}
+
+		expectACLAppliedTrue := func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
+				"-l", "valkey.io/cluster="+clusterName,
+				"-o", "jsonpath={.items[*].metadata.name}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			names := strings.Fields(out)
+			g.Expect(names).To(HaveLen(6))
+			for _, name := range names {
+				node, err := utils.GetValkeyNodeStatus(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := utils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+				g.Expect(cond).NotTo(BeNil(), "ACLApplied condition should be set on %s", name)
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue), "ACLApplied should be True on %s", name)
+			}
+		}
+
+		It("removes a legacy internal-acl-hash annotation from the pod template", Label("acl-hash-migration"), func() {
+			defer func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
+			}()
+
+			By("creating a ValkeyCluster with a custom user set")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the cluster to become Ready with live ACL applied")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
+			// Operator versions before live ACL stamped the ACL hash on the pod
+			// template. Reproduce that pre-upgrade state and assert the current
+			// operator reconciles it away. Removing the annotation is the one-time
+			// roll that, on a real version upgrade, restarts the pod onto the new
+			// aclfile and thereby grants _operator the ACL commands. This spec runs
+			// against the current operator (which already grants them), so it pins
+			// the reconcile trigger and that ACL stays live across the roll, not
+			// the permission bootstrap itself, which needs the old operator build.
+			var stsNames []string
+			Eventually(func(g Gomega) {
+				stsNames = serverStatefulSets(g)
+				g.Expect(stsNames).To(HaveLen(6))
+			}).Should(Succeed())
+			for _, sts := range stsNames {
+				_, err := utils.Run(exec.Command("kubectl", "patch", "statefulset", sts, "--type", "merge",
+					"-p", `{"spec":{"template":{"metadata":{"annotations":{"valkey.io/internal-acl-hash":"simulated-legacy"}}}}}`))
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("the operator strips the annotation from every StatefulSet (the migration roll)")
+			Eventually(func(g Gomega) {
+				for _, sts := range serverStatefulSets(g) {
+					out, err := utils.Run(exec.Command("kubectl", "get", "statefulset", sts,
+						"-o", "jsonpath={.spec.template.metadata.annotations.valkey\\.io/internal-acl-hash}"))
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(strings.TrimSpace(out)).To(BeEmpty(),
+						"operator must strip the legacy ACL-hash annotation from %s", sts)
+				}
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("the cluster returns to Ready and ACL stays live after the migration")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
 })

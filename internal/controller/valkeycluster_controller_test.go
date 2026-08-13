@@ -884,20 +884,6 @@ func filterEvents(eventsList []string, reason string) []string {
 	return filtered
 }
 
-var _ = Describe("anyNodeHasPodIP", func() {
-	It("is false when no node has a PodIP", func() {
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{{}, {}}}
-		Expect(anyNodeHasPodIP(nodes)).To(BeFalse())
-	})
-	It("is true when at least one node has a PodIP", func() {
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
-			{},
-			{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"}},
-		}}
-		Expect(anyNodeHasPodIP(nodes)).To(BeTrue())
-	})
-})
-
 var _ = Describe("reconcileValkeyNodes", func() {
 	const clusterName = "node-reconcile-test"
 
@@ -997,7 +983,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "")
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "", nil)
 	}
 
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.

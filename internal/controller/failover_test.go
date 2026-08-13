@@ -20,10 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestFindFailoverShard(t *testing.T) {
@@ -171,67 +169,6 @@ func TestNodeRequiresRollIgnoresConfig(t *testing.T) {
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{Image: "valkey:9"},
 		}
 		assert.True(t, nodeRequiresRoll(current, desired))
-	})
-}
-
-func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
-	cluster := &valkeyiov1alpha1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
-	}
-	const configHash = "abc123"
-
-	steadyStateNode := func() valkeyiov1alpha1.ValkeyNode {
-		n := buildClusterValkeyNode(cluster, 0, 0)
-		n.Spec.ServerConfigHash = configHash
-		require.NoError(t, setDesiredWorkloadRevision(n))
-		n.Status.PodIP = "10.0.0.1"
-		return *n
-	}
-
-	t.Run("settled node does not need failover-aware roll", func(t *testing.T) {
-		n := steadyStateNode()
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		live := map[string]string{n.Name: n.Spec.WorkloadRevision}
-		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
-	})
-
-	t.Run("empty WorkloadRevision backfill when live matches does not need failover-aware roll", func(t *testing.T) {
-		n := steadyStateNode()
-		authorized := n.Spec.WorkloadRevision
-		n.Spec.WorkloadRevision = ""
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		live := map[string]string{n.Name: authorized}
-		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
-		assert.True(t, nodeRequiresRoll(&n, func() *valkeyiov1alpha1.ValkeyNode {
-			d := buildClusterValkeyNode(cluster, 0, 0)
-			d.Spec.ServerConfigHash = configHash
-			require.NoError(t, setDesiredWorkloadRevision(d))
-			return d
-		}()))
-	})
-
-	t.Run("empty WorkloadRevision with live template mismatch needs failover-aware roll", func(t *testing.T) {
-		n := steadyStateNode()
-		n.Spec.WorkloadRevision = ""
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		// Live still on an older template (e.g. ACL hash change before backfill).
-		live := map[string]string{n.Name: "old-live-template-hash"}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
-	})
-
-	t.Run("stale config hash needs failover-aware roll", func(t *testing.T) {
-		n := steadyStateNode()
-		n.Spec.ServerConfigHash = "stale"
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
-	})
-
-	t.Run("stale WorkloadRevision needs failover-aware roll", func(t *testing.T) {
-		n := steadyStateNode()
-		n.Spec.WorkloadRevision = "not-the-real-hash"
-		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
 	})
 }
 

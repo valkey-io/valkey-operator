@@ -181,7 +181,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash); err != nil {
+	// One cluster-state snapshot per reconcile, shared throughout reconcile
+	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	if err != nil {
+		log.Error(err, "failed to retrieve system user password")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, nil
+	}
+	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+	defer state.CloseClients()
+
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash, state); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -198,16 +209,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-	if err != nil {
-		log.Error(err, "failed to retrieve system user password")
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, nil
-	}
-	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
-	defer state.CloseClients()
-
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
 	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
@@ -542,40 +543,20 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string) (bool, error) {
+//
+// clusterState is the reconcile's single live-topology snapshot (see Reconcile).
+// It drives replica-first ordering, proactive failover and the observed-role
+// hints. It is safe to reuse across the loop: after an update we requeue
+// immediately, re-scraping fresh state before any further rolls.
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string, clusterState *valkey.ClusterState) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
-	// Scrape cluster state for proactive-failover roll decisions AND for
-	// observed-role hints. Scrape whenever a node needs a failover-aware roll OR
-	// any node is running (has a PodIP): a spontaneous failover needs no roll, so
-	// gating the scrape on rolls alone would never refresh role hints, and a
-	// promoted node's Status.Role would only update on its slow backstop. During
-	// initial bootstrap no node has a PodIP yet, so state stays nil. The snapshot
-	// is safe to reuse across the loop: replicaFirstNodeOrder uses it to place the
-	// actual primary last within each shard, and after an update we requeue
-	// immediately, re-scraping fresh state before any further rolls.
-	var clusterState *valkey.ClusterState
 	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
 	if err != nil {
 		return false, err
-	}
-	needRoll := anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, liveHashes)
-	if needRoll || anyNodeHasPodIP(nodes) {
-		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-		switch {
-		case err != nil && needRoll:
-			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
-		case err != nil:
-			// Hint-only scrape: don't fail the reconcile if the operator password
-			// is briefly unavailable; role hints catch up on a later reconcile.
-			log.V(1).Info("skipping cluster-state scrape for role hints; operator password unavailable", "err", err)
-		default:
-			clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
-			defer clusterState.CloseClients()
-		}
 	}
 
 	for shardIndex := range int(cluster.Spec.Shards) {
@@ -629,17 +610,6 @@ const (
 	nodeCreated                     // new ValkeyNode was created
 	nodeDeferred                    // primary roll deferred, waiting for synced replica
 )
-
-// anyNodeHasPodIP reports whether at least one node has a PodIP, i.e. there is a
-// running node worth scraping cluster state from.
-func anyNodeHasPodIP(nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
-	for i := range nodes.Items {
-		if nodes.Items[i].Status.PodIP != "" {
-			return true
-		}
-	}
-	return false
-}
 
 // liveRoleForAddress returns the live replication role ("primary" or "replica")
 // of the node with the given address per the cluster state, or "" if the address

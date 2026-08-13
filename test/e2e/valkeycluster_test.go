@@ -178,10 +178,10 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 
 				primariesPerShard := map[string]int{}
 				for _, node := range nodes.Items {
-					g.Expect(node.Status.Role).To(BeElementOf("primary", "replica"),
+					g.Expect(node.Status.Role).To(BeElementOf(controller.RolePrimary, controller.RoleReplica),
 						"ValkeyNode %s should report a resolved role", node.Name)
-					if node.Status.Role == "primary" {
-						primariesPerShard[node.Labels["valkey.io/shard-index"]]++
+					if node.Status.Role == controller.RolePrimary {
+						primariesPerShard[node.Labels[controller.LabelShardIndex]]++
 					}
 				}
 				g.Expect(primariesPerShard).To(HaveLen(3), "expected all 3 shards to have a primary")

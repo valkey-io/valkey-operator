@@ -1281,6 +1281,34 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		Expect(updated.Status.Role).To(Equal(RolePrimary))
 	})
 
+	It("keeps resolving Role while the workload is mid-roll, but reports Ready=false", func() {
+		seedReadyWorkload(node)
+
+		By("advancing the StatefulSet to a new revision the pods are not on yet")
+		sts := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}, sts)).To(Succeed())
+		sts.Status.UpdateRevision = "rev-2"
+		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RolePrimary
+			},
+		}
+
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Ready).To(BeFalse(), "an unfinished rollout must not report Ready")
+		Expect(updated.Status.Role).To(Equal(RolePrimary),
+			"a serving pod's role must survive its workload rolling")
+	})
+
 	It("keeps the last-known Role and signals failure when the resolver returns empty on a ready pod", func() {
 		seedReadyWorkload(node)
 

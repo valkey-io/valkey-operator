@@ -626,6 +626,21 @@ func TestParseClusterNodesRole(t *testing.T) {
 			expected:     RoleReplica,
 		},
 		{
+			// Scale-out: a new shard's primary has joined the cluster but has no
+			// slots yet. Indistinguishable from the restart transient above, so it
+			// resolves to replica — documented behaviour, not an oversight.
+			name:         "myself master before slot assignment is replica (scale-out)",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 0 connected\n",
+			expected:     RoleReplica,
+		},
+		{
+			// ...and flips to primary as soon as CLUSTER ADDSLOTSRANGE lands, even
+			// for a single slot.
+			name:         "myself master becomes primary once it owns a slot",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 0\n",
+			expected:     RolePrimary,
+		},
+		{
 			name:         "myself slave is replica",
 			clusterNodes: "37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
 			expected:     RoleReplica,

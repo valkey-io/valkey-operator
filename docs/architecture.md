@@ -13,8 +13,8 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 1. Upserts a headless Service and PodDisruptionBudget
 2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
 3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
-4. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard
-5. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
+4. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
+5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover), and each node's `valkey.io/observed-role` annotation is refreshed from it
 6. Issues CLUSTER MEET, CLUSTER ADDSLOTSRANGE, CLUSTER REPLICATE in phases
 7. Handles scale-in (drains slots via CLUSTER MIGRATESLOTS, deletes excess ValkeyNodes) and scale-out (rebalances slots via `internal/valkey.PlanRebalanceMove`)
 
@@ -25,7 +25,21 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 1. Ensures a ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
 2. Ensures a PVC (if persistence is configured)
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
-4. Updates `status.ready`, `status.podIP`, `status.role` (fetched via INFO replication), and `status.observedGeneration`
+4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+
+#### Role resolution
+
+The ValkeyNode controller is the only writer of `status.role`, and always resolves it from the node's own server.
+
+In cluster mode the role comes from **slot ownership** on the `myself` line of CLUSTER NODES: a node owning at least one slot is `primary`, everything else is `replica`. INFO replication is used only in standalone mode, since a restarting cluster replica reports `role:master` (and the `master` flag) for several seconds before replication is re-established, whereas slot ownership stays correct throughout. The tradeoff is that a primary owning no slots — a new shard before slot assignment — reads as `replica` until slots are assigned.
+
+Resolution is event-driven rather than tied to the reconcile cadence:
+
+- a filtered Pod watch, admitting only readiness, pod-IP and phase transitions
+- a `valkey.io/observed-role` annotation written by the ValkeyCluster controller when a node's live role drifts from the annotation
+  - This is a trigger only: the ValkeyNode controller never trusts the value and always re-reads its own state
+
+The role follows the pod, not the workload: it is cleared when the pod is not ready, kept at its last-known value on a transient read failure, and preserved while the node's StatefulSet/Deployment rolls (`status.ready` still reports the rollout).
 
 ## Key packages
 

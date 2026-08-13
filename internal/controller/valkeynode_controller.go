@@ -750,28 +750,27 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		current.Status.PodName = pod.Name
 		current.Status.PodIP = pod.Status.PodIP
 
-		podReady := false
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				podReady = true
-				break
-			}
-		}
-
-		// If the pod appears ready, also verify the workload rollout has completed.
+		// If the pod is ready, also verify the workload rollout has completed.
 		// The old pod may still be running (and ready) while the StatefulSet is rolling
 		// to a new spec; we must not report Ready=true until the rollout is done so the
 		// ValkeyCluster controller waits before advancing to the next node.
-		if podReady {
+		ready := podReady(pod)
+		rolledOut := ready
+		if ready {
 			rolled, err := r.isWorkloadRolledOut(ctx, node)
 			if err != nil {
 				return false, err
 			}
-			podReady = rolled
+			rolledOut = rolled
 		}
 
-		current.Status.Ready = podReady
-		if podReady {
+		current.Status.Ready = ready && rolledOut
+
+		// Role follows the pod, not the rollout: a pod that is serving has a
+		// resolvable role even while its workload rolls, and blanking it there
+		// would drop a live primary from role-based selection for the whole roll.
+		// Only an unready pod (nothing to ask) clears it.
+		if ready {
 			if role := r.resolveRole(ctx, current); role != "" {
 				current.Status.Role = role
 			} else {
@@ -780,6 +779,11 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				// requeue so we retry sooner than the backstop.
 				roleResolveFailed = true
 			}
+		} else {
+			current.Status.Role = ""
+		}
+
+		if current.Status.Ready {
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 				Status:             metav1.ConditionTrue,
@@ -788,7 +792,6 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				ObservedGeneration: current.Generation,
 			})
 		} else {
-			current.Status.Role = ""
 			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
 			message := "Pod is not ready"
 			if node.Spec.Persistence != nil {
@@ -1002,6 +1005,15 @@ func parseClusterEnabled(info string) bool {
 // replica restart, where INFO replication (and the myself,master flag)
 // transiently report master before replication re-establishes, but no slots are
 // ever owned. Returns "" if there is no myself line.
+//
+// A slot-less myself,master therefore resolves to replica in two states: the
+// restarting replica above, and the primary of a freshly created shard before
+// CLUSTER ADDSLOTSRANGE. The second is a deliberate tradeoff — the two are
+// indistinguishable from the node's own CLUSTER NODES output, and publishing a
+// restarting replica as primary is the more damaging error. A new shard's
+// primary is therefore reported as replica until it owns slots. This matches
+// the cluster-wide view, where GetClusterState holds slot-less masters in
+// PendingNodes rather than assigning them a shard primary.
 //
 // CLUSTER NODES line layout:
 // <id> <ip:port@cport> <flags> <master> <ping> <pong> <epoch> <link-state> <slot>...

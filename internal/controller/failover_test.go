@@ -184,7 +184,7 @@ func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
 	steadyStateNode := func() valkeyiov1alpha1.ValkeyNode {
 		n := buildClusterValkeyNode(cluster, 0, 0)
 		n.Spec.ServerConfigHash = configHash
-		require.NoError(t, setDesiredWorkloadRevision(n, nil))
+		require.NoError(t, setDesiredWorkloadRevision(n))
 		n.Status.PodIP = "10.0.0.1"
 		return *n
 	}
@@ -193,7 +193,7 @@ func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
 		n := steadyStateNode()
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
 		live := map[string]string{n.Name: n.Spec.WorkloadRevision}
-		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil, live))
+		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
 	})
 
 	t.Run("empty WorkloadRevision backfill when live matches does not need failover-aware roll", func(t *testing.T) {
@@ -202,11 +202,11 @@ func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
 		n.Spec.WorkloadRevision = ""
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
 		live := map[string]string{n.Name: authorized}
-		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil, live))
+		assert.False(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
 		assert.True(t, nodeRequiresRoll(&n, func() *valkeyiov1alpha1.ValkeyNode {
 			d := buildClusterValkeyNode(cluster, 0, 0)
 			d.Spec.ServerConfigHash = configHash
-			require.NoError(t, setDesiredWorkloadRevision(d, nil))
+			require.NoError(t, setDesiredWorkloadRevision(d))
 			return d
 		}()))
 	})
@@ -217,21 +217,21 @@ func TestAnyNodeRequiresFailoverAwareRoll(t *testing.T) {
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
 		// Live still on an older template (e.g. ACL hash change before backfill).
 		live := map[string]string{n.Name: "old-live-template-hash"}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil, live))
+		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, live))
 	})
 
 	t.Run("stale config hash needs failover-aware roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.ServerConfigHash = "stale"
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil, nil))
+		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
 	})
 
 	t.Run("stale WorkloadRevision needs failover-aware roll", func(t *testing.T) {
 		n := steadyStateNode()
 		n.Spec.WorkloadRevision = "not-the-real-hash"
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{n}}
-		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil, nil))
+		assert.True(t, anyNodeRequiresFailoverAwareRoll(cluster, nodes, configHash, nil))
 	})
 }
 

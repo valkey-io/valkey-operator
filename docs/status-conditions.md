@@ -199,6 +199,27 @@ Common reasons when `LiveConfigApplied=True`:
 
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
+#### `ACLApplied`
+Indicates whether the ACL the cluster controller wrote for `spec.users` is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
+
+This condition is set once the node is ready and mounts an ACL Secret. An edit reads `False` until the mounted aclfile refreshes (the projected Secret volume is updated lazily by kubelet) and the server loads it.
+
+| Status | Meaning |
+|---|---|
+| `True` | The desired user set and their password hashes are live on the server. |
+| `False` | The reload ran but the running ACL does not yet match the desired users and passwords (for example the mounted aclfile has not refreshed yet), or the reload failed. |
+
+Common reasons when `ACLApplied=False`:
+- `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
+- `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the exact error.
+
+Common reasons when `ACLApplied=True`:
+- `Applied` – the desired users and passwords are live.
+
+> **Note:** `ACLApplied` compares the user set and password hashes exactly, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+>
+> **Limitation:** Only the user set and password hashes drive the condition, so only those changes move it through `PendingPropagation` back to `True`: adding or removing a user or a password. A change to a user's `enabled` flag or permissions still takes effect on the server (the reload is unconditional), but the condition does not report a transient `PendingPropagation` for it, so it is not a signal to wait on for those fields. Comparing rules directly would mean reimplementing Valkey's normalized ACL rendering; making the condition track every field is left as a follow-up.
+
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
 
@@ -212,7 +233,7 @@ The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully b
 Common reasons when `WorkloadRollPending=True`:
 - `AwaitingWorkloadRevision` – waiting for the ValkeyCluster controller to set `spec.workloadRevision` to the desired template hash.
 
-> **Note:** First-time backfill of an empty `spec.workloadRevision` (operator upgrade onto this feature) is bookkeeping only and does not fail over primaries. A non-empty revision change (for example after an ACL secret hash or image-driven template change) is staged like any other Spec roll.
+> **Note:** First-time backfill of an empty `spec.workloadRevision` (operator upgrade onto this feature) is bookkeeping only and does not fail over primaries. A non-empty revision change (for example an image-driven template change) is staged like any other Spec roll. ACL edits do not change the template and are applied live instead (see [`ACLApplied`](#aclapplied)).
 
 Example commands:
 
@@ -372,6 +393,7 @@ These events are emitted during ACL user management.
 | `InternalSecretsUpdated` | Normal | Internal ACL secret synchronized |
 | `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
 | `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
+| `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
 
 ### Viewing events
 

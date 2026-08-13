@@ -99,14 +99,14 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 			WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 		},
 	}
-	h1, err := computeWorkloadRevision(node, nil)
+	h1, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
-	h2, err := computeWorkloadRevision(node, nil)
+	h2, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.Equal(t, h1, h2)
 
 	node.Spec.Image = "valkey/valkey:9.0.1"
-	h3, err := computeWorkloadRevision(node, nil)
+	h3, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, h1, h3)
 }

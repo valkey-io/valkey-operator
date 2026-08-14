@@ -124,6 +124,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// During deletion (e.g. a foreground cascading delete, where the garbage
+	// collector removes dependents before the cluster itself) reconciling would
+	// recreate the very children being deleted and deadlock the delete
+	if !cluster.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
 	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {

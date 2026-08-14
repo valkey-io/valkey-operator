@@ -429,18 +429,29 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		return r.clearWorkloadRollPending(ctx, node)
 	}
 
-	// serviceName is immutable. Changing the governing Service (e.g. to the
-	// cluster headless name for per-pod DNS) requires orphan delete + recreate.
+	// serviceName is immutable. Orphan-delete and recreate with the live pod
+	// template so WorkloadRevision still gates any real template roll.
 	if sts.Spec.ServiceName != desired.Spec.ServiceName {
-		log.Info("StatefulSet serviceName changed; deleting with orphan cascade for recreate",
-			"name", sts.Name, "from", sts.Spec.ServiceName, "to", desired.Spec.ServiceName)
+		from, to := sts.Spec.ServiceName, desired.Spec.ServiceName
+		log.Info("StatefulSet serviceName changed; orphan-recreating STS with live template",
+			"name", sts.Name, "from", from, "to", to)
+		recreated := statefulSetAfterServiceNameChange(desired, sts)
 		policy := metav1.DeletePropagationOrphan
 		if err := r.Delete(ctx, sts, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
 			return err
 		}
+		if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
+			return err
+		}
+		if err := r.Create(ctx, recreated); err != nil {
+			return err
+		}
 		r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
-			"Deleted StatefulSet %s (orphan) to change serviceName from %q to %q", sts.Name, sts.Spec.ServiceName, desired.Spec.ServiceName)
-		return nil
+			"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q; pod template left unchanged until WorkloadRevision allows a roll",
+			sts.Name, from, to)
+		// Template rolls still go through the gate below on the next reconcile
+		// (or immediately if we continue). Prefer continuing so WR pending is set.
+		sts = recreated
 	}
 
 	desiredHash := podTemplateRollHash(desired.Spec.Template)
@@ -897,7 +908,7 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 		secretName := node.Spec.TLS.Certificates.Server.SecretName
 		serverName := ""
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
-			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
+			serverName = headlessServiceFQDN(clusterName, node.Namespace, node.Spec.ClusterDomain)
 		}
 		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace)
 		if err != nil {

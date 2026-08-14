@@ -113,3 +113,27 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 		Expect(out).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 })
+
+var _ = Describe("Discovery managed config", func() {
+	It("omits cluster-preferred-endpoint-type for default IP announce", func() {
+		cfg := buildManagedConfig(true, nil, false)
+		Expect(cfg).NotTo(HaveKey("cluster-preferred-endpoint-type"))
+	})
+
+	It("sets cluster-preferred-endpoint-type hostname when Hostname announce is on", func() {
+		cfg := buildManagedConfig(true, nil, true)
+		Expect(cfg["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+	})
+
+	It("getBaseConfig follows PrefersHostnameAnnounce", func() {
+		cluster := getSampleCluster()
+		Expect(getBaseConfig(cluster)).NotTo(HaveKey("cluster-preferred-endpoint-type"))
+
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			Discovery: &valkeyiov1alpha1.DiscoverySpec{
+				PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+			},
+		}
+		Expect(getBaseConfig(cluster)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+	})
+})

@@ -1892,7 +1892,10 @@ spec:
                     description: |-
                       ClusterDomain is the DNS suffix kubelet publishes Service DNS under
                       (kubelet --cluster-domain). Used when building Hostname announce FQDNs.
-                      Must match the cluster; the API cannot validate that. Default cluster.local.
+                      Must match the cluster. Default cluster.local.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$
                     type: string
                   discovery:
                     description: Discovery configures in-cluster endpoint announcement

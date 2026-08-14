@@ -61,7 +61,7 @@ func TestGetPreferredEndpointTypeAndClusterDomain(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		c := &ValkeyCluster{}
 		assert.Equal(t, PreferredEndpointTypeIP, c.GetPreferredEndpointType())
-		assert.Equal(t, "cluster.local", c.GetClusterDomain())
+		assert.Equal(t, DefaultClusterDomain, c.GetClusterDomain())
 		assert.False(t, c.PrefersHostnameAnnounce())
 	})
 	t.Run("hostname and custom domain", func(t *testing.T) {

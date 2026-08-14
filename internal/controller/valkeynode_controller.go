@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -30,6 +31,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,6 +51,9 @@ const (
 	// valkeyInfoRolePrefix is the key prefix in the INFO replication output.
 	valkeyInfoRolePrefix = "role:"
 )
+
+// errTransientRequeue retries reconcile without marking the node failed.
+var errTransientRequeue = errors.New("transient requeue")
 
 // valkeyConfigClient is the subset of Valkey operations the ValkeyNode
 // controller needs to apply config live. An interface so tests can inject a
@@ -181,6 +186,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if err := r.ensureWorkload(ctx, node); err != nil {
+		if errors.Is(err, errTransientRequeue) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		workloadReason := "WorkloadError"
 		switch node.Spec.WorkloadType {
 		case valkeyiov1alpha1.WorkloadTypeStatefulSet:
@@ -419,8 +427,9 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		}
 		desiredHash := podTemplateRollHash(desired.Spec.Template)
 		if refuseDesiredSTSCreate(node, pod, desiredHash) {
-			return fmt.Errorf("StatefulSet %s missing while pod exists; waiting to recreate without applying unauthorized template (desired hash %s, spec revision %q)",
-				desired.Name, desiredHash, node.Spec.WorkloadRevision)
+			log.Info("StatefulSet missing while pod exists; requeue without applying unauthorized template",
+				"name", desired.Name, "desiredHash", desiredHash, "specRevision", node.Spec.WorkloadRevision)
+			return errTransientRequeue
 		}
 		sts = desired.DeepCopy()
 		if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
@@ -436,27 +445,10 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	// serviceName is immutable. Orphan-delete and recreate with the live pod
 	// template so WorkloadRevision still gates any real template roll.
 	if sts.Spec.ServiceName != desired.Spec.ServiceName {
-		from, to := sts.Spec.ServiceName, desired.Spec.ServiceName
-		log.Info("StatefulSet serviceName changed; orphan-recreating STS with live template",
-			"name", sts.Name, "from", from, "to", to)
-		recreated := statefulSetAfterServiceNameChange(desired, sts)
-		policy := metav1.DeletePropagationOrphan
-		if err := r.Delete(ctx, sts, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
-			if client.IgnoreNotFound(err) != nil {
-				return err
-			}
-		}
-		if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
+		recreated, err := r.orphanAndRecreateStatefulSet(ctx, node, sts, desired)
+		if err != nil {
 			return err
 		}
-		if err := r.Create(ctx, recreated); err != nil {
-			return err
-		}
-		r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
-			"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q; pod template left unchanged until WorkloadRevision allows a roll",
-			sts.Name, from, to)
-		// Template rolls still go through the gate below on the next reconcile
-		// (or immediately if we continue). Prefer continuing so WR pending is set.
 		sts = recreated
 	}
 
@@ -492,6 +484,37 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "WorkloadRollApplied", "ApplyWorkloadRoll",
 		"Applied pod template update (hash %s)", desiredHash)
 	return r.clearWorkloadRollPending(ctx, node)
+}
+
+func (r *ValkeyNodeReconciler) orphanAndRecreateStatefulSet(
+	ctx context.Context,
+	node *valkeyiov1alpha1.ValkeyNode,
+	live, desired *appsv1.StatefulSet,
+) (*appsv1.StatefulSet, error) {
+	log := logf.FromContext(ctx)
+	from, to := live.Spec.ServiceName, desired.Spec.ServiceName
+	log.Info("StatefulSet serviceName changed; orphan-recreating STS with live template",
+		"name", live.Name, "from", from, "to", to)
+	recreated := statefulSetAfterServiceNameChange(desired, live)
+	policy := metav1.DeletePropagationOrphan
+	if err := r.Delete(ctx, live, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			return nil, err
+		}
+	}
+	if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
+		return nil, err
+	}
+	if err := r.Create(ctx, recreated); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil, errTransientRequeue
+		}
+		return nil, err
+	}
+	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
+		"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q; pod template left unchanged until WorkloadRevision allows a roll",
+		live.Name, from, to)
+	return recreated, nil
 }
 
 // ensureDeployment creates or updates the Deployment for the ValkeyNode.

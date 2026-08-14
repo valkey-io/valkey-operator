@@ -402,14 +402,21 @@ const (
 	// PreferredEndpointTypeHostname announces stable per-pod DNS names under the
 	// cluster headless Service.
 	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
+
+	// DefaultClusterDomain matches kubelet --cluster-domain when the CR omits
+	// networking.clusterDomain. Announce and TLS FQDNs append a trailing dot.
+	DefaultClusterDomain = "cluster.local"
 )
 
 // NetworkingSpec groups connectivity configuration for the cluster.
 type NetworkingSpec struct {
 	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under
 	// (kubelet --cluster-domain). Used when building Hostname announce FQDNs.
-	// Must match the cluster; the API cannot validate that. Default cluster.local.
+	// Must match the cluster. Default cluster.local.
 	// +kubebuilder:default="cluster.local"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$`
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
 
@@ -465,7 +472,7 @@ func (c *ValkeyCluster) GetPreferredEndpointType() PreferredEndpointType {
 // GetClusterDomain returns networking.clusterDomain, default cluster.local.
 func (c *ValkeyCluster) GetClusterDomain() string {
 	if c == nil || c.Spec.Networking == nil || c.Spec.Networking.ClusterDomain == "" {
-		return "cluster.local"
+		return DefaultClusterDomain
 	}
 	return c.Spec.Networking.ClusterDomain
 }

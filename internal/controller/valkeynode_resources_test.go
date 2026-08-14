@@ -254,7 +254,7 @@ func TestValkeyAnnounceArgsAndEnv(t *testing.T) {
 		args, env := valkeyAnnounceArgsAndEnv(node)
 		assert.Equal(t, []string{
 			"--cluster-announce-hostname",
-			"$(POD_NAME).valkey-mycluster.ns.svc.example.local",
+			"$(POD_NAME).valkey-mycluster.ns.svc.example.local.",
 		}, args)
 		require.Len(t, env, 1)
 		assert.Equal(t, "POD_NAME", env[0].Name)
@@ -262,8 +262,9 @@ func TestValkeyAnnounceArgsAndEnv(t *testing.T) {
 }
 
 func TestHeadlessServiceFQDN(t *testing.T) {
-	assert.Equal(t, "valkey-c.default.svc.cluster.local", headlessServiceFQDN("c", "default", ""))
-	assert.Equal(t, "valkey-c.ns.svc.corp.local", headlessServiceFQDN("c", "ns", "corp.local"))
+	assert.Equal(t, "valkey-c.default.svc.cluster.local.", headlessServiceFQDN("c", "default", ""))
+	assert.Equal(t, "valkey-c.ns.svc.corp.local.", headlessServiceFQDN("c", "ns", "corp.local"))
+	assert.Equal(t, "valkey-c.ns.svc.corp.local.", headlessServiceFQDN("c", "ns", "corp.local."))
 }
 
 func TestStatefulSetAfterServiceNameChange(t *testing.T) {

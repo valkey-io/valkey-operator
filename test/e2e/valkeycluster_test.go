@@ -170,6 +170,27 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			}
 			Eventually(verifyCrStatus).Should(Succeed())
 
+			By("validating each ValkeyNode reports a resolved role, one primary per shard")
+			verifyNodeRoles := func(g Gomega) {
+				nodes, err := utils.GetValkeyClusterNodes(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(nodes.Items).To(HaveLen(6), "Expected 6 ValkeyNodes")
+
+				primariesPerShard := map[string]int{}
+				for _, node := range nodes.Items {
+					g.Expect(node.Status.Role).To(BeElementOf(controller.RolePrimary, controller.RoleReplica),
+						"ValkeyNode %s should report a resolved role", node.Name)
+					if node.Status.Role == controller.RolePrimary {
+						primariesPerShard[node.Labels[controller.LabelShardIndex]]++
+					}
+				}
+				g.Expect(primariesPerShard).To(HaveLen(3), "expected all 3 shards to have a primary")
+				for shard, count := range primariesPerShard {
+					g.Expect(count).To(Equal(1), "shard %s should report exactly one primary", shard)
+				}
+			}
+			Eventually(verifyNodeRoles).Should(Succeed())
+
 			By("validating live ACL converges with only the unmanaged default user")
 			// This cluster sets no custom users, so the only user on the server is
 			// Valkey's own `default`, which the aclfile does not manage. The node
@@ -2335,6 +2356,101 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
+		})
+	})
+
+	Context("role convergence after a graceful failover", Label("role-poller"), func() {
+		const clusterName = "valkeycluster-failover-role-e2e"
+
+		AfterEach(func() {
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			_, _ = utils.Run(cmd)
+		})
+
+		// A CLUSTER FAILOVER between two healthy pods changes nothing in
+		// Kubernetes — no restart, no readiness flip, no IP change — so no watch
+		// can fire. Before the RolePoller the only detector was the 30s backstop
+		// requeue, which measured ~13s in practice.
+		It("swaps status.role without any pod restarting", func() {
+			By("creating a cluster with one shard and one replica")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+`, clusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+
+			By("waiting for the cluster to become Ready with one primary and one replica")
+			var primaryNode, replicaNode string
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+
+				nodes, err := utils.GetValkeyClusterNodes(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(nodes.Items).To(HaveLen(2))
+
+				primaryNode, replicaNode = "", ""
+				for _, node := range nodes.Items {
+					switch node.Status.Role {
+					case controller.RolePrimary:
+						primaryNode = node.Name
+					case controller.RoleReplica:
+						replicaNode = node.Name
+					}
+				}
+				g.Expect(primaryNode).NotTo(BeEmpty(), "no node reports primary")
+				g.Expect(replicaNode).NotTo(BeEmpty(), "no node reports replica")
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+			replicaPod := fmt.Sprintf("valkey-%s-0", replicaNode)
+			primaryPod := fmt.Sprintf("valkey-%s-0", primaryNode)
+
+			By("recording the pod UIDs so a restart cannot be mistaken for a failover")
+			podUID := func(pod string) string {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o", "jsonpath={.metadata.uid}"))
+				Expect(err).NotTo(HaveOccurred())
+				return strings.TrimSpace(out)
+			}
+			replicaUID, primaryUID := podUID(replicaPod), podUID(primaryPod)
+
+			By("promoting the replica with CLUSTER FAILOVER")
+			b64Password, err := utils.Run(exec.Command("kubectl", "get", "secret",
+				"internal-"+clusterName+"-system-passwords", "-o", "jsonpath={.data._operator}"))
+			Expect(err).NotTo(HaveOccurred())
+			decoded, err := base64.StdEncoding.DecodeString(b64Password)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = utils.Run(exec.Command("kubectl", "exec", replicaPod, "-c", "server", "--",
+				"valkey-cli", "--no-auth-warning", "--user", "_operator", "--pass", string(decoded),
+				"cluster", "failover"))
+			Expect(err).NotTo(HaveOccurred(), "CLUSTER FAILOVER should be accepted")
+
+			// Deliberately shorter than the 30s backstop requeue: only the poller
+			// can close the gap this quickly.
+			By("waiting for the roles to swap on the CRs")
+			Eventually(func(g Gomega) {
+				replica, err := utils.GetValkeyNodeStatus(replicaNode)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(replica.Status.Role).To(Equal(controller.RolePrimary),
+					"the promoted node should report primary")
+
+				primary, err := utils.GetValkeyNodeStatus(primaryNode)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(primary.Status.Role).To(Equal(controller.RoleReplica),
+					"the demoted node should report replica")
+			}, 20*time.Second, time.Second).Should(Succeed())
+
+			By("confirming neither pod was replaced")
+			Expect(podUID(replicaPod)).To(Equal(replicaUID))
+			Expect(podUID(primaryPod)).To(Equal(primaryUID))
 		})
 	})
 })

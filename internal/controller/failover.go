@@ -173,36 +173,3 @@ func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode
 	// Live unknown or differs (ACL/builder change concurrent with first backfill).
 	return true
 }
-
-// anyNodeRequiresFailoverAwareRoll is true when at least one node needs a Spec
-// update that should scrape live topology for proactive failover / replica-first
-// primary placement. Pure WorkloadRevision backfill (live template already
-// matches) does not qualify.
-//
-// liveTemplateHashes maps ValkeyNode name -> hash of live pod template.
-func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, liveTemplateHashes map[string]string) bool {
-	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
-	for i := range nodeList.Items {
-		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
-	}
-	nodesPerShard := 1 + int(cluster.Spec.Replicas)
-	for shardIndex := range int(cluster.Spec.Shards) {
-		for nodeIndex := range nodesPerShard {
-			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-			desired.Spec.ServerConfigHash = configHash
-			if err := setDesiredWorkloadRevision(desired); err != nil {
-				return true
-			}
-			if current, ok := byName[desired.Name]; ok {
-				liveHash := ""
-				if liveTemplateHashes != nil {
-					liveHash = liveTemplateHashes[desired.Name]
-				}
-				if needsProactiveFailoverForRoll(current, desired, liveHash) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}

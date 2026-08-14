@@ -888,6 +888,13 @@ spec:
 
 	Context("when a ValkeyCluster CR is deleted", func() {
 		It("deletes the Valkey Cluster deployment", func() {
+			// Assert against the cluster this spec actually deletes. The
+			// shared valkeyClusterName is reassigned by the scale-out and
+			// scale-in specs that run before this one, so using it here
+			// checks a cluster those specs already removed and never
+			// verifies that the sample below is gone.
+			const sampleClusterName = "cluster-sample"
+
 			By("deleting the CR")
 			cmd := exec.Command("kubectl", "delete", "-f", "config/samples/v1alpha1_valkeycluster.yaml")
 			_, err := utils.Run(cmd)
@@ -896,7 +903,7 @@ spec:
 			By("validating that the CR does not exist")
 			verifyCrRemoved := func(g Gomega) {
 				// Get the name of the ValkeyCluster CR
-				cmd := exec.Command("kubectl", "get", "ValkeyCluster", valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "ValkeyCluster", sampleClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -904,7 +911,7 @@ spec:
 
 			By("validating that the Service does not exist")
 			verifyServiceRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", "valkey-"+valkeyClusterName)
+				cmd := exec.Command("kubectl", "get", "service", "valkey-"+sampleClusterName)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -912,7 +919,7 @@ spec:
 
 			By("validating that the ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName))
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(sampleClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -921,7 +928,7 @@ spec:
 			By("validating that no ValkeyNode exists")
 			verifyValkeyNodesRemoved := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "valkeynodes",
-					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName))
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", sampleClusterName))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve ValkeyNodes")
 				g.Expect(output).To(ContainSubstring("No resources found"))

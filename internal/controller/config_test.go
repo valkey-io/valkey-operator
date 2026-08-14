@@ -81,7 +81,7 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 		rollConfig := renderServerConfig(map[string]string{
 			"maxmemory-policy": "allkeys-lru", // allowlisted
 			"appendonly":       "yes",         // not allowlisted
-		}, getBaseConfig(nil), liveConfigAllowlist)
+		}, getBaseConfig(nil, false), liveConfigAllowlist)
 		Expect(rollConfig).NotTo(ContainSubstring("maxmemory-policy"))
 		Expect(rollConfig).To(ContainSubstring("appendonly"))
 		Expect(rollConfig).To(ContainSubstring("cluster-enabled")) // base retained

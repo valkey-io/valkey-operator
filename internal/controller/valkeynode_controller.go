@@ -429,6 +429,20 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		return r.clearWorkloadRollPending(ctx, node)
 	}
 
+	// serviceName is immutable. Changing the governing Service (e.g. to the
+	// cluster headless name for per-pod DNS) requires orphan delete + recreate.
+	if sts.Spec.ServiceName != desired.Spec.ServiceName {
+		log.Info("StatefulSet serviceName changed; deleting with orphan cascade for recreate",
+			"name", sts.Name, "from", sts.Spec.ServiceName, "to", desired.Spec.ServiceName)
+		policy := metav1.DeletePropagationOrphan
+		if err := r.Delete(ctx, sts, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
+			return err
+		}
+		r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
+			"Deleted StatefulSet %s (orphan) to change serviceName from %q to %q", sts.Name, sts.Spec.ServiceName, desired.Spec.ServiceName)
+		return nil
+	}
+
 	desiredHash := podTemplateRollHash(desired.Spec.Template)
 	// Heal live drift whenever templates differ; do not skip on a stale
 	// last-applied annotation (that can hide real STS edits).

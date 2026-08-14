@@ -154,6 +154,57 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 	return output, nil
 }
 
+// valkeyAnnounceArgsAndEnv returns --cluster-announce-* flags and env for the
+// server container: pod IP by default, pod FQDN under the headless Service in
+// Hostname mode (STS serviceName must be that headless Service).
+func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []corev1.EnvVar) {
+	podIPEnv := corev1.EnvVar{
+		Name: "POD_IP",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			},
+		},
+	}
+	if node.Spec.PreferredEndpointType != valkeyiov1alpha1.PreferredEndpointTypeHostname {
+		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
+	}
+
+	clusterDomain := node.Spec.ClusterDomain
+	if clusterDomain == "" {
+		clusterDomain = "cluster.local"
+	}
+	clusterName := node.Labels[LabelCluster]
+	if clusterName == "" {
+		// Standalone Hostname is not supported; fall back to IP.
+		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
+	}
+	fqdn := fmt.Sprintf("$(POD_NAME).%s.%s.svc.%s",
+		headlessServiceName(clusterName),
+		node.Namespace,
+		clusterDomain,
+	)
+	podNameEnv := corev1.EnvVar{
+		Name: "POD_NAME",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.name",
+			},
+		},
+	}
+	return []string{"--cluster-announce-hostname", fqdn}, []corev1.EnvVar{podNameEnv}
+}
+
+// statefulSetServiceName is the governing Service for STS pod DNS. Cluster-owned
+// nodes use the shared cluster headless Service so multi 1-pod STS get per-pod
+// FQDNs. Standalone nodes keep the resource name (historical behaviour).
+func statefulSetServiceName(node *valkeyiov1alpha1.ValkeyNode) string {
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		return headlessServiceName(clusterName)
+	}
+	return valkeyNodeResourceName(node)
+}
+
 // buildContainersDef builds the base containers definition for the ValkeyNode
 // and applies any strategic merge patches from node.Spec.Containers.
 func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, error) {
@@ -162,42 +213,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		image = node.Spec.Image
 	}
 
+	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+
 	containers := []corev1.Container{
 		{
 			Name:      "server",
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: []string{
+			Command: append([]string{
 				"valkey-server",
 				"/config/valkey.conf",
-				"--cluster-announce-ip",
-				"$(POD_IP)",
+			}, append(announceArgs, []string{
 				"--primaryuser",
 				replicationUser,
 				"--primaryauth",
 				"$(PRIMARY_AUTH)",
-			},
-			Env: []corev1.EnvVar{
-				{
-					Name: "POD_IP",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "status.podIP",
+			}...)...),
+			Env: append(announceEnv, corev1.EnvVar{
+				Name: "PRIMARY_AUTH",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
 						},
+						Key: replicationUser,
 					},
 				},
-				{
-					Name: "PRIMARY_AUTH",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
-							},
-							Key: replicationUser,
-						},
-					},
-				},
-			},
+			}),
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "client",
@@ -584,7 +626,7 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:    func(i int32) *int32 { return &i }(1),
-			ServiceName: valkeyNodeResourceName(node),
+			ServiceName: statefulSetServiceName(node),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},

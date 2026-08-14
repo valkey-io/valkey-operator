@@ -417,7 +417,17 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		if client.IgnoreNotFound(err) != nil {
 			return err
 		}
-		// Create path: no live pod to protect.
+		// After a failed serviceName recreate the STS is gone but the pod remains.
+		// Do not Create full desired (that skips WorkloadRevision). Requeue instead.
+		pod, err := r.getPod(ctx, node)
+		if err != nil {
+			return err
+		}
+		desiredHash := podTemplateRollHash(desired.Spec.Template)
+		if refuseDesiredSTSCreate(node, pod, desiredHash) {
+			return fmt.Errorf("StatefulSet %s missing while pod exists; waiting to recreate without applying unauthorized template (desired hash %s, spec revision %q)",
+				desired.Name, desiredHash, node.Spec.WorkloadRevision)
+		}
 		sts = desired.DeepCopy()
 		if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
 			return err
@@ -438,7 +448,9 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		recreated := statefulSetAfterServiceNameChange(desired, sts)
 		policy := metav1.DeletePropagationOrphan
 		if err := r.Delete(ctx, sts, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
-			return err
+			if client.IgnoreNotFound(err) != nil {
+				return err
+			}
 		}
 		if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
 			return err

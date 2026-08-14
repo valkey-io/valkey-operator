@@ -35,7 +35,7 @@ In cluster mode the role comes from **slot ownership** on the `myself` line of C
 
 Resolution is event-driven rather than tied to the reconcile cadence:
 
-- a filtered Pod watch, admitting only readiness, pod-IP and phase transitions
+- a Pod watch: create and delete events pass through, and update events are filtered to readiness, pod-IP and phase transitions
 - a `valkey.io/observed-role` annotation written by the ValkeyCluster controller when a node's live role drifts from the annotation
   - This is a trigger only: the ValkeyNode controller never trusts the value and always re-reads its own state
 

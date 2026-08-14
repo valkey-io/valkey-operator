@@ -187,7 +187,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Error(err, "failed to retrieve system user password")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, err
 	}
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()

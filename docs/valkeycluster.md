@@ -367,7 +367,9 @@ networking:
 | `IP` (default) | Announce pod IPs. Same as historical behaviour. |
 | `Hostname` | Announce `<pod>.<headlessService>.<namespace>.svc.<clusterDomain>`. Requires `workloadType: StatefulSet` (or omit for the default). |
 
-Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service. Changing `serviceName` on an existing STS is immutable: the operator deletes the StatefulSet with orphan cascade and recreates it (pods are recreated; document for upgrades).
+Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service.
+
+Changing `serviceName` on an existing StatefulSet is immutable. The operator deletes the StatefulSet with **orphan** cascade and recreates it with the new `serviceName` while **keeping the live pod template**. Existing pods are adopted, not deleted by that step. Per-pod DNS names under the headless Service (and the pod `subdomain` the STS controller sets) become reliable after a later pod replace (for example a WorkloadRevision-staged roll), not after the STS-only recreate alone.
 
 `networking.clusterDomain` must match the kubelet cluster domain (`--cluster-domain`). The API cannot validate that. Wrong values fail as non-resolving announced names.
 

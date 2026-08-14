@@ -971,7 +971,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	}
 	var tlsConfig *tls.Config
 	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificate.SecretName != "" {
-		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
+		serverName := headlessServiceFQDN(cluster.Name, cluster.Namespace, cluster.GetClusterDomain())
 		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg

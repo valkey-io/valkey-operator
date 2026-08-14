@@ -261,6 +261,63 @@ func TestValkeyAnnounceArgsAndEnv(t *testing.T) {
 	})
 }
 
+func TestHeadlessServiceFQDN(t *testing.T) {
+	assert.Equal(t, "valkey-c.default.svc.cluster.local", headlessServiceFQDN("c", "default", ""))
+	assert.Equal(t, "valkey-c.ns.svc.corp.local", headlessServiceFQDN("c", "ns", "corp.local"))
+}
+
+func TestStatefulSetAfterServiceNameChange(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	desired, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	require.Equal(t, headlessServiceName("mycluster"), desired.Spec.ServiceName)
+
+	live := desired.DeepCopy()
+	live.Spec.ServiceName = "valkey-mycluster-0-0" // pre-migration value
+	live.Spec.Template.Annotations = map[string]string{"live": "template"}
+	live.UID = "live-uid"
+	live.ResourceVersion = "99"
+
+	// Desired template differs (would be a real roll if applied now).
+	desired.Spec.Template.Annotations = map[string]string{"desired": "template"}
+
+	out := statefulSetAfterServiceNameChange(desired, live)
+	assert.Equal(t, desired.Spec.ServiceName, out.Spec.ServiceName)
+	assert.Equal(t, live.Spec.Template.Annotations, out.Spec.Template.Annotations)
+	assert.Empty(t, out.ResourceVersion)
+	assert.Empty(t, string(out.UID))
+	// Must not carry the desired template that would bypass WorkloadRevision.
+	assert.NotEqual(t, desired.Spec.Template.Annotations, out.Spec.Template.Annotations)
+}
+
+func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
+	base := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+	}
+
+	t.Run("default IP leaves announce fields empty", func(t *testing.T) {
+		n := buildClusterValkeyNode(base, 0, 0)
+		assert.Empty(t, n.Spec.PreferredEndpointType)
+		assert.Empty(t, n.Spec.ClusterDomain)
+		assert.Equal(t, "c", n.Labels[LabelCluster])
+	})
+
+	t.Run("Hostname sets PreferredEndpointType and ClusterDomain", func(t *testing.T) {
+		c := base.DeepCopy()
+		c.Spec.Networking = &valkeyv1.NetworkingSpec{
+			ClusterDomain: "example.local",
+			Discovery: &valkeyv1.DiscoverySpec{
+				PreferredEndpointType: valkeyv1.PreferredEndpointTypeHostname,
+			},
+		}
+		n := buildClusterValkeyNode(c, 0, 0)
+		assert.Equal(t, valkeyv1.PreferredEndpointTypeHostname, n.Spec.PreferredEndpointType)
+		assert.Equal(t, "example.local", n.Spec.ClusterDomain)
+	})
+}
+
 func TestBuildValkeyNodePVC(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	storageClassName := "gp3"

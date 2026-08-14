@@ -205,6 +205,31 @@ func statefulSetServiceName(node *valkeyiov1alpha1.ValkeyNode) string {
 	return valkeyNodeResourceName(node)
 }
 
+// headlessServiceFQDN is the Service DNS name used for TLS ServerName and similar.
+func headlessServiceFQDN(clusterName, namespace, clusterDomain string) string {
+	if clusterDomain == "" {
+		clusterDomain = "cluster.local"
+	}
+	return fmt.Sprintf("%s.%s.svc.%s", headlessServiceName(clusterName), namespace, clusterDomain)
+}
+
+// statefulSetAfterServiceNameChange builds a create-ready STS with desired
+// serviceName and labels but the live pod template (and PVC templates), so a
+// serviceName migration does not apply an unauthorized template roll.
+func statefulSetAfterServiceNameChange(desired, live *appsv1.StatefulSet) *appsv1.StatefulSet {
+	out := desired.DeepCopy()
+	out.ResourceVersion = ""
+	out.UID = ""
+	out.Generation = 0
+	out.CreationTimestamp = metav1.Time{}
+	out.ManagedFields = nil
+	out.Status = appsv1.StatefulSetStatus{}
+	out.Spec.Template = *live.Spec.Template.DeepCopy()
+	out.Spec.VolumeClaimTemplates = live.Spec.VolumeClaimTemplates
+	out.Spec.ServiceName = desired.Spec.ServiceName
+	return out
+}
+
 // buildContainersDef builds the base containers definition for the ValkeyNode
 // and applies any strategic merge patches from node.Spec.Containers.
 func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, error) {

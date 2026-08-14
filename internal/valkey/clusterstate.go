@@ -198,6 +198,18 @@ func (s *ClusterState) FindShardForAddress(address string) *ShardState {
 	return nil
 }
 
+// HasAddress reports whether the node at the given address answered the scrape,
+// whether it joined a shard or is still pending. It distinguishes "unreachable"
+// from "reachable but not in any shard", which FindShardForAddress alone cannot.
+func (s *ClusterState) HasAddress(address string) bool {
+	for _, node := range s.AllNodes() {
+		if node.Address == address {
+			return true
+		}
+	}
+	return false
+}
+
 // GetPrimaryNode returns the primary NodeState object
 func (s *ShardState) GetPrimaryNode() *NodeState {
 	idx := slices.IndexFunc(s.Nodes, func(n *NodeState) bool { return n.Id == s.PrimaryId })

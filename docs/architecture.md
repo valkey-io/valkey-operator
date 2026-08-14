@@ -14,7 +14,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
 3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
-5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover), and each node's `valkey.io/observed-role` annotation is refreshed from it
+5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover)
 6. Issues CLUSTER MEET, CLUSTER ADDSLOTSRANGE, CLUSTER REPLICATE in phases
 7. Handles scale-in (drains slots via CLUSTER MIGRATESLOTS, deletes excess ValkeyNodes) and scale-out (rebalances slots via `internal/valkey.PlanRebalanceMove`)
 
@@ -36,10 +36,25 @@ In cluster mode the role comes from **slot ownership** on the `myself` line of C
 Resolution is event-driven rather than tied to the reconcile cadence:
 
 - a Pod watch: create and delete events pass through, and update events are filtered to readiness, pod-IP and phase transitions
-- a `valkey.io/observed-role` annotation written by the ValkeyCluster controller when a node's live role drifts from the annotation
-  - This is a trigger only: the ValkeyNode controller never trusts the value and always re-reads its own state
+- the RolePoller (below), for role changes Kubernetes never sees
+
+Both are triggers only: the ValkeyNode controller re-reads its own state on every reconcile and never trusts a value handed to it.
 
 The role follows the pod, not the workload: it is cleared when the pod is not ready, kept at its last-known value on a transient read failure, and preserved while the node's StatefulSet/Deployment rolls (`status.ready` still reports the rollout).
+
+### RolePoller
+
+`internal/controller/rolepoller.go` — a manager `Runnable` that samples live topology every `DefaultRolePollInterval` (5s) and pushes a reconcile trigger for any node whose live role differs from its `status.role`. The interval is a constant, not a flag: polling cost is an implementation concern, not an operator-facing knob.
+
+It exists because a failover between two healthy pods moves nothing in Kubernetes: no restart, no readiness flip, no IP change. No watch can fire, so without the poller the only detector is the 30s backstop requeue.
+
+- **It triggers; it never writes.** The ValkeyNode controller stays the sole writer of `status.role`, so a false positive costs one extra reconcile and nothing else.
+- Triggers travel in-process over a channel (`source.Channel`), so a tick where every role matches performs no API operations at all.
+- It runs only on the elected leader
+- A Valkey instance that fails to answer is backed off exponentially (up to a minute) rather than dialled every tick.
+- The Pod watch and the 30s backstop are both retained: the watch is faster for pod recreation, and the backstop is what makes a wedged poller a latency regression rather than an availability bug.
+
+Each tick opens one connection per node. That is the cost that sets the interval, and the `scrapeFunc` seam is where pooled clients will replace it.
 
 ## Key packages
 

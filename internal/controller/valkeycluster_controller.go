@@ -545,9 +545,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
 //
 // clusterState is the reconcile's single live-topology snapshot (see Reconcile).
-// It drives replica-first ordering, proactive failover and the observed-role
-// hints. It is safe to reuse across the loop: after an update we requeue
-// immediately, re-scraping fresh state before any further rolls.
+// It drives replica-first ordering and proactive failover. It is safe to reuse
+// across the loop: after an update we requeue immediately, re-scraping fresh
+// state before any further rolls.
 func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string, clusterState *valkey.ClusterState) (bool, error) {
 	log := logf.FromContext(ctx)
 
@@ -611,47 +611,6 @@ const (
 	nodeDeferred                    // primary roll deferred, waiting for synced replica
 )
 
-// liveRoleForAddress returns the live replication role ("primary" or "replica")
-// of the node with the given address per the cluster state, or "" if the address
-// is not part of any shard yet.
-func liveRoleForAddress(state *valkey.ClusterState, address string) string {
-	shard := state.FindShardForAddress(address)
-	if shard == nil {
-		return ""
-	}
-	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
-		return RolePrimary
-	}
-	return RoleReplica
-}
-
-// hintObservedRole patches the node's observed-role annotation to its live role
-// when they differ, poking the ValkeyNode controller to re-resolve promptly
-// after a failover. It writes only on change (via upsertAnnotation), so a stable
-// role produces no churn. A "" live role (node not yet in topology) is a no-op.
-//
-// The change is keyed on the annotation VALUE, deliberately not on the node's
-// Status.Role: a same-value patch produces no watch event, so keying on the
-// annotation is what keeps this churn-free. The corollary is a bounded gap —
-// if Status.Role drifts while the annotation already holds the live role, no
-// re-poke fires here — which is intentionally covered by the ValkeyNode
-// controller's backstop requeue. Do not "simplify" this to compare against
-// Status.Role; that reintroduces churn without closing the gap.
-func (r *ValkeyClusterReconciler) hintObservedRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, state *valkey.ClusterState) error {
-	if node.Status.PodIP == "" {
-		return nil
-	}
-	liveRole := liveRoleForAddress(state, node.Status.PodIP)
-	if liveRole == "" {
-		return nil
-	}
-	patchBase := node.DeepCopy()
-	if upserted := upsertAnnotation(node, AnnotationObservedRole, liveRole); !upserted {
-		return nil
-	}
-	return r.Patch(ctx, node, client.MergeFrom(patchBase))
-}
-
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
 // liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
@@ -680,14 +639,6 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			return nodeUnchanged, err
 		}
 		currentExists = false
-	}
-
-	// Keep the observed-role hint in sync so a node whose live role changed is
-	// poked immediately instead of waiting on its backstop requeue.
-	if currentExists && clusterState != nil {
-		if err := r.hintObservedRole(ctx, current, clusterState); err != nil {
-			log.V(1).Info("could not update observed-role hint", "name", node.Name, "err", err)
-		}
 	}
 
 	liveHash := ""
@@ -972,6 +923,12 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+	return scrapeClusterState(ctx, r.APIReader, cluster, nodeAddresses(nodes), username, password)
+}
+
+// nodeAddresses returns the pod IPs of every node that has one. Nodes still
+// waiting for an IP are skipped: there is nothing to dial.
+func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -979,15 +936,21 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
+	return ips
+}
+
+// scrapeClusterState connects to the given addresses and builds a live topology
+// snapshot.
+func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
 	var tlsConfig *tls.Config
 	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificate.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
-		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
 		if err == nil {
 			tlsConfig = cfg
 		}
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
+	return valkey.GetClusterState(ctx, addresses, DefaultPort, username, password, tlsConfig)
 }
 
 // healStaleAddressPeers re-introduces live cluster members to nodes whose

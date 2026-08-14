@@ -45,6 +45,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -145,6 +146,13 @@ type ValkeyNodeReconciler struct {
 	// application. SetupWithManager defaults it to realConfigClient; tests
 	// override it with a fake.
 	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
+	// RoleEvents carries reconcile triggers from the RolePoller, which detects
+	// role changes that produce no Kubernetes event (a failover between two
+	// healthy pods). Events are triggers only: the reconcile re-resolves the role
+	// from the node's own connection, so this controller stays the sole writer of
+	// Status.Role. Leave nil to run without the poller; the backstop requeue then
+	// bounds staleness on its own.
+	RoleEvents <-chan event.GenericEvent
 	// resolveRoleFunc, when set, overrides how resolveRole reads a node's live
 	// replication role. Tests set it to a fake (envtest has no running Valkey
 	// server); when nil, resolveRole connects to the pod directly.
@@ -1113,7 +1121,7 @@ func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.newConfigClient == nil {
 		r.newConfigClient = realConfigClient
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&appsv1.StatefulSet{}).
@@ -1124,8 +1132,14 @@ func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(valkeyPodPredicate()),
 		).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.aclSecretToNodes)).
-		Named("valkeynode").
-		Complete(r)
+		Named("valkeynode")
+	if r.RoleEvents != nil {
+		// The poller pushes the ValkeyNode itself, so the event maps straight to
+		// its own reconcile request. Repeat events for one node while a reconcile
+		// is already queued collapse into a single pass.
+		ctrlBuilder = ctrlBuilder.WatchesRawSource(source.Channel(r.RoleEvents, &handler.EnqueueRequestForObject{}))
+	}
+	return ctrlBuilder.Complete(r)
 }
 
 // aclSecretToNodes maps a changed internal ACL Secret to reconcile requests for

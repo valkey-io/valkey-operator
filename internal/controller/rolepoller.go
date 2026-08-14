@@ -47,7 +47,7 @@ const (
 // woken; the poller only decides *when* to wake it. Keeps the single-writer
 // invariant intact.
 //
-// The poller complements the two existing triggers: the Pod watch is still 
+// The poller complements the two existing triggers: the Pod watch is still
 // faster for pod recreation, while the ValkeyNode requeue can lag behind
 // the real state
 type RolePoller struct {

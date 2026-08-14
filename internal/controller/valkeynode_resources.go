@@ -488,7 +488,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name: tlsVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: node.Spec.TLS.Certificate.SecretName,
+					SecretName: node.Spec.TLS.Certificates.Server.SecretName,
 				},
 			},
 		})

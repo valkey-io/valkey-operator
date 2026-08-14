@@ -58,7 +58,7 @@ func GetServerConfigMapName(clusterName string) string {
 // cluster and standalone ValkeyNode config paths.
 //
 //nolint:goconst
-func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[string]string {
+func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec) map[string]string {
 	config := map[string]string{}
 
 	if includeACL {
@@ -106,7 +106,7 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 //
 //nolint:goconst
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
-	baseConfig := buildManagedConfig(true, cluster.GetTLS())
+	baseConfig := buildManagedConfig(true, nodeTLSFromCluster(cluster.GetTLS()))
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",

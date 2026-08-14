@@ -291,6 +291,32 @@ func TestStatefulSetAfterServiceNameChange(t *testing.T) {
 	assert.NotEqual(t, desired.Spec.Template.Annotations, out.Spec.Template.Annotations)
 }
 
+func TestRefuseDesiredSTSCreate(t *testing.T) {
+	ctrl := true
+	owned := newTestValkeyNode("c-0-0", "ns")
+	owned.OwnerReferences = []metav1.OwnerReference{{
+		Kind:       "ValkeyCluster",
+		Controller: &ctrl,
+	}}
+	pod := &corev1.Pod{}
+	hash := "abc"
+
+	t.Run("missing STS with live pod and WR mismatch", func(t *testing.T) {
+		assert.True(t, refuseDesiredSTSCreate(owned, pod, hash))
+	})
+	t.Run("WR matches", func(t *testing.T) {
+		n := owned.DeepCopy()
+		n.Spec.WorkloadRevision = hash
+		assert.False(t, refuseDesiredSTSCreate(n, pod, hash))
+	})
+	t.Run("no pod is first create", func(t *testing.T) {
+		assert.False(t, refuseDesiredSTSCreate(owned, nil, hash))
+	})
+	t.Run("standalone", func(t *testing.T) {
+		assert.False(t, refuseDesiredSTSCreate(newTestValkeyNode("solo", "ns"), pod, hash))
+	})
+}
+
 func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 	base := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},

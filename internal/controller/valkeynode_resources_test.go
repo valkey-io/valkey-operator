@@ -213,7 +213,7 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 
 	assert.Equal(t, "valkey-mynode", ss.Name)
 	assert.Equal(t, "test-ns", ss.Namespace)
-	assert.Equal(t, "valkey-mynode", ss.Spec.ServiceName, "ServiceName should match resource name")
+	assert.Equal(t, "valkey-mynode", ss.Spec.ServiceName, "standalone ServiceName should match resource name")
 	require.NotNil(t, ss.Spec.Replicas)
 	assert.Equal(t, int32(1), *ss.Spec.Replicas)
 
@@ -228,6 +228,37 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	// Verify the template has the right container
 	require.Len(t, ss.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
+}
+
+func TestBuildValkeyNodeStatefulSet_ClusterOwnedUsesHeadlessServiceName(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	ss, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	assert.Equal(t, headlessServiceName("mycluster"), ss.Spec.ServiceName)
+}
+
+func TestValkeyAnnounceArgsAndEnv(t *testing.T) {
+	t.Run("default IP", func(t *testing.T) {
+		node := newTestValkeyNode("n", "ns")
+		args, env := valkeyAnnounceArgsAndEnv(node)
+		assert.Equal(t, []string{"--cluster-announce-ip", "$(POD_IP)"}, args)
+		require.Len(t, env, 1)
+		assert.Equal(t, "POD_IP", env[0].Name)
+	})
+	t.Run("Hostname FQDN", func(t *testing.T) {
+		node := newTestValkeyNode("mycluster-0-0", "ns")
+		node.Labels = map[string]string{LabelCluster: "mycluster"}
+		node.Spec.PreferredEndpointType = valkeyv1.PreferredEndpointTypeHostname
+		node.Spec.ClusterDomain = "example.local"
+		args, env := valkeyAnnounceArgsAndEnv(node)
+		assert.Equal(t, []string{
+			"--cluster-announce-hostname",
+			"$(POD_NAME).valkey-mycluster.ns.svc.example.local",
+		}, args)
+		require.Len(t, env, 1)
+		assert.Equal(t, "POD_NAME", env[0].Name)
+	})
 }
 
 func TestBuildValkeyNodePVC(t *testing.T) {

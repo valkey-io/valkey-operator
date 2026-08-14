@@ -346,14 +346,34 @@ If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`
 >
 > A milder form of this applies to `zone.spread.*` set to `Required`: a recreated pod can be pushed away from its volume's zone.
 
-### TLS
+### Networking
 
 ```yaml
 networking:
+  clusterDomain: cluster.local   # optional; default cluster.local
+  discovery:
+    preferredEndpointType: IP    # IP (default) | Hostname
   tls:
     certificate:
       secretName: valkey-tls
 ```
+
+#### Discovery (in-cluster announce)
+
+`networking.discovery.preferredEndpointType` controls how nodes advertise themselves after `CLUSTER SLOTS`:
+
+| Value | Behaviour |
+|---|---|
+| `IP` (default) | Announce pod IPs. Same as historical behaviour. |
+| `Hostname` | Announce `<pod>.<headlessService>.<namespace>.svc.<clusterDomain>`. Requires `workloadType: StatefulSet` (or omit for the default). |
+
+Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service. Changing `serviceName` on an existing STS is immutable: the operator deletes the StatefulSet with orphan cascade and recreates it (pods are recreated; document for upgrades).
+
+`networking.clusterDomain` must match the kubelet cluster domain (`--cluster-domain`). The API cannot validate that. Wrong values fail as non-resolving announced names.
+
+**TLS tip:** with TLS and IP announce (including the default), clients that re-dial announced pod IPs often fail certificate name checks. Prefer `preferredEndpointType: Hostname` and a server cert SAN such as `*.<headlessService>.<namespace>.svc.<clusterDomain>`. The operator sets a non-blocking `TLSEndpointWarning` condition when TLS is on and announce stays IP; Ready is not forced False for that alone.
+
+#### TLS
 
 `networking.tls` enables TLS for all cluster communication. When set, `certificate.secretName` is required. The Secret must contain:
 

@@ -305,6 +305,9 @@ type ZonePinning struct {
 //
 // zone.pinning: reject a passthrough nodeSelector that sets the zone key the pinning render owns.
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.nodeSelector) || !('topology.kubernetes.io/zone' in self.scheduling.nodeSelector)",message="scheduling.nodeSelector cannot set topology.kubernetes.io/zone while zone.pinning is set: pinning renders that key itself, and the curated value would overwrite yours"
+//
+// discovery: Hostname announce needs stable StatefulSet pod names.
+// +kubebuilder:validation:XValidation:rule="!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType) || self.networking.discovery.preferredEndpointType != 'Hostname' || !has(self.workloadType) || self.workloadType == 'StatefulSet'",message="networking.discovery.preferredEndpointType Hostname requires workloadType StatefulSet (or omit workloadType for the StatefulSet default)"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -373,8 +376,8 @@ type ValkeyClusterSpec struct {
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
-	// Networking groups how clients and peers reach cluster nodes (TLS today;
-	// discovery and external access land in follow-ups under this object).
+	// Networking groups how clients and peers reach cluster nodes (TLS,
+	// in-cluster discovery announce, and later external access).
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
 
@@ -389,13 +392,45 @@ type ValkeyClusterSpec struct {
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
+// PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
+// +kubebuilder:validation:Enum=IP;Hostname
+type PreferredEndpointType string
+
+const (
+	// PreferredEndpointTypeIP announces pod IPs (default).
+	PreferredEndpointTypeIP PreferredEndpointType = "IP"
+	// PreferredEndpointTypeHostname announces stable per-pod DNS names under the
+	// cluster headless Service.
+	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
+)
+
 // NetworkingSpec groups connectivity configuration for the cluster.
-// Phase 1 of the networking API (#318): TLS only. Discovery (in-cluster
-// endpoint announcement) and external access will nest here later.
 type NetworkingSpec struct {
+	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under
+	// (kubelet --cluster-domain). Used when building Hostname announce FQDNs.
+	// Must match the cluster; the API cannot validate that. Default cluster.local.
+	// +kubebuilder:default="cluster.local"
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// Discovery configures in-cluster endpoint announcement after CLUSTER SLOTS.
+	// +optional
+	Discovery *DiscoverySpec `json:"discovery,omitempty"`
+
 	// TLS configuration for the cluster.
 	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
+}
+
+// DiscoverySpec configures how nodes announce themselves for in-cluster clients.
+type DiscoverySpec struct {
+	// PreferredEndpointType selects IP (default) or Hostname announcement.
+	// Hostname uses per-pod DNS under the cluster headless Service
+	// (<pod>.<headless>.<namespace>.svc.<clusterDomain>) and requires
+	// workloadType StatefulSet (or the default).
+	// +kubebuilder:default=IP
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
 }
 
 // TLSConfig defines the TLS configuration for ValkeyCluster.
@@ -416,6 +451,28 @@ func (c *ValkeyCluster) GetTLS() *TLSConfig {
 		return nil
 	}
 	return c.Spec.Networking.TLS
+}
+
+// GetPreferredEndpointType returns discovery preferred endpoint type, default IP.
+func (c *ValkeyCluster) GetPreferredEndpointType() PreferredEndpointType {
+	if c == nil || c.Spec.Networking == nil || c.Spec.Networking.Discovery == nil ||
+		c.Spec.Networking.Discovery.PreferredEndpointType == "" {
+		return PreferredEndpointTypeIP
+	}
+	return c.Spec.Networking.Discovery.PreferredEndpointType
+}
+
+// GetClusterDomain returns networking.clusterDomain, default cluster.local.
+func (c *ValkeyCluster) GetClusterDomain() string {
+	if c == nil || c.Spec.Networking == nil || c.Spec.Networking.ClusterDomain == "" {
+		return "cluster.local"
+	}
+	return c.Spec.Networking.ClusterDomain
+}
+
+// PrefersHostnameAnnounce reports whether discovery announces hostnames.
+func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
+	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
 }
 
 // CertificateRef defines the certificate reference for ValkeyCluster.
@@ -497,6 +554,9 @@ const (
 	// considers risky, for example a terminationGracePeriodSeconds too short for
 	// graceful failover.
 	ConditionConfigurationWarning = "ConfigurationWarning"
+	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
+	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
+	ConditionTLSEndpointWarning = "TLSEndpointWarning"
 )
 
 const (
@@ -526,6 +586,9 @@ const (
 	ReasonSystemUsersAclError      = "SystemUsersACLError"
 	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
 	ReasonPodUnschedulable         = "PodUnschedulable"
+	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
+	// is enabled and preferred endpoint type is IP (default or explicit).
+	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
 )
 
 // +kubebuilder:object:root=true

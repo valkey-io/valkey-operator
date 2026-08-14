@@ -170,20 +170,11 @@ func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []co
 		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
 	}
 
-	clusterDomain := node.Spec.ClusterDomain
-	if clusterDomain == "" {
-		clusterDomain = "cluster.local"
-	}
 	clusterName := node.Labels[LabelCluster]
 	if clusterName == "" {
-		// Standalone Hostname is not supported; fall back to IP.
 		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
 	}
-	fqdn := fmt.Sprintf("$(POD_NAME).%s.%s.svc.%s",
-		headlessServiceName(clusterName),
-		node.Namespace,
-		clusterDomain,
-	)
+	fqdn := "$(POD_NAME)." + headlessServiceFQDN(clusterName, node.Namespace, node.Spec.ClusterDomain)
 	podNameEnv := corev1.EnvVar{
 		Name: "POD_NAME",
 		ValueFrom: &corev1.EnvVarSource{
@@ -205,12 +196,14 @@ func statefulSetServiceName(node *valkeyiov1alpha1.ValkeyNode) string {
 	return valkeyNodeResourceName(node)
 }
 
-// headlessServiceFQDN is the Service DNS name used for TLS ServerName and similar.
+// headlessServiceFQDN is the absolute Service DNS name (trailing dot) used for
+// TLS ServerName and Hostname announce.
 func headlessServiceFQDN(clusterName, namespace, clusterDomain string) string {
 	if clusterDomain == "" {
-		clusterDomain = "cluster.local"
+		clusterDomain = valkeyiov1alpha1.DefaultClusterDomain
 	}
-	return fmt.Sprintf("%s.%s.svc.%s", headlessServiceName(clusterName), namespace, clusterDomain)
+	domain := strings.TrimSuffix(clusterDomain, ".")
+	return fmt.Sprintf("%s.%s.svc.%s.", headlessServiceName(clusterName), namespace, domain)
 }
 
 // statefulSetAfterServiceNameChange builds a create-ready STS with desired

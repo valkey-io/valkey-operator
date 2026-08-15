@@ -879,7 +879,11 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
 			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
 		}
-		if cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace); err == nil {
+		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
+				"secretName", secretName)
+		} else {
 			tlsConfig = cfg
 		}
 	}

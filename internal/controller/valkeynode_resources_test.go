@@ -1133,6 +1133,46 @@ func TestDefaultImagePullPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+				Zone: &valkeyv1.ZoneScheduling{
+					Pinning: &valkeyv1.ZonePinning{Zones: []string{"az1", "az2", "az3"}},
+				},
+			},
+		},
+	}
+
+	// shard 1 + node-index 1 => (1+1) % 3 => az3.
+	node := buildClusterValkeyNode(cluster, 1, 1)
+	assert.Equal(t, map[string]string{
+		"node.kubernetes.io/instance-type": "m6i.xlarge",
+		"topology.kubernetes.io/zone":      "az3",
+	}, node.Spec.NodeSelector)
+
+	// shard 0 + node-index 0 => az1, and the user's own entry survives.
+	first := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "az1", first.Spec.NodeSelector["topology.kubernetes.io/zone"])
+
+	// The cluster's own nodeSelector is not mutated by rendering.
+	assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+		cluster.Spec.Scheduling.NodeSelector)
+}
+
+func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, node.Spec.NodeSelector, "no pinning must leave nodeSelector nil, not an empty map")
+}
+
 func TestApplyProbeAPIDefaults(t *testing.T) {
 	probe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{

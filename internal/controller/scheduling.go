@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"maps"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -191,4 +192,44 @@ func zoneSpreadTSCs(clusterName string, shardIndex, nodeIndex int, shard, primar
 		})
 	}
 	return out
+}
+
+// effectiveZonePinning returns the ordered zone list for pinning, or nil when
+// pinning is off. A nil spec, a nil Zone, or a nil Pinning all resolve to off.
+// The returned slice is the live backing array from the spec, not a copy;
+// callers must treat it as read-only.
+func effectiveZonePinning(s *valkeyiov1alpha1.SchedulingSpec) []string {
+	if s == nil || s.Zone == nil || s.Zone.Pinning == nil {
+		return nil
+	}
+	return s.Zone.Pinning.Zones
+}
+
+// zoneForPod returns the zone a pod is pinned to, or "" when pinning is off.
+// Each shard walks the zone list from a different starting point, so a shard's
+// members land in consecutive zones, and while there are at least as many
+// zones as shards, primaries end up in distinct zones as a side effect of the
+// modulo.
+func zoneForPod(zones []string, shardIndex, nodeIndex int) string {
+	if len(zones) == 0 {
+		return ""
+	}
+	return zones[(shardIndex+nodeIndex)%len(zones)]
+}
+
+// withZonePin returns a copy of base with the pinned zone added. base may be
+// nil and is never mutated. An empty zone returns base unchanged, so an
+// unpinned cluster keeps a nil nodeSelector rather than gaining an empty map,
+// which would re-render every pod on upgrade. If base already carries the
+// zone key, the curated value wins; admission rejects a passthrough
+// nodeSelector that sets it while pinning is on (the scheduling.nodeSelector
+// CEL rule on ValkeyClusterSpec), so that collision should be unreachable here.
+func withZonePin(nodeSelector map[string]string, zone string) map[string]string {
+	if zone == "" {
+		return nodeSelector
+	}
+	enrichedNodeSelector := make(map[string]string, len(nodeSelector)+1)
+	maps.Copy(enrichedNodeSelector, nodeSelector)
+	enrichedNodeSelector[corev1.LabelTopologyZone] = zone
+	return enrichedNodeSelector
 }

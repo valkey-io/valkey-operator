@@ -1,0 +1,143 @@
+//go:build e2e
+// +build e2e
+
+/*
+Copyright 2025 Valkey Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"fmt"
+	"os/exec"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/test/utils"
+)
+
+// Covers https://github.com/valkey-io/valkey-operator/issues/275: a
+// persistent cluster whose pods all restart at once comes back with every
+// pod IP changed while each node's persisted nodes.conf still holds the
+// peers' old addresses. No node is isolated (all IDs are known), so only
+// the stale-address heal phase can re-form the cluster - without it, the
+// cluster stays in Reconciling with cluster_state:fail until a manual
+// CLUSTER MEET.
+var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCluster", "Persistence", "RestartRecovery"), func() {
+	const clusterName = "cluster-persistent-restart"
+	const manifestPath = "config/samples/v1alpha1_valkeycluster-persistent-restart.yaml"
+	const canaryKey = "restart-canary"
+	const canaryValue = "survives-full-restart"
+
+	podSelector := fmt.Sprintf("valkey.io/cluster=%s", clusterName)
+
+	AfterEach(func() {
+		specReport := CurrentSpecReport()
+		if specReport.Failed() {
+			utils.CollectDebugInfo(namespace)
+		}
+	})
+
+	It("re-forms the cluster after all pods restart simultaneously", func() {
+		By("creating the persistent cluster")
+		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "create", "-f", manifestPath)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create persistent ValkeyCluster CR")
+
+		By("waiting for the cluster to reach Ready")
+		verifyClusterReady := func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+		}
+		Eventually(verifyClusterReady, 5*time.Minute).Should(Succeed())
+
+		By("writing a canary key")
+		writeCanary := func(g Gomega) {
+			cmd := exec.Command("kubectl", "exec", fmt.Sprintf("valkey-%s-0-0-0", clusterName), "-c", "server", "--",
+				"sh", "-c",
+				fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli -c set %s %s", canaryKey, canaryValue))
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("OK"))
+		}
+		Eventually(writeCanary).Should(Succeed())
+
+		By("deleting all pods at once so every pod IP changes")
+		cmd = exec.Command("kubectl", "delete", "pod",
+			"-l", podSelector, "--wait=false")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's pods")
+
+		By("waiting for the stale-address heal to re-introduce the moved members")
+		verifyHealEvent := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "events",
+				"--field-selector", fmt.Sprintf("reason=StaleAddressesHealed,involvedObject.name=%s", clusterName),
+				"-o", "jsonpath={range .items[*]}{.message}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(utils.GetNonEmptyLines(output)).NotTo(BeEmpty(),
+				"expected a StaleAddressesHealed event after the full restart")
+		}
+		Eventually(verifyHealEvent, 5*time.Minute).Should(Succeed())
+
+		By("waiting for the cluster to return to Ready without manual intervention")
+		verifyClusterRecovered := func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+		}
+		Eventually(verifyClusterRecovered, 5*time.Minute).Should(Succeed())
+
+		By("verifying cluster_state is ok and the canary key survived on disk")
+		verifyDataSurvived := func(g Gomega) {
+			cmd := exec.Command("kubectl", "exec", fmt.Sprintf("valkey-%s-0-0-0", clusterName), "-c", "server", "--",
+				"sh", "-c",
+				fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli cluster info | head -1; valkey-cli -c get %s", canaryKey))
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).To(ContainSubstring("cluster_state:ok"))
+			g.Expect(output).To(ContainSubstring(canaryValue))
+		}
+		Eventually(verifyDataSurvived).Should(Succeed())
+
+		By("verifying no live member was forgotten during recovery")
+		// The heal's companion guard: forgetStaleNodes must not CLUSTER
+		// FORGET members whose address changed - a forget here would ban
+		// the node from rejoining for 60s and fight the recovery.
+		cmd = exec.Command("kubectl", "get", "events",
+			"--field-selector", fmt.Sprintf("reason=StaleNodeForgotten,involvedObject.name=%s", clusterName),
+			"-o", "jsonpath={range .items[*]}{.message}{\"\\n\"}{end}")
+		output, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(utils.GetNonEmptyLines(output)).To(BeEmpty(),
+			"no member should be forgotten while recovering from an all-pods restart")
+	})
+
+	AfterAll(func() {
+		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "delete", "pvc",
+			"-l", podSelector, "--ignore-not-found=true", "--wait=false")
+		_, _ = utils.Run(cmd)
+	})
+})

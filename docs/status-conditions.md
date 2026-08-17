@@ -134,6 +134,17 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
 
+#### `TLSEndpointWarning`
+Non-blocking warning when TLS is enabled and discovery still uses IP announce (default or explicit `preferredEndpointType: IP`). `Ready` may stay `True`.
+
+| Status | Meaning |
+|---|---|
+| `True` | TLS is set and announce is IP; clients re-dialing pod IPs after `CLUSTER SLOTS` often fail certificate name checks. Prefer `networking.discovery.preferredEndpointType: Hostname` and DNS SANs for pod FQDNs. |
+| `False` (or absent) | No TLS, or Hostname announce is selected. |
+
+Common reasons:
+- `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
+
 ---
 
 ### ValkeyNode conditions

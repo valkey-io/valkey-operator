@@ -146,6 +146,19 @@ type ValkeyNodeSpec struct {
 	// the field and apply immediately.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
+
+	// PreferredEndpointType is set by the ValkeyCluster controller from
+	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
+	// flags and managed config to hostname mode. Standalone nodes leave this empty
+	// (IP announce).
+	// +kubebuilder:validation:Enum=IP;Hostname
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
+
+	// ClusterDomain is set by the ValkeyCluster controller from
+	// spec.networking.clusterDomain for Hostname FQDN construction.
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

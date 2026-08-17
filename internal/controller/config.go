@@ -58,7 +58,7 @@ func GetServerConfigMapName(clusterName string) string {
 // cluster and standalone ValkeyNode config paths.
 //
 //nolint:goconst
-func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[string]string {
+func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig, hostnameAnnounce bool) map[string]string {
 	config := map[string]string{}
 
 	if includeACL {
@@ -82,6 +82,10 @@ func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[st
 		config["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
 	}
 
+	if hostnameAnnounce {
+		config["cluster-preferred-endpoint-type"] = "hostname"
+	}
+
 	return config
 }
 
@@ -99,14 +103,15 @@ func renderConfig(config map[string]string) string {
 }
 
 func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS))
+	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
+	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname))
 }
 
 // Return a base config of parameters that users shouldn't be able to override
 //
 //nolint:goconst
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
-	baseConfig := buildManagedConfig(true, cluster.GetTLS())
+	baseConfig := buildManagedConfig(true, cluster.GetTLS(), cluster.PrefersHostnameAnnounce())
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",

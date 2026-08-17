@@ -154,6 +154,81 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 	return output, nil
 }
 
+// valkeyAnnounceArgsAndEnv returns --cluster-announce-* flags and env for the
+// server container: pod IP by default, pod FQDN under the headless Service in
+// Hostname mode (STS serviceName must be that headless Service).
+func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []corev1.EnvVar) {
+	podIPEnv := corev1.EnvVar{
+		Name: "POD_IP",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			},
+		},
+	}
+	if node.Spec.PreferredEndpointType != valkeyiov1alpha1.PreferredEndpointTypeHostname {
+		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
+	}
+
+	clusterName := node.Labels[LabelCluster]
+	if clusterName == "" {
+		return []string{"--cluster-announce-ip", "$(POD_IP)"}, []corev1.EnvVar{podIPEnv}
+	}
+	fqdn := "$(POD_NAME)." + headlessServiceFQDN(clusterName, node.Namespace, node.Spec.ClusterDomain)
+	podNameEnv := corev1.EnvVar{
+		Name: "POD_NAME",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.name",
+			},
+		},
+	}
+	return []string{"--cluster-announce-hostname", fqdn}, []corev1.EnvVar{podNameEnv}
+}
+
+// statefulSetServiceName is the governing Service for STS pod DNS. Cluster-owned
+// nodes use the shared cluster headless Service so multi 1-pod STS get per-pod
+// FQDNs. Standalone nodes keep the resource name (historical behaviour).
+func statefulSetServiceName(node *valkeyiov1alpha1.ValkeyNode) string {
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		return headlessServiceName(clusterName)
+	}
+	return valkeyNodeResourceName(node)
+}
+
+// headlessServiceFQDN is the absolute Service DNS name (trailing dot) used for
+// TLS ServerName and Hostname announce.
+func headlessServiceFQDN(clusterName, namespace, clusterDomain string) string {
+	if clusterDomain == "" {
+		clusterDomain = valkeyiov1alpha1.DefaultClusterDomain
+	}
+	domain := strings.TrimSuffix(clusterDomain, ".")
+	return fmt.Sprintf("%s.%s.svc.%s.", headlessServiceName(clusterName), namespace, domain)
+}
+
+// statefulSetAfterServiceNameChange builds a create-ready STS with desired
+// serviceName and labels but the live pod template (and PVC templates), so a
+// serviceName migration does not apply an unauthorized template roll.
+func statefulSetAfterServiceNameChange(desired, live *appsv1.StatefulSet) *appsv1.StatefulSet {
+	out := desired.DeepCopy()
+	out.ResourceVersion = ""
+	out.UID = ""
+	out.Generation = 0
+	out.CreationTimestamp = metav1.Time{}
+	out.ManagedFields = nil
+	out.Status = appsv1.StatefulSetStatus{}
+	out.Spec.Template = *live.Spec.Template.DeepCopy()
+	out.Spec.VolumeClaimTemplates = live.Spec.VolumeClaimTemplates
+	out.Spec.ServiceName = desired.Spec.ServiceName
+	return out
+}
+
+// refuseDesiredSTSCreate is true when creating the full desired STS would
+// skip WorkloadRevision (STS gone after orphan, pod still running).
+func refuseDesiredSTSCreate(node *valkeyiov1alpha1.ValkeyNode, pod *corev1.Pod, desiredHash string) bool {
+	return pod != nil && isClusterOwned(node) && !workloadRevisionAllows(node, desiredHash)
+}
+
 // buildContainersDef builds the base containers definition for the ValkeyNode
 // and applies any strategic merge patches from node.Spec.Containers.
 func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, error) {
@@ -162,42 +237,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		image = node.Spec.Image
 	}
 
+	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+
 	containers := []corev1.Container{
 		{
 			Name:      "server",
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: []string{
+			Command: append([]string{
 				"valkey-server",
 				"/config/valkey.conf",
-				"--cluster-announce-ip",
-				"$(POD_IP)",
+			}, append(announceArgs, []string{
 				"--primaryuser",
 				replicationUser,
 				"--primaryauth",
 				"$(PRIMARY_AUTH)",
-			},
-			Env: []corev1.EnvVar{
-				{
-					Name: "POD_IP",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "status.podIP",
+			}...)...),
+			Env: append(announceEnv, corev1.EnvVar{
+				Name: "PRIMARY_AUTH",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
 						},
+						Key: replicationUser,
 					},
 				},
-				{
-					Name: "PRIMARY_AUTH",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
-							},
-							Key: replicationUser,
-						},
-					},
-				},
-			},
+			}),
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "client",
@@ -584,7 +650,7 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:    func(i int32) *int32 { return &i }(1),
-			ServiceName: valkeyNodeResourceName(node),
+			ServiceName: statefulSetServiceName(node),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},

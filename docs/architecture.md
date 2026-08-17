@@ -42,7 +42,7 @@ ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-ind
 
 ## Config hash propagation
 
-When `valkey.conf` changes, ValkeyCluster computes a SHA-256 of the rendered `valkey.conf` string and writes it to `ValkeyNode.spec.serverConfigHash`. The ValkeyNode controller stamps this as a pod template annotation, triggering a rolling restart.
+When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spec.config` to each ValkeyNode. The ValkeyNode pod-template builders derive a SHA-256 roll hash from the node spec (config minus the live-settable allowlist, plus TLS) and stamp it as a pod template annotation — gated on `spec.serverConfigMapName`, the marker that a parent manages the node's config. The changed template then rolls out one node at a time, authorized by `spec.workloadRevision`. The hash render is shared with the ValkeyCluster ConfigMap path, and `internal/controller/config_rollhash_test.go` pins it byte-for-byte so operator upgrades do not roll pods.
 
 ## Auto-generated files
 

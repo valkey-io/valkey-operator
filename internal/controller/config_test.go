@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	semver "github.com/Masterminds/semver/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -112,5 +113,152 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 			"appendonly":       "yes",
 		})
 		Expect(out).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+	})
+})
+
+var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
+	newTLSCluster := func(image string, cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Image:  image,
+				Config: cfg,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					TLS: &valkeyiov1alpha1.TLSConfig{
+						Certificate: valkeyiov1alpha1.CertificateRef{SecretName: "valkey-tls"},
+					},
+				},
+			},
+		}
+	}
+
+	It("drops a user-set directive when the version is below 9.1", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval 3600"))
+	})
+
+	It("keeps a user-set directive when the version is 9.1 or newer", func() {
+		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(buildServerConfig(cluster)).To(ContainSubstring("tls-auto-reload-interval 3600"))
+	})
+
+	It("skips the directive when the version is below 9.1 and the key is unset", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
+	})
+
+	It("skips the directive when the version cannot be determined and the key is unset", func() {
+		cluster := newTLSCluster("valkey/valkey:latest", nil)
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
+	})
+
+	It("skips the directive when TLS is not enabled", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{Image: "valkey/valkey:9.1.0"},
+		}
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
+	})
+
+	It("skips the directive when TLS is enabled but the image is empty", func() {
+		cluster := newTLSCluster("", nil)
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auto-reload-interval"))
+	})
+
+	It("keeps un-gated user directives even on an old image", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"appendonly": "yes",
+		})
+		Expect(buildServerConfig(cluster)).To(ContainSubstring("appendonly yes"))
+	})
+
+	It("reports gated user keys via gatedUserKeysToSuppress on an old image", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+			"appendonly":               "yes",
+		})
+		Expect(gatedUserKeysToSuppress(cluster)).To(Equal(map[string]struct{}{
+			"tls-auto-reload-interval": {},
+		}))
+	})
+
+	It("reports gated user keys when the image tag cannot be parsed", func() {
+		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(gatedUserKeysToSuppress(cluster)).To(Equal(map[string]struct{}{
+			"tls-auto-reload-interval": {},
+		}))
+	})
+
+	It("returns no suppressed keys when no user config is set", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		Expect(gatedUserKeysToSuppress(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateConfigWarnings names the directive, its required version, and the detected version", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("tls-auto-reload-interval"))
+		Expect(warnings[0].message).To(ContainSubstring("9.1.0"))
+		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
+	})
+
+	It("versionGateConfigWarnings says so when the detected version cannot be determined", func() {
+		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("no version could be detected from spec.image \"valkey/valkey:latest\""))
+	})
+
+	It("versionGateConfigWarnings names the default image when spec.image is empty", func() {
+		cluster := newTLSCluster("", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("default image"))
+		Expect(warnings[0].message).To(ContainSubstring(DefaultImage))
+		Expect(warnings[0].message).NotTo(ContainSubstring("spec.image"))
+	})
+
+	It("versionGateConfigWarnings stays silent for a gated directive the user never set", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		Expect(versionGateConfigWarnings(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateConfigWarnings returns nothing when the image supports every directive", func() {
+		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
+			"tls-auto-reload-interval": "3600",
+		})
+		Expect(versionGateConfigWarnings(cluster)).To(BeEmpty())
+	})
+
+	It("versionGateConfigWarnings returns unsupported directives in sorted order", func() {
+		original := versionGatedConfig
+		versionGatedConfig = map[string]*semver.Version{
+			"beta-directive":  semver.MustParse("9.3.0"),
+			"alpha-directive": semver.MustParse("9.2.0"),
+		}
+		defer func() {
+			versionGatedConfig = original
+		}()
+
+		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{
+			"alpha-directive": "one",
+			"beta-directive":  "two",
+		})
+
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(2))
+		Expect(warnings[0].message).To(ContainSubstring("alpha-directive"))
+		Expect(warnings[1].message).To(ContainSubstring("beta-directive"))
 	})
 })

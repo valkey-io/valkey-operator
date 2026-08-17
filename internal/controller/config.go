@@ -25,7 +25,9 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,7 +46,15 @@ const (
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
+
+	tlsAutoReloadIntervalKey = "tls-auto-reload-interval"
 )
+
+// versionGatedConfig maps user-facing config directives to the minimum Valkey
+// version that understands them.
+var versionGatedConfig = map[string]*semver.Version{
+	tlsAutoReloadIntervalKey: semver.MustParse("9.1.0"),
+}
 
 //go:embed scripts/*
 var scripts embed.FS
@@ -143,6 +153,57 @@ func liveConfigToApply(config map[string]string) map[string]string {
 	return out
 }
 
+// versionGateConfigWarnings returns warnings when user-set directives are not
+// supported by the detected Valkey version. It reports exactly the directives
+// the renderer drops.
+func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	droppedKeys := gatedUserKeysToSuppress(cluster)
+	if len(droppedKeys) == 0 {
+		return nil
+	}
+
+	image := effectiveImage(cluster.Spec.Image)
+	imageSource := "spec.image"
+	if cluster.Spec.Image == "" {
+		imageSource = "default image"
+	}
+
+	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
+	if version, ok := valkey.VersionFromImage(image); ok {
+		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
+	}
+
+	warnings := make([]configWarning, 0, len(droppedKeys))
+	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
+		minVersion := versionGatedConfig[key]
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
+			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, %s", key, minVersion, versionDetail),
+		})
+	}
+
+	return warnings
+}
+
+// gatedUserKeysToSuppress returns user-set directives that should be omitted
+// from the rendered config because the detected Valkey version does not
+// support them.
+func gatedUserKeysToSuppress(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]struct{} {
+	skipKeys := map[string]struct{}{}
+	image := effectiveImage(cluster.Spec.Image)
+
+	for key, minVersion := range versionGatedConfig {
+		if _, userSet := cluster.Spec.Config[key]; !userSet {
+			continue
+		}
+		if !valkey.MeetsMinVersion(image, minVersion) {
+			skipKeys[key] = struct{}{}
+		}
+	}
+
+	return skipKeys
+}
+
 // renderServerConfig renders the full valkey.conf. User-provided config is
 // written first and base config last, so users cannot override key base
 // directives (Valkey uses the last value in the file). Any user keys in
@@ -151,6 +212,7 @@ func liveConfigToApply(config map[string]string) map[string]string {
 func renderServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster, excludeUserKeys map[string]struct{}) string {
 	baseConfig := getBaseConfig(cluster)
 	userConfig := cluster.Spec.Config
+	skipKeys := gatedUserKeysToSuppress(cluster)
 
 	var configBuilder strings.Builder
 	configBuilder.Grow((len(baseConfig) + len(userConfig)) * averageParameterLength)
@@ -158,6 +220,9 @@ func renderServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster, excludeUserKeys
 	includedKeys := make([]string, 0, len(userConfig))
 	for _, param := range slices.Sorted(maps.Keys(userConfig)) {
 		if _, skip := excludeUserKeys[param]; skip {
+			continue
+		}
+		if _, skip := skipKeys[param]; skip {
 			continue
 		}
 		includedKeys = append(includedKeys, param)

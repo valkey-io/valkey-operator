@@ -50,12 +50,10 @@ const (
 	tlsAutoReloadIntervalKey = "tls-auto-reload-interval"
 )
 
-var minTLSAutoReloadVersion = semver.MustParse("9.1.0")
-
 // versionGatedConfig maps user-facing config directives to the minimum Valkey
 // version that understands them.
 var versionGatedConfig = map[string]*semver.Version{
-	tlsAutoReloadIntervalKey: minTLSAutoReloadVersion,
+	tlsAutoReloadIntervalKey: semver.MustParse("9.1.0"),
 }
 
 //go:embed scripts/*
@@ -165,9 +163,14 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 	}
 
 	image := effectiveImage(cluster.Spec.Image)
-	versionDetail := fmt.Sprintf("no version could be detected from spec.image %q", image)
+	imageSource := "spec.image"
+	if cluster.Spec.Image == "" {
+		imageSource = "default image"
+	}
+
+	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
 	if version, ok := valkey.VersionFromImage(image); ok {
-		versionDetail = fmt.Sprintf("detected %s from spec.image %q", version, image)
+		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
 	}
 
 	warnings := make([]configWarning, 0, len(droppedKeys))

@@ -338,9 +338,10 @@ spec:
   image: %s
   shards: 1
   replicas: 1
-  tls:
-    certificate:
-      secretName: %s
+  networking:
+    tls:
+      certificate:
+        secretName: %s
   config:
     tls-auto-reload-interval: "3600"
 `, gatedClusterName, preGateImage, gatedSecretName)
@@ -383,6 +384,14 @@ spec:
 			Expect(hit).To(BeTrue(), "expected ConfigurationWarning with reason UnsupportedConfigDirective")
 		})
 
+		It("drops the gated directive from the rendered config", func() {
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(gatedClusterName),
+				"-o", "jsonpath={.data.valkey\\.conf}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(ContainSubstring("tls-auto-reload-interval"))
+		})
+
 		It("stops warning once the gated directive is removed from spec.config", func() {
 			By("removing the directive while staying on the pre-9.1 image")
 
@@ -406,14 +415,6 @@ spec:
 						"the image is still pre-9.1, but a directive the user never set must not be reported as unsupported")
 				}
 			}).Should(Succeed())
-		})
-
-		It("drops the gated directive from the rendered config", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(gatedClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).NotTo(ContainSubstring("tls-auto-reload-interval"))
 		})
 	})
 })

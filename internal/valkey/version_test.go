@@ -79,28 +79,3 @@ func TestMeetsMinVersion(t *testing.T) {
 		})
 	}
 }
-
-func TestVersionStringFromImage(t *testing.T) {
-	tests := []struct {
-		name  string
-		image string
-		want  string
-	}{
-		{name: "plain semver tag", image: "valkey/valkey:9.1.0", want: "9.1.0"},
-		{name: "distro suffix alpine", image: "valkey/valkey:9.1.2-alpine", want: "9.1.2"},
-		{name: "distro suffix bookworm", image: "valkey/valkey:9.1.0-bookworm", want: "9.1.0"},
-		{name: "v-prefixed tag", image: "valkey/valkey:v9.1.0", want: "9.1.0"},
-		{name: "registry with port", image: "myregistry:5000/valkey/valkey:9.1.0", want: "9.1.0"},
-		{name: "floating latest tag returns empty", image: "valkey/valkey:latest", want: ""},
-		{name: "no tag returns empty", image: "valkey/valkey", want: ""},
-		{name: "digest pin returns empty", image: "valkey/valkey@sha256:abcd1234", want: ""},
-		{name: "empty image returns empty", image: "", want: ""},
-		{name: "non-numeric tag returns empty", image: "valkey/valkey:unstable", want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, VersionStringFromImage(tt.image))
-		})
-	}
-}

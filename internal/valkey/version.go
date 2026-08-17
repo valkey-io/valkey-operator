@@ -57,15 +57,6 @@ func imageTag(image string) (string, bool) {
 	return tag, true
 }
 
-// VersionStringFromImage returns the parsed version string or an empty string
-// when the version cannot be determined.
-func VersionStringFromImage(image string) string {
-	if v, ok := VersionFromImage(image); ok {
-		return v.String()
-	}
-	return ""
-}
-
 // MeetsMinVersion reports whether the version parsed from image meets min.
 func MeetsMinVersion(image string, min *semver.Version) bool {
 	if min == nil {

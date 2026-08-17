@@ -45,7 +45,7 @@ func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason st
 	}
 }
 
-// configWarning is a entry that represents a configuration warning with a reason and message.
+// configWarning represents a configuration warning with a reason and message.
 type configWarning struct {
 	reason  string
 	message string

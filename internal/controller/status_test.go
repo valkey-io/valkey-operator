@@ -67,32 +67,33 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	recorder := events.NewFakeRecorder(10)
 	r := &ValkeyClusterReconciler{Recorder: recorder}
+	graceMessage := "spec.terminationGracePeriodSeconds (20s) is below the recommended 30s for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown"
 
 	g.Expect(cluster.Status.Conditions).To(BeEmpty())
 
 	// Add a warning and ensure the condition is updated
 	r.applyConfigurationWarnings(ctx, cluster, []configWarning{{
 		reason:  valkeyiov1alpha1.ReasonGracePeriodTooShort,
-		message: "grace warning",
+		message: graceMessage,
 	}})
 
 	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
 	g.Expect(cond).NotTo(BeNil())
 	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonGracePeriodTooShort))
-	g.Expect(cond.Message).To(Equal("grace warning"))
+	g.Expect(cond.Message).To(Equal(graceMessage))
 	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 	g.Expect(<-recorder.Events).To(ContainSubstring(valkeyiov1alpha1.ReasonGracePeriodTooShort))
 
 	// Add another warning and ensure the condition is updated with multiple warnings
 	r.applyConfigurationWarnings(ctx, cluster, []configWarning{
-		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: "grace warning"},
+		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: graceMessage},
 		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "directive warning"},
 	})
 
 	cond = meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
 	g.Expect(cond).NotTo(BeNil())
 	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonMultipleConfigurationWarnings))
-	g.Expect(cond.Message).To(Equal("grace warning; directive warning"))
+	g.Expect(cond.Message).To(Equal(graceMessage + "; directive warning"))
 	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 	g.Expect(<-recorder.Events).To(ContainSubstring(valkeyiov1alpha1.ReasonUnsupportedConfigDirective))
 
@@ -111,7 +112,7 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 	// Reapplying the exact same warning set should keep the condition stable.
 	before := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
 	r.applyConfigurationWarnings(ctx, cluster, []configWarning{
-		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: "grace warning"},
+		{reason: valkeyiov1alpha1.ReasonGracePeriodTooShort, message: graceMessage},
 		{reason: valkeyiov1alpha1.ReasonUnsupportedConfigDirective, message: "directive warning"},
 	})
 	after := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)

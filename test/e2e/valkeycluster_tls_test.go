@@ -111,9 +111,10 @@ spec:
   image: %s
   shards: 1
   replicas: 1
-  tls:
-    certificate:
-      secretName: %s
+  networking:
+    tls:
+      certificate:
+        secretName: %s
   exporter:
     enabled: true
   config:
@@ -222,9 +223,9 @@ spec:
 				g.Expect(containers).To(ContainElement("metrics-exporter"))
 			}).Should(Succeed())
 
-			By("verifying metrics-exporter uses rediss:// scheme in args")
+			By("verifying metrics-exporter uses rediss:// scheme in REDIS_ADDR env var")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName), "-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].args[0]}")
+				cmd := exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName), "-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].env[?(@.name=='REDIS_ADDR')].value}")
 				out, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(ContainSubstring("rediss://"), "exporter should use rediss:// when TLS is enabled")

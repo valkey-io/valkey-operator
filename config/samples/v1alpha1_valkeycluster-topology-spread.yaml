@@ -17,3 +17,11 @@ spec:
           mode: Disabled
         pods:
           mode: Preferred
+    zone:
+      spread:
+        shard:
+          mode: Preferred
+        primaries:
+          mode: Disabled
+        pods:
+          mode: Disabled

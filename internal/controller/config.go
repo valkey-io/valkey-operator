@@ -118,7 +118,7 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 //
 //nolint:goconst
 func getBaseConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
-	baseConfig := buildManagedConfig(true, cluster.Spec.TLS)
+	baseConfig := buildManagedConfig(true, cluster.GetTLS())
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",

@@ -22,6 +22,7 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -81,6 +82,27 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 		}
 		Eventually(writeCanary).Should(Succeed())
 
+		// Events are matched by the CR's UID, not just its name, so
+		// retained events from an earlier same-named cluster can neither
+		// satisfy the heal assertion nor fail the forget assertion. The
+		// pre-restart counts scope both assertions to the restart window.
+		cmd = exec.Command("kubectl", "get", "valkeycluster", clusterName, "-o", "jsonpath={.metadata.uid}")
+		clusterUID, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		clusterUID = strings.TrimSpace(clusterUID)
+		Expect(clusterUID).NotTo(BeEmpty())
+
+		countEvents := func(reason string) int {
+			cmd := exec.Command("kubectl", "get", "events",
+				"--field-selector", fmt.Sprintf("reason=%s,involvedObject.uid=%s", reason, clusterUID),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			return len(utils.GetNonEmptyLines(output))
+		}
+		healEventsBefore := countEvents("StaleAddressesHealed")
+		forgottenEventsBefore := countEvents("StaleNodeForgotten")
+
 		By("deleting all pods at once so every pod IP changes")
 		cmd = exec.Command("kubectl", "delete", "pod",
 			"-l", podSelector, "--wait=false")
@@ -89,13 +111,8 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 
 		By("waiting for the stale-address heal to re-introduce the moved members")
 		verifyHealEvent := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "events",
-				"--field-selector", fmt.Sprintf("reason=StaleAddressesHealed,involvedObject.name=%s", clusterName),
-				"-o", "jsonpath={range .items[*]}{.message}{\"\\n\"}{end}")
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(utils.GetNonEmptyLines(output)).NotTo(BeEmpty(),
-				"expected a StaleAddressesHealed event after the full restart")
+			g.Expect(countEvents("StaleAddressesHealed")).To(BeNumerically(">", healEventsBefore),
+				"expected a new StaleAddressesHealed event after the full restart")
 		}
 		Eventually(verifyHealEvent, 5*time.Minute).Should(Succeed())
 
@@ -124,12 +141,7 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 		// The heal's companion guard: forgetStaleNodes must not CLUSTER
 		// FORGET members whose address changed - a forget here would ban
 		// the node from rejoining for 60s and fight the recovery.
-		cmd = exec.Command("kubectl", "get", "events",
-			"--field-selector", fmt.Sprintf("reason=StaleNodeForgotten,involvedObject.name=%s", clusterName),
-			"-o", "jsonpath={range .items[*]}{.message}{\"\\n\"}{end}")
-		output, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(utils.GetNonEmptyLines(output)).To(BeEmpty(),
+		Expect(countEvents("StaleNodeForgotten")).To(Equal(forgottenEventsBefore),
 			"no member should be forgotten while recovering from an all-pods restart")
 	})
 

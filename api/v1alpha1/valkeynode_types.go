@@ -218,7 +218,10 @@ const (
 	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
 	// wrote to the mounted Secret is live on the server. It is applied via ACL
 	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
-	// means the desired user set and their password hashes are live.
+	// means the desired user set, their password hashes, and the current ACL
+	// revision are live, confirmed by a bookkeeping revision user whose password
+	// is a hash of the managed ACL (see aclRevisionUser); permission-only
+	// edits are therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and

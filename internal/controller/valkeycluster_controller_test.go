@@ -623,6 +623,16 @@ var _ = Describe("reconcileUsersAcl", func() {
 
 			// assert that the generated password for users are not nil/empty string
 			Expect(acl).NotTo(ContainSubstring(nilPassword))
+
+			// The revision user is appended last, disabled, and its only
+			// password is the hash of every managed entry above it.
+			revisionPrefix := "user " + aclRevisionUser + " off"
+			Expect(acl).To(ContainSubstring(revisionPrefix))
+			idx := strings.Index(acl, revisionPrefix)
+			Expect(idx).To(BeNumerically(">", 0), "the revision user must come after the managed users")
+			managed := acl[:idx]
+			Expect(acl).To(ContainSubstring(fmt.Sprintf("#%x", sha256.Sum256([]byte(managed)))),
+				"its password must be the hash of the managed ACL above it")
 		})
 
 		It("should update the system user secret when spec.exporter is enabled after cluster creation", func() {

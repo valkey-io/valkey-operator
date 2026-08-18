@@ -206,19 +206,17 @@ This condition is set once the node is ready and mounts an ACL Secret. An edit r
 
 | Status | Meaning |
 |---|---|
-| `True` | The desired user set and their password hashes are live on the server. |
-| `False` | The reload ran but the running ACL does not yet match the desired users and passwords (for example the mounted aclfile has not refreshed yet), or the reload failed. |
+| `True` | The desired user set, their password hashes, and the current ACL revision are live on the server. |
+| `False` | The reload ran but the running ACL does not yet match the desired revision (for example the mounted aclfile has not refreshed yet), or the reload failed. |
 
 Common reasons when `ACLApplied=False`:
 - `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
 - `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the exact error.
 
 Common reasons when `ACLApplied=True`:
-- `Applied` – the desired users and passwords are live.
+- `Applied` – the desired ACL revision is live.
 
-> **Note:** `ACLApplied` compares the user set and password hashes exactly, which is what a password rotation waits on. It is informational and does not block the cluster controller's one-at-a-time progress. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
->
-> **Limitation:** Only the user set and password hashes drive the condition, so only those changes move it through `PendingPropagation` back to `True`: adding or removing a user or a password. A change to a user's `enabled` flag or permissions still takes effect on the server (the reload is unconditional), but the condition does not report a transient `PendingPropagation` for it, so it is not a signal to wait on for those fields. Comparing rules directly would mean reimplementing Valkey's normalized ACL rendering; making the condition track every field is left as a follow-up.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition is informational and does not block the cluster controller's one-at-a-time progress. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

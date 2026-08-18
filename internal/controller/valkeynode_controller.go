@@ -879,13 +879,17 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 // when available). Shared by getValkeyRole and the live-config client.
 func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
 	var tlsConfig *tls.Config
-	if node.Spec.TLS != nil && node.Spec.TLS.Certificate.SecretName != "" {
-		secretName := node.Spec.TLS.Certificate.SecretName
+	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
+		secretName := node.Spec.TLS.Certificates.Server.SecretName
 		serverName := ""
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
 			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
 		}
-		if cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace); err == nil {
+		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
+				"secretName", secretName)
+		} else {
 			tlsConfig = cfg
 		}
 	}

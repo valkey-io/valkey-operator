@@ -58,7 +58,7 @@ func GetServerConfigMapName(clusterName string) string {
 // cluster and standalone ValkeyNode config paths.
 //
 //nolint:goconst
-func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.TLSConfig) map[string]string {
+func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec) map[string]string {
 	config := map[string]string{}
 
 	if includeACL {
@@ -107,7 +107,7 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 // controller and the ValkeyNode pod-template builders render identical bytes.
 //
 //nolint:goconst
-func getBaseConfig(tls *valkeyiov1alpha1.TLSConfig) map[string]string {
+func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec) map[string]string {
 	baseConfig := buildManagedConfig(true, tls)
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
@@ -177,7 +177,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(cluster.GetTLS()), nil)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster.GetTLS())), nil)
 }
 
 // nodeServerConfigRollHash derives the config roll hash from the node spec:

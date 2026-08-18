@@ -106,8 +106,10 @@ func pinTestCluster(config map[string]string, tls bool) *valkeyiov1alpha1.Valkey
 	}
 	if tls {
 		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
-			TLS: &valkeyiov1alpha1.TLSConfig{
-				Certificate: valkeyiov1alpha1.CertificateRef{SecretName: "tls-secret"},
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{
+					Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"},
+				},
 			},
 		}
 	}

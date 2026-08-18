@@ -118,6 +118,62 @@ var _ = Describe("ValkeyCluster Controller", func() {
 
 		})
 	})
+
+	Context("When the ValkeyCluster is being deleted", func() {
+		const resourceName = "deleting-resource"
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+
+		It("should not create child resources while deletion is in progress", func() {
+			By("creating a ValkeyCluster held under deletion by a finalizer")
+			resource := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       resourceName,
+					Namespace:  "default",
+					Finalizers: []string{"test.valkey.io/block-deletion"},
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				latest := &valkeyiov1alpha1.ValkeyCluster{}
+				Expect(k8sClient.Get(ctx, typeNamespacedName, latest)).To(Succeed())
+				latest.Finalizers = nil
+				Expect(k8sClient.Update(ctx, latest)).To(Succeed())
+			})
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			By("reconciling the deleting resource")
+			controllerReconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+
+			By("verifying no child resources were created")
+			svc := &corev1.Service{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: headlessServiceName(resourceName), Namespace: "default"}, svc)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "headless Service should not be created for a deleting cluster")
+
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(resourceName, 0, 0), Namespace: "default"}, node)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "ValkeyNode should not be created for a deleting cluster")
+		})
+	})
 })
 
 var _ = Describe("ValkeyCluster config hash propagation", func() {

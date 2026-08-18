@@ -1890,25 +1890,32 @@ spec:
                   tls:
                     description: TLS configuration for the cluster.
                     properties:
-                      certificate:
-                        description: |-
-                          Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
-                          The referenced secret should contain the following:
-
-                          - `ca.crt`: The certificate authority.
-                          - `tls.crt`: The certificate (or a chain).
-                          - `tls.key`: The private key to the first certificate in the certificate chain.
+                      certificates:
+                        description: Certificates holds the certificate slots used
+                          by the cluster.
                         properties:
-                          secretName:
-                            description: SecretName is the name of the secret.
-                            maxLength: 253
-                            minLength: 1
-                            type: string
+                          server:
+                            description: |-
+                              Server is the node identity presented to clients and peers, and the
+                              trust root for the cluster. The referenced secret must contain:
+
+                              - `ca.crt`: The certificate authority.
+                              - `tls.crt`: The certificate (or a chain).
+                              - `tls.key`: The private key to the first certificate in the certificate chain.
+                            properties:
+                              secretName:
+                                description: SecretName is the name of the secret.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                            required:
+                            - secretName
+                            type: object
                         required:
-                        - secretName
+                        - server
                         type: object
                     required:
-                    - certificate
+                    - certificates
                     type: object
                 type: object
               persistence:

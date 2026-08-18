@@ -117,7 +117,7 @@ type ValkeyNodeSpec struct {
 
 	// TLS configuration for the node
 	// +optional
-	TLS *TLSConfig `json:"tls,omitempty"`
+	TLS *NodeTLSSpec `json:"tls,omitempty"`
 
 	// Config is the user-facing Valkey configuration, copied verbatim from the
 	// owning cluster's Spec.Config. The controller applies the subset of these
@@ -146,6 +146,38 @@ type ValkeyNodeSpec struct {
 	// the field and apply immediately.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
+}
+
+// NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
+// ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this
+// API is the resolved view the node controller renders into valkey.conf and
+// volume mounts.
+type NodeTLSSpec struct {
+	// Certificates holds the certificate slots mounted into the node pod.
+	// +kubebuilder:validation:Required
+	Certificates NodeTLSCertificates `json:"certificates"`
+}
+
+// NodeTLSCertificates groups the certificate slots for a ValkeyNode.
+type NodeTLSCertificates struct {
+	// Server is the node identity presented to clients and peers, and the
+	// trust root for the node. The referenced secret must contain `ca.crt`,
+	// `tls.crt` and `tls.key`.
+	// +kubebuilder:validation:Required
+	Server NodeCertificateRef `json:"server"`
+}
+
+// NodeCertificateRef references a certificate and its private key held in a
+// Secret. It is deliberately a ref and not a source: the cluster-level
+// CertificateSource is a union that grows a cert-manager arm, whereas the
+// ValkeyCluster controller resolves any such source to a Secret before writing
+// the ValkeyNode, so this side only ever names something the node can mount.
+type NodeCertificateRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.

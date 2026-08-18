@@ -414,8 +414,10 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
-	node.Spec.TLS = &valkeyv1.TLSConfig{
-		Certificate: valkeyv1.CertificateRef{SecretName: "tls-secret"},
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
 	}
 
 	cm, err := buildValkeyNodeConfigMap(node)
@@ -624,7 +626,11 @@ func TestBuildExporterContainer(t *testing.T) {
 
 	t.Run("env contains rediss addr with tls", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
 		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")

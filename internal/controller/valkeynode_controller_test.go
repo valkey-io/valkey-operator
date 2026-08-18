@@ -635,12 +635,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
 		})
 
-		It("should propagate ServerConfigHash spec field to StatefulSet pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set (simulating a cluster-managed node)")
+		It("derives the config hash annotation on the StatefulSet pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and Config set (simulating a cluster-managed node)")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				ServerConfigMapName: "ext-config",
-				ServerConfigHash:    "hash-v1",
+				Config:              map[string]string{"appendfsync": "everysec"},
 			})
 
 			r := &ValkeyNodeReconciler{
@@ -653,27 +653,55 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the StatefulSet pod template carries the config hash annotation")
-			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
-				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
-
-			By("simulating a config change by updating ServerConfigHash in the spec")
+			By("verifying the StatefulSet pod template carries the derived config hash annotation")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			node.Spec.ServerConfigHash = "hash-v2"
+			initialHash := nodeServerConfigRollHash(node)
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
+				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+
+			By("changing a non-live-settable config key")
+			node.Spec.Config["appendfsync"] = "always"
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			By("reconciling after the config change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the StatefulSet pod template annotation was updated, causing a rolling update")
+			By("verifying the annotation moved to the new derived hash, causing a rolling update")
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			newHash := nodeServerConfigRollHash(updated)
+			Expect(newHash).NotTo(Equal(initialHash))
 			sts2 := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
-			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
 				"updated config hash must be propagated to trigger pod restart")
+		})
+
+		It("does not add a config hash annotation for standalone nodes without ServerConfigMapName", func() {
+			By("recreating a standalone ValkeyNode with Config but no ServerConfigMapName")
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Config:       map[string]string{"appendfsync": "everysec"},
+			})
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("reconciling to create the StatefulSet")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the pod template has no config hash annotation (pre-existing standalone behavior)")
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
 		})
 
 		It("should defer rolling template updates for cluster-owned nodes until Spec.WorkloadRevision matches", func() {
@@ -870,8 +898,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:8.0.0"))
 		})
 
-		It("should propagate ServerConfigHash spec field to Deployment pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set")
+		It("derives the config hash annotation on the Deployment pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and Config set")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, node); err == nil {
 				node.Finalizers = nil
@@ -892,7 +920,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
 					ServerConfigMapName: "ext-config",
-					ServerConfigHash:    "hash-v1",
+					Config:              map[string]string{"appendfsync": "everysec"},
 				},
 			})).To(Succeed())
 
@@ -906,27 +934,33 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Deployment pod template carries the config hash annotation")
+			By("verifying the Deployment pod template carries the derived config hash annotation")
 			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			initialHash := nodeServerConfigRollHash(node)
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
-			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
+			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
 				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
 
-			By("simulating a config change by updating ServerConfigHash in the spec")
+			By("changing a non-live-settable config key")
 			updated := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			updated.Spec.ServerConfigHash = "hash-v2"
+			updated.Spec.Config["appendfsync"] = "always"
 			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
 			By("reconciling after the config change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Deployment pod template annotation was updated, causing a rolling update")
+			By("verifying the annotation moved to the new derived hash, causing a rolling update")
+			updated2 := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated2)).To(Succeed())
+			newHash := nodeServerConfigRollHash(updated2)
+			Expect(newHash).NotTo(Equal(initialHash))
 			dep2 := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
-			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
 				"updated config hash must be propagated to trigger pod restart")
 		})
 	})

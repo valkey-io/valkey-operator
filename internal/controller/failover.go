@@ -134,8 +134,9 @@ func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1a
 		return false
 	}
 	// Config changes are applied live via CONFIG SET (see applyLiveConfig) and
-	// must not trigger a roll; the roll-relevant config subset is already
-	// captured by Spec.ServerConfigHash.
+	// must not trigger a roll on their own; the roll-relevant config subset
+	// reaches the pod template as a derived annotation (see
+	// buildPodTemplateAnnotations) and is therefore captured by WorkloadRevision.
 	currentSpec, desiredSpec := current.Spec, desired.Spec
 	currentSpec.Config, desiredSpec.Config = nil, nil
 	return !equality.Semantic.DeepEqual(currentSpec, desiredSpec)
@@ -153,7 +154,7 @@ func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode
 	if !nodeRequiresRoll(current, desired) {
 		return false
 	}
-	// Other Spec fields differ (image, config hash, resources, …): real roll.
+	// Other Spec fields differ (image, resources, …): real roll.
 	c, d := current.Spec, desired.Spec
 	c.WorkloadRevision, d.WorkloadRevision = "", ""
 	c.Config, d.Config = nil, nil
@@ -180,7 +181,7 @@ func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode
 // matches) does not qualify.
 //
 // liveTemplateHashes maps ValkeyNode name -> hash of live pod template.
-func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string, liveTemplateHashes map[string]string) bool {
+func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, liveTemplateHashes map[string]string) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -189,7 +190,6 @@ func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, n
 	for shardIndex := range int(cluster.Spec.Shards) {
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-			desired.Spec.ServerConfigHash = configHash
 			if err := setDesiredWorkloadRevision(desired); err != nil {
 				return true
 			}

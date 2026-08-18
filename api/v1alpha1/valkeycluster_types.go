@@ -395,31 +395,42 @@ type ValkeyClusterSpec struct {
 type NetworkingSpec struct {
 	// TLS configuration for the cluster.
 	// +optional
-	TLS *TLSConfig `json:"tls,omitempty"`
+	TLS *TLSSpec `json:"tls,omitempty"`
 }
 
-// TLSConfig defines the TLS configuration for ValkeyCluster.
-type TLSConfig struct {
-	// Certificate is a reference to a Kubernetes secret that contains the certificate and private key for enabling TLS.
-	// The referenced secret should contain the following:
+// TLSSpec defines the TLS configuration for ValkeyCluster.
+type TLSSpec struct {
+	// Certificates holds the certificate slots used by the cluster.
+	// +kubebuilder:validation:Required
+	Certificates TLSCertificates `json:"certificates"`
+}
+
+// TLSCertificates groups the certificate slots for a ValkeyCluster. Today
+// `server` is the only slot; the trust-source, outbound-identity and
+// control-plane-identity slots land in later phases of #360.
+type TLSCertificates struct {
+	// Server is the node identity presented to clients and peers, and the
+	// trust root for the cluster. The referenced secret must contain:
 	//
 	// - `ca.crt`: The certificate authority.
 	// - `tls.crt`: The certificate (or a chain).
 	// - `tls.key`: The private key to the first certificate in the certificate chain.
 	// +kubebuilder:validation:Required
-	Certificate CertificateRef `json:"certificate"`
+	Server CertificateSource `json:"server"`
 }
 
 // GetTLS returns the cluster TLS config from spec.networking.tls, or nil.
-func (c *ValkeyCluster) GetTLS() *TLSConfig {
+func (c *ValkeyCluster) GetTLS() *TLSSpec {
 	if c == nil || c.Spec.Networking == nil {
 		return nil
 	}
 	return c.Spec.Networking.TLS
 }
 
-// CertificateRef defines the certificate reference for ValkeyCluster.
-type CertificateRef struct {
+// CertificateSource references a certificate and its private key. Today the
+// only source is a Secret; future sources (cert-manager, operator-generated)
+// are added as sibling fields forming a union where exactly one may be set.
+type CertificateSource struct {
 	// SecretName is the name of the secret.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1

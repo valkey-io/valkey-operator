@@ -351,11 +351,12 @@ If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`
 ```yaml
 networking:
   tls:
-    certificate:
-      secretName: valkey-tls
+    certificates:
+      server:
+        secretName: valkey-tls
 ```
 
-`networking.tls` enables TLS for all cluster communication. When set, `certificate.secretName` is required. The Secret must contain:
+`networking.tls` enables TLS for all cluster communication. When set, `certificates.server.secretName` is required. The Secret must contain:
 
 | Key | Description |
 |---|---|
@@ -363,9 +364,7 @@ networking:
 | `tls.crt` | Server certificate (or chain) |
 | `tls.key` | Private key for the certificate |
 
-> **Breaking (alpha):** top-level `spec.tls` is removed in favour of `spec.networking.tls`.
->
-> **Upgrade order:** move every ValkeyCluster to `spec.networking.tls` **before** rolling the new CRD. If you upgrade with only top-level `spec.tls` still set, the API server drops the unknown field and the cluster comes back up **with TLS off** (plaintext). That is not a silent field rename; migrate first, then CRD/operator.
+`certificates` is a set of named slots. `server` is the only one today; the trust-source override, the outbound peer identity and the control-plane identity land as sibling slots in later phases of [#360](https://github.com/valkey-io/valkey-operator/issues/360).
 
 ### Users
 

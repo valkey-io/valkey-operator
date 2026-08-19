@@ -21,6 +21,7 @@ package e2e
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1843,7 +1844,257 @@ spec:
 	Context("rolling update", func() {
 		const clusterName = "valkeycluster-rolling-e2e"
 
+		deleteCluster := func() {
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete ValkeyCluster")
+		}
+
+		waitForClusterDeletion := func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "valkeycluster", clusterName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}).Should(Succeed())
+		}
+
+		createReadyCluster := func(manifest string, readyShards int32) {
+			deleteCluster()
+			waitForClusterDeletion()
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(readyShards))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+		}
+
+		podUIDs := func(expectedPods int) map[string]string {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{\"\\n\"}{end}")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			uids := make(map[string]string, expectedPods)
+			for _, line := range utils.GetNonEmptyLines(out) {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				uids[parts[0]] = parts[1]
+			}
+			Expect(uids).To(HaveLen(expectedPods))
+			return uids
+		}
+
+		getNodeWorkloadRevisions := func() (map[string]string, error) {
+			cmd := exec.Command("kubectl", "get", "valkeynodes",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			if err != nil {
+				return nil, err
+			}
+
+			var nodeList struct {
+				Items []struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+					Spec struct {
+						WorkloadRevision string `json:"workloadRevision"`
+					} `json:"spec"`
+				} `json:"items"`
+			}
+			if err := json.Unmarshal([]byte(out), &nodeList); err != nil {
+				return nil, err
+			}
+
+			revs := make(map[string]string, len(nodeList.Items))
+			for _, item := range nodeList.Items {
+				revs[item.Metadata.Name] = item.Spec.WorkloadRevision
+			}
+			return revs, nil
+		}
+
+		nodeWorkloadRevisions := func(g Gomega) map[string]string {
+			revs, err := getNodeWorkloadRevisions()
+			g.Expect(err).NotTo(HaveOccurred())
+			return revs
+		}
+
+		countAwaitingWorkloadRevision := func(g Gomega) int {
+			cmd := exec.Command("kubectl", "get", "valkeynodes",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var nodeList struct {
+				Items []struct {
+					Status struct {
+						Conditions []struct {
+							Type   string `json:"type"`
+							Status string `json:"status"`
+							Reason string `json:"reason"`
+						} `json:"conditions"`
+					} `json:"status"`
+				} `json:"items"`
+			}
+			g.Expect(json.Unmarshal([]byte(out), &nodeList)).To(Succeed())
+
+			awaiting := 0
+			for _, item := range nodeList.Items {
+				for _, cond := range item.Status.Conditions {
+					if cond.Type == string(valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) &&
+						cond.Status == string(metav1.ConditionTrue) &&
+						cond.Reason == valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision {
+						awaiting++
+						break
+					}
+				}
+			}
+			return awaiting
+		}
+
+		countStatefulSetContainers := func(g Gomega, match func(name, image string, args []string) bool) int {
+			cmd := exec.Command("kubectl", "get", "statefulsets",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+				"-o", "json")
+			out, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var stsList struct {
+				Items []struct {
+					Spec struct {
+						Template struct {
+							Spec struct {
+								Containers []struct {
+									Name  string   `json:"name"`
+									Image string   `json:"image"`
+									Args  []string `json:"args"`
+								} `json:"containers"`
+							} `json:"spec"`
+						} `json:"template"`
+					} `json:"spec"`
+				} `json:"items"`
+			}
+			g.Expect(json.Unmarshal([]byte(out), &stsList)).To(Succeed())
+
+			updated := 0
+			for _, item := range stsList.Items {
+				for _, c := range item.Spec.Template.Spec.Containers {
+					if match(c.Name, c.Image, c.Args) {
+						updated++
+						break
+					}
+				}
+			}
+			return updated
+		}
+
+		countStatefulSetsWithExporterArg := func(g Gomega, arg string) int {
+			return countStatefulSetContainers(g, func(name, _ string, args []string) bool {
+				if name != "metrics-exporter" {
+					return false
+				}
+				for _, a := range args {
+					if a == arg {
+						return true
+					}
+				}
+				return false
+			})
+		}
+
+		countStatefulSetsWithServerImage := func(g Gomega, image string) int {
+			return countStatefulSetContainers(g, func(name, img string, _ []string) bool {
+				return name == "server" && img == image
+			})
+		}
+
+		assertStagedRoll := func(baselineUIDs map[string]string, expectedPods int, baselineRevs map[string]string, updatedSTs func(g Gomega) int) {
+			maxConcurrentRestarts := 0
+			stagedRollObserved := false
+			rollComplete := func(updated, restarted int) bool {
+				return updated == expectedPods && restarted == expectedPods
+			}
+
+			Eventually(func(g Gomega) {
+				updated := updatedSTs(g)
+				if updated > 0 && updated < expectedPods {
+					stagedRollObserved = true
+				}
+				nameToUID := podUIDs(expectedPods)
+
+				missing := 0
+				restarted := 0
+				for name, oldUID := range baselineUIDs {
+					uid, ok := nameToUID[name]
+					if !ok {
+						missing++
+						continue
+					}
+					if uid != oldUID {
+						restarted++
+					}
+				}
+				inFlight := missing
+				if inFlight > maxConcurrentRestarts {
+					maxConcurrentRestarts = inFlight
+				}
+				if !rollComplete(updated, restarted) {
+					g.Expect(inFlight).To(BeNumerically("<=", 1),
+						"expected at most one concurrent pod restart, saw %d", inFlight)
+				}
+				if restarted > 0 && restarted < expectedPods {
+					stagedRollObserved = true
+				}
+
+				if len(baselineRevs) > 0 {
+					currentRevs := nodeWorkloadRevisions(g)
+					advanced := 0
+					for name, baselineRev := range baselineRevs {
+						if rev, ok := currentRevs[name]; ok && rev != baselineRev && rev != "" {
+							advanced++
+						}
+					}
+					if advanced > 0 && advanced < expectedPods {
+						stagedRollObserved = true
+					}
+					if countAwaitingWorkloadRevision(g) > 0 {
+						stagedRollObserved = true
+					}
+				}
+
+				g.Expect(updated).To(Equal(expectedPods), "not all workloads updated yet")
+				g.Expect(restarted).To(Equal(expectedPods), "not all pods replaced yet")
+				if len(baselineRevs) > 0 {
+					currentRevs := nodeWorkloadRevisions(g)
+					g.Expect(countAwaitingWorkloadRevision(g)).To(Equal(0), "nodes still awaiting workload revision")
+					for name, baselineRev := range baselineRevs {
+						g.Expect(currentRevs[name]).NotTo(Equal(baselineRev))
+						g.Expect(currentRevs[name]).NotTo(BeEmpty())
+					}
+				}
+
+			}).Should(Succeed())
+
+			Expect(stagedRollObserved).To(BeTrue(), "expected to observe a partially rolled state")
+			Expect(maxConcurrentRestarts).To(BeNumerically("<=", 1),
+				"expected at most one concurrent pod restart, saw %d", maxConcurrentRestarts)
+		}
+
 		It("propagates spec changes one node at a time and returns to Ready", func() {
+			defer deleteCluster()
+
 			By("creating a ValkeyCluster with 2 shards and 1 replica")
 			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -1853,28 +2104,13 @@ spec:
   shards: 2
   replicas: 1
 `, clusterName)
-			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(manifest)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
-			defer func() {
-				cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
-				_, _ = utils.Run(cmd)
-			}()
-
-			By("waiting for the cluster to become Ready")
-			Eventually(func(g Gomega) {
-				cr, err := utils.GetValkeyClusterStatus(clusterName)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
-				g.Expect(cr.Status.ReadyShards).To(Equal(int32(2)))
-			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			createReadyCluster(manifest, 2)
 
 			By("patching the cluster with new memory requests to trigger a rolling update")
 			patchCmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
 				"--type=merge", "-p",
 				`{"spec":{"resources":{"requests":{"cpu":"100m","memory":"384Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}}`)
-			_, err = utils.Run(patchCmd)
+			_, err := utils.Run(patchCmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch ValkeyCluster resources")
 
 			By("waiting for the cluster to enter the UpdatingNodes progressing state")
@@ -1911,6 +2147,80 @@ spec:
 				g.Expect(progressingCond.Status).To(Equal(metav1.ConditionFalse))
 				g.Expect(progressingCond.Reason).To(Equal(valkeyiov1alpha1.ReasonReconcileComplete))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("updates the exporter template one node at a time", Label("WorkloadRoll"), func() {
+			defer deleteCluster()
+
+			const expectedPods = 6
+			By("creating a ValkeyCluster with 3 shards and 1 replica")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+`, clusterName)
+			createReadyCluster(manifest, 3)
+
+			baselineUIDs := podUIDs(expectedPods)
+
+			By("patching exporter args to trigger staged rolling update of the exporter")
+			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", `{"spec":{"exporter":{"args":["--include-system-metrics"]}}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			assertStagedRoll(baselineUIDs, expectedPods, nil, func(g Gomega) int {
+				return countStatefulSetsWithExporterArg(g, "--include-system-metrics")
+			})
+		})
+
+		It("updates Valkey 9.0.0 to 9.1.0 one node at a time", Label("ImageUpgrade"), func() {
+			defer deleteCluster()
+
+			const (
+				expectedPods = 6
+				oldImage     = "valkey/valkey:9.0.0"
+				newImage     = "valkey/valkey:9.1.0"
+			)
+
+			By("creating a ValkeyCluster pinned to Valkey 9.0.0")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  image: %s
+  shards: 3
+  replicas: 1
+`, clusterName, oldImage)
+			createReadyCluster(manifest, 3)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+					"-o", `jsonpath={.items[*].spec.containers[?(@.name=="server")].image}`)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				images := strings.Fields(out)
+				g.Expect(images).To(HaveLen(expectedPods), "expected one server image per pod")
+				for _, img := range images {
+					g.Expect(img).To(Equal(oldImage))
+				}
+			}).Should(Succeed())
+
+			baselineUIDs := podUIDs(expectedPods)
+			By("upgrading the cluster image to Valkey 9.1.0")
+			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"image":"%s"}}`, newImage))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			assertStagedRoll(baselineUIDs, expectedPods, nil, func(g Gomega) int {
+				return countStatefulSetsWithServerImage(g, newImage)
+			})
 		})
 	})
 

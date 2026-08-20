@@ -413,8 +413,8 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred(), "K8s resources not ready: %v", err)
 				err = utils.VerifyClusterHealth(clusterName, "default", shards, replicas)
 				g.Expect(err).NotTo(HaveOccurred(), "cluster health: %v", err)
-				err = utils.VerifyConfigHashConsistency(clusterName, "default")
-				g.Expect(err).NotTo(HaveOccurred(), "config hash: %v", err)
+				err = utils.VerifyClusterConverged(clusterName, "default")
+				g.Expect(err).NotTo(HaveOccurred(), "cluster convergence: %v", err)
 			}, recoveryTimeout, 5*time.Second).Should(Succeed(),
 				fmt.Sprintf("Iteration %d: cluster did not recover after %s (scenario=%s, shards=%v, seed=%d)",
 					iteration, recoveryTimeout, scenario.Name, targetShardsForIteration, seed))

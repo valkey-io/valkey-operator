@@ -717,27 +717,46 @@ func StopBackgroundClient(namespace string) {
 	_, _ = Run(cmd)
 }
 
-// VerifyConfigHashConsistency checks that all ValkeyNodes in the cluster have
-// the same spec.serverConfigHash. A mismatch means the rolling update hasn't
-// finished — some nodes still have the old config.
-func VerifyConfigHashConsistency(clusterName, namespace string) error {
+// VerifyClusterConverged checks that all ValkeyNodes have converged:
+// same workload revision, and no node stuck with ACLApplied=False.
+func VerifyClusterConverged(clusterName, namespace string) error {
+	// 1. All workload revisions must match
 	cmd := exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
 		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-		"-o", "jsonpath={range .items[*]}{.spec.serverConfigHash}{\"\\n\"}{end}")
+		"-o", "jsonpath={range .items[*]}{.spec.workloadRevision}{\"\\n\"}{end}")
 	output, err := Run(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to get config hashes: %w", err)
+		return fmt.Errorf("failed to get workload revisions: %w", err)
 	}
 	var expected string
-	for _, hash := range strings.Split(strings.TrimSpace(output), "\n") {
-		if hash == "" {
+	for _, rev := range strings.Split(strings.TrimSpace(output), "\n") {
+		if rev == "" {
 			continue
 		}
 		if expected == "" {
-			expected = hash
-		} else if hash != expected {
-			return fmt.Errorf("config hash mismatch: expected %s, got %s", expected, hash)
+			expected = rev
+		} else if rev != expected {
+			return fmt.Errorf("workload revision mismatch: expected %s, got %s", expected, rev)
 		}
 	}
+
+	// 2. No node should have ACLApplied=False (if the condition exists it must be True)
+	cmd = exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="ACLApplied")]}{.status}{end}{"\n"}{end}`)
+	output, err = Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to get ACLApplied conditions: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue // condition not present, that is fine
+		}
+		if parts[1] == "False" {
+			return fmt.Errorf("node %s has ACLApplied=False", parts[0])
+		}
+	}
+
 	return nil
 }

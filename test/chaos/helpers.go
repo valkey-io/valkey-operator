@@ -505,28 +505,47 @@ func getPodNodeName(podName, namespace string) (string, error) {
 	return strings.TrimSpace(output), nil
 }
 
-// partitionNode adds iptables DROP rules to isolate a node from the cluster network.
-// In Kind, nodes are docker containers. docker exec still works as it uses the
-// Docker daemon socket, not the container's network.
-func partitionNode(nodeName string) error {
-	rules := [][]string{
-		{"iptables", "-A", "INPUT", "-j", "DROP"},
-		{"iptables", "-A", "OUTPUT", "-j", "DROP"},
-	}
-	for _, rule := range rules {
-		cmd := exec.Command("docker", append([]string{"exec", nodeName}, rule...)...)
+// partitionRules are the iptables rules partitionWorkerNode adds and healWorkerNode removes.
+var partitionRules = [][]string{
+	{"INPUT", "-j", "DROP"},
+	{"OUTPUT", "-j", "DROP"},
+}
+
+// partitionWorkerNode adds iptables DROP rules to isolate a worker node from the
+// cluster network. In Kind, worker nodes are docker containers. docker exec still
+// works as it uses the Docker daemon socket, not the container's network.
+func partitionWorkerNode(nodeName string) error {
+	for _, rule := range partitionRules {
+		args := append([]string{"exec", nodeName, "iptables", "-A"}, rule...)
+		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil {
-			return fmt.Errorf("failed to partition node %s: %w", nodeName, err)
+			return fmt.Errorf("failed to partition worker node %s: %w", nodeName, err)
 		}
 	}
 	return nil
 }
 
-// healNode removes iptables DROP rules to restore network connectivity.
-func healNode(nodeName string) error {
-	cmd := exec.Command("docker", "exec", nodeName, "iptables", "-F")
-	_, err := utils.Run(cmd)
-	return err
+// healWorkerNode removes the DROP rules added by partitionWorkerNode to restore
+// network connectivity. Only those rules are deleted, leaving any other rules on
+// the worker node (such as the CNI's) untouched. Rules that are not present are
+// skipped, so this is safe to call on a node that was never partitioned. Removal
+// continues past failures so one error cannot leave the node partitioned.
+func healWorkerNode(nodeName string) error {
+	var firstErr error
+	for _, rule := range partitionRules {
+		// iptables -C exits non-zero when the rule is absent, so only delete
+		// rules we actually added.
+		check := exec.Command("docker", append([]string{"exec", nodeName, "iptables", "-C"}, rule...)...)
+		if _, err := utils.Run(check); err != nil {
+			continue
+		}
+		args := append([]string{"exec", nodeName, "iptables", "-D"}, rule...)
+		cmd := exec.Command("docker", args...)
+		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to heal worker node %s: %w", nodeName, err)
+		}
+	}
+	return firstErr
 }
 
 // pauseContainer pauses the valkey container in a pod using ctr on the Kind node.

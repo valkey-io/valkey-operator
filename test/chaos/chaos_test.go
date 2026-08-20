@@ -600,14 +600,14 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	for _, nodeName := range nodes {
-		if err := partitionNode(nodeName); err != nil {
+		if err := partitionWorkerNode(nodeName); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, nodeName := range nodes {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := healNode(nodeName); err != nil {
+		if err := healWorkerNode(nodeName); err != nil {
 			return err
 		}
 	}
@@ -645,14 +645,14 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	for _, nodeName := range nodes {
-		if err := partitionNode(nodeName); err != nil {
+		if err := partitionWorkerNode(nodeName); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, nodeName := range nodes {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := healNode(nodeName); err != nil {
+		if err := healWorkerNode(nodeName); err != nil {
 			return err
 		}
 	}

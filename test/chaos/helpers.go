@@ -689,10 +689,15 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 	stopBackgroundClient(namespace)
 
 	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)
+	// With rps 0 the client exits after seeding, so it must not be restarted.
+	restart := "Always"
+	if rps == 0 {
+		restart = "Never"
+	}
 	cmd := exec.Command("kubectl", "run", backgroundClientPod,
 		"-n", namespace,
 		"--image="+clientImage,
-		"--restart=Always",
+		"--restart="+restart,
 		"--image-pull-policy=Never",
 		"--env=VALKEY_ADDR="+svcHost,
 		"--env=NUM_KEYS="+strconv.Itoa(numKeys),
@@ -703,8 +708,13 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 		return 0, err
 	}
 
+	// Fail fast if the client gets stuck rather than waiting out the suite timeout.
+	// Seeding is one unthrottled round-trip per key, measured well above 10k
+	// keys/sec on Kind, so 1s per 1000 keys leaves room for a throttled worker.
+	timeout := 60*time.Second + time.Duration(numKeys/1000)*time.Second
+	deadline := time.Now().Add(timeout)
 	var seeded int
-	for attempts := 0; attempts < 240; attempts++ {
+	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
 		cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace)
 		output, err := utils.Run(cmd)
@@ -727,7 +737,7 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 	if output, err := utils.Run(cmd); err == nil && output != "" {
 		fmt.Printf("  Background client previous logs:\n%s\n", output)
 	}
-	return 0, fmt.Errorf("background client did not finish seeding within 240s")
+	return 0, fmt.Errorf("background client did not finish seeding within %s", timeout)
 }
 
 // stopBackgroundClient prints stats and deletes the background client pod.

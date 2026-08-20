@@ -22,6 +22,7 @@ package chaos
 // Chaos test suite. See docs/chaos-testing.md for configuration and usage.
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -251,33 +252,33 @@ spec:
 
 			// Dump cluster-specific state
 			By("collecting chaos cluster debug info")
-			cmd := exec.Command("kubectl", "get", "pods", "-l",
+			cmd := exec.Command("kubectl", "get", "pods", "-n", "default", "-l",
 				fmt.Sprintf("valkey.io/cluster=%s", clusterName), "-o", "wide")
 			if output, err := utils.Run(cmd); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Cluster pods:\n%s\n", output)
 			}
-			cmd = exec.Command("kubectl", "get", "valkeycluster", clusterName, "-o", "yaml")
+			cmd = exec.Command("kubectl", "get", "valkeycluster", clusterName, "-n", "default", "-o", "yaml")
 			if output, err := utils.Run(cmd); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyCluster status:\n%s\n", output)
 			}
-			cmd = exec.Command("kubectl", "get", "valkeynodes", "-l",
+			cmd = exec.Command("kubectl", "get", "valkeynodes", "-n", "default", "-l",
 				fmt.Sprintf("valkey.io/cluster=%s", clusterName), "-o", "wide")
 			if output, err := utils.Run(cmd); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes:\n%s\n", output)
 			}
 
 			// Collect logs and CLUSTER NODES from all valkey node pods
-			cmd = exec.Command("kubectl", "get", "pods", "-l",
+			cmd = exec.Command("kubectl", "get", "pods", "-n", "default", "-l",
 				fmt.Sprintf("valkey.io/cluster=%s", clusterName),
 				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 			if podList, err := utils.Run(cmd); err == nil {
 				for _, pod := range utils.GetNonEmptyLines(podList) {
-					cmd = exec.Command("kubectl", "exec", pod, "-c", "server", "--",
+					cmd = exec.Command("kubectl", "exec", pod, "-n", "default", "-c", "server", "--",
 						"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 					if output, err := utils.Run(cmd); err == nil {
 						_, _ = fmt.Fprintf(GinkgoWriter, "CLUSTER NODES from %s:\n%s\n", pod, output)
 					}
-					cmd = exec.Command("kubectl", "logs", pod, "-c", "server", "--tail=100")
+					cmd = exec.Command("kubectl", "logs", pod, "-n", "default", "-c", "server", "--tail=100")
 					if logs, err := utils.Run(cmd); err == nil {
 						_, _ = fmt.Fprintf(GinkgoWriter, "Logs for %s:\n%s\n", pod, logs)
 					}
@@ -349,12 +350,12 @@ spec:
 
 			// Mark iteration start in all valkey node logs
 			logMsg := fmt.Sprintf("CHAOS-TEST: iteration %d scenario=%s", iteration, scenario.Name)
-			cmd := exec.Command("kubectl", "get", "pods", "-l",
+			cmd := exec.Command("kubectl", "get", "pods", "-n", "default", "-l",
 				fmt.Sprintf("valkey.io/cluster=%s", clusterName),
 				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 			if podList, err := utils.Run(cmd); err == nil {
 				for _, pod := range utils.GetNonEmptyLines(podList) {
-					cmd = exec.Command("kubectl", "exec", pod, "-c", "server", "--",
+					cmd = exec.Command("kubectl", "exec", pod, "-n", "default", "-c", "server", "--",
 						"sh", "-c", fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli EVAL \"return server.log(server.LOG_WARNING, '%s')\" 0", logMsg))
 					_, _ = utils.Run(cmd)
 				}
@@ -833,16 +834,19 @@ func scaleReplicas(ctx *ChaosContext) error {
 }
 
 func deleteRecreateCluster(ctx *ChaosContext) error {
-	// Capture the current spec before deleting
-	cmd := exec.Command("kubectl", "get", "valkeycluster", ctx.ClusterName,
-		"-n", ctx.Namespace, "-o", "jsonpath={.spec}")
-	spec, err := utils.Run(cmd)
+	// Capture the current spec before deleting. Fetch the typed object so the
+	// spec round-trips as valid JSON for the manifest below.
+	cr, err := utils.GetValkeyClusterStatus(ctx.ClusterName)
 	if err != nil {
 		return fmt.Errorf("failed to get ValkeyCluster spec: %w", err)
 	}
+	spec, err := json.Marshal(cr.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ValkeyCluster spec: %w", err)
+	}
 
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting ValkeyCluster %s and waiting for removal\n", ctx.ClusterName)
-	cmd = exec.Command("kubectl", "delete", "valkeycluster", ctx.ClusterName,
+	cmd := exec.Command("kubectl", "delete", "valkeycluster", ctx.ClusterName,
 		"-n", ctx.Namespace, "--wait=true", "--timeout=120s")
 	if _, err := utils.Run(cmd); err != nil {
 		return fmt.Errorf("failed to delete ValkeyCluster: %w", err)

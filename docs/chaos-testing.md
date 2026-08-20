@@ -1,6 +1,6 @@
 # Chaos Testing
 
-The chaos test suite continuously injects faults into a running ValkeyCluster and verifies that the operator recovers the cluster to a healthy state without losing data.
+The chaos test suite continuously injects faults into a running ValkeyCluster and verifies that the operator recovers the cluster to a healthy state, preserving data for the scenarios that are expected to retain it.
 
 ## Prerequisites
 
@@ -14,22 +14,22 @@ The chaos test suite continuously injects faults into a running ValkeyCluster an
 make test-chaos
 ```
 
-This creates a Kind cluster, builds and deploys the operator, then runs the chaos test loop until a failure occurs or it is interrupted.
+This creates a Kind cluster, builds and deploys the operator, then runs the chaos test loop until a failure occurs, it is interrupted, or the 24 hour test timeout is reached.
 
 To save the output to a log file (useful for post-mortem analysis):
 
 ```bash
-make test-chaos 2>&1 | tee --ignore-interrupts chaos.log
+make test-chaos 2>&1 | tee -i chaos.log
 ```
 
-The `--ignore-interrupts` flag ensures the log is fully written even if you Ctrl+C the test.
+The `-i` flag ensures the log is fully written even if you Ctrl+C the test.
 
 ## How It Works
 
 1. Creates a ValkeyCluster with the configured number of shards and replicas
 2. Waits for the cluster to become Ready and healthy
 3. Seeds test data across all shards
-4. Loops indefinitely:
+4. Loops until a failure, an interrupt, or the 24 hour timeout:
    - Picks a scenario (random or sequential)
    - Logs cluster state and per-shard key counts
    - Injects the fault
@@ -93,7 +93,7 @@ They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testin
 A custom Go client (`test/chaos/client/`) handles seeding and continuous writes.
 It is built and loaded into Kind automatically during `BeforeSuite`.
 
-**Seeding:** Writes `CHAOS_NUM_KEYS` keys sequentially (`key:000000000000` to `key:000000099999`)
+**Seeding:** Writes `CHAOS_NUM_KEYS` keys sequentially, starting at `key:000000000000`,
 with a fixed value of `CHAOS_DATA_SIZE` bytes.
 
 **Continuous writes:** After seeding, the client overwrites the same keys at `CHAOS_WRITE_RPS` rate.
@@ -197,11 +197,11 @@ To run two chaos tests simultaneously with different configurations, use separat
 
 ```bash
 # Terminal 1: default config
-make test-chaos 2>&1 | tee --ignore-interrupts chaos-run1.log
+make test-chaos 2>&1 | tee -i chaos-run1.log
 
 # Terminal 2: different cluster name and kubeconfig to avoid conflicts
 KIND_CLUSTER_CHAOS=chaos-2 KUBECONFIG=/tmp/chaos-2.conf \
-  make test-chaos 2>&1 | tee --ignore-interrupts chaos-run2.log
+  make test-chaos 2>&1 | tee -i chaos-run2.log
 ```
 
 Each run creates its own Kind cluster, so they don't interfere with each other.

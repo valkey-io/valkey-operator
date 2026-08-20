@@ -721,7 +721,7 @@ func pauseWorkerNode(ctx *ChaosContext) error {
 	// Range spans below and above threshold to cover both eviction and non-eviction cases.
 	evictionThreshold := 40*time.Second + time.Duration(ctx.TolerationSec)*time.Second
 	duration := randomDuration(ctx.Rand, 3*time.Second, evictionThreshold+30*time.Second)
-	var paused []string
+	var nodes []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
@@ -731,23 +731,39 @@ func pauseWorkerNode(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing Kind node %s (primary pod: %s, shard %d) for %s\n", nodeName, pod, shard, duration.Truncate(time.Second))
+		if slices.Contains(nodes, nodeName) {
+			continue
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Will pause Kind node %s (primary pod: %s, shard %d)\n", nodeName, pod, shard)
 		logIfControllerNode(nodeName)
+		nodes = append(nodes, nodeName)
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing %d node(s) for %s\n", len(nodes), duration.Truncate(time.Second))
+	var paused []string
+	for _, nodeName := range nodes {
 		cmd := exec.Command("docker", "pause", nodeName)
 		if _, err := utils.Run(cmd); err != nil {
+			_ = unpauseNodes(paused)
 			return err
 		}
 		paused = append(paused, nodeName)
 	}
 	time.Sleep(duration)
-	for _, nodeName := range paused {
+	return unpauseNodes(paused)
+}
+
+// unpauseNodes unpauses every given Kind node, continuing past failures so a
+// single error cannot leave the remaining nodes frozen. Returns the first error.
+func unpauseNodes(nodes []string) error {
+	var firstErr error
+	for _, nodeName := range nodes {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing Kind node %s\n", nodeName)
 		cmd := exec.Command("docker", "unpause", nodeName)
-		if _, err := utils.Run(cmd); err != nil {
-			return err
+		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func scaleShards(ctx *ChaosContext) error {

@@ -1023,7 +1023,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeName}},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeName}},
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.1.1"}}},
 					},
 				},
 			}
@@ -1048,7 +1048,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node2.Name}},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node2.Name}},
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.1.1"}}},
 					},
 				},
 			}
@@ -1081,7 +1081,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node3.Name}},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node3.Name}},
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.1.1"}}},
 					},
 				},
 			}
@@ -1116,7 +1116,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeName}},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeName}},
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.1.1"}}},
 					},
 				},
 			}
@@ -1141,7 +1141,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": node2.Name}},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": node2.Name}},
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.1.1"}}},
 					},
 				},
 			}

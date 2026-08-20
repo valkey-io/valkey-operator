@@ -31,6 +31,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return &envVars[i]
+		}
+	}
+	require.Failf(t, "env var not found", "expected env var %q to be present", name)
+	return nil
+}
+
 func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 	return &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -403,8 +414,10 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
-	node.Spec.TLS = &valkeyv1.TLSConfig{
-		Certificate: valkeyv1.CertificateRef{SecretName: "tls-secret"},
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
 	}
 
 	cm, err := buildValkeyNodeConfigMap(node)
@@ -602,24 +615,37 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, resources, c.Resources)
 	})
 
-	t.Run("args contain redis addr", func(t *testing.T) {
+	t.Run("env contains redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
-		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "redis://localhost:6379", redisAddr.Value)
+		assert.Empty(t, c.Args)
 		assert.Empty(t, c.VolumeMounts)
 	})
 
-	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+	t.Run("env contains rediss addr with tls", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
-		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
-		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
+		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
+		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("args set from spec", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true, Args: []string{"-append-instance-role-label"}}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, []string{"-append-instance-role-label"}, c.Args)
 	})
 
 	t.Run("security context passthrough", func(t *testing.T) {
@@ -1111,4 +1137,66 @@ func TestDefaultImagePullPolicy(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, defaultImagePullPolicy(tc.image), "image %q", tc.image)
 	}
+}
+
+func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+				Zone: &valkeyv1.ZoneScheduling{
+					Pinning: &valkeyv1.ZonePinning{Zones: []string{"az1", "az2", "az3"}},
+				},
+			},
+		},
+	}
+
+	// shard 1 + node-index 1 => (1+1) % 3 => az3.
+	node := buildClusterValkeyNode(cluster, 1, 1)
+	assert.Equal(t, map[string]string{
+		"node.kubernetes.io/instance-type": "m6i.xlarge",
+		"topology.kubernetes.io/zone":      "az3",
+	}, node.Spec.NodeSelector)
+
+	// shard 0 + node-index 0 => az1, and the user's own entry survives.
+	first := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "az1", first.Spec.NodeSelector["topology.kubernetes.io/zone"])
+
+	// The cluster's own nodeSelector is not mutated by rendering.
+	assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+		cluster.Spec.Scheduling.NodeSelector)
+}
+
+func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, node.Spec.NodeSelector, "no pinning must leave nodeSelector nil, not an empty map")
+}
+
+func TestApplyProbeAPIDefaults(t *testing.T) {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
+		},
+	}
+	applyProbeAPIDefaults(probe)
+	assert.Equal(t, int32(1), probe.TimeoutSeconds)
+	assert.Equal(t, int32(10), probe.PeriodSeconds)
+	assert.Equal(t, int32(1), probe.SuccessThreshold)
+	assert.Equal(t, int32(3), probe.FailureThreshold)
+	assert.Equal(t, corev1.URISchemeHTTP, probe.HTTPGet.Scheme)
+
+	// Explicit values are preserved.
+	custom := &corev1.Probe{TimeoutSeconds: 5, PeriodSeconds: 2, SuccessThreshold: 2, FailureThreshold: 9}
+	applyProbeAPIDefaults(custom)
+	assert.Equal(t, int32(5), custom.TimeoutSeconds)
+	assert.Equal(t, int32(2), custom.PeriodSeconds)
+	assert.Equal(t, int32(2), custom.SuccessThreshold)
+	assert.Equal(t, int32(9), custom.FailureThreshold)
 }

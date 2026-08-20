@@ -1,0 +1,19 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: valkey-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: cluster-sample-zone-pinning
+spec:
+  shards: 3
+  replicas: 1
+  scheduling:
+    zone:
+      # Each pod is pinned to zones[(shardIndex + nodeIndex) % len(zones)].
+      # Mutually exclusive with zone.spread, and immutable once set.
+      pinning:
+        zones:
+          - eu-west-1a
+          - eu-west-1b
+          - eu-west-1c

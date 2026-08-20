@@ -134,22 +134,54 @@ func nodeRequiresRoll(current *valkeyiov1alpha1.ValkeyNode, desired *valkeyiov1a
 		return false
 	}
 	// Config changes are applied live via CONFIG SET (see applyLiveConfig) and
-	// must not trigger a roll; the roll-relevant config subset is already
-	// captured by Spec.ServerConfigHash.
+	// must not trigger a roll on their own; the roll-relevant config subset
+	// reaches the pod template as a derived annotation (see
+	// buildPodTemplateAnnotations) and is therefore captured by WorkloadRevision.
 	currentSpec, desiredSpec := current.Spec, desired.Spec
 	currentSpec.Config, desiredSpec.Config = nil, nil
 	return !equality.Semantic.DeepEqual(currentSpec, desiredSpec)
 }
 
-// anyNodeRequiresRoll returns true if any existing ValkeyNode in the list has
-// a spec diff against what the cluster would build for it. Used as a cheap
-// pre-flight check to avoid opening Valkey connections on steady-state reconciles.
+// needsProactiveFailoverForRoll reports whether a Spec update should run
+// proactive failover before applying.
 //
-// configHash must be the current server config hash so the desired spec matches
-// what reconcileValkeyNode actually applies; omitting it would make every
-// settled node (which carries the hash) report a spurious diff and defeat the
-// purpose of this pre-flight check.
-func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, configHash string) bool {
+// liveTemplateHash is podTemplateRollHash of the live StatefulSet/Deployment
+// template (empty if unknown). When only WorkloadRevision differs and the
+// current revision is empty, we treat it as bookkeeping only if live already
+// matches the authorized hash; otherwise (e.g. ACL annotation changed before
+// the field was ever set) it is a real pod roll.
+func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode, liveTemplateHash string) bool {
+	if !nodeRequiresRoll(current, desired) {
+		return false
+	}
+	// Other Spec fields differ (image, resources, …): real roll.
+	c, d := current.Spec, desired.Spec
+	c.WorkloadRevision, d.WorkloadRevision = "", ""
+	c.Config, d.Config = nil, nil
+	if !equality.Semantic.DeepEqual(c, d) {
+		return true
+	}
+	// Only WorkloadRevision differs.
+	if current.Spec.WorkloadRevision != "" {
+		// Non-empty A -> B: Spec authorizes a new template.
+		return current.Spec.WorkloadRevision != desired.Spec.WorkloadRevision
+	}
+	// Empty current revision: skip failover only when live already matches
+	// the template we are about to authorize (pure backfill).
+	if liveTemplateHash != "" && liveTemplateHash == desired.Spec.WorkloadRevision {
+		return false
+	}
+	// Live unknown or differs (ACL/builder change concurrent with first backfill).
+	return true
+}
+
+// anyNodeRequiresFailoverAwareRoll is true when at least one node needs a Spec
+// update that should scrape live topology for proactive failover / replica-first
+// primary placement. Pure WorkloadRevision backfill (live template already
+// matches) does not qualify.
+//
+// liveTemplateHashes maps ValkeyNode name -> hash of live pod template.
+func anyNodeRequiresFailoverAwareRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valkeyiov1alpha1.ValkeyNodeList, liveTemplateHashes map[string]string) bool {
 	byName := make(map[string]*valkeyiov1alpha1.ValkeyNode, len(nodeList.Items))
 	for i := range nodeList.Items {
 		byName[nodeList.Items[i].Name] = &nodeList.Items[i]
@@ -158,9 +190,17 @@ func anyNodeRequiresRoll(cluster *valkeyiov1alpha1.ValkeyCluster, nodeList *valk
 	for shardIndex := range int(cluster.Spec.Shards) {
 		for nodeIndex := range nodesPerShard {
 			desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-			desired.Spec.ServerConfigHash = configHash
-			if current, ok := byName[desired.Name]; ok && nodeRequiresRoll(current, desired) {
+			if err := setDesiredWorkloadRevision(desired); err != nil {
 				return true
+			}
+			if current, ok := byName[desired.Name]; ok {
+				liveHash := ""
+				if liveTemplateHashes != nil {
+					liveHash = liveTemplateHashes[desired.Name]
+				}
+				if needsProactiveFailoverForRoll(current, desired, liveHash) {
+					return true
+				}
 			}
 		}
 	}

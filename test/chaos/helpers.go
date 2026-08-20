@@ -744,6 +744,11 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 					return seeded, nil
 				}
 			}
+			// The client refuses to seed partially, so surface its failure here
+			// rather than waiting for the deadline.
+			if idx := strings.Index(line, "SEED FAILED"); idx >= 0 {
+				return 0, fmt.Errorf("background client failed to seed: %s", line[idx:])
+			}
 		}
 	}
 	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=50")

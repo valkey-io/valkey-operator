@@ -51,15 +51,15 @@ func main() {
 
 	ctx := context.Background()
 
-	// Phase 1: Seed all keys
+	// Phase 1: Seed all keys. The cluster is Ready and reports healthy before the
+	// client starts, so a refused write means the operator signalled readiness too
+	// early. Fail rather than retry, so the suite stops and the cause is visible.
 	log.Printf("SEEDING %d keys...\n", numKeys)
 	seeded := 0
 	for i := range numKeys {
 		key := fmt.Sprintf("key:%012d", i)
-		err := client.Do(ctx, client.B().Set().Key(key).Value(value).Build()).Error()
-		if err != nil {
-			log.Printf("seed error at key %d: %v\n", i, err)
-			continue
+		if err := client.Do(ctx, client.B().Set().Key(key).Value(value).Build()).Error(); err != nil {
+			log.Fatalf("SEED FAILED at key %d of %d: %v\n", i, numKeys, err)
 		}
 		seeded++
 	}

@@ -13,6 +13,9 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
+// maxRPS is the highest rate that keeps time.Second/rps positive, avoiding a panic in time.NewTicker.
+const maxRPS = int(time.Second / time.Nanosecond)
+
 // envIntOrDefault returns the integer value of the env var, or defaultVal when
 // unset. An explicit zero is preserved; an unparsable or too small value is fatal.
 func envIntOrDefault(key string, defaultVal, minVal int) int {
@@ -38,6 +41,9 @@ func main() {
 	numKeys := envIntOrDefault("NUM_KEYS", 100000, 1 /* min */)
 	dataSize := envIntOrDefault("DATA_SIZE", 3, 1 /* min */)
 	rps := envIntOrDefault("RPS", 20, 0 /* min, 0 = seed only */)
+	if rps > maxRPS {
+		log.Fatalf("RPS=%d must be <= %d", rps, maxRPS)
+	}
 	value := strings.Repeat("x", dataSize)
 
 	log.Printf("Connecting to %s...\n", addr)

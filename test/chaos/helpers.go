@@ -706,15 +706,13 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 	stopBackgroundClient(namespace)
 
 	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)
-	// With rps 0 the client exits after seeding, so it must not be restarted.
-	restart := "Always"
-	if rps == 0 {
-		restart = "Never"
-	}
+	// Never restart: the client exits after seeding when rps is 0, and a seeding
+	// failure is meant to be terminal. Restarting would hide the failure in a
+	// previous container's log and re-seed behind the suite's back.
 	cmd := exec.Command("kubectl", "run", backgroundClientPod,
 		"-n", namespace,
 		"--image="+clientImage,
-		"--restart="+restart,
+		"--restart=Never",
 		"--image-pull-policy=Never",
 		"--env=VALKEY_ADDR="+svcHost,
 		"--env=NUM_KEYS="+strconv.Itoa(numKeys),
@@ -744,7 +742,7 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 					return seeded, nil
 				}
 			}
-			// The client refuses to seed partially, so surface its failure here
+			// The client seeds every key or exits, so report its failure here
 			// rather than waiting for the deadline.
 			if idx := strings.Index(line, "SEED FAILED"); idx >= 0 {
 				return 0, fmt.Errorf("background client failed to seed: %s", line[idx:])
@@ -754,10 +752,6 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=50")
 	if output, err := utils.Run(cmd); err == nil {
 		fmt.Printf("  Background client logs at timeout:\n%s\n", output)
-	}
-	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--previous", "--tail=50")
-	if output, err := utils.Run(cmd); err == nil && output != "" {
-		fmt.Printf("  Background client previous logs:\n%s\n", output)
 	}
 	return 0, fmt.Errorf("background client did not finish seeding within %s", timeout)
 }

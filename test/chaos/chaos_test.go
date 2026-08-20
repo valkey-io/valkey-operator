@@ -136,6 +136,15 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		cpuMin = envFloat64OrDefault("CHAOS_CPU_MIN", 0.3, 0.1)
 		cpuMax = envFloat64OrDefault("CHAOS_CPU_MAX", 1.0, cpuMin)
 		writeRPS = envIntOrDefault("CHAOS_WRITE_RPS", 20, 0 /* min */)
+
+		// The scale scenarios move within these ranges, so the starting counts
+		// have to be inside them.
+		if shards < minShards || shards > maxShards {
+			Fail(fmt.Sprintf("CHAOS_SHARDS=%d must be within [%d, %d]", shards, minShards, maxShards))
+		}
+		if replicas > maxReplicas {
+			Fail(fmt.Sprintf("CHAOS_REPLICAS=%d must be <= CHAOS_MAX_REPLICAS=%d", replicas, maxReplicas))
+		}
 		if cpuPressure {
 			workerNodes = getWorkerNodes()
 		}
@@ -293,7 +302,7 @@ spec:
 	AfterAll(func() {
 		stopBackgroundClient("default")
 		By("cleaning up chaos cluster")
-		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true")
+		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "-n", "default", "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 	})
 
@@ -356,7 +365,9 @@ spec:
 			if podList, err := utils.Run(cmd); err == nil {
 				for _, pod := range utils.GetNonEmptyLines(podList) {
 					cmd = exec.Command("kubectl", "exec", pod, "-n", "default", "-c", "server", "--",
-						"sh", "-c", fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli EVAL \"return server.log(server.LOG_WARNING, '%s')\" 0", logMsg))
+						"sh", "-c",
+						`unset VALKEYCLI_AUTH REDISCLI_AUTH; exec valkey-cli EVAL "return server.log(server.LOG_WARNING, ARGV[1])" 0 "$1"`,
+						"sh", logMsg)
 					_, _ = utils.Run(cmd)
 				}
 			}
@@ -520,9 +531,7 @@ func deleteShardPods(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		for _, pod := range utils.GetNonEmptyLines(output) {
-			pods = append(pods, pod)
-		}
+		pods = append(pods, utils.GetNonEmptyLines(output)...)
 	}
 
 	for _, pod := range pods {
@@ -1062,6 +1071,9 @@ func filterScenarios(all []Scenario, filter string) []Scenario {
 			group := make([]string, len(parts))
 			for i, p := range parts {
 				group[i] = strings.TrimSpace(p)
+				if scenarioByName(group[i]) == nil {
+					Fail(fmt.Sprintf("CHAOS_SCENARIOS compound %q contains unknown scenario: %q", name, group[i]))
+				}
 			}
 			result = append(result, Scenario{
 				Name:      name,

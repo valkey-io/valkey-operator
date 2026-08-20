@@ -48,6 +48,7 @@ All configuration is via environment variables:
 | `CHAOS_MIN_SHARDS` | value of `CHAOS_SHARDS` | Minimum shards for scale scenarios |
 | `CHAOS_MAX_SHARDS` | `CHAOS_SHARDS + 3` | Maximum shards for scale scenarios |
 | `CHAOS_REPLICAS` | `1` | Replicas per shard |
+| `CHAOS_MAX_REPLICAS` | `CHAOS_REPLICAS + 2` | Maximum replicas for scale scenarios |
 | `CHAOS_WORKLOAD_TYPE` | `StatefulSet` | `StatefulSet` or `Deployment` |
 | `CHAOS_PERSISTENCE` | `false` | Enable persistence (requires StatefulSet) |
 | `CHAOS_SCENARIOS` | all except disabled | Comma-separated list of scenarios to run |
@@ -114,7 +115,7 @@ This generates replication traffic on all shards, simulating a real workload dur
 Set `CHAOS_WRITE_RPS=0` to disable (client seeds and exits).
 
 **Stats output** (printed at test end and in pod logs):
-```
+```text
 2026/06/14 15:50:53 writes=5721 errors=21 rps=20.0
 ```
 - `writes` — successful SET commands since seeding completed
@@ -145,7 +146,7 @@ Compound scenarios are always marked as potentially losing data; the test logs a
 
 Each iteration logs:
 
-```
+```text
 --- Iteration 5: scenario=rolling-update ---
   PODS before: ...
   CLUSTER NODES before: ...

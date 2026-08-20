@@ -767,9 +767,13 @@ func unpauseWorkerNodes(workers []string) error {
 }
 
 func scaleShards(ctx *ChaosContext) error {
+	if ctx.MinShards == ctx.MaxShards {
+		return fmt.Errorf("skip: shard range is fixed at %d", ctx.MinShards)
+	}
+	// Pick a random shard count in [MinShards, MaxShards], excluding current.
 	newShards := ctx.MinShards + ctx.Rand.Intn(ctx.MaxShards-ctx.MinShards+1)
 	if newShards == ctx.Shards {
-		// Ensure we actually change something
+		// Ensure we actually change something, staying within the range.
 		if newShards < ctx.MaxShards {
 			newShards++
 		} else {

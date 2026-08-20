@@ -41,7 +41,6 @@ import (
 // CLUSTER MEET.
 var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCluster", "Persistence", "RestartRecovery"), func() {
 	const clusterName = "cluster-persistent-restart"
-	const manifestPath = "config/samples/v1alpha1_valkeycluster-persistent-restart.yaml"
 	const canaryKey = "restart-canary"
 	const canaryValue = "survives-full-restart"
 
@@ -56,9 +55,22 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 
 	It("re-forms the cluster after all pods restart simultaneously", func() {
 		By("creating the persistent cluster")
-		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true")
+		manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  persistence:
+    size: 1Gi
+  config:
+    appendonly: "yes"
+`, clusterName)
+		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
-		cmd = exec.Command("kubectl", "create", "-f", manifestPath)
+		cmd = exec.Command("kubectl", "apply", "-f", "-")
+		cmd.Stdin = strings.NewReader(manifest)
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create persistent ValkeyCluster CR")
 
@@ -146,7 +158,7 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 	})
 
 	AfterAll(func() {
-		cmd := exec.Command("kubectl", "delete", "-f", manifestPath, "--ignore-not-found=true", "--wait=false")
+		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "delete", "pvc",
 			"-l", podSelector, "--ignore-not-found=true", "--wait=false")

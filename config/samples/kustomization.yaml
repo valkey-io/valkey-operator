@@ -2,5 +2,4 @@
 resources:
 - v1alpha1_valkeycluster.yaml
 - v1alpha1_valkeycluster-persistent.yaml
-- v1alpha1_valkeycluster-persistent-restart.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -13,23 +13,31 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
+// envIntOrDefault returns the integer value of the env var, or defaultVal when
+// unset. An explicit zero is preserved; an unparsable or too small value is fatal.
+func envIntOrDefault(key string, defaultVal, minVal int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Fatalf("invalid %s %q: %v", key, v, err)
+	}
+	if n < minVal {
+		log.Fatalf("%s=%d must be >= %d", key, n, minVal)
+	}
+	return n
+}
+
 func main() {
 	addr := os.Getenv("VALKEY_ADDR")
 	if addr == "" {
 		log.Fatal("VALKEY_ADDR not set")
 	}
-	numKeys, _ := strconv.Atoi(os.Getenv("NUM_KEYS"))
-	if numKeys <= 0 {
-		numKeys = 100000
-	}
-	dataSize, _ := strconv.Atoi(os.Getenv("DATA_SIZE"))
-	if dataSize <= 0 {
-		dataSize = 3
-	}
-	rps, _ := strconv.Atoi(os.Getenv("RPS"))
-	if rps <= 0 {
-		rps = 20
-	}
+	numKeys := envIntOrDefault("NUM_KEYS", 100000, 1 /* min */)
+	dataSize := envIntOrDefault("DATA_SIZE", 3, 1 /* min */)
+	rps := envIntOrDefault("RPS", 20, 0 /* min, 0 = seed only */)
 	value := strings.Repeat("x", dataSize)
 
 	log.Printf("Connecting to %s...\n", addr)

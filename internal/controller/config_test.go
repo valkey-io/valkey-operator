@@ -19,7 +19,7 @@ package controller
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 // getSampleCluster returns a ValkeyCluster object with config options.
@@ -46,33 +46,53 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 
 		// Base, non-overridable parameter
 		Expect(testConfigString).To(ContainSubstring("cluster-enabled"))
+
+		// Primary fails over to a replica on SIGTERM (graceful shutdown)
+		Expect(testConfigString).To(ContainSubstring("shutdown-on-sigterm failover"))
+	})
+
+	// dir and cluster-config-file must always be present, even
+	// without spec.persistence, so nodes.conf can be written under
+	// readOnlyRootFilesystem: true.
+	It("should always emit dir and cluster-config-file directives", func() {
+		By("verifying the rendered config without persistence")
+		clusterNoPersist := getSampleCluster()
+		cfgNoPersist := buildServerConfig(clusterNoPersist)
+		Expect(cfgNoPersist).To(ContainSubstring("dir " + dataMountPath))
+		Expect(cfgNoPersist).To(ContainSubstring("cluster-config-file " + dataMountPath + "/nodes.conf"))
+
+		By("verifying the rendered config with persistence")
+		clusterWithPersist := getSampleCluster()
+		clusterWithPersist.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{}
+		cfgWithPersist := buildServerConfig(clusterWithPersist)
+		Expect(cfgWithPersist).To(ContainSubstring("dir " + dataMountPath))
+		Expect(cfgWithPersist).To(ContainSubstring("cluster-config-file " + dataMountPath + "/nodes.conf"))
 	})
 })
 
 var _ = Describe("Live config", Label("liveconfig"), func() {
-	newCluster := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyCluster {
-		return &valkeyiov1alpha1.ValkeyCluster{
-			Spec: valkeyiov1alpha1.ValkeyClusterSpec{Config: cfg},
+	newNode := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: cfg},
 		}
 	}
 
 	It("excludes allowlisted keys from the roll config but keeps others and base", func() {
-		cluster := newCluster(map[string]string{
+		rollConfig := renderServerConfig(map[string]string{
 			"maxmemory-policy": "allkeys-lru", // allowlisted
 			"appendonly":       "yes",         // not allowlisted
-		})
-		rollConfig := buildRollServerConfig(cluster)
+		}, getBaseConfig(nil), liveConfigAllowlist)
 		Expect(rollConfig).NotTo(ContainSubstring("maxmemory-policy"))
 		Expect(rollConfig).To(ContainSubstring("appendonly"))
 		Expect(rollConfig).To(ContainSubstring("cluster-enabled")) // base retained
 	})
 
 	It("keeps the roll hash stable when only an allowlisted key changes", func() {
-		before := serverConfigRollHash(newCluster(map[string]string{
+		before := nodeServerConfigRollHash(newNode(map[string]string{
 			"maxmemory-policy": "allkeys-lru",
 			"appendonly":       "yes",
 		}))
-		after := serverConfigRollHash(newCluster(map[string]string{
+		after := nodeServerConfigRollHash(newNode(map[string]string{
 			"maxmemory-policy": "volatile-lru",
 			"appendonly":       "yes",
 		}))
@@ -80,8 +100,8 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 	})
 
 	It("changes the roll hash when a non-allowlisted key changes", func() {
-		before := serverConfigRollHash(newCluster(map[string]string{"appendonly": "yes"}))
-		after := serverConfigRollHash(newCluster(map[string]string{"appendonly": "no"}))
+		before := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "yes"}))
+		after := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "no"}))
 		Expect(after).NotTo(Equal(before))
 	})
 

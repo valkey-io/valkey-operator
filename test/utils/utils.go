@@ -26,8 +26,8 @@ import (
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 const (

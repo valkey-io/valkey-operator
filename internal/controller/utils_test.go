@@ -20,10 +20,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/valkey"
 )
 
 func TestLabels(t *testing.T) {
@@ -396,3 +396,29 @@ func TestBuildClusterValkeyNodeImagePullSecrets(t *testing.T) {
 	}, 0, 0)
 	assert.Empty(t, bare.Spec.ImagePullSecrets)
 }
+
+// TestBuildClusterValkeyNodePodSecurityContext verifies that
+// cluster.Spec.PodSecurityContext is propagated to the per-shard
+// ValkeyNode so the node controller can render it onto the pod.
+func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
+	fsGroup := int64(56849)
+	psc := &corev1.PodSecurityContext{
+		FSGroup:      &fsGroup,
+		RunAsNonRoot: boolPtr(true),
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{PodSecurityContext: psc},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, psc, node.Spec.PodSecurityContext, "podSecurityContext should propagate cluster -> node")
+
+	// Absent on the cluster -> absent on the node.
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Nil(t, bare.Spec.PodSecurityContext)
+}
+
+func boolPtr(b bool) *bool { return &b }

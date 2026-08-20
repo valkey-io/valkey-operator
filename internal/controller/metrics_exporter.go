@@ -19,13 +19,13 @@ package controller
 import (
 	"fmt"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string, tlsSpec *valkeyiov1alpha1.TLSConfig) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string, tlsSpec *valkeyiov1alpha1.NodeTLSSpec) corev1.Container {
 	exporterImage := DefaultExporterImage
 	if exporter.Image != "" {
 		exporterImage = exporter.Image
@@ -36,11 +36,28 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 		scheme = "rediss"
 	}
 
-	args := []string{fmt.Sprintf("--redis.addr=%s://localhost:%d", scheme, DefaultPort)}
+	env := []corev1.EnvVar{
+		{Name: "REDIS_ADDR", Value: fmt.Sprintf("%s://localhost:%d", scheme, DefaultPort)},
+		{Name: "REDIS_USER", Value: exporterUser},
+		{
+			Name: "REDIS_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: getSystemPasswordSecretName(clusterName),
+					},
+					Key: exporterUser,
+				},
+			},
+		},
+	}
 	var volumeMounts []corev1.VolumeMount
 
 	if tlsSpec != nil {
-		args = append(args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		env = append(env, corev1.EnvVar{
+			Name:  "REDIS_EXPORTER_TLS_CA_CERT_FILE",
+			Value: fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA),
+		})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      tlsVolumeName,
 			MountPath: tlsCertMountPath,
@@ -49,23 +66,10 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 	}
 
 	return corev1.Container{
-		Name:  "metrics-exporter",
-		Image: exporterImage,
-		Env: []corev1.EnvVar{
-			{Name: "REDIS_USER", Value: exporterUser},
-			{
-				Name: "REDIS_PASSWORD",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: getSystemPasswordSecretName(clusterName),
-						},
-						Key: exporterUser,
-					},
-				},
-			},
-		},
-		Args:         args,
+		Name:         "metrics-exporter",
+		Image:        exporterImage,
+		Env:          env,
+		Args:         exporter.Args,
 		VolumeMounts: volumeMounts,
 		Ports: []corev1.ContainerPort{
 			{
@@ -96,6 +100,7 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 				},
 			},
 		},
-		Resources: exporter.Resources,
+		Resources:       exporter.Resources,
+		SecurityContext: exporter.SecurityContext,
 	}
 }

@@ -19,7 +19,7 @@ package valkey
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -84,7 +84,7 @@ func SlotsToRanges(slots []int) []SlotsRange {
 		return nil
 	}
 	ordered := append([]int(nil), slots...)
-	sort.Ints(ordered)
+	slices.Sort(ordered)
 	ranges := make([]SlotsRange, 0, len(ordered))
 	start := ordered[0]
 	prev := ordered[0]

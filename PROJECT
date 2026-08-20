@@ -2,7 +2,7 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-cliVersion: 4.14.0
+cliVersion: 4.15.0
 domain: valkey.io
 layout:
 - go.kubebuilder.io/v4
@@ -11,7 +11,7 @@ layout:
 plugins:
   autoupdate.kubebuilder.io/v1-alpha: {}
 projectName: valkey-operator
-repo: valkey.io/valkey-operator
+repo: github.com/valkey-io/valkey-operator
 resources:
 - api:
     crdVersion: v1
@@ -19,6 +19,6 @@ resources:
   controller: true
   domain: valkey.io
   kind: ValkeyCluster
-  path: valkey.io/valkey-operator/api/v1alpha1
+  path: github.com/valkey-io/valkey-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

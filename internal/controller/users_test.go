@@ -17,12 +17,22 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
-	//	corev1 "k8s.io/api/core/v1"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"github.com/stretchr/testify/assert"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
+
+func TestOperatorUserPasswordSecret(t *testing.T) {
+	sel := operatorUserPasswordSecret("c1")
+	assert.NotNil(t, sel)
+	assert.Equal(t, "internal-c1-system-passwords", sel.Name)
+	assert.Equal(t, "_operator", sel.Key)
+	assert.NotNil(t, sel.Optional)
+	assert.True(t, *sel.Optional)
+}
 
 func TestBuildAclFileContents(t *testing.T) {
 
@@ -113,5 +123,61 @@ func TestBuildAclFileContents(t *testing.T) {
 		if strings.TrimSpace(acl) != expected {
 			t.Errorf("%s ACL Failed. Expected '%s'; got '%s'", userName, expected, acl)
 		}
+	}
+}
+
+func TestValidateSystemUserPasswordSecret(t *testing.T) {
+	userSecret := map[string][]byte{
+		operatorUser:    nil,
+		replicationUser: nil,
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Exporter: valkeyiov1alpha1.ExporterSpec{
+				Enabled: true,
+			},
+		},
+	}
+	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	if !errors.Is(err, errMissingSystemUser) {
+		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
+	}
+}
+
+func TestValidateSystemUserPasswordSecret_UnknownUser(t *testing.T) {
+	unknownUser := "_randomuser"
+	userSecret := map[string][]byte{
+		operatorUser:    nil,
+		replicationUser: nil,
+		unknownUser:     nil,
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Exporter: valkeyiov1alpha1.ExporterSpec{
+				Enabled: false,
+			},
+		},
+	}
+	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	if !errors.Is(err, errUnknownSystemUser) {
+		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errUnknownSystemUser.Error(), err.Error())
+	}
+}
+
+func TestValidateSystemUserPasswordSecret_UnknownUserAndMissingRequiredUser(t *testing.T) {
+	unknownUser := "_randomuser"
+	userSecret := map[string][]byte{
+		unknownUser: nil,
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Exporter: valkeyiov1alpha1.ExporterSpec{
+				Enabled: false,
+			},
+		},
+	}
+	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	if !errors.Is(err, errMissingSystemUser) {
+		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
 	}
 }

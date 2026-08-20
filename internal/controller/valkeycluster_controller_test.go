@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"time"
 
@@ -33,8 +35,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	testutils "valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {
@@ -80,9 +82,10 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			By("Reconciling the created resource")
 			fakeRecorder := events.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: fakeRecorder,
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  fakeRecorder,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -113,6 +116,62 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(events).To(ContainElement(ContainSubstring("ConfigMapCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("ValkeyNodeCreated")))
 
+		})
+	})
+
+	Context("When the ValkeyCluster is being deleted", func() {
+		const resourceName = "deleting-resource"
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+
+		It("should not create child resources while deletion is in progress", func() {
+			By("creating a ValkeyCluster held under deletion by a finalizer")
+			resource := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       resourceName,
+					Namespace:  "default",
+					Finalizers: []string{"test.valkey.io/block-deletion"},
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				latest := &valkeyiov1alpha1.ValkeyCluster{}
+				Expect(k8sClient.Get(ctx, typeNamespacedName, latest)).To(Succeed())
+				latest.Finalizers = nil
+				Expect(k8sClient.Update(ctx, latest)).To(Succeed())
+			})
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			By("reconciling the deleting resource")
+			controllerReconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.IsZero()).To(BeTrue())
+
+			By("verifying no child resources were created")
+			svc := &corev1.Service{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: headlessServiceName(resourceName), Namespace: "default"}, svc)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "headless Service should not be created for a deleting cluster")
+
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(resourceName, 0, 0), Namespace: "default"}, node)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "ValkeyNode should not be created for a deleting cluster")
 		})
 	})
 })
@@ -151,9 +210,10 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		By("reconciling to create the ConfigMap and ValkeyNodes")
@@ -166,17 +226,21 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		initialCMHash := cm.Annotations[configHashKey]
 		Expect(initialCMHash).NotTo(BeEmpty())
 
-		By("verifying each ValkeyNode carries the roll hash (not the CM full hash) in its spec")
-		// ServerConfigHash is the roll hash: it excludes live-settable keys so that
-		// changes to those keys do not trigger a pod roll.
-		initialRollHash := serverConfigRollHash(cluster)
-		Expect(initialRollHash).NotTo(BeEmpty())
+		By("capturing each ValkeyNode's derived roll hash and authorized WorkloadRevision")
+		// The derived roll hash excludes live-settable keys so that changes to
+		// those keys do not trigger a pod roll.
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
-		for _, n := range nodeList.Items {
-			Expect(n.Spec.ServerConfigHash).To(Equal(initialRollHash),
-				"ValkeyNode %s must have ServerConfigHash set to the roll hash", n.Name)
+		initialHashes := map[string]string{}
+		initialRevisions := map[string]string{}
+		for i := range nodeList.Items {
+			n := &nodeList.Items[i]
+			Expect(nodeServerConfigRollHash(n)).NotTo(BeEmpty())
+			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty(),
+				"ValkeyNode %s must be created with an authorized WorkloadRevision", n.Name)
+			initialHashes[n.Name] = nodeServerConfigRollHash(n)
+			initialRevisions[n.Name] = n.Spec.WorkloadRevision
 		}
 
 		By("updating the cluster config with a live-settable key (maxmemory)")
@@ -195,15 +259,16 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		Expect(newCMHash).NotTo(BeEmpty())
 		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
-		By("verifying ValkeyNode ServerConfigHash is unchanged (maxmemory is live-settable, no pod roll)")
-		newRollHash := serverConfigRollHash(cluster)
-		Expect(newRollHash).To(Equal(initialRollHash), "roll hash must not change for live-settable key changes")
+		By("verifying derived roll hash and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, updatedNodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(updatedNodeList.Items).NotTo(BeEmpty())
-		for _, n := range updatedNodeList.Items {
-			Expect(n.Spec.ServerConfigHash).To(Equal(newRollHash),
-				"ValkeyNode %s ServerConfigHash must remain the roll hash after a live-settable key change", n.Name)
+		for i := range updatedNodeList.Items {
+			n := &updatedNodeList.Items[i]
+			Expect(nodeServerConfigRollHash(n)).To(Equal(initialHashes[n.Name]),
+				"ValkeyNode %s roll hash must not change for live-settable key changes", n.Name)
+			Expect(n.Spec.WorkloadRevision).To(Equal(initialRevisions[n.Name]),
+				"ValkeyNode %s WorkloadRevision must not change for live-settable key changes (a change would roll the pod)", n.Name)
 		}
 	})
 })
@@ -258,9 +323,10 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:   staleConfigMapClient{Client: k8sClient},
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    staleConfigMapClient{Client: k8sClient},
+			APIReader: staleConfigMapClient{Client: k8sClient},
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		By("reconciling with a client that cannot yet see the freshly created ConfigMap")
@@ -272,15 +338,17 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
 
-		By("verifying every ValkeyNode was created with the roll hash, not an empty one")
-		rollHash := serverConfigRollHash(cluster)
-		Expect(rollHash).NotTo(BeEmpty())
+		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a derived config-hash annotation")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
-		for _, n := range nodeList.Items {
-			Expect(n.Spec.ServerConfigHash).To(Equal(rollHash),
-				"ValkeyNode %s must be created with the roll hash; an empty hash means the pod starts without the config-hash annotation and rolls as soon as the hash is later populated", n.Name)
+		for i := range nodeList.Items {
+			n := &nodeList.Items[i]
+			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty())
+			tmpl, err := buildNodePodTemplate(n)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tmpl.Annotations[configHashKey]).To(Equal(nodeServerConfigRollHash(n)),
+				"ValkeyNode %s pod template must carry the derived config-hash annotation even when the ConfigMap is not yet visible in the cache", n.Name)
 		}
 	})
 })
@@ -334,9 +402,10 @@ var _ = Describe("pod scheduling issue handling", func() {
 
 		fakeRecorder := events.NewFakeRecorder(100)
 		reconciler := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 
 		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
@@ -376,9 +445,10 @@ var _ = Describe("pod scheduling issue handling", func() {
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionTrue)
 
 		reconciler := &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
@@ -432,9 +502,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
@@ -466,9 +537,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
@@ -483,6 +555,128 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, internalSecret) }()
 
 			Expect(internalSecret.Type).To(Equal(AclSecretType))
+		})
+
+		It("should be able to create the internal ACL secret when unknown system user is present", func() {
+			unknownUser := "_unknown"
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-unknown-system-user-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Exporter: valkeyiov1alpha1.ExporterSpec{
+						Enabled: false,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getSystemPasswordSecretName(cluster.Name),
+					Namespace: "default",
+				},
+				Type: AclSecretType,
+				StringData: map[string]string{
+					unknownUser: "",
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			systemSecret := &corev1.Secret{}
+			systemSecretName := types.NamespacedName{
+				Name:      getSystemPasswordSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, systemSecretName, systemSecret)).To(Succeed())
+			Expect(systemSecret.Data).To(HaveKey(operatorUser))
+			Expect(systemSecret.Data).To(HaveKey(replicationUser))
+			Expect(systemSecret.Data).To(HaveKey(unknownUser))
+
+			aclSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      getInternalSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, aclSecret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, aclSecret) }()
+			acl := string(aclSecret.Data[aclFilename])
+			nilPassword := fmt.Sprintf("%x", sha256.Sum256(nil))
+
+			Expect(acl).To(ContainSubstring("user _operator on"))
+			Expect(acl).To(ContainSubstring("user _replication on"))
+			Expect(acl).NotTo(ContainSubstring("user " + unknownUser))
+
+			// assert that the generated password for users are not nil/empty string
+			Expect(acl).NotTo(ContainSubstring(nilPassword))
+
+			// The revision user is appended last, disabled, and its only
+			// password is the hash of every managed entry above it.
+			revisionPrefix := "user " + aclRevisionUser + " off"
+			Expect(acl).To(ContainSubstring(revisionPrefix))
+			idx := strings.Index(acl, revisionPrefix)
+			Expect(idx).To(BeNumerically(">", 0), "the revision user must come after the managed users")
+			managed := acl[:idx]
+			Expect(acl).To(ContainSubstring(fmt.Sprintf("#%x", sha256.Sum256([]byte(managed)))),
+				"its password must be the hash of the managed ACL above it")
+		})
+
+		It("should update the system user secret when spec.exporter is enabled after cluster creation", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "acl-system-user-reconciliation-test",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   1,
+					Replicas: 0,
+					Exporter: valkeyiov1alpha1.ExporterSpec{
+						Enabled: false,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			err := reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			systemUsersSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      getSystemPasswordSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, systemUsersSecret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, systemUsersSecret) }()
+			Expect(systemUsersSecret.Data).NotTo(HaveKey(exporterUser))
+
+			cluster.Spec.Exporter.Enabled = true
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			err = reconciler.reconcileUsersAcl(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, secretName, systemUsersSecret)).To(Succeed())
+			Expect(systemUsersSecret.Data).To(HaveKey(exporterUser))
 		})
 	})
 })
@@ -501,6 +695,9 @@ var _ = Describe("updateStatus", func() {
 				Name:      "test-cluster",
 				Namespace: "default",
 			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1,
+			},
 		}
 		// In a real scenario, the reconciler would be created with a real client,
 		// but for this focused unit test, we can use a fake client if needed,
@@ -508,9 +705,10 @@ var _ = Describe("updateStatus", func() {
 		// For updateStatus, we need a client to Get the current object.
 		// The envtest client is used here.
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(100),
 		}
 
 		// Create the cluster object in the fake client
@@ -599,9 +797,10 @@ var _ = Describe("EventRecorder", func() {
 		ctx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 	})
 
@@ -627,6 +826,37 @@ var _ = Describe("EventRecorder", func() {
 			Expect(events).To(ContainElement(ContainSubstring("ServiceCreated")))
 			Expect(events).To(ContainElement(ContainSubstring("Normal")))
 			Expect(events).To(ContainElement(ContainSubstring("Created headless Service")))
+		})
+
+		It("should not update the headless Service on repeated upserts", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc-noop-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			Expect(r.upsertService(ctx, cluster)).To(Succeed())
+			svc := &corev1.Service{}
+			svcKey := types.NamespacedName{Name: headlessServiceName(cluster.Name), Namespace: cluster.Namespace}
+			Expect(k8sClient.Get(ctx, svcKey, svc)).To(Succeed())
+			createdResourceVersion := svc.ResourceVersion
+
+			// The API server defaults the port's protocol and targetPort when
+			// the Service is stored; the rebuilt ports slice must already carry
+			// them or every upsert Updates the Service (#315).
+			for range 3 {
+				Expect(r.upsertService(ctx, cluster)).To(Succeed())
+			}
+			Expect(k8sClient.Get(ctx, svcKey, svc)).To(Succeed())
+			Expect(svc.ResourceVersion).To(Equal(createdResourceVersion),
+				"an upsert with no changes must not write the Service")
 		})
 
 		It("should emit ConfigMapCreated event on successful configmap creation", func() {
@@ -684,6 +914,10 @@ var _ = Describe("EventRecorder", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "event-type-test",
 					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -747,9 +981,10 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		testCtx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -820,7 +1055,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, "")
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList)
 	}
 
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.
@@ -981,9 +1216,10 @@ var _ = Describe("reconcileValkeyNode", func() {
 		testCtx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: fakeRecorder,
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1020,10 +1256,9 @@ var _ = Describe("reconcileValkeyNode", func() {
 	}
 
 	It("creates the ValkeyNode and emits ValkeyNodeCreated event", func() {
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeFalse())
-		Expect(created).To(BeTrue())
+		Expect(result).To(Equal(nodeCreated))
 
 		evts := collectEvents(fakeRecorder)
 		Expect(filterEvents(evts, "ValkeyNodeCreated")).To(HaveLen(1))
@@ -1031,48 +1266,45 @@ var _ = Describe("reconcileValkeyNode", func() {
 	})
 
 	It("updates the ValkeyNode spec, emits ValkeyNodeUpdated event, and signals requeue", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeTrue())
-		Expect(created).To(BeFalse())
+		Expect(result).To(Equal(nodeRequeued))
 
 		evts := collectEvents(fakeRecorder)
 		Expect(filterEvents(evts, "ValkeyNodeUpdated")).To(HaveLen(1))
 	})
 
 	It("signals requeue when node is unchanged but not yet ready", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		// Status.Ready defaults to false after creation
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeTrue())
-		Expect(created).To(BeFalse())
+		Expect(result).To(Equal(nodeRequeued))
 	})
 
 	It("does not requeue when node is unchanged and ready", func() {
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		setNodeReady(true)
 
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeFalse())
-		Expect(created).To(BeFalse())
+		Expect(result).To(Equal(nodeUnchanged))
 	})
 
 	It("signals requeue when node is unchanged but ObservedGeneration is stale", func() {
 		// Create the node
-		_, _, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Mark ready but leave ObservedGeneration at 0
@@ -1087,10 +1319,9 @@ var _ = Describe("reconcileValkeyNode", func() {
 		// Because ObservedGeneration > 0 guard: newly created node with
 		// ObservedGeneration=0 falls through to the Ready check, which
 		// passes (Ready=true). No requeue.
-		requeue, created, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeFalse())
-		Expect(created).To(BeFalse())
+		Expect(result).To(Equal(nodeUnchanged))
 
 		// Now simulate the ValkeyNode controller having processed once
 		// (ObservedGeneration=1), then a spec change bumps Generation to 2.
@@ -1103,16 +1334,15 @@ var _ = Describe("reconcileValkeyNode", func() {
 
 		// Change cluster spec to trigger an update on next reconcile
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		requeue, _, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeTrue(), "should requeue after updating node")
+		Expect(result).To(Equal(nodeRequeued), "should requeue after updating node")
 
 		// Next reconcile: spec matches (OperationResultNone), but
 		// Generation (2) != ObservedGeneration (1) — must requeue.
-		requeue, created, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, "")
+		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeTrue(), "should requeue while ObservedGeneration is stale")
-		Expect(created).To(BeFalse())
+		Expect(result).To(Equal(nodeRequeued), "should requeue while ObservedGeneration is stale")
 	})
 })
 
@@ -1128,5 +1358,34 @@ var _ = Describe("buildClusterValkeyNode config passthrough", Label("liveconfig"
 		}
 		node := buildClusterValkeyNode(cluster, 0, 0)
 		Expect(node.Spec.Config).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+	})
+})
+
+var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
+	It("copies cluster Spec.PriorityClassName into the built ValkeyNode spec", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
+					PriorityClassName: "high-priority",
+				},
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.PriorityClassName).To(Equal("high-priority"))
+	})
+
+	It("leaves PriorityClassName empty when the cluster does not set it", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   1,
+				Replicas: 0,
+			},
+		}
+		node := buildClusterValkeyNode(cluster, 0, 0)
+		Expect(node.Spec.PriorityClassName).To(BeEmpty())
 	})
 })

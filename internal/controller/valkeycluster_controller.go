@@ -27,22 +27,21 @@ import (
 	"strings"
 	"time"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const (
@@ -52,7 +51,7 @@ const (
 	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
 	DefaultExporterPort   = 9121
 
-	// AclSecretType is used to filter ACL Secret watch events.
+	// AclSecretType is the Secret type used for operator-managed ACL Secrets.
 	AclSecretType = corev1.SecretType("valkey.io/acl")
 
 	// Error messages
@@ -62,8 +61,9 @@ const (
 // ValkeyClusterReconciler reconciles a ValkeyCluster object
 type ValkeyClusterReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -82,27 +82,31 @@ type ValkeyClusterReconciler struct {
 // cluster one step closer to the desired state described by the ValkeyCluster
 // spec. The pipeline runs in the following order:
 //
-//  1. Ensure the headless Service exists (upsertService).
-//  2. Ensure the ConfigMap with valkey.conf and health-check scripts exists
+//   - Ensure the headless Service exists (upsertService).
+//   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
+//   - Ensure internal ACL users are configured (reconcileUsersAcl).
+//   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
-//  3. Ensure one ValkeyNode per (shard, node) pair exists, creating missing
+//   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes).
-//  4. List all ValkeyNodes and build the Valkey cluster state by connecting to each
-//     node and scraping CLUSTER INFO / CLUSTER NODES.
-//  5. Forget stale nodes that no longer have a backing ValkeyNode.
-//  6. Phase 1 – MEET: batch-introduce all isolated pending nodes to the
-//     cluster via CLUSTER MEET. Requeue to let gossip propagate.
-//  7. Phase 2 – Assign slots: batch-assign hash-slot ranges to all
-//     primary-labeled pending nodes via CLUSTER ADDSLOTSRANGE.
-//  8. Phase 3 – Replicate: batch-attach all replica-labeled pending nodes
-//     to their matching primaries via CLUSTER REPLICATE.
-//  9. Scale-in: if the cluster has more shards than desired, drain slots
+//   - Build the Valkey cluster state by connecting to each node and scraping
+//     CLUSTER INFO / CLUSTER NODES.
+//   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
+//     is lost (promoteOrphanedReplicas).
+//   - Forget stale nodes that no longer have a backing ValkeyNode.
+//   - MEET: batch-introduce all isolated pending nodes to the cluster via
+//     CLUSTER MEET. Requeue to let gossip propagate.
+//   - Assign slots: batch-assign hash-slot ranges to all primary-labeled
+//     pending nodes via CLUSTER ADDSLOTSRANGE.
+//   - Replicate: batch-attach all replica-labeled pending nodes to their
+//     matching primaries via CLUSTER REPLICATE.
+//   - Scale-in: if the cluster has more shards than desired, drain slots
 //     from excess shards via CLUSTER MIGRATESLOTS and delete their
 //     ValkeyNodes once fully drained.
-//  10. Verify that the expected number of shards and replicas exist.
-//  11. Verify that all 16384 hash slots are assigned.
-//  12. If everything is healthy, mark the cluster Ready and requeue after 30s
+//   - Verify that the expected number of shards and replicas exist.
+//   - Verify that all 16384 hash slots are assigned.
+//   - If everything is healthy, mark the cluster Ready and requeue after 30s
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
@@ -113,8 +117,21 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			deleteClusterMetrics(req.Name, req.Namespace)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
+
+	// During deletion (e.g. a foreground cascading delete, where the garbage
+	// collector removes dependents before the cluster itself) reconciling would
+	// recreate the very children being deleted and deadlock the delete
+	if !cluster.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
@@ -139,11 +156,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	// Roll hash ignores live-settable keys, so a change confined to those keys
-	// does not roll the pods (they are applied live by the ValkeyNode controller).
-	// Computed directly from cluster.Spec rather than reading back from the
-	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
-	configHash := serverConfigRollHash(cluster)
+	// Surface a ConfigurationWarning condition when an explicit
+	// terminationGracePeriodSeconds is too short for the graceful failover on
+	// SIGTERM to finish before SIGKILL. The value is honoured; the operator does
+	// not silently override it. The condition is idempotent, so the event fires
+	// only when the cluster first enters the warning state.
+	rec := recommendedGracePeriodSeconds(cluster)
+	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < rec {
+		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
+		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning) {
+			log.Info("terminationGracePeriodSeconds is below the recommended minimum for graceful failover",
+				"requested", *g, "recommended", rec)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, "ReconcileValkeyCluster", "%s", msg)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, msg, metav1.ConditionTrue)
+	} else {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort)
+	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
@@ -153,7 +182,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -170,14 +199,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	} else if handled {
-		return result, nil
-	}
-
 	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
@@ -187,6 +208,25 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
+
+	// Promote replicas of dead primaries when quorum is lost.
+	// TAKEOVER before FORGET so slots remain continuously owned.
+	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+		return result, nil
+	}
+
+	// Re-introduce members whose addresses changed while every peer's
+	// nodes.conf still points at the old ones (full restart with
+	// persistence — #275). Must run before forgetStaleNodes: those same
+	// entries look failing, and CLUSTER FORGET would ban the live node
+	// from rejoining for a minute.
+	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 
 	r.forgetStaleNodes(ctx, cluster, state, nodes)
 
@@ -265,7 +305,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	allShards := effectiveShards(state, nodes)
 
 	// Handle scale-in: drain excess shards and clean up leftover ValkeyNodes.
+	// This runs before pod scheduling checks so that excess shard pods from a
+	// prior scale-up don't block scale-down when they can't be scheduled.
 	if result, requeue := r.handleScaleIn(ctx, cluster, state, nodes); requeue {
+		return result, nil
+	}
+
+	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{}, err
+	} else if handled {
 		return result, nil
 	}
 
@@ -403,7 +453,14 @@ func (r *ValkeyClusterReconciler) findPodSchedulingIssue(ctx context.Context, cl
 		return nil, fmt.Errorf("list Valkey pods: %w", err)
 	}
 
+	desiredShards := int(cluster.Spec.Shards)
 	for i := range pods.Items {
+		if label, ok := pods.Items[i].Labels[LabelShardIndex]; ok {
+			si, err := strconv.Atoi(label)
+			if err == nil && si >= desiredShards {
+				continue
+			}
+		}
 		if issue := podSchedulingIssueForPod(&pods.Items[i]); issue != nil {
 			return issue, nil
 		}
@@ -448,7 +505,15 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			svc.Spec.ClusterIP = "None"
 		}
 		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
-		svc.Spec.Ports = []corev1.ServicePort{{Name: "valkey", Port: DefaultPort}}
+		// Protocol and TargetPort are API-server defaults; set them explicitly
+		// so the rebuilt slice deep-equals the stored one and CreateOrUpdate
+		// stops updating the Service on every reconcile (#315).
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Name:       appName,
+			Port:       DefaultPort,
+			Protocol:   corev1.ProtocolTCP,
+			TargetPort: intstr.FromInt32(DefaultPort),
+		}}
 		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
 	})
 	if err != nil {
@@ -478,20 +543,24 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
 	// Scrape cluster state once for proactive failover decisions, but only
-	// when at least one node actually needs a roll. During initial bootstrap
-	// no nodes exist, so state stays nil. The snapshot is safe to reuse
-	// across the loop: replicaFirstNodeOrder uses it to place the actual
+	// when at least one node needs a failover-aware roll. During initial
+	// bootstrap no nodes exist, so state stays nil. The snapshot is safe to
+	// reuse across the loop: replicaFirstNodeOrder uses it to place the actual
 	// primary last within each shard, and after an update we requeue
 	// immediately, re-scraping fresh state before any further rolls.
 	var clusterState *valkey.ClusterState
-	if anyNodeRequiresRoll(cluster, nodes, configHash) {
+	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
+	if err != nil {
+		return false, err
+	}
+	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, liveHashes) {
 		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
 		if err != nil {
 			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
@@ -513,14 +582,24 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			requeue, nodeCreated, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
 			if err != nil {
 				return false, err
 			}
-			if requeue {
+			switch result {
+			case nodeDeferred:
+				// Roll deferred; MEET and REPLICATE isolated nodes so they
+				// rejoin the shard before next reconcile.
+				if _, meetErr := r.meetIsolatedNodes(ctx, cluster, clusterState); meetErr != nil {
+					log.Error(meetErr, "meetIsolatedNodes failed during deferred roll")
+				}
+				if _, replErr := r.replicatePendingReplicas(ctx, cluster, clusterState, nodes); replErr != nil {
+					log.Error(replErr, "replicatePendingReplicas failed during deferred roll")
+				}
 				return true, nil
-			}
-			if nodeCreated {
+			case nodeRequeued:
+				return true, nil
+			case nodeCreated:
 				totalCreated++
 			}
 		}
@@ -532,14 +611,28 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	return false, nil
 }
 
+// nodeResult describes the outcome of reconciling a single ValkeyNode.
+type nodeResult int
+
+const (
+	nodeUnchanged nodeResult = iota // no spec change, node is ready
+	nodeRequeued                    // spec updated or not ready, caller should requeue
+	nodeCreated                     // new ValkeyNode was created
+	nodeDeferred                    // primary roll deferred, waiting for synced replica
+)
+
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
-// Returns (requeue, nodeCreated, err). requeue signals the caller should stop
-// iterating and wait before processing the next node.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string) (bool, bool, error) {
+// Returns a nodeResult signaling the outcome or required next action.
+// liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
+// and failover decisions stay consistent for the whole pass.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-	desired.Spec.ServerConfigHash = configHash
+	if err := setDesiredWorkloadRevision(desired); err != nil {
+		return nodeUnchanged, err
+	}
+
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -547,40 +640,26 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Check if proactive failover is needed before updating.
-	if clusterState != nil {
-		current := &valkeyiov1alpha1.ValkeyNode{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-			if !apierrors.IsNotFound(err) {
-				log.V(1).Info("could not fetch current ValkeyNode for failover check, skipping",
-					"name", node.Name, "err", err)
-			}
-		} else if nodeRequiresRoll(current, desired) {
-			shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
-			if shard != nil {
-				log.Info("proactive failover before rolling primary",
-					"name", node.Name, "address", current.Status.PodIP,
-					"syncedReplicas", len(replicas))
-				if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
-					log.Info("proactive failover did not complete, proceeding with roll",
-						"name", node.Name, "err", err)
-				}
-			} else if cluster.Spec.Replicas > 0 {
-				// findFailoverShard returned nil for one of three reasons:
-				// 1. Node is the shard primary but has no synced replicas: skip roll, would lose data
-				// 2. Node is in a shard but is a replica: safe to roll
-				// 3. Node isn't in any shard (isolated): safe to roll
-				// Only case 1 requires skipping; identify it's the actual primary of its shard.
-				shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
-				if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
-					log.Info("primary has no synced replicas, deferring roll",
-						"name", node.Name, "address", current.Status.PodIP,
-						"shardNodes", len(shardInState.Nodes),
-						"shardId", shardInState.Id)
-					return false, false, nil
-				}
-			}
+	// Load current node (if any) for failover decisions.
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	currentExists := true
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nodeUnchanged, err
 		}
+		currentExists = false
+	}
+
+	liveHash := ""
+	if liveTemplateHashes != nil {
+		liveHash = liveTemplateHashes[desired.Name]
+	}
+	// Proactive failover only when the Spec update implies a real pod template
+	// change, not pure WorkloadRevision backfill when live already matches.
+	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
+
+	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); deferred {
+		return nodeDeferred, nil
 	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
@@ -590,43 +669,191 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	})
 	if err != nil {
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeWarning, "ValkeyNodeFailed", "ReconcileValkeyNode", "Failed to reconcile ValkeyNode: %v", err)
-		return false, false, err
+		return nodeUnchanged, err
 	}
 	switch result {
 	case controllerutil.OperationResultCreated:
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeCreated", "CreateValkeyNode", "Created ValkeyNode for shard %d node %d", shardIndex, nodeIndex)
-		return false, true, nil
+		return nodeCreated, nil
 	case controllerutil.OperationResultUpdated:
-		// A spec change was applied. Requeue unconditionally so the node has
-		// time to settle before we advance to the next one (one-at-a-time
-		// rolling update).
+		// A spec change was applied (including WorkloadRevision advances). Requeue
+		// so the node settles before the next one (one-at-a-time rolling update).
 		log.V(1).Info("updated ValkeyNode, waiting for it to become ready", "name", node.Name)
 		r.Recorder.Eventf(cluster, node, corev1.EventTypeNormal, "ValkeyNodeUpdated", "UpdateValkeyNode", "Updated ValkeyNode %s", node.Name)
-		return true, false, nil
+		return nodeRequeued, nil
 	case controllerutil.OperationResultNone:
-		if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
-			log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
-				"name", node.Name,
-				"generation", node.Generation,
-				"observedGeneration", node.Status.ObservedGeneration)
-			return true, false, nil
-		}
-		if !node.Status.Ready {
-			// No spec change, but the node hasn't reached Ready yet (e.g.
-			// still starting after a prior update). Unlike Updated above, we
-			// only wait when not-ready; a ready unchanged node is safe to
-			// advance past.
-			log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
-			return true, false, nil
-		}
-		if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
-			log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
-			return true, false, nil
-		}
+		return r.handleUnchangedValkeyNode(ctx, node)
 	default:
 		log.V(1).Info("unexpected CreateOrUpdate result", "result", result, "name", node.Name)
 	}
-	return false, false, nil
+	return nodeUnchanged, nil
+}
+
+// maybeProactiveFailoverBeforeRoll runs proactive failover when rolling a
+// primary. Returns true when the primary has no synced replica yet (defer).
+func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, current *valkeyiov1alpha1.ValkeyNode, rolling bool) bool {
+	log := logf.FromContext(ctx)
+	if clusterState == nil || !rolling {
+		return false
+	}
+	shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+	if shard != nil {
+		log.Info("proactive failover before rolling primary",
+			"name", current.Name, "address", current.Status.PodIP,
+			"syncedReplicas", len(replicas))
+		if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+			// Do not authorize the Spec update (and pod roll) until failover succeeds
+			// or the primary no longer needs failover (checked on next reconcile).
+			log.Info("proactive failover did not complete, deferring roll",
+				"name", current.Name, "err", err)
+			return true
+		}
+		return false
+	}
+	if cluster.Spec.Replicas == 0 {
+		return false
+	}
+	// findFailoverShard returned nil for one of three reasons:
+	// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
+	// 2. Node is in a shard but is a replica: safe to roll
+	// 3. Node isn't in any shard (isolated): safe to roll
+	// Only case 1 requires waiting; identify it's the actual primary of its shard.
+	shardInState := clusterState.FindShardForAddress(current.Status.PodIP)
+	if shardInState != nil && shardInState.GetPrimaryNode() != nil && shardInState.GetPrimaryNode().Address == current.Status.PodIP {
+		log.Info("primary has no synced replicas, deferring roll",
+			"name", current.Name, "address", current.Status.PodIP,
+			"shardNodes", len(shardInState.Nodes),
+			"shardId", shardInState.Id)
+		return true
+	}
+	return false
+}
+
+// handleUnchangedValkeyNode waits until a settled node is Ready before advancing.
+func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (nodeResult, error) {
+	log := logf.FromContext(ctx)
+	if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
+		log.V(1).Info("ValkeyNode spec not yet observed by controller, waiting",
+			"name", node.Name,
+			"generation", node.Generation,
+			"observedGeneration", node.Status.ObservedGeneration)
+		return nodeRequeued, nil
+	}
+	if !node.Status.Ready {
+		// No spec change, but the node hasn't reached Ready yet (e.g.
+		// still starting after a prior update). Unlike Updated above, we
+		// only wait when not-ready; a ready unchanged node is safe to
+		// advance past.
+		log.V(1).Info("ValkeyNode not yet ready, waiting", "name", node.Name)
+		return nodeRequeued, nil
+	}
+	if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied); c != nil && c.Status == metav1.ConditionFalse {
+		log.V(1).Info("ValkeyNode live config not yet applied, waiting", "name", node.Name)
+		return nodeRequeued, nil
+	}
+	return nodeUnchanged, nil
+}
+
+// liveWorkloadTemplateHashes returns podTemplateRollHash of each cluster node's
+// live StatefulSet or Deployment template (empty string when missing).
+func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]string, error) {
+	out := make(map[string]string, len(nodes.Items))
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		hash, err := r.livePodTemplateHash(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		if hash != "" {
+			out[n.Name] = hash
+		}
+	}
+	return out, nil
+}
+
+func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
+	switch node.Spec.WorkloadType {
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		dep := &appsv1.Deployment{}
+		if err := r.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		return podTemplateRollHash(dep.Spec.Template), nil
+	default:
+		// StatefulSet or empty (CRD default).
+		sts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, key, sts); err != nil {
+			if apierrors.IsNotFound(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		return podTemplateRollHash(sts.Spec.Template), nil
+	}
+}
+
+const (
+	// gracePeriodBufferSeconds is added on top of cluster-manual-failover-timeout
+	// so the SIGTERM-triggered failover has headroom to finish before SIGKILL.
+	gracePeriodBufferSeconds = 10
+	// defaultFailoverTimeoutSeconds mirrors the Valkey default for
+	// cluster-manual-failover-timeout (5000ms).
+	defaultFailoverTimeoutSeconds = 5
+	// defaultGracePeriodSeconds mirrors the Kubernetes default
+	// terminationGracePeriodSeconds.
+	defaultGracePeriodSeconds = 30
+)
+
+// failoverTimeoutSeconds returns cluster-manual-failover-timeout in whole
+// seconds (rounded up), or the Valkey default when unset or unparseable.
+func failoverTimeoutSeconds(config map[string]string) int64 {
+	v, ok := config["cluster-manual-failover-timeout"]
+	if !ok {
+		return defaultFailoverTimeoutSeconds
+	}
+	ms, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || ms <= 0 {
+		return defaultFailoverTimeoutSeconds
+	}
+	return (ms + 999) / 1000
+}
+
+// recommendedGracePeriodSeconds is the smallest terminationGracePeriodSeconds
+// that lets a SIGTERM-triggered failover finish before SIGKILL.
+func recommendedGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 {
+	return failoverTimeoutSeconds(cluster.Spec.Config) + gracePeriodBufferSeconds
+}
+
+// effectiveGracePeriodSeconds is the grace period the operator applies to the
+// Valkey pods: the user's value when set, otherwise a safe default that is at
+// least the Kubernetes default and the recommended minimum.
+func effectiveGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 {
+	if cluster.Spec.TerminationGracePeriodSeconds != nil {
+		return *cluster.Spec.TerminationGracePeriodSeconds
+	}
+	if rec := recommendedGracePeriodSeconds(cluster); rec > defaultGracePeriodSeconds {
+		return rec
+	}
+	return defaultGracePeriodSeconds
+}
+
+// nodeTLSFromCluster resolves the cluster's TLS intent into the node's TLS
+// view.
+func nodeTLSFromCluster(tlsSpec *valkeyiov1alpha1.TLSSpec) *valkeyiov1alpha1.NodeTLSSpec {
+	if tlsSpec == nil {
+		return nil
+	}
+	return &valkeyiov1alpha1.NodeTLSSpec{
+		Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+			Server: valkeyiov1alpha1.NodeCertificateRef{
+				SecretName: tlsSpec.Certificates.Server.SecretName,
+			},
+		},
+	}
 }
 
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.
@@ -644,6 +871,52 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	l[LabelShardIndex] = strconv.Itoa(shardIndex)
 	l[LabelNodeIndex] = strconv.Itoa(nodeIndex)
 
+	var scheduling valkeyiov1alpha1.SchedulingSpec
+	if cluster.Spec.Scheduling != nil {
+		scheduling = *cluster.Spec.Scheduling
+	}
+
+	// Only set the field when it differs from the Kubernetes default, so existing
+	// clusters that resolve to the default keep a nil value and are not rolled on
+	// operator upgrade.
+	// Store the user's value verbatim when set, so an explicit change (including
+	// back to the Kubernetes default) always propagates to the pod. When unset,
+	// only populate the field if the derived default deviates from the Kubernetes
+	// pod default, so existing clusters that resolve to the default are not rolled
+	// on operator upgrade.
+	var gracePeriod *int64
+	if cluster.Spec.TerminationGracePeriodSeconds != nil {
+		g := *cluster.Spec.TerminationGracePeriodSeconds
+		gracePeriod = &g
+	} else if d := effectiveGracePeriodSeconds(cluster); d != defaultGracePeriodSeconds {
+		gracePeriod = &d
+	}
+
+	// Curate node-axis scheduling primitives from node.spread, merged with the
+	// user's escape-hatch passthrough. Preserve nil when nothing is curated.
+	shardMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
+	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardMode)
+	topologySpreadConstraints := scheduling.TopologySpreadConstraints
+	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode); len(curated) > 0 {
+		topologySpreadConstraints = append(
+			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
+			curated...,
+		)
+	}
+
+	zoneShardMode, zonePrimariesMode, zonePodsMode := effectiveZoneSpread(cluster.Spec.Scheduling)
+	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode); len(curated) > 0 {
+		topologySpreadConstraints = append(
+			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
+			curated...,
+		)
+	}
+
+	// Pin the pod to its deterministic zone, ANDed with the user's passthrough
+	// nodeSelector. Kubernetes ANDs nodeSelector with any nodeAffinity the user
+	// supplies, so the escape hatch is left verbatim.
+	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex))
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -651,21 +924,24 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Labels:    l,
 		},
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-			Image:                     cluster.Spec.Image,
-			ImagePullSecrets:          cluster.Spec.ImagePullSecrets,
-			WorkloadType:              cluster.Spec.WorkloadType,
-			Persistence:               cluster.Spec.Persistence,
-			Resources:                 cluster.Spec.Resources,
-			NodeSelector:              cluster.Spec.NodeSelector,
-			Affinity:                  cluster.Spec.Affinity,
-			Tolerations:               cluster.Spec.Tolerations,
-			TopologySpreadConstraints: cluster.Spec.TopologySpreadConstraints,
-			Exporter:                  cluster.Spec.Exporter,
-			Containers:                cluster.Spec.Containers,
-			ServerConfigMapName:       GetServerConfigMapName(cluster.Name),
-			UsersACLSecretName:        getInternalSecretName(cluster.Name),
-			TLS:                       cluster.Spec.TLS,
-			Config:                    cluster.Spec.Config,
+			Image:                         cluster.Spec.Image,
+			ImagePullSecrets:              cluster.Spec.ImagePullSecrets,
+			WorkloadType:                  cluster.Spec.WorkloadType,
+			Persistence:                   cluster.Spec.Persistence,
+			Resources:                     cluster.Spec.Resources,
+			NodeSelector:                  nodeSelector,
+			Affinity:                      affinity,
+			Tolerations:                   scheduling.Tolerations,
+			PriorityClassName:             scheduling.PriorityClassName,
+			TopologySpreadConstraints:     topologySpreadConstraints,
+			Exporter:                      cluster.Spec.Exporter,
+			Containers:                    cluster.Spec.Containers,
+			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
+			UsersACLSecretName:            getInternalSecretName(cluster.Name),
+			TLS:                           nodeTLSFromCluster(cluster.GetTLS()),
+			Config:                        cluster.Spec.Config,
+			PodSecurityContext:            cluster.Spec.PodSecurityContext,
+			TerminationGracePeriodSeconds: gracePeriod,
 		},
 	}
 }
@@ -679,14 +955,64 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 		ips = append(ips, node.Status.PodIP)
 	}
 	var tlsConfig *tls.Config
-	if cluster.Spec.TLS != nil && cluster.Spec.TLS.Certificate.SecretName != "" {
+	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
-		cfg, err := getTLSConfig(ctx, r.Client, cluster.Spec.TLS.Certificate.SecretName, serverName, cluster.Namespace)
-		if err == nil {
+		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
+				"secretName", tlsSpec.Certificates.Server.SecretName)
+		} else {
 			tlsConfig = cfg
 		}
 	}
 	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
+}
+
+// healStaleAddressPeers re-introduces live cluster members to nodes whose
+// gossip tables still point at addresses the members no longer hold.
+//
+// When every pod restarts at the same time (full Kubernetes cluster restart,
+// node pool replacement) with persistence enabled, each node comes back with
+// a new pod IP but a nodes.conf listing its peers' old IPs. A single restarted
+// member is re-discovered through the survivors, but with no survivors there
+// is no gossip path at all: every node keeps dialing dead addresses, all peers
+// stay fail?/fail, and the cluster never re-forms on its own (#275).
+//
+// The operator knows both sides — the live address of every member (scraped
+// via ValkeyNode pod IPs) and each node's stale view (CLUSTER NODES) — so it
+// re-introduces the live member to the viewer with CLUSTER MEET. The
+// handshake carries the member's node ID; since the ID is already known, the
+// viewer rebinds the existing entry to the new address and gossip propagates
+// it from there.
+//
+// One successful MEET per moved member is enough: the handshake also
+// registers the viewer's current address on the target, and gossip carries
+// both new addresses to the remaining nodes. Without the dedupe a full
+// N-node restart would issue ~N² MEETs (every node's table lists every peer
+// as stale) — needless churn on a large cluster.
+//
+// Returns the number of MEETs issued; failures are logged and skipped (and
+// don't count as met) so one unreachable node doesn't block healing the rest.
+func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+	log := logf.FromContext(ctx)
+	healed := 0
+	met := map[string]bool{}
+	for _, pair := range state.FindStaleAddressPeers() {
+		viewer, live := pair.Viewer, pair.Live
+		if met[live.Id] {
+			continue
+		}
+		log.Info("re-introducing peer whose address changed",
+			"viewer", viewer.Address, "peer", live.Address, "peerId", live.Id)
+		if err := viewer.Client.Do(ctx, viewer.Client.B().ClusterMeet().Ip(live.Address).Port(int64(live.Port)).Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER MEET failed", "from", viewer.Address, "to", live.Address)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", viewer.Address, live.Address, err)
+			continue
+		}
+		met[live.Id] = true
+		healed++
+	}
+	return healed
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -973,6 +1299,59 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	return nil
 }
 
+// promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
+// primary is dead and failover quorum is unreachable. With persistence enabled
+// the pod will return with the same node ID, so TAKEOVER is skipped.
+// Returns (result, true) if a promotion was made and reconcile should requeue.
+func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
+	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+		return ctrl.Result{}, false
+	}
+	log := logf.FromContext(ctx)
+	var promoted, attempted int
+	deadPrimaries := make(map[string]bool)
+	for _, shard := range state.Shards {
+		for _, node := range shard.Nodes {
+			primaryId := node.PrimaryIdFromSelf()
+			if primaryId == "-" || primaryId == "" {
+				continue // node is a primary
+			}
+			if deadPrimaries[primaryId] {
+				continue
+			}
+			if !state.IsNodeFailed(primaryId) {
+				continue
+			}
+			// Note: we don't check if the pod still exists in k8s here.
+			// Without persistence, even if the primary is merely partitioned
+			// (not gone), the TAKEOVER'd replica will own the slots at a
+			// higher epoch. A returning primary will see the higher epoch
+			// and demote itself; no split-brain.
+			deadPrimaries[primaryId] = true
+		}
+	}
+	for primaryId := range deadPrimaries {
+		replica := state.BestReplicaOf(primaryId)
+		if replica == nil {
+			continue
+		}
+		attempted++
+		log.Info("promoting orphaned replica via TAKEOVER", "node", replica.Address, "deadPrimary", primaryId)
+		if err := replica.Client.Do(ctx, replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
+		} else {
+			promoted++
+		}
+	}
+	if promoted > 0 || attempted > 0 {
+		if promoted > 0 {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+	return ctrl.Result{}, false
+}
+
 // Check each cluster node and forget stale nodes (noaddr or status fail)
 func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
 	log := logf.FromContext(ctx)
@@ -985,17 +1364,32 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				if idx != -1 {
 					continue
 				}
+				// The address match above misses a live member whose pod IP
+				// changed while this node's table still holds the old one
+				// (full restart with persistence — #275). Forgetting it
+				// would ban the live node from rejoining for a minute;
+				// healStaleAddressPeers re-MEETs it instead.
+				if state.FindNodeById(failing.Id) != nil {
+					log.V(1).Info("skipping forget; node is alive at a new address",
+						"staleAddress", failing.Address, "Id", failing.Id)
+					continue
+				}
 				// A live replica still considers this failing node its
 				// primary. Forgetting it from the other primaries now would
 				// remove it from their node tables and prevent them from
 				// voting in the auto-failover election, permanently
 				// blocking the replica's promotion.
 				if state.HasReplicaOf(failing.Id) {
-					log.V(1).Info("skipping forget; failover pending for node",
+					if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+						log.V(1).Info("skipping forget; failover pending for node",
+							"address", failing.Address, "Id", failing.Id)
+						continue
+					}
+					log.Info("forget node despite pending replica; quorum unreachable",
 						"address", failing.Address, "Id", failing.Id)
-					continue
+				} else {
+					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 				}
-				log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
 				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
 					log.Error(err, "command failed: CLUSTER FORGET")
 					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
@@ -1052,6 +1446,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Reason = readyCondition.Reason
 		current.Status.Message = readyCondition.Message
 	}
+
+	// Update Prometheus metrics
+	updateClusterMetrics(current)
 
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
@@ -1135,6 +1532,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		}
 		return false, err
 	}
+	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
 }
 
@@ -1248,6 +1646,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			}
 			return false, err
 		}
+		slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 		return true, nil
 	}
 
@@ -1335,6 +1734,7 @@ func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.Valke
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyCluster{}).
 		Owns(&corev1.Service{}).
@@ -1342,14 +1742,6 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
-		Watches(
-			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.findReferencedClusters),
-			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				secret, ok := obj.(*corev1.Secret)
-				return ok && secret.Type == AclSecretType
-			})),
-		).
 		Named("valkeycluster").
 		Complete(r)
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +40,35 @@ type NodeState struct {
 	Info         map[string]string
 	ClusterInfo  map[string]string
 	ClusterNodes string
+}
+
+// ReplicationOffset returns this node's processed replication offset from
+// INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
+// value means the replica is more caught up with its primary.
+func (n *NodeState) ReplicationOffset() int64 {
+	v, ok := n.Info["slave_repl_offset"]
+	if !ok {
+		return -1
+	}
+	offset, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return offset
+}
+
+// HighestOffsetReplica returns the replica with the greatest replication offset,
+// the one most caught up with its primary. Replicas whose offset is unavailable
+// sort last and ties keep slice order. Returns nil for an empty slice.
+func HighestOffsetReplica(replicas []*NodeState) *NodeState {
+	var best *NodeState
+	var bestOffset int64
+	for _, replica := range replicas {
+		if offset := replica.ReplicationOffset(); best == nil || offset > bestOffset {
+			best, bestOffset = replica, offset
+		}
+	}
+	return best
 }
 
 // ShardState represents the current state of a shard.
@@ -268,6 +298,68 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// HasFailoverQuorum returns true if a majority of slot-owning primaries are
+// reachable. Valkey requires a majority of primaries to vote in a failover
+// election; if quorum is unreachable, no automatic failover can succeed.
+// Uses cluster_size from CLUSTER INFO (total primaries with slots, including
+// failed ones) as the denominator.
+func (s *ClusterState) HasFailoverQuorum() bool {
+	if len(s.Shards) == 0 {
+		return false
+	}
+	var livePrimaries, clusterSize int
+	for _, shard := range s.Shards {
+		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
+			livePrimaries++
+		}
+		for _, node := range shard.Nodes {
+			// Take the max across nodes in case gossip hasn't fully propagated.
+			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
+				clusterSize = size
+			}
+		}
+	}
+	if clusterSize == 0 {
+		return false
+	}
+	return livePrimaries > (clusterSize / 2)
+}
+
+// IsNodeFailed returns true if any live node reports the given node ID as
+// "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
+// majority of primaries are down, pfail can never promote to fail.
+func (s *ClusterState) IsNodeFailed(nodeId string) bool {
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			for line := range strings.SplitSeq(node.ClusterNodes, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 8 || fields[0] != nodeId {
+					continue
+				}
+				flags := strings.Split(fields[2], ",")
+				if slices.Contains(flags, "fail") || slices.Contains(flags, "fail?") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// BestReplicaOf returns the replica with the highest replication offset
+// that references the given primary ID, or nil if none found.
+func (s *ClusterState) BestReplicaOf(primaryId string) *NodeState {
+	var replicas []*NodeState
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.PrimaryIdFromSelf() == primaryId {
+				replicas = append(replicas, node)
+			}
+		}
+	}
+	return HighestOffsetReplica(replicas)
+}
+
 // PrimaryIdFromSelf returns the primary node ID that this node reports as its
 // own primary in CLUSTER NODES (fields[3] of the "myself" line). Returns "-"
 // for primaries and the primary's node ID for replicas.
@@ -282,6 +374,110 @@ func (n *NodeState) PrimaryIdFromSelf() string {
 		}
 	}
 	return ""
+}
+
+// AllNodes returns every reachable node in the state: shard members first,
+// then pending nodes.
+func (s *ClusterState) AllNodes() []*NodeState {
+	var nodes []*NodeState
+	for _, shard := range s.Shards {
+		nodes = append(nodes, shard.Nodes...)
+	}
+	return append(nodes, s.PendingNodes...)
+}
+
+// FindNodeById returns the reachable node with the given cluster node ID, or
+// nil if no such node was scraped.
+func (s *ClusterState) FindNodeById(id string) *NodeState {
+	for _, node := range s.AllNodes() {
+		if node.Id == id {
+			return node
+		}
+	}
+	return nil
+}
+
+// hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
+// endpoint field (<ip:port@cport[,hostname]>). IPv6 hosts appear bracketed
+// ([fd00::2]:6379@16379); net.SplitHostPort unbrackets them so the result
+// compares equal to the bare pod IP Kubernetes reports. Returns "" when the
+// field has no parsable host:port part.
+func hostFromClusterNodesEndpoint(endpoint string) string {
+	// Drop the cluster-bus suffix and the optional ,hostname after it.
+	if i := strings.Index(endpoint, "@"); i != -1 {
+		endpoint = endpoint[:i]
+	}
+	if host, _, err := net.SplitHostPort(endpoint); err == nil {
+		return host
+	}
+	// Fallback for entries with no port (shouldn't occur in CLUSTER NODES,
+	// but keep the previous last-colon behavior rather than dropping them).
+	if i := strings.LastIndex(endpoint, ":"); i != -1 {
+		return strings.Trim(endpoint[:i], "[]")
+	}
+	return ""
+}
+
+// StaleAddressPeer pairs a viewer node with a live cluster member whose
+// address in the viewer's node table is outdated.
+type StaleAddressPeer struct {
+	Viewer *NodeState // node whose table holds the stale entry
+	Live   *NodeState // the same member, reachable at its current address
+}
+
+// FindStaleAddressPeers detects cluster members that restarted with a new
+// address while other nodes' tables (persisted in nodes.conf) still point at
+// the old one. This happens when many pods restart at once — e.g. a full
+// Kubernetes cluster restart — leaving no surviving member to gossip the new
+// addresses from, so the cluster stays partitioned until the peers are
+// re-introduced (see valkey-io/valkey-operator#275).
+//
+// A peer entry is stale when it is flagged failing (fail, fail? or noaddr)
+// in the viewer's node table, but a node with the same cluster ID was
+// scraped alive at a different address. Entries whose ID matches no live
+// node are genuinely dead and left for forgetStaleNodes.
+func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
+	all := s.AllNodes()
+	live := make(map[string]*NodeState, len(all))
+	for _, node := range all {
+		live[node.Id] = node
+	}
+	var stale []StaleAddressPeer
+	for _, viewer := range all {
+		for line := range strings.SplitSeq(viewer.ClusterNodes, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			flags := strings.Split(fields[2], ",")
+			if slices.Contains(flags, "myself") {
+				continue
+			}
+			// fail? is included: promoting pfail to fail needs gossip
+			// between a majority of primaries, which is exactly what a
+			// cluster-wide address change breaks — entries can stay at
+			// fail? indefinitely.
+			noaddr := slices.Contains(flags, "noaddr")
+			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !noaddr {
+				continue
+			}
+			peer, ok := live[fields[0]]
+			if !ok {
+				continue
+			}
+			// A noaddr entry carries no endpoint at all (:0@0) — the ID is
+			// known but no address ever completed a handshake. A live node
+			// with that ID always needs re-introduction.
+			if noaddr {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
+				continue
+			}
+			if address := hostFromClusterNodesEndpoint(fields[1]); address != "" && address != peer.Address {
+				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
+			}
+		}
+	}
+	return stale
 }
 
 // GetFailingNodes returns all known nodes that are failing.

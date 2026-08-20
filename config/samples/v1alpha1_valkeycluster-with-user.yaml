@@ -7,6 +7,7 @@ data:
   alicepw: M21wdHlQQHNzdzByZA==
   davidold: OVYqTHQlYXU4Mk5tdTlyeQ==
   davidnew: VmFsa2V5I1J1bHojMjIzMw==
+  defaultpw: dHg4OWx4elRLNEZjdXR2akZ4SmQ=
 ---
 apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -50,6 +51,12 @@ spec:
           - davidnew
       commands:
         allow: ["@admin"]
+    - name: default
+      enabled: true
+      permissions: "+@all ~* &*"
+      passwordSecret:
+        name: valkey-cluster-sample-users
+        keys: [defaultpw]
     - name: edward
       enabled: true
       resetpass: true

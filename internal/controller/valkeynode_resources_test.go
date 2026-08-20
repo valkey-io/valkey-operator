@@ -25,11 +25,22 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
 )
+
+func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return &envVars[i]
+		}
+	}
+	require.Failf(t, "env var not found", "expected env var %q to be present", name)
+	return nil
+}
 
 func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 	return &valkeyv1.ValkeyNode{
@@ -76,12 +87,17 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
 	// Command
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf", "--cluster-announce-ip", "$(POD_IP)"}, c.Command)
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
 
 	// Env
-	require.Len(t, c.Env, 1)
+	require.Len(t, c.Env, 2)
 	assert.Equal(t, "POD_IP", c.Env[0].Name)
 	assert.Equal(t, "status.podIP", c.Env[0].ValueFrom.FieldRef.FieldPath)
+	assert.Equal(t, "PRIMARY_AUTH", c.Env[1].Name)
+	assert.Equal(t, getSystemPasswordSecretName(node.Labels[LabelCluster]), c.Env[1].ValueFrom.SecretKeyRef.Name)
 
 	// Ports
 	require.Len(t, c.Ports, 2)
@@ -114,21 +130,57 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
 	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
 
-	// VolumeMounts
-	require.Len(t, c.VolumeMounts, 2)
+	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence)
+	require.Len(t, c.VolumeMounts, 3)
 	assert.Equal(t, "scripts", c.VolumeMounts[0].Name)
 	assert.Equal(t, "/scripts", c.VolumeMounts[0].MountPath)
 	assert.Equal(t, "valkey-conf", c.VolumeMounts[1].Name)
 	assert.Equal(t, "/config", c.VolumeMounts[1].MountPath)
 	assert.True(t, c.VolumeMounts[1].ReadOnly, "valkey-conf mount should be read-only")
+	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
+	assert.Equal(t, dataMountPath, c.VolumeMounts[2].MountPath)
+	assert.False(t, c.VolumeMounts[2].ReadOnly, "/data must be writable for nodes.conf")
 
-	// Volumes
-	require.Len(t, pts.Spec.Volumes, 2)
+	// Volumes: scripts + valkey-conf + /data emptyDir
+	require.Len(t, pts.Spec.Volumes, 3)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
+	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
+	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	var dataVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == dataVolumeName {
+			dataVol = &pts.Spec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, dataVol, "/data volume must exist even without persistence (PSS-restricted / readOnlyRootFilesystem support)")
+	require.NotNil(t, dataVol.EmptyDir, "/data should be an emptyDir when persistence is not configured")
+	assert.Nil(t, dataVol.PersistentVolumeClaim)
+
+	server := pts.Spec.Containers[0]
+	var dataMount *corev1.VolumeMount
+	for i := range server.VolumeMounts {
+		if server.VolumeMounts[i].Name == dataVolumeName {
+			dataMount = &server.VolumeMounts[i]
+			break
+		}
+	}
+	require.NotNil(t, dataMount, "server container must mount /data")
+	assert.Equal(t, dataMountPath, dataMount.MountPath)
+	assert.False(t, dataMount.ReadOnly)
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -269,6 +321,7 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	node.Spec.NodeSelector = nodeSelector
 	node.Spec.Affinity = affinity
 	node.Spec.Tolerations = tolerations
+	node.Spec.PriorityClassName = "high-priority"
 
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
@@ -277,126 +330,36 @@ func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
 	assert.Equal(t, nodeSelector, pts.Spec.NodeSelector, "node selector should pass through")
 	assert.Equal(t, affinity, pts.Spec.Affinity, "affinity should pass through")
 	assert.Equal(t, tolerations, pts.Spec.Tolerations, "tolerations should pass through")
+	assert.Equal(t, "high-priority", pts.Spec.PriorityClassName, "priorityClassName should pass through")
 }
 
-func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraints(t *testing.T) {
-	node := newTestValkeyNode("mycluster-1-0", "test-ns")
-	node.Labels = map[string]string{
-		LabelCluster:    "mycluster",
-		LabelShardIndex: "1",
-		LabelNodeIndex:  "0",
-	}
+func TestBuildValkeyNodePodTemplateSpec_PriorityClassNameDefaultsEmpty(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Empty(t, pts.Spec.PriorityClassName, "priorityClassName should be unset by default")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsVerbatim(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster", LabelShardIndex: "2"}
 	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
 		{
 			MaxSkew:           1,
 			TopologyKey:       "kubernetes.io/hostname",
 			WhenUnsatisfiable: corev1.DoNotSchedule,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"app": "custom"}},
 		},
 	}
 
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
-	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
 
-	constraint := pts.Spec.TopologySpreadConstraints[0]
-	require.NotNil(t, constraint.LabelSelector)
-	assert.Equal(t, "mycluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should be injected")
-	assert.Contains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard label key should scope the spread group")
-}
-
-func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsPreservesUserSelector(t *testing.T) {
-	node := newTestValkeyNode("mycluster-1-0", "test-ns")
-	node.Labels = map[string]string{
-		LabelCluster:    "mycluster",
-		LabelShardIndex: "1",
-		LabelNodeIndex:  "0",
-	}
-	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
-		{
-			MaxSkew:           1,
-			TopologyKey:       "topology.kubernetes.io/zone",
-			WhenUnsatisfiable: corev1.ScheduleAnyway,
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"role":          "server",
-					LabelShardIndex: "1",
-				},
-			},
-		},
-	}
-
-	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-	require.NoError(t, err)
-	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
-
-	constraint := pts.Spec.TopologySpreadConstraints[0]
-	require.NotNil(t, constraint.LabelSelector)
-	assert.Equal(t, "server", constraint.LabelSelector.MatchLabels["role"], "user selector labels should be preserved")
-	assert.Equal(t, "1", constraint.LabelSelector.MatchLabels[LabelShardIndex], "existing shard selector should be preserved")
-	assert.Equal(t, "mycluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected")
-	assert.NotContains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard key should not be duplicated when already selected")
-}
-
-func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsAvoidsDuplicateReservedKeys(t *testing.T) {
-	node := newTestValkeyNode("mycluster-1-0", "test-ns")
-	node.Labels = map[string]string{
-		LabelCluster:    "mycluster",
-		LabelShardIndex: "1",
-		LabelNodeIndex:  "0",
-	}
-	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
-		{
-			MaxSkew:           1,
-			TopologyKey:       "kubernetes.io/hostname",
-			WhenUnsatisfiable: corev1.DoNotSchedule,
-			MatchLabelKeys:    []string{LabelCluster},
-		},
-		{
-			MaxSkew:           1,
-			TopologyKey:       "topology.kubernetes.io/zone",
-			WhenUnsatisfiable: corev1.ScheduleAnyway,
-			MatchLabelKeys:    []string{LabelShardIndex},
-		},
-	}
-
-	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-	require.NoError(t, err)
-	require.Len(t, pts.Spec.TopologySpreadConstraints, 2)
-
-	clusterConstraint := pts.Spec.TopologySpreadConstraints[0]
-	require.NotNil(t, clusterConstraint.LabelSelector)
-	assert.NotContains(t, clusterConstraint.LabelSelector.MatchLabels, LabelCluster, "cluster label should not be injected when matchLabelKeys already uses it")
-	assert.Contains(t, clusterConstraint.MatchLabelKeys, LabelCluster, "user-provided cluster matchLabelKey should be preserved")
-	assert.Contains(t, clusterConstraint.MatchLabelKeys, LabelShardIndex, "shard key should still be injected when unused")
-
-	shardConstraint := pts.Spec.TopologySpreadConstraints[1]
-	require.NotNil(t, shardConstraint.LabelSelector)
-	assert.Equal(t, "mycluster", shardConstraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected when unused")
-	assert.Contains(t, shardConstraint.MatchLabelKeys, LabelShardIndex, "user-provided shard matchLabelKey should be preserved")
-	assert.Len(t, shardConstraint.MatchLabelKeys, 1, "shard matchLabelKey should not be duplicated")
-}
-
-func TestBuildValkeyNodePodTemplateSpec_TopologySpreadConstraintsSkipsShardScopingWithoutShardLabel(t *testing.T) {
-	node := newTestValkeyNode("standalone-node", "test-ns")
-	node.Labels = map[string]string{
-		LabelCluster: "standalone-cluster",
-	}
-	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
-		{
-			MaxSkew:           1,
-			TopologyKey:       "kubernetes.io/hostname",
-			WhenUnsatisfiable: corev1.DoNotSchedule,
-		},
-	}
-
-	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-	require.NoError(t, err)
-	require.Len(t, pts.Spec.TopologySpreadConstraints, 1)
-
-	constraint := pts.Spec.TopologySpreadConstraints[0]
-	require.NotNil(t, constraint.LabelSelector)
-	assert.Equal(t, "standalone-cluster", constraint.LabelSelector.MatchLabels[LabelCluster], "cluster label should still be injected")
-	assert.NotContains(t, constraint.MatchLabelKeys, LabelShardIndex, "shard label key should only be injected when the pod carries a shard label")
+	// Rendered exactly as authored: no cluster or shard-index injection.
+	assert.Equal(t, node.Spec.TopologySpreadConstraints, pts.Spec.TopologySpreadConstraints,
+		"user TopologySpreadConstraints must pass through verbatim")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
@@ -451,8 +414,10 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
-	node.Spec.TLS = &valkeyv1.TLSConfig{
-		Certificate: valkeyv1.CertificateRef{SecretName: "tls-secret"},
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
 	}
 
 	cm, err := buildValkeyNodeConfigMap(node)
@@ -494,14 +459,27 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, pts.Spec.Volumes, 3)
-	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
-	require.NotNil(t, pts.Spec.Volumes[2].PersistentVolumeClaim)
-	assert.Equal(t, "valkey-mynode-data", pts.Spec.Volumes[2].PersistentVolumeClaim.ClaimName)
+	var dataVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == dataVolumeName {
+			dataVol = &pts.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, dataVol, "data volume must be present")
+	require.NotNil(t, dataVol.PersistentVolumeClaim, "with persistence the data volume must be a PVC")
+	require.Nil(t, dataVol.EmptyDir, "with persistence the data volume must not be an emptyDir")
+	assert.Equal(t, "valkey-mynode-data", dataVol.PersistentVolumeClaim.ClaimName)
 
 	server := pts.Spec.Containers[0]
 	require.Len(t, server.VolumeMounts, 3)
-	assert.Equal(t, dataVolumeName, server.VolumeMounts[2].Name)
-	assert.Equal(t, dataMountPath, server.VolumeMounts[2].MountPath)
+	var dataMount *corev1.VolumeMount
+	for i := range server.VolumeMounts {
+		if server.VolumeMounts[i].Name == dataVolumeName {
+			dataMount = &server.VolumeMounts[i]
+		}
+	}
+	require.NotNil(t, dataMount, "server container must mount /data")
+	assert.Equal(t, dataMountPath, dataMount.MountPath)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
@@ -637,24 +615,57 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, resources, c.Resources)
 	})
 
-	t.Run("args contain redis addr", func(t *testing.T) {
+	t.Run("env contains redis addr", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
-		require.Len(t, c.Args, 1)
-		assert.Contains(t, c.Args[0], "--redis.addr=redis://localhost:6379")
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "redis://localhost:6379", redisAddr.Value)
+		assert.Empty(t, c.Args)
 		assert.Empty(t, c.VolumeMounts)
 	})
 
-	t.Run("args contain rediss addr with tls", func(t *testing.T) {
+	t.Run("env contains rediss addr with tls", func(t *testing.T) {
 		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
-		assert.Contains(t, c.Args[0], "--redis.addr=rediss://localhost:6379")
-		assert.Contains(t, c.Args, fmt.Sprintf("--tls-ca-cert-file=%s/%s", tlsCertMountPath, tlsSecretKeyCA))
+		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
+		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
+		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
+		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("args set from spec", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true, Args: []string{"-append-instance-role-label"}}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, []string{"-append-instance-role-label"}, c.Args)
+	})
+
+	t.Run("security context passthrough", func(t *testing.T) {
+		sc := &corev1.SecurityContext{
+			AllowPrivilegeEscalation: boolPtr(false),
+			ReadOnlyRootFilesystem:   boolPtr(true),
+			RunAsNonRoot:             boolPtr(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		}
+		exporter := valkeyv1.ExporterSpec{Enabled: true, SecurityContext: sc}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Equal(t, sc, c.SecurityContext, "SecurityContext should pass through verbatim")
+	})
+
+	t.Run("nil security context is noop", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		c := generateMetricsExporterContainerDef(exporter, "", nil)
+		assert.Nil(t, c.SecurityContext, "omitting SecurityContext must leave container SecurityContext nil")
 	})
 }
 
@@ -688,17 +699,21 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	// Volumes: scripts, valkey-conf, users-acl
-	require.Len(t, pts.Spec.Volumes, 3)
+	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir
+	require.Len(t, pts.Spec.Volumes, 4)
 	aclVol := pts.Spec.Volumes[2]
 	assert.Equal(t, "users-acl", aclVol.Name)
 	require.NotNil(t, aclVol.Secret)
 	assert.Equal(t, "mynode-internal", aclVol.Secret.SecretName)
+	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[3].Name)
+	require.NotNil(t, pts.Spec.Volumes[3].EmptyDir)
 
-	// VolumeMounts on the server container (always Containers[0])
+	// VolumeMounts on the server container (always Containers[0]):
+	// scripts, valkey-conf, /data, users-acl
 	c := pts.Spec.Containers[0]
-	require.Len(t, c.VolumeMounts, 3)
-	aclMount := c.VolumeMounts[2]
+	require.Len(t, c.VolumeMounts, 4)
+	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
+	aclMount := c.VolumeMounts[3]
 	assert.Equal(t, "users-acl", aclMount.Name)
 	assert.Equal(t, "/config/users", aclMount.MountPath)
 	assert.True(t, aclMount.ReadOnly)
@@ -710,8 +725,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 2, "should only have scripts and valkey-conf volumes")
-	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 2, "should only have scripts and valkey-conf mounts")
+	require.Len(t, pts.Spec.Volumes, 3, "scripts, valkey-conf, /data emptyDir")
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 3, "scripts, valkey-conf, /data")
 }
 
 func TestLivenessCheckScript(t *testing.T) {
@@ -779,27 +794,30 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 					corev1.ResourceCPU:    resource.MustParse("250m"),
 				},
 			},
-			NodeSelector: map[string]string{"zone": "us-east-1a"},
-			Affinity: &corev1.Affinity{
-				NodeAffinity: &corev1.NodeAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-						NodeSelectorTerms: []corev1.NodeSelectorTerm{
-							{MatchExpressions: []corev1.NodeSelectorRequirement{
-								{Key: "disktype", Operator: corev1.NodeSelectorOpIn, Values: []string{"ssd"}},
-							}},
+			Scheduling: &valkeyv1.SchedulingSpec{
+				NodeSelector: map[string]string{"zone": "us-east-1a"},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{
+								{MatchExpressions: []corev1.NodeSelectorRequirement{
+									{Key: "disktype", Operator: corev1.NodeSelectorOpIn, Values: []string{"ssd"}},
+								}},
+							},
 						},
 					},
 				},
-			},
-			Tolerations: []corev1.Toleration{
-				{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
-			},
-			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-				{
-					MaxSkew:           1,
-					TopologyKey:       "kubernetes.io/hostname",
-					WhenUnsatisfiable: corev1.DoNotSchedule,
+				Tolerations: []corev1.Toleration{
+					{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "valkey", Effect: corev1.TaintEffectNoSchedule},
 				},
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+					{
+						MaxSkew:           1,
+						TopologyKey:       "kubernetes.io/hostname",
+						WhenUnsatisfiable: corev1.DoNotSchedule,
+					},
+				},
+				PriorityClassName: "high-priority",
 			},
 			Exporter: valkeyv1.ExporterSpec{Enabled: true},
 			Containers: []corev1.Container{
@@ -816,14 +834,139 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.WorkloadType, node.Spec.WorkloadType, "WorkloadType must be propagated")
 	assert.Equal(t, cluster.Spec.Persistence, node.Spec.Persistence, "Persistence must be propagated")
 	assert.Equal(t, cluster.Spec.Resources, node.Spec.Resources, "Resources must be propagated")
-	assert.Equal(t, cluster.Spec.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
-	assert.Equal(t, cluster.Spec.Affinity, node.Spec.Affinity, "Affinity must be propagated")
-	assert.Equal(t, cluster.Spec.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
-	assert.Equal(t, cluster.Spec.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.NodeSelector, node.Spec.NodeSelector, "NodeSelector must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.Affinity, node.Spec.Affinity, "Affinity must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.Tolerations, node.Spec.Tolerations, "Tolerations must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.TopologySpreadConstraints, node.Spec.TopologySpreadConstraints, "TopologySpreadConstraints must be propagated")
+	assert.Equal(t, cluster.Spec.Scheduling.PriorityClassName, node.Spec.PriorityClassName, "PriorityClassName must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
 	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
+}
+
+func TestBuildClusterValkeyNode_NodeSpreadDefaultsRenderNothing(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+	// All spreads default Disabled → no curated primitives, and nothing set that
+	// would re-render an existing cluster's pods on upgrade.
+	assert.Nil(t, node.Spec.Affinity, "no scheduling config → no affinity")
+	assert.Empty(t, node.Spec.TopologySpreadConstraints, "no scheduling config → no TSCs")
+}
+
+func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
+				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+			}}},
+		},
+	}
+
+	// node-index 0 (a primary): shard anti-affinity (Required) + primaries TSC.
+	primary := buildClusterValkeyNode(cluster, 1, 0)
+	require.NotNil(t, primary.Spec.Affinity)
+	require.Len(t, primary.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1,
+		"explicit shards Required → hard anti-affinity")
+	require.Len(t, primary.Spec.TopologySpreadConstraints, 1, "primaries TSC on node-index 0")
+	assert.Equal(t, "0", primary.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelNodeIndex])
+
+	// node-index 1 (a replica): shard anti-affinity, no primaries TSC.
+	replica := buildClusterValkeyNode(cluster, 1, 1)
+	require.Len(t, replica.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+	assert.Empty(t, replica.Spec.TopologySpreadConstraints, "replicas carry no primaries TSC")
+}
+
+func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
+	userTSC := corev1.TopologySpreadConstraint{
+		MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 1, Replicas: 0,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				Affinity:                  &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}},
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
+				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
+					Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+					Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+				}},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	// user NodeAffinity retained, shard anti-affinity added at Required strength.
+	assert.NotNil(t, node.Spec.Affinity.NodeAffinity)
+	assert.Len(t, node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+	// passthrough TSC first, curated primaries TSC appended after it.
+	require.Len(t, node.Spec.TopologySpreadConstraints, 2)
+	assert.Equal(t, "topology.kubernetes.io/zone", node.Spec.TopologySpreadConstraints[0].TopologyKey, "passthrough first")
+	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "curated appended")
+}
+
+func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+			}}},
+		},
+	}
+
+	// node-index 0 (a primary): zone shard TSC + zone primaries TSC, no affinity.
+	primary := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, primary.Spec.Affinity, "zone axis never renders anti-affinity")
+	require.Len(t, primary.Spec.TopologySpreadConstraints, 2)
+	for _, tsc := range primary.Spec.TopologySpreadConstraints {
+		assert.Equal(t, "topology.kubernetes.io/zone", tsc.TopologyKey)
+	}
+	assert.Equal(t, "1", primary.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex], "shard TSC first")
+	assert.Equal(t, "0", primary.Spec.TopologySpreadConstraints[1].LabelSelector.MatchLabels[LabelNodeIndex], "primaries TSC second")
+
+	// node-index 1 (a replica): zone shard TSC only.
+	replica := buildClusterValkeyNode(cluster, 1, 1)
+	require.Len(t, replica.Spec.TopologySpreadConstraints, 1, "replica carries only the shard TSC")
+	assert.Equal(t, "1", replica.Spec.TopologySpreadConstraints[0].LabelSelector.MatchLabels[LabelShardIndex])
+}
+
+func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
+	userTSC := corev1.TopologySpreadConstraint{
+		MaxSkew: 1, TopologyKey: "custom-key", WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 1, Replicas: 0,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
+				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				}},
+				Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
+					Pods: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
+				}},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	// passthrough first, then node curation, then zone curation.
+	require.Len(t, node.Spec.TopologySpreadConstraints, 3)
+	assert.Equal(t, "custom-key", node.Spec.TopologySpreadConstraints[0].TopologyKey, "passthrough first")
+	assert.Equal(t, "kubernetes.io/hostname", node.Spec.TopologySpreadConstraints[1].TopologyKey, "node curation second")
+	assert.Equal(t, "topology.kubernetes.io/zone", node.Spec.TopologySpreadConstraints[2].TopologyKey, "zone curation last")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ImagePullSecrets(t *testing.T) {
@@ -853,4 +996,207 @@ func runProbeScript(t *testing.T, scriptPath, response string) error {
 		"VALKEY_RESPONSE="+response,
 	)
 	return cmd.Run()
+}
+
+func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	server := pts.Spec.Containers[0]
+	envByName := map[string]corev1.EnvVar{}
+	for i := range server.Env {
+		envByName[server.Env[i].Name] = server.Env[i]
+	}
+
+	user, ok := envByName["VALKEY_USER"]
+	require.True(t, ok, "VALKEY_USER env should be set")
+	assert.Equal(t, "_operator", user.Value)
+
+	e, ok := envByName["VALKEYCLI_AUTH"]
+	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
+	require.NotNil(t, e.ValueFrom)
+	require.NotNil(t, e.ValueFrom.SecretKeyRef)
+	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "_operator", e.ValueFrom.SecretKeyRef.Key)
+}
+
+// A ValkeyNode without a cluster label (e.g. a standalone node) has no
+// operator-managed system-passwords Secret, so no probe auth env is injected.
+func TestBuildValkeyNodePodTemplateSpec_NoOperatorUserProbeEnv(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	for _, e := range pts.Spec.Containers[0].Env {
+		assert.NotEqual(t, "VALKEY_USER", e.Name)
+		assert.NotEqual(t, "VALKEYCLI_AUTH", e.Name)
+	}
+}
+
+// TestProbeScriptOperatorUserArgs verifies the probe scripts pass --user for the
+// probe user when set, while the password itself never appears on the command line.
+func TestProbeScriptOperatorUserArgs(t *testing.T) {
+	for _, name := range []string{"liveness-check.sh", "readiness-check.sh"} {
+		t.Run(name, func(t *testing.T) {
+			scriptPath := filepath.Join("scripts", name)
+			binDir := t.TempDir()
+			argsFile := filepath.Join(binDir, "args.txt")
+			stub := "#!/bin/sh\nprintf '%s' \"$*\" > \"" + argsFile + "\"\necho PONG\n"
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
+			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+
+			// With probe user + auth env: --user present, password absent from argv.
+			cmd := exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=s3cr3t")
+			require.NoError(t, cmd.Run())
+			got, err := os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.Contains(t, string(got), "-user _operator")
+			assert.NotContains(t, string(got), "s3cr3t", "password must not be passed on the command line")
+
+			// Without any probe env: no --user.
+			cmd = exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=", "VALKEYCLI_AUTH=")
+			require.NoError(t, cmd.Run())
+			got, err = os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.NotContains(t, string(got), "-user")
+
+			// With probe user but empty auth env: no --user.
+			cmd = exec.Command(scriptPath)
+			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=")
+			require.NoError(t, cmd.Run())
+			got, err = os.ReadFile(argsFile)
+			require.NoError(t, err)
+			assert.NotContains(t, string(got), "-user")
+		})
+	}
+}
+
+// TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough verifies
+// the user-supplied PodSecurityContext is set verbatim on the pod (fixes the
+// persistence + non-root + PSS-restricted permission-denied case).
+func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_Passthrough(t *testing.T) {
+	uid := int64(56849)
+	gid := int64(56849)
+	fsGroup := int64(56849)
+	psc := &corev1.PodSecurityContext{
+		RunAsNonRoot:   boolPtr(true),
+		RunAsUser:      &uid,
+		RunAsGroup:     &gid,
+		FSGroup:        &fsGroup,
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.PodSecurityContext = psc
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.NotNil(t, pts.Spec.SecurityContext, "pod-level SecurityContext should be set")
+	assert.Equal(t, psc, pts.Spec.SecurityContext, "PodSecurityContext should pass through verbatim")
+}
+
+// TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop confirms
+// backward compatibility: omitting the field applies no security settings.
+// The built template carries the empty SecurityContext the API server would
+// default a stored pod template to — semantically identical to nil, and
+// required so an unchanged reconcile stays a no-op (#315).
+func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	assert.Equal(t, &corev1.PodSecurityContext{}, pts.Spec.SecurityContext,
+		"omitting PodSecurityContext must produce the empty SecurityContext the API server defaults to")
+}
+
+// TestDefaultImagePullPolicy pins the mirror of the API server's defaulting
+// rule branch by branch — a silent divergence on any of these makes that
+// container churn on every reconcile (#315). Rule: the effective tag is the
+// explicit tag when present (even alongside a digest), "latest" when the
+// reference has neither tag nor digest, empty for digest-only; policy is
+// Always exactly when the effective tag is "latest".
+func TestDefaultImagePullPolicy(t *testing.T) {
+	cases := []struct {
+		image string
+		want  corev1.PullPolicy
+	}{
+		{"valkey/valkey:8.0.1", corev1.PullIfNotPresent},                  // plain tag
+		{"valkey/valkey:latest", corev1.PullAlways},                       // latest tag
+		{"valkey/valkey", corev1.PullAlways},                              // no tag, no digest
+		{"valkey/valkey@sha256:deadbeef", corev1.PullIfNotPresent},        // digest only
+		{"valkey/valkey:8.0.1@sha256:deadbeef", corev1.PullIfNotPresent},  // tag + digest
+		{"valkey/valkey:latest@sha256:deadbeef", corev1.PullAlways},       // latest tag wins over digest
+		{"registry:5000/valkey", corev1.PullAlways},                       // registry port is not a tag
+		{"registry:5000/valkey:8.0.1", corev1.PullIfNotPresent},           // registry port + tag
+		{"registry:5000/valkey@sha256:deadbeef", corev1.PullIfNotPresent}, // registry port + digest
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, defaultImagePullPolicy(tc.image), "image %q", tc.image)
+	}
+}
+
+func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{
+				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+				Zone: &valkeyv1.ZoneScheduling{
+					Pinning: &valkeyv1.ZonePinning{Zones: []string{"az1", "az2", "az3"}},
+				},
+			},
+		},
+	}
+
+	// shard 1 + node-index 1 => (1+1) % 3 => az3.
+	node := buildClusterValkeyNode(cluster, 1, 1)
+	assert.Equal(t, map[string]string{
+		"node.kubernetes.io/instance-type": "m6i.xlarge",
+		"topology.kubernetes.io/zone":      "az3",
+	}, node.Spec.NodeSelector)
+
+	// shard 0 + node-index 0 => az1, and the user's own entry survives.
+	first := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "az1", first.Spec.NodeSelector["topology.kubernetes.io/zone"])
+
+	// The cluster's own nodeSelector is not mutated by rendering.
+	assert.Equal(t, map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
+		cluster.Spec.Scheduling.NodeSelector)
+}
+
+func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+	}
+
+	node := buildClusterValkeyNode(cluster, 1, 0)
+	assert.Nil(t, node.Spec.NodeSelector, "no pinning must leave nodeSelector nil, not an empty map")
+}
+
+func TestApplyProbeAPIDefaults(t *testing.T) {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
+		},
+	}
+	applyProbeAPIDefaults(probe)
+	assert.Equal(t, int32(1), probe.TimeoutSeconds)
+	assert.Equal(t, int32(10), probe.PeriodSeconds)
+	assert.Equal(t, int32(1), probe.SuccessThreshold)
+	assert.Equal(t, int32(3), probe.FailureThreshold)
+	assert.Equal(t, corev1.URISchemeHTTP, probe.HTTPGet.Scheme)
+
+	// Explicit values are preserved.
+	custom := &corev1.Probe{TimeoutSeconds: 5, PeriodSeconds: 2, SuccessThreshold: 2, FailureThreshold: 9}
+	applyProbeAPIDefaults(custom)
+	assert.Equal(t, int32(5), custom.TimeoutSeconds)
+	assert.Equal(t, int32(2), custom.PeriodSeconds)
+	assert.Equal(t, int32(2), custom.SuccessThreshold)
+	assert.Equal(t, int32(9), custom.FailureThreshold)
 }

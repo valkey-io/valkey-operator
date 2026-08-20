@@ -11,7 +11,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 `internal/controller/valkeycluster_controller.go` — owns top-level orchestration. Each reconcile loop:
 
 1. Upserts a headless Service and PodDisruptionBudget
-2. Reconciles ACL users (Secret with type `valkey.io/acl`)
+2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
 3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard
 5. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
@@ -42,7 +42,7 @@ ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-ind
 
 ## Config hash propagation
 
-When `valkey.conf` changes, ValkeyCluster computes a SHA-256 of the rendered `valkey.conf` string and writes it to `ValkeyNode.spec.serverConfigHash`. The ValkeyNode controller stamps this as a pod template annotation, triggering a rolling restart.
+When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spec.config` to each ValkeyNode. The ValkeyNode pod-template builders derive a SHA-256 roll hash from the node spec (config minus the live-settable allowlist, plus TLS) and stamp it as a pod template annotation — gated on `spec.serverConfigMapName`, the marker that a parent manages the node's config. The changed template then rolls out one node at a time, authorized by `spec.workloadRevision`. The hash render is shared with the ValkeyCluster ConfigMap path, and `internal/controller/config_rollhash_test.go` pins it byte-for-byte so operator upgrades do not roll pods.
 
 ## Auto-generated files
 

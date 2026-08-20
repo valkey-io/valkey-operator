@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // WorkloadType specifies the type of workload to create for the ValkeyNode.
@@ -75,6 +76,11 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// the pod, protecting it from eviction under resource pressure.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// TopologySpreadConstraints defines pod topology spread constraints applied
 	// to the ValkeyNode workload. The operator augments these constraints with
 	// shard-aware selectors derived from node labels.
@@ -90,13 +96,6 @@ type ValkeyNodeSpec struct {
 	// +optional
 	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
 
-	// ServerConfigHash is a hash of the server ConfigMap contents. When set by
-	// the ValkeyCluster controller it bumps the spec Generation, which triggers
-	// the ValkeyNode controller to reconcile and update the pod template
-	// annotation — causing a rolling restart when the cluster config changes.
-	// +optional
-	ServerConfigHash string `json:"serverConfigHash,omitempty"`
-
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the
 	// container can load aclfile /config/users/users.acl.
@@ -111,7 +110,7 @@ type ValkeyNodeSpec struct {
 
 	// TLS configuration for the node
 	// +optional
-	TLS *TLSConfig `json:"tls,omitempty"`
+	TLS *NodeTLSSpec `json:"tls,omitempty"`
 
 	// Config is the user-facing Valkey configuration, copied verbatim from the
 	// owning cluster's Spec.Config. The controller applies the subset of these
@@ -119,6 +118,59 @@ type ValkeyNodeSpec struct {
 	// the rest take effect on the next pod roll.
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
+
+	// Override the PodSecurityContext applied to the ValkeyNode pod.
+	// When set, this overrides the default PodSecurityContext.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// TerminationGracePeriodSeconds is the pod termination grace period, set by
+	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
+	// can complete before SIGKILL.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
+	// controller authorizes this node to apply. The ValkeyCluster controller sets
+	// it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
+	// controller applies a rolling StatefulSet/Deployment template update only
+	// when the template it builds hashes to this value. Standalone nodes ignore
+	// the field and apply immediately.
+	// +optional
+	WorkloadRevision string `json:"workloadRevision,omitempty"`
+}
+
+// NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
+// ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this
+// API is the resolved view the node controller renders into valkey.conf and
+// volume mounts.
+type NodeTLSSpec struct {
+	// Certificates holds the certificate slots mounted into the node pod.
+	// +kubebuilder:validation:Required
+	Certificates NodeTLSCertificates `json:"certificates"`
+}
+
+// NodeTLSCertificates groups the certificate slots for a ValkeyNode.
+type NodeTLSCertificates struct {
+	// Server is the node identity presented to clients and peers, and the
+	// trust root for the node. The referenced secret must contain `ca.crt`,
+	// `tls.crt` and `tls.key`.
+	// +kubebuilder:validation:Required
+	Server NodeCertificateRef `json:"server"`
+}
+
+// NodeCertificateRef references a certificate and its private key held in a
+// Secret. It is deliberately a ref and not a source: the cluster-level
+// CertificateSource is a union that grows a cert-manager arm, whereas the
+// ValkeyCluster controller resolves any such source to a Secret before writing
+// the ValkeyNode, so this side only ever names something the node can mount.
+type NodeCertificateRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // ValkeyNodeStatus defines the observed state of ValkeyNode.
@@ -163,6 +215,20 @@ const (
 	// of Spec.Config has been successfully applied via CONFIG SET. The cluster
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
+	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
+	// wrote to the mounted Secret is live on the server. It is applied via ACL
+	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// means the desired user set, their password hashes, and the current ACL
+	// revision are live, confirmed by a bookkeeping revision user whose password
+	// is a hash of the managed ACL (see aclRevisionUser); permission-only
+	// edits are therefore honoured too.
+	ValkeyNodeConditionACLApplied = "ACLApplied"
+	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
+	// is intentionally deferred: the desired template differs from live, and
+	// Spec.WorkloadRevision has not yet authorized that template. Status True means
+	// waiting for the ValkeyCluster controller to advance Spec.WorkloadRevision
+	// (one node at a time today). Expected staging, not an error.
+	ValkeyNodeConditionWorkloadRollPending = "WorkloadRollPending"
 )
 
 const (
@@ -170,6 +236,9 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
+	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
+	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.
@@ -215,5 +284,8 @@ type ValkeyNodeList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ValkeyNode{}, &ValkeyNodeList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &ValkeyNode{}, &ValkeyNodeList{})
+		return nil
+	})
 }

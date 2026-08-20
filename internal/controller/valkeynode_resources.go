@@ -19,13 +19,13 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
+	"strings"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
 // valkeyNodeResourceName returns the name used for resources
@@ -172,6 +172,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				"/config/valkey.conf",
 				"--cluster-announce-ip",
 				"$(POD_IP)",
+				"--primaryuser",
+				replicationUser,
+				"--primaryauth",
+				"$(PRIMARY_AUTH)",
 			},
 			Env: []corev1.EnvVar{
 				{
@@ -179,6 +183,17 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 					ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{
 							FieldPath: "status.podIP",
+						},
+					},
+				},
+				{
+					Name: "PRIMARY_AUTH",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
+							},
+							Key: replicationUser,
 						},
 					},
 				},
@@ -202,7 +217,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/sh",
+							shellPath,
 							"-c",
 							"/scripts/liveness-check.sh",
 						},
@@ -218,7 +233,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/sh",
+							shellPath,
 							"-c",
 							"/scripts/liveness-check.sh",
 						},
@@ -234,7 +249,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
-							"/bin/sh",
+							shellPath,
 							"-c",
 							"/scripts/readiness-check.sh",
 						},
@@ -255,12 +270,12 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		},
 	}
 
-	if node.Spec.Persistence != nil {
-		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
-			Name:      dataVolumeName,
-			MountPath: dataMountPath,
-		})
-	}
+	// /data is always mounted (PVC when persistence is set, emptyDir otherwise)
+	// so the server can write nodes.conf under readOnlyRootFilesystem.
+	containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      dataVolumeName,
+		MountPath: dataMountPath,
+	})
 
 	if node.Spec.TLS != nil {
 		containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
@@ -278,61 +293,118 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
+	// Use operator-managed custom user for probes
+	clusterName := node.Labels[LabelCluster]
+	probeUserSecret := operatorUserPasswordSecret(clusterName)
+	if probeUserSecret != nil && probeUserSecret.Name != "" {
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "VALKEY_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "VALKEYCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: probeUserSecret}},
+		)
+	}
+
 	// Add exporter sidecar if enabled.
 	if node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))
 	}
 
-	return mergePatchContainers(containers, node.Spec.Containers)
+	merged, err := mergePatchContainers(containers, node.Spec.Containers)
+	if err != nil {
+		return nil, err
+	}
+	applyContainerAPIDefaults(merged)
+	return merged, nil
 }
 
-func buildShardTopologySpreadConstraints(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) []corev1.TopologySpreadConstraint {
-	if len(node.Spec.TopologySpreadConstraints) == 0 {
-		return nil
+// applyContainerAPIDefaults fills the container fields the API server would
+// otherwise default (imagePullPolicy, terminationMessagePath/Policy, port
+// protocol, env fieldRef apiVersion, probe period/timeout/thresholds/scheme). The workload
+// reconcilers assign the whole desired spec in their CreateOrUpdate mutate
+// functions, so a field left unset here is clobbered to its zero value on
+// every pass and the operator updates the workload on every reconcile even
+// though nothing changed (#315). Runs after mergePatchContainers so
+// user-supplied container patches are normalized the same way the API server
+// would normalize them.
+func applyContainerAPIDefaults(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		if c.ImagePullPolicy == "" {
+			c.ImagePullPolicy = defaultImagePullPolicy(c.Image)
+		}
+		if c.TerminationMessagePath == "" {
+			c.TerminationMessagePath = corev1.TerminationMessagePathDefault
+		}
+		if c.TerminationMessagePolicy == "" {
+			c.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+		}
+		for j := range c.Ports {
+			if c.Ports[j].Protocol == "" {
+				c.Ports[j].Protocol = corev1.ProtocolTCP
+			}
+		}
+		for j := range c.Env {
+			if vf := c.Env[j].ValueFrom; vf != nil && vf.FieldRef != nil && vf.FieldRef.APIVersion == "" {
+				vf.FieldRef.APIVersion = "v1"
+			}
+		}
+		applyProbeAPIDefaults(c.LivenessProbe)
+		applyProbeAPIDefaults(c.ReadinessProbe)
+		applyProbeAPIDefaults(c.StartupProbe)
 	}
-
-	constraints := make([]corev1.TopologySpreadConstraint, len(node.Spec.TopologySpreadConstraints))
-	clusterName := labels[LabelCluster]
-	shardIndex := labels[LabelShardIndex]
-
-	for i := range node.Spec.TopologySpreadConstraints {
-		constraint := *node.Spec.TopologySpreadConstraints[i].DeepCopy()
-		if constraint.LabelSelector == nil {
-			constraint.LabelSelector = &metav1.LabelSelector{}
-		}
-		if constraint.LabelSelector.MatchLabels == nil {
-			constraint.LabelSelector.MatchLabels = map[string]string{}
-		}
-		if clusterName != "" && !topologySpreadConstraintUsesKey(constraint, LabelCluster) {
-			constraint.LabelSelector.MatchLabels[LabelCluster] = clusterName
-		}
-		if shardIndex != "" && !topologySpreadConstraintUsesKey(constraint, LabelShardIndex) {
-			constraint.MatchLabelKeys = append(constraint.MatchLabelKeys, LabelShardIndex)
-		}
-		constraints[i] = constraint
-	}
-
-	return constraints
 }
 
-func topologySpreadConstraintUsesKey(constraint corev1.TopologySpreadConstraint, key string) bool {
-	return labelSelectorUsesKey(constraint.LabelSelector, key) ||
-		slices.Contains(constraint.MatchLabelKeys, key)
+func applyProbeAPIDefaults(probe *corev1.Probe) {
+	if probe == nil {
+		return
+	}
+	// Match API-server Probe defaults so user-supplied container patches that
+	// omit these fields do not look like perpetual pod-template drift.
+	if probe.TimeoutSeconds == 0 {
+		probe.TimeoutSeconds = 1
+	}
+	if probe.PeriodSeconds == 0 {
+		probe.PeriodSeconds = 10
+	}
+	if probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = 1
+	}
+	if probe.FailureThreshold == 0 {
+		probe.FailureThreshold = 3
+	}
+	if probe.HTTPGet != nil && probe.HTTPGet.Scheme == "" {
+		probe.HTTPGet.Scheme = corev1.URISchemeHTTP
+	}
 }
 
-func labelSelectorUsesKey(selector *metav1.LabelSelector, key string) bool {
-	if selector == nil {
-		return false
+// defaultImagePullPolicy mirrors the API server's imagePullPolicy defaulting
+// (SetDefaults_Container + parsers.ParseImageName): the effective tag is the
+// explicit tag when present — even alongside a digest — "latest" when the
+// reference has neither tag nor digest, and empty for a digest-only reference.
+// The policy is Always exactly when the effective tag is "latest",
+// IfNotPresent otherwise.
+func defaultImagePullPolicy(image string) corev1.PullPolicy {
+	name := image
+	if i := strings.IndexByte(name, '@'); i >= 0 {
+		name = name[:i] // strip the digest; an explicit tag before it still counts
 	}
-	if _, exists := selector.MatchLabels[key]; exists {
-		return true
+	tag := ""
+	// ':' only introduces a tag after the last '/' (a registry port such as
+	// "reg:5000/img" is not a tag).
+	if i := strings.LastIndexByte(name, ':'); i > strings.LastIndexByte(name, '/') {
+		tag = name[i+1:]
 	}
-	for _, expr := range selector.MatchExpressions {
-		if expr.Key == key {
-			return true
-		}
+	switch {
+	case tag == "latest":
+		return corev1.PullAlways
+	case tag != "":
+		return corev1.PullIfNotPresent
+	case len(name) < len(image):
+		// Digest-only reference (no tag): IfNotPresent.
+		return corev1.PullIfNotPresent
+	default:
+		// No tag, no digest: the reference normalizes to :latest.
+		return corev1.PullAlways
 	}
-	return false
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
@@ -351,12 +423,24 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	podSpec := corev1.PodSpec{
-		Containers:                containers,
-		ImagePullSecrets:          node.Spec.ImagePullSecrets,
-		NodeSelector:              node.Spec.NodeSelector,
-		Affinity:                  node.Spec.Affinity,
-		Tolerations:               node.Spec.Tolerations,
-		TopologySpreadConstraints: buildShardTopologySpreadConstraints(node, labels),
+		Containers:                    containers,
+		ImagePullSecrets:              node.Spec.ImagePullSecrets,
+		NodeSelector:                  node.Spec.NodeSelector,
+		Affinity:                      node.Spec.Affinity,
+		Tolerations:                   node.Spec.Tolerations,
+		PriorityClassName:             node.Spec.PriorityClassName,
+		TopologySpreadConstraints:     node.Spec.TopologySpreadConstraints,
+		SecurityContext:               node.Spec.PodSecurityContext,
+		TerminationGracePeriodSeconds: node.Spec.TerminationGracePeriodSeconds,
+		// Fields below are set to the API server's defaults. The workload
+		// reconcilers assign the whole desired spec in their CreateOrUpdate
+		// mutate functions, so any field left unset here gets clobbered back
+		// to its zero value on every pass, the API server re-defaults it, and
+		// the operator issues an Update on every reconcile even though nothing
+		// changed (#315).
+		RestartPolicy: corev1.RestartPolicyAlways,
+		DNSPolicy:     corev1.DNSClusterFirst,
+		SchedulerName: corev1.DefaultSchedulerName,
 		Volumes: []corev1.Volume{
 			{
 				Name: "scripts",
@@ -404,21 +488,43 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name: tlsVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: node.Spec.TLS.Certificate.SecretName,
+					SecretName: node.Spec.TLS.Certificates.Server.SecretName,
 				},
 			},
 		})
 	}
 
+	// Back /data with a PVC when persistence is set; otherwise an emptyDir so
+	// the cluster works on readOnlyRootFilesystem.
+	dataVolume := corev1.Volume{Name: dataVolumeName}
 	if node.Spec.Persistence != nil {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: dataVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: valkeyNodePVCName(node),
-				},
+		dataVolume.VolumeSource = corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: valkeyNodePVCName(node),
 			},
-		})
+		}
+	} else {
+		dataVolume.VolumeSource = corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		}
+	}
+	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
+
+	// Mirror the remaining API-server defaults (see the comment on the struct
+	// literal above): a nil here is not "unset" once stored, it is a diff.
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	if podSpec.TerminationGracePeriodSeconds == nil {
+		podSpec.TerminationGracePeriodSeconds = func(i int64) *int64 { return &i }(corev1.DefaultTerminationGracePeriodSeconds)
+	}
+	for i := range podSpec.Volumes {
+		if cm := podSpec.Volumes[i].ConfigMap; cm != nil && cm.DefaultMode == nil {
+			cm.DefaultMode = func(i int32) *int32 { return &i }(corev1.ConfigMapVolumeSourceDefaultMode)
+		}
+		if sec := podSpec.Volumes[i].Secret; sec != nil && sec.DefaultMode == nil {
+			sec.DefaultMode = func(i int32) *int32 { return &i }(corev1.SecretVolumeSourceDefaultMode)
+		}
 	}
 
 	return corev1.PodTemplateSpec{
@@ -452,6 +558,11 @@ func buildValkeyNodeDeployment(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Deplo
 				MatchLabels: labels,
 			},
 			Template: tmpl,
+			// API-server defaults, set explicitly so the desired spec equals
+			// the stored one and ensureDeployment's wholesale spec assignment
+			// stops producing an Update on every reconcile (#315).
+			RevisionHistoryLimit:    func(i int32) *int32 { return &i }(10),
+			ProgressDeadlineSeconds: func(i int32) *int32 { return &i }(600),
 		},
 	}, nil
 }
@@ -478,6 +589,21 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 				MatchLabels: labels,
 			},
 			Template: tmpl,
+			// API-server defaults, set explicitly so the desired spec equals
+			// the stored one and ensureStatefulSet's wholesale spec assignment
+			// stops producing an Update on every reconcile (#315).
+			PodManagementPolicy: appsv1.OrderedReadyPodManagement,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
+					Partition: func(i int32) *int32 { return &i }(0),
+				},
+			},
+			RevisionHistoryLimit: func(i int32) *int32 { return &i }(10),
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
 		},
 	}, nil
 }

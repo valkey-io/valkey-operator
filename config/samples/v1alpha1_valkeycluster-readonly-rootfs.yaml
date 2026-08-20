@@ -1,0 +1,33 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-readonly-rootfs-sample
+spec:
+  shards: 1
+  replicas: 1
+  exporter:
+    enabled: true
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      runAsUser: 56850
+      runAsGroup: 56850
+      seccompProfile:
+        type: RuntimeDefault
+  containers:
+    - name: server
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        runAsNonRoot: true
+        runAsUser: 56849
+        runAsGroup: 56849
+        seccompProfile:
+          type: RuntimeDefault

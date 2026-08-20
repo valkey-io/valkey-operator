@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	testutils "valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var _ = Describe("ValkeyNode Controller", func() {
@@ -190,6 +192,37 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/instance", resourceName))
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
+		})
+
+		It("should not update the StatefulSet on reconciles when nothing changed", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet on first reconcile")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			createdResourceVersion := sts.ResourceVersion
+
+			// The API server fills in defaults (podManagementPolicy,
+			// updateStrategy, imagePullPolicy, ...) when the StatefulSet is
+			// stored. The desired object built on the next pass must already
+			// carry those values, otherwise CreateOrUpdate sees a diff and
+			// issues an Update on every reconcile (#315).
+			By("reconciling again without any spec change")
+			for range 3 {
+				_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(createdResourceVersion),
+				"a reconcile with no changes must not write the StatefulSet")
 		})
 
 		It("should set Ready=false with PodNotReady condition when no pod exists", func() {
@@ -602,12 +635,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
 		})
 
-		It("should propagate ServerConfigHash spec field to StatefulSet pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set (simulating a cluster-managed node)")
+		It("derives the config hash annotation on the StatefulSet pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and Config set (simulating a cluster-managed node)")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				ServerConfigMapName: "ext-config",
-				ServerConfigHash:    "hash-v1",
+				Config:              map[string]string{"appendfsync": "everysec"},
 			})
 
 			r := &ValkeyNodeReconciler{
@@ -620,27 +653,128 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the StatefulSet pod template carries the config hash annotation")
-			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
-				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
-
-			By("simulating a config change by updating ServerConfigHash in the spec")
+			By("verifying the StatefulSet pod template carries the derived config hash annotation")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			node.Spec.ServerConfigHash = "hash-v2"
+			initialHash := nodeServerConfigRollHash(node)
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
+				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+
+			By("changing a non-live-settable config key")
+			node.Spec.Config["appendfsync"] = "always"
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			By("reconciling after the config change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the StatefulSet pod template annotation was updated, causing a rolling update")
+			By("verifying the annotation moved to the new derived hash, causing a rolling update")
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			newHash := nodeServerConfigRollHash(updated)
+			Expect(newHash).NotTo(Equal(initialHash))
 			sts2 := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
-			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
 				"updated config hash must be propagated to trigger pod restart")
+		})
+
+		It("does not add a config hash annotation for standalone nodes without ServerConfigMapName", func() {
+			By("recreating a standalone ValkeyNode with Config but no ServerConfigMapName")
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Config:       map[string]string{"appendfsync": "everysec"},
+			})
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("reconciling to create the StatefulSet")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the pod template has no config hash annotation (pre-existing standalone behavior)")
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
+		})
+
+		It("should defer rolling template updates for cluster-owned nodes until Spec.WorkloadRevision matches", func() {
+			By("recreating a cluster-owned ValkeyNode with matching WorkloadRevision")
+			ctrl := true
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Image:        "valkey/valkey:9.0.0",
+			})
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			rev, err := computeWorkloadRevision(node)
+			Expect(err).NotTo(HaveOccurred())
+			node.Spec.WorkloadRevision = rev
+			node.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "valkey.io/v1alpha1",
+				Kind:       "ValkeyCluster",
+				Name:       "parent-cluster",
+				UID:        "parent-uid",
+				Controller: &ctrl,
+			}}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet on first reconcile")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
+			initialGen := sts.Generation
+
+			By("changing Spec.Image without advancing WorkloadRevision")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Image = "valkey/valkey:9.0.1"
+			// Keep Spec.WorkloadRevision on the old value so the gate blocks.
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("StatefulSet template must stay on the old image")
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
+			Expect(sts.Generation).To(Equal(initialGen))
+
+			By("node is marked WorkloadRollPending awaiting Spec.WorkloadRevision")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			pending := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
+			Expect(pending).NotTo(BeNil())
+			Expect(pending.Status).To(Equal(metav1.ConditionTrue))
+			Expect(pending.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision))
+
+			By("advancing Spec.WorkloadRevision to the new template hash")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			newRev, err := computeWorkloadRevision(node)
+			Expect(err).NotTo(HaveOccurred())
+			node.Spec.WorkloadRevision = newRev
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("StatefulSet template advances to the new image and pending clears")
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.1"))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			Expect(testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)).To(BeNil())
 		})
 	})
 
@@ -764,8 +898,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:8.0.0"))
 		})
 
-		It("should propagate ServerConfigHash spec field to Deployment pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and ServerConfigHash set")
+		It("derives the config hash annotation on the Deployment pod template when ServerConfigMapName is set", func() {
+			By("recreating the ValkeyNode with ServerConfigMapName and Config set")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, node); err == nil {
 				node.Finalizers = nil
@@ -786,7 +920,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
 					ServerConfigMapName: "ext-config",
-					ServerConfigHash:    "hash-v1",
+					Config:              map[string]string{"appendfsync": "everysec"},
 				},
 			})).To(Succeed())
 
@@ -800,27 +934,33 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Deployment pod template carries the config hash annotation")
+			By("verifying the Deployment pod template carries the derived config hash annotation")
 			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			initialHash := nodeServerConfigRollHash(node)
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
-			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v1"),
+			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
 				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
 
-			By("simulating a config change by updating ServerConfigHash in the spec")
+			By("changing a non-live-settable config key")
 			updated := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			updated.Spec.ServerConfigHash = "hash-v2"
+			updated.Spec.Config["appendfsync"] = "always"
 			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
 			By("reconciling after the config change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Deployment pod template annotation was updated, causing a rolling update")
+			By("verifying the annotation moved to the new derived hash, causing a rolling update")
+			updated2 := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated2)).To(Succeed())
+			newHash := nodeServerConfigRollHash(updated2)
+			Expect(newHash).NotTo(Equal(initialHash))
 			dep2 := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
-			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, "hash-v2"),
+			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
 				"updated config hash must be propagated to trigger pod restart")
 		})
 	})
@@ -1186,6 +1326,16 @@ type fakeConfigClient struct {
 	params map[string]string
 	err    error
 	closed bool
+
+	// aclHashes is the server's current user -> password hashes, as ACL USERS
+	// and ACL GETUSER would report them.
+	aclHashes map[string][]string
+	// aclOnLoad is what an ACL LOAD converges the server to. Leaving it nil
+	// models a mounted aclfile that has not caught up yet, so the LOAD is a
+	// no-op.
+	aclOnLoad map[string][]string
+	aclLoads  int
+	aclErr    error
 }
 
 func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string) error {
@@ -1193,7 +1343,122 @@ func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string
 	return f.err
 }
 
+func (f *fakeConfigClient) LoadACL(_ context.Context) error {
+	f.aclLoads++
+	if f.aclErr != nil {
+		return f.aclErr
+	}
+	if f.aclOnLoad != nil {
+		f.aclHashes = f.aclOnLoad
+	}
+	return nil
+}
+
+func (f *fakeConfigClient) UserNames(_ context.Context) ([]string, error) {
+	if f.aclErr != nil {
+		return nil, f.aclErr
+	}
+	return slices.Sorted(maps.Keys(f.aclHashes)), nil
+}
+
+func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string) ([]string, error) {
+	if f.aclErr != nil {
+		return nil, f.aclErr
+	}
+	hashes, ok := f.aclHashes[username]
+	if !ok {
+		return []string{}, nil
+	}
+	return normalizeHashes(slices.Clone(hashes)), nil
+}
+
 func (f *fakeConfigClient) Close() { f.closed = true }
+
+var _ = Describe("applyLiveACL", Label("liveacl"), func() {
+	ctx := context.Background()
+
+	// One alice password ("aaa") is what the aclfile Secret asks for.
+	const aclSecretName = "live-acl-users"
+	const aclFileContent = "user alice on #aaa ~* +@all\n"
+	desiredHashes := map[string][]string{"alice": {"aaa"}}
+	staleHashes := map[string][]string{"alice": {"old"}}
+
+	nodeWith := func(secretName string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "live-acl-node", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{UsersACLSecretName: secretName},
+		}
+	}
+	reconcilerFor := func(fake *fakeConfigClient) *ValkeyNodeReconciler {
+		return &ValkeyNodeReconciler{
+			APIReader: k8sClient,
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: aclSecretName, Namespace: "default"},
+			Data:       map[string][]byte{aclFilename: []byte(aclFileContent)},
+		}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
+	})
+
+	It("does nothing when the node has no ACL secret", func() {
+		fake := &fakeConfigClient{}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(BeZero(), "must not open a client when there is no ACL to manage")
+	})
+
+	It("treats a missing secret as nothing to apply", func() {
+		fake := &fakeConfigClient{}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(BeZero())
+	})
+
+	It("still reloads when the passwords already match, so non-password edits converge", func() {
+		// A permissions-only change, or a removed user, leaves every desired
+		// password hash untouched. The reload must not be skipped on that basis
+		// or those edits would never reach the server.
+		fake := &fakeConfigClient{aclHashes: desiredHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
+		Expect(fake.closed).To(BeTrue())
+	})
+
+	It("reports synced once the mounted file has caught up", func() {
+		fake := &fakeConfigClient{aclHashes: staleHashes, aclOnLoad: desiredHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.aclLoads).To(Equal(1))
+	})
+
+	It("reports not synced when the mounted aclfile is still stale", func() {
+		// aclOnLoad nil: the LOAD reads the pre-update file and changes nothing.
+		fake := &fakeConfigClient{aclHashes: staleHashes}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeFalse(), "a premature LOAD must not be reported as applied")
+		Expect(fake.aclLoads).To(Equal(1))
+	})
+
+	It("returns an error when ACL LOAD fails", func() {
+		fake := &fakeConfigClient{aclErr: fmt.Errorf("boom")}
+		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).To(HaveOccurred())
+		Expect(synced).To(BeFalse())
+		Expect(fake.closed).To(BeTrue())
+	})
+})
 
 var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 	nodeWith := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {

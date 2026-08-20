@@ -25,16 +25,19 @@ import (
 	"slices"
 	"strconv"
 
+	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	valkeyv1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/internal/valkey"
 )
 
 const (
 	appName        = "valkey"
 	resourcePrefix = "valkey-"
+
+	// shellPath used in exec for running scripts
+	shellPath = "/bin/sh"
 )
 
 // Naming and labelling scheme
@@ -313,7 +316,7 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 }
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
-func getTLSConfig(ctx context.Context, c client.Client, secretName, serverName, namespace string) (*tls.Config, error) {
+func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {

@@ -238,7 +238,7 @@ spec:
 	AfterEach(func() {
 		// Always remove CPU pressure to avoid leaving nodes throttled
 		if cpuPressure {
-			unthrottleNodes(workerNodes)
+			unthrottleWorkerNodes(workerNodes)
 		}
 
 		if CurrentSpecReport().Failed() {
@@ -369,7 +369,7 @@ spec:
 
 			// Apply random CPU pressure to Kind worker nodes
 			if cpuPressure {
-				unthrottleNodes(workerNodes)
+				unthrottleWorkerNodes(workerNodes)
 				throttledNodes = throttleRandomWorkerNodes(rnd, workerNodes, cpuMin, cpuMax)
 				if len(throttledNodes) > 0 {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  CPU pressure on %v\n", throttledNodes)
@@ -380,7 +380,7 @@ spec:
 			if err != nil {
 				if strings.Contains(err.Error(), "skip:") {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  Skipped: %s\n", err)
-					unthrottleNodes(throttledNodes)
+					unthrottleWorkerNodes(throttledNodes)
 					continue
 				}
 				Fail(fmt.Sprintf("Iteration %d: scenario %s failed to inject: %v", iteration, scenario.Name, err))
@@ -420,7 +420,7 @@ spec:
 					iteration, recoveryTimeout, scenario.Name, targetShardsForIteration, seed))
 
 			// Remove CPU pressure after recovery
-			unthrottleNodes(throttledNodes)
+			unthrottleWorkerNodes(throttledNodes)
 
 			// Log cluster state after recovery
 			logClusterState(clusterName, "default", "after")
@@ -743,22 +743,22 @@ func pauseWorkerNode(ctx *ChaosContext) error {
 	for _, nodeName := range nodes {
 		cmd := exec.Command("docker", "pause", nodeName)
 		if _, err := utils.Run(cmd); err != nil {
-			_ = unpauseNodes(paused)
+			_ = unpauseWorkerNodes(paused)
 			return err
 		}
 		paused = append(paused, nodeName)
 	}
 	time.Sleep(duration)
-	return unpauseNodes(paused)
+	return unpauseWorkerNodes(paused)
 }
 
-// unpauseNodes unpauses every given Kind node, continuing past failures so a
-// single error cannot leave the remaining nodes frozen. Returns the first error.
-func unpauseNodes(nodes []string) error {
+// unpauseWorkerNodes unpauses every given worker node, continuing past failures
+// so a single error cannot leave the remaining nodes frozen. Returns the first error.
+func unpauseWorkerNodes(workers []string) error {
 	var firstErr error
-	for _, nodeName := range nodes {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing Kind node %s\n", nodeName)
-		cmd := exec.Command("docker", "unpause", nodeName)
+	for _, worker := range workers {
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing Kind node %s\n", worker)
+		cmd := exec.Command("docker", "unpause", worker)
 		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
 			firstErr = err
 		}

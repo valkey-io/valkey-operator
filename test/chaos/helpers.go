@@ -514,12 +514,12 @@ var partitionRules = [][]string{
 // partitionWorkerNode adds iptables DROP rules to isolate a worker node from the
 // cluster network. In Kind, worker nodes are docker containers. docker exec still
 // works as it uses the Docker daemon socket, not the container's network.
-func partitionWorkerNode(nodeName string) error {
+func partitionWorkerNode(worker string) error {
 	for _, rule := range partitionRules {
-		args := append([]string{"exec", nodeName, "iptables", "-A"}, rule...)
+		args := append([]string{"exec", worker, "iptables", "-A"}, rule...)
 		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil {
-			return fmt.Errorf("failed to partition worker node %s: %w", nodeName, err)
+			return fmt.Errorf("failed to partition worker node %s: %w", worker, err)
 		}
 	}
 	return nil
@@ -530,19 +530,19 @@ func partitionWorkerNode(nodeName string) error {
 // the worker node (such as the CNI's) untouched. Rules that are not present are
 // skipped, so this is safe to call on a node that was never partitioned. Removal
 // continues past failures so one error cannot leave the node partitioned.
-func healWorkerNode(nodeName string) error {
+func healWorkerNode(worker string) error {
 	var firstErr error
 	for _, rule := range partitionRules {
 		// iptables -C exits non-zero when the rule is absent, so only delete
 		// rules we actually added.
-		check := exec.Command("docker", append([]string{"exec", nodeName, "iptables", "-C"}, rule...)...)
+		check := exec.Command("docker", append([]string{"exec", worker, "iptables", "-C"}, rule...)...)
 		if _, err := utils.Run(check); err != nil {
 			continue
 		}
-		args := append([]string{"exec", nodeName, "iptables", "-D"}, rule...)
+		args := append([]string{"exec", worker, "iptables", "-D"}, rule...)
 		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("failed to heal worker node %s: %w", nodeName, err)
+			firstErr = fmt.Errorf("failed to heal worker node %s: %w", worker, err)
 		}
 	}
 	return firstErr
@@ -606,15 +606,15 @@ func getWorkerNodes() []string {
 	return utils.GetNonEmptyLines(output)
 }
 
-// throttleNodes applies a CPU limit to the given Docker containers.
-func throttleNodes(nodes []string, cpus float64) []string {
+// throttleWorkerNodes applies a CPU limit to the given worker nodes.
+func throttleWorkerNodes(workers []string, cpus float64) []string {
 	var throttled []string
-	for _, node := range nodes {
-		cmd := exec.Command("docker", "update", "--cpus", fmt.Sprintf("%.2f", cpus), node)
+	for _, worker := range workers {
+		cmd := exec.Command("docker", "update", "--cpus", fmt.Sprintf("%.2f", cpus), worker)
 		if _, err := utils.Run(cmd); err != nil {
 			continue
 		}
-		throttled = append(throttled, node)
+		throttled = append(throttled, worker)
 	}
 	return throttled
 }
@@ -632,26 +632,28 @@ func getHostCPUs() string {
 	return hostCPUs
 }
 
-// unthrottleNodes removes CPU limits from the given Docker containers.
-func unthrottleNodes(nodes []string) {
+// unthrottleWorkerNodes removes CPU limits from the given worker nodes.
+// docker update --cpus 0 is a no-op; we must set cpus to the host max.
+func unthrottleWorkerNodes(workers []string) {
 	cpus := getHostCPUs()
-	for _, node := range nodes {
-		cmd := exec.Command("docker", "update", "--cpus", cpus, node)
+	for _, worker := range workers {
+		cmd := exec.Command("docker", "update", "--cpus", cpus, worker)
 		_, _ = utils.Run(cmd)
 	}
 }
 
-// throttleRandomWorkerNodes picks a random subset of the given nodes and applies a random CPU limit per node.
-func throttleRandomWorkerNodes(rnd *rand.Rand, nodes []string, cpuMin, cpuMax float64) []string {
-	if len(nodes) == 0 {
+// throttleRandomWorkerNodes picks a random subset of the given worker nodes and
+// applies a random CPU limit per worker node.
+func throttleRandomWorkerNodes(rnd *rand.Rand, workers []string, cpuMin, cpuMax float64) []string {
+	if len(workers) == 0 {
 		return nil
 	}
-	count := 1 + rnd.Intn(len(nodes))
-	perm := rnd.Perm(len(nodes))
+	count := 1 + rnd.Intn(len(workers))
+	perm := rnd.Perm(len(workers))
 	var throttled []string
 	for i := 0; i < count; i++ {
 		cpus := cpuMin + rnd.Float64()*(cpuMax-cpuMin)
-		if result := throttleNodes([]string{nodes[perm[i]]}, cpus); len(result) > 0 {
+		if result := throttleWorkerNodes([]string{workers[perm[i]]}, cpus); len(result) > 0 {
 			throttled = append(throttled, result...)
 		}
 	}

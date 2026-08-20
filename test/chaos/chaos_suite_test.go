@@ -110,7 +110,7 @@ var _ = AfterSuite(func() {
 	// Reset any CPU pressure and network partitions before teardown, in case a
 	// scenario was interrupted between injecting a fault and undoing it.
 	workers := getWorkerNodes()
-	unthrottleNodes(workers)
+	unthrottleWorkerNodes(workers)
 	for _, worker := range workers {
 		_ = healWorkerNode(worker)
 	}

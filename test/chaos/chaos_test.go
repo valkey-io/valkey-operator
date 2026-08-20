@@ -34,8 +34,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
-	"valkey.io/valkey-operator/test/utils"
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 const namespace = "valkey-operator-system"
@@ -271,7 +271,7 @@ spec:
 			if podList, err := utils.Run(cmd); err == nil {
 				for _, pod := range utils.GetNonEmptyLines(podList) {
 					cmd = exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-						"valkey-cli", "CLUSTER", "NODES")
+						"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 					if output, err := utils.Run(cmd); err == nil {
 						_, _ = fmt.Fprintf(GinkgoWriter, "CLUSTER NODES from %s:\n%s\n", pod, output)
 					}
@@ -348,7 +348,7 @@ spec:
 			if podList, err := utils.Run(cmd); err == nil {
 				for _, pod := range utils.GetNonEmptyLines(podList) {
 					cmd = exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-						"valkey-cli", "EVAL", fmt.Sprintf("return server.log(server.LOG_WARNING, '%s')", logMsg), "0")
+						"sh", "-c", fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli EVAL \"return server.log(server.LOG_WARNING, '%s')\" 0", logMsg))
 					_, _ = utils.Run(cmd)
 				}
 			}
@@ -946,20 +946,6 @@ func envBool(key string, defaultVal bool) bool {
 		Fail(fmt.Sprintf("%s=%q is not a valid boolean", key, v))
 	}
 	return b
-}
-
-func envOneOfOrInt(key, defaultVal string, valid []string) string {
-	v := envOrDefault(key, defaultVal)
-	for _, opt := range valid {
-		if v == opt {
-			return v
-		}
-	}
-	if _, err := strconv.Atoi(v); err == nil {
-		return v
-	}
-	Fail(fmt.Sprintf("%s=%q is invalid, must be one of %v or an integer", key, v, valid))
-	return ""
 }
 
 func envOneOf(key, defaultVal string, valid []string) string {

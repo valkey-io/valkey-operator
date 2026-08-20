@@ -29,7 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"valkey.io/valkey-operator/test/utils"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 var (
@@ -58,12 +58,12 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	By("building the chaos client image")
-	cmd = exec.Command("docker", "build", "-t", "chaos-client:v0.0.1", "test/chaos/client/")
+	cmd = exec.Command("docker", "build", "-t", clientImage, "test/chaos/client/")
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the chaos client image")
 
 	By("loading the chaos client image on Kind")
-	err = utils.LoadImageToKindClusterWithName("chaos-client:v0.0.1")
+	err = utils.LoadImageToKindClusterWithName(clientImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the chaos client image into Kind")
 
 	setupCertManager()
@@ -96,6 +96,14 @@ var _ = BeforeSuite(func() {
 		"-n", namespace, "--limits=memory=512Mi", "--requests=memory=128Mi")
 	_, err = utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to set controller-manager memory limits")
+
+	// The resource change rolls the Deployment, so wait for the new pod to be
+	// available and for it to acquire leadership before creating any cluster.
+	By("waiting for the controller-manager rollout to complete")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/valkey-operator-controller-manager",
+		"-n", namespace, "--timeout=2m")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "controller-manager rollout did not complete")
 })
 
 var _ = AfterSuite(func() {

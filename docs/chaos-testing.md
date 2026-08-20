@@ -33,7 +33,7 @@ The `--ignore-interrupts` flag ensures the log is fully written even if you Ctrl
    - Picks a scenario (random or sequential)
    - Logs cluster state and per-shard key counts
    - Injects the fault
-   - Waits for recovery (Ready state + cluster health)
+   - Waits for recovery (Ready state, K8s resources, cluster health, and convergence)
    - Verifies data integrity (unless the scenario is expected to lose data)
 5. On failure, collects controller logs, pod states, and CLUSTER NODES output
 

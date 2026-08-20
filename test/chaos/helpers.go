@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"valkey.io/valkey-operator/test/utils"
+	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // DeletePod deletes a pod by name in the given namespace.
@@ -80,7 +80,7 @@ func getClusterNodesOutput(clusterName, namespace string) (string, error) {
 		return "", err
 	}
 	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-cli", "CLUSTER", "NODES")
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 	return utils.Run(cmd)
 }
 
@@ -101,7 +101,7 @@ func getShardPrimaryPod(clusterName, namespace string, shardIndex int) (string, 
 	}
 
 	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-cli", "CLUSTER", "NODES")
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to run CLUSTER NODES: %w", err)
@@ -126,7 +126,7 @@ func getShardReplicaPod(clusterName, namespace string, shardIndex int) (string, 
 	}
 
 	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-cli", "CLUSTER", "NODES")
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to run CLUSTER NODES: %w", err)
@@ -208,7 +208,7 @@ func verifyClusterHealth(clusterName, namespace string, shards, replicas int) er
 
 	for _, pod := range pods {
 		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
-			"valkey-cli", "CLUSTER", "INFO")
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER INFO")
 		info, err := utils.Run(cmd)
 		if err != nil {
 			return fmt.Errorf("CLUSTER INFO failed on %s: %w", pod, err)
@@ -218,10 +218,13 @@ func verifyClusterHealth(clusterName, namespace string, shards, replicas int) er
 		}
 
 		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
-			"valkey-cli", "CLUSTER", "NODES")
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 		nodes, err := utils.Run(cmd)
 		if err != nil {
 			return fmt.Errorf("CLUSTER NODES failed on %s: %w", pod, err)
+		}
+		if strings.HasPrefix(nodes, "ERR ") || strings.HasPrefix(nodes, "AUTH ") {
+			return fmt.Errorf("CLUSTER NODES returned an error on %s: %s", pod, nodes)
 		}
 		if err := verifyClusterNodesOutput(nodes, shards, replicas, pod); err != nil {
 			return err
@@ -320,7 +323,7 @@ func flushAll(clusterName, namespace string) error {
 		return err
 	}
 	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-cli", "CLUSTER", "NODES")
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return err
@@ -331,7 +334,7 @@ func flushAll(clusterName, namespace string) error {
 			return err
 		}
 		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
-			"valkey-cli", "FLUSHALL")
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli FLUSHALL")
 		if _, err := utils.Run(cmd); err != nil {
 			return fmt.Errorf("FLUSHALL failed on %s: %w", pod, err)
 		}
@@ -363,7 +366,7 @@ func getTotalKeyCount(clusterName, namespace string) (int, map[string]int, error
 	}
 
 	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"valkey-cli", "CLUSTER", "NODES")
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return 0, nil, err
@@ -378,7 +381,7 @@ func getTotalKeyCount(clusterName, namespace string) (int, map[string]int, error
 			return 0, nil, err
 		}
 		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
-			"valkey-cli", "INFO", "keyspace")
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli INFO keyspace")
 		info, err := utils.Run(cmd)
 		if err != nil {
 			return 0, nil, fmt.Errorf("INFO keyspace failed on %s: %w", pod, err)
@@ -636,7 +639,11 @@ func throttleRandomWorkerNodes(rnd *rand.Rand, nodes []string, cpuMin, cpuMax fl
 	return throttled
 }
 
-const backgroundClientPod = "chaos-background-client"
+const (
+	// clientImage is the chaos client image built and loaded in BeforeSuite.
+	clientImage         = "chaos-client:v0.0.1"
+	backgroundClientPod = "chaos-background-client"
+)
 
 // startBackgroundClient deploys a pod running a custom Go client that seeds
 // all keys and then continuously overwrites them. Waits for seeding to complete.
@@ -647,7 +654,7 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)
 	cmd := exec.Command("kubectl", "run", backgroundClientPod,
 		"-n", namespace,
-		"--image=chaos-client:v0.0.1",
+		"--image="+clientImage,
 		"--restart=Always",
 		"--image-pull-policy=Never",
 		"--env=VALKEY_ADDR="+svcHost,
@@ -697,26 +704,26 @@ func stopBackgroundClient(namespace string) {
 	_, _ = utils.Run(cmd)
 }
 
-// verifyClusterConverged checks that all ValkeyNodes have converged:
-// same workload revision, and no node stuck with ACLApplied=False.
+// verifyClusterConverged checks that all ValkeyNodes have converged: no node is
+// still waiting for a pod-template roll, and no node is stuck with ACLApplied=False.
 func verifyClusterConverged(clusterName, namespace string) error {
-	// All workload revisions must match
+	// No node should be left waiting for a pod-template roll to be authorized.
+	// WorkloadRollPending=True is expected staging mid-roll, but once the cluster
+	// has recovered every node must have completed or never needed its roll.
 	cmd := exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
 		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-		"-o", "jsonpath={range .items[*]}{.spec.workloadRevision}{\"\\n\"}{end}")
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="WorkloadRollPending")]}{.status}{end}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to get workload revisions: %w", err)
+		return fmt.Errorf("failed to get WorkloadRollPending conditions: %w", err)
 	}
-	var expected string
-	for _, rev := range strings.Split(strings.TrimSpace(output), "\n") {
-		if rev == "" {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
 			continue
 		}
-		if expected == "" {
-			expected = rev
-		} else if rev != expected {
-			return fmt.Errorf("workload revision mismatch: expected %s, got %s", expected, rev)
+		if parts[1] == "True" {
+			return fmt.Errorf("node %s still has WorkloadRollPending=True", parts[0])
 		}
 	}
 

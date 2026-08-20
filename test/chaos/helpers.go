@@ -548,6 +548,22 @@ func healWorkerNode(worker string) error {
 	return firstErr
 }
 
+// unpauseWorkerNode resumes a paused worker node. Nodes that are not paused are
+// skipped, so this is safe to call on a node that was never paused.
+func unpauseWorkerNode(worker string) error {
+	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Paused}}", worker))
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker node %s: %w", worker, err)
+	}
+	if strings.TrimSpace(out) != "true" {
+		return nil
+	}
+	if _, err := utils.Run(exec.Command("docker", "unpause", worker)); err != nil {
+		return fmt.Errorf("failed to unpause worker node %s: %w", worker, err)
+	}
+	return nil
+}
+
 // pauseContainer pauses the valkey container in a pod using ctr on the Kind node.
 func pauseContainer(podName, namespace string) error {
 	containerID, err := getContainerID(podName, namespace)

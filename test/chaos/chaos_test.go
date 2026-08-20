@@ -599,19 +599,16 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 		nodes = append(nodes, nodeName)
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
+	var partitioned []string
 	for _, nodeName := range nodes {
 		if err := partitionWorkerNode(nodeName); err != nil {
+			_ = healWorkerNodes(partitioned)
 			return err
 		}
+		partitioned = append(partitioned, nodeName)
 	}
 	time.Sleep(duration)
-	for _, nodeName := range nodes {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := healWorkerNode(nodeName); err != nil {
-			return err
-		}
-	}
-	return nil
+	return healWorkerNodes(partitioned)
 }
 
 func networkPartitionReplica(ctx *ChaosContext) error {
@@ -644,19 +641,29 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 		nodes = append(nodes, nodeName)
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
+	var partitioned []string
 	for _, nodeName := range nodes {
 		if err := partitionWorkerNode(nodeName); err != nil {
+			_ = healWorkerNodes(partitioned)
 			return err
 		}
+		partitioned = append(partitioned, nodeName)
 	}
 	time.Sleep(duration)
-	for _, nodeName := range nodes {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := healWorkerNode(nodeName); err != nil {
-			return err
+	return healWorkerNodes(partitioned)
+}
+
+// healWorkerNodes heals every given worker node, continuing past failures so a
+// single error cannot leave a node partitioned. Returns the first error.
+func healWorkerNodes(workers []string) error {
+	var firstErr error
+	for _, worker := range workers {
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing worker node %s\n", worker)
+		if err := healWorkerNode(worker); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func pausePrimaryContainer(ctx *ChaosContext) error {
@@ -671,19 +678,16 @@ func pausePrimaryContainer(ctx *ChaosContext) error {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing primary container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
 		pods = append(pods, pod)
 	}
+	var paused []string
 	for _, pod := range pods {
 		if err := pauseContainer(pod, ctx.Namespace); err != nil {
+			_ = unpauseContainers(paused, ctx.Namespace)
 			return err
 		}
+		paused = append(paused, pod)
 	}
 	time.Sleep(duration)
-	for _, pod := range pods {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing primary container in pod: %s\n", pod)
-		if err := unpauseContainer(pod, ctx.Namespace); err != nil {
-			return err
-		}
-	}
-	return nil
+	return unpauseContainers(paused, ctx.Namespace)
 }
 
 func pauseReplicaContainer(ctx *ChaosContext) error {
@@ -701,19 +705,30 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing replica container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
 		pods = append(pods, pod)
 	}
+	var paused []string
 	for _, pod := range pods {
 		if err := pauseContainer(pod, ctx.Namespace); err != nil {
+			_ = unpauseContainers(paused, ctx.Namespace)
 			return err
 		}
+		paused = append(paused, pod)
 	}
 	time.Sleep(duration)
+	return unpauseContainers(paused, ctx.Namespace)
+}
+
+// unpauseContainers unpauses the server container in every given pod, continuing
+// past failures so a single error cannot leave a container paused. Returns the
+// first error.
+func unpauseContainers(pods []string, namespace string) error {
+	var firstErr error
 	for _, pod := range pods {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing replica container in pod: %s\n", pod)
-		if err := unpauseContainer(pod, ctx.Namespace); err != nil {
-			return err
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing container in pod: %s\n", pod)
+		if err := unpauseContainer(pod, namespace); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func pauseWorkerNode(ctx *ChaosContext) error {
@@ -758,8 +773,7 @@ func unpauseWorkerNodes(workers []string) error {
 	var firstErr error
 	for _, worker := range workers {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing Kind node %s\n", worker)
-		cmd := exec.Command("docker", "unpause", worker)
-		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
+		if err := unpauseWorkerNode(worker); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

@@ -107,13 +107,13 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	// Reset any CPU pressure and network partitions before teardown, in case a
-	// scenario was interrupted between injecting a fault and undoing it.
+	// Undo any fault a scenario may have left behind, in case it was interrupted
+	// between injecting the fault and reverting it. Errors are ignored: a worker
+	// that was never faulted is the normal case.
 	workers := getWorkerNodes()
 	unthrottleWorkerNodes(workers)
-	for _, worker := range workers {
-		_ = healWorkerNode(worker)
-	}
+	_ = healWorkerNodes(workers)
+	_ = unpauseWorkerNodes(workers)
 
 	teardownCertManager()
 

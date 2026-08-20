@@ -68,7 +68,7 @@ containers:
 ```yaml
 exporter:
   enabled: true   # default
-  image: oliver006/redis_exporter:v1.80.0
+  image: oliver006/redis_exporter:v1.88.0
   args: # optional command-line flags for exporter
     - -ping-on-connect
   resources:

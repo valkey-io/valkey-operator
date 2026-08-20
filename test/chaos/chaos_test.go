@@ -95,6 +95,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		minShards       int
 		maxShards       int
 		replicas        int
+		maxReplicas     int
 		numKeys         int
 		dataSize        int
 		seededKeys      int
@@ -121,6 +122,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		minShards = envIntOrDefault("CHAOS_MIN_SHARDS", shards, 1 /* min */)
 		maxShards = envIntOrDefault("CHAOS_MAX_SHARDS", shards+3, minShards /* min */)
 		replicas = envIntOrDefault("CHAOS_REPLICAS", 1, 0 /* min */)
+		maxReplicas = envIntOrDefault("CHAOS_MAX_REPLICAS", replicas+2, replicas /* min */)
 		numKeys = envIntOrDefault("CHAOS_NUM_KEYS", 100000, 0 /* min */)
 		dataSize = envIntOrDefault("CHAOS_DATA_SIZE", 3, 1 /* min */)
 		targetShards = envOrDefault("CHAOS_TARGET_SHARDS", "random")
@@ -144,7 +146,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  WorkloadType:     %s\n", workloadType)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Persistence:      %v\n", persistence)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Shards:           %d (min=%d, max=%d)\n", shards, minShards, maxShards)
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Replicas:         %d\n", replicas)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Replicas:         %d (max=%d)\n", replicas, maxReplicas)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  NumKeys:          %d\n", numKeys)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  DataSize:         %d\n", dataSize)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  TargetShards:     %s\n", targetShards)
@@ -324,9 +326,14 @@ spec:
 				targetShardsForIteration = rnd.Perm(shards)[:count]
 			default:
 				for _, s := range strings.Split(targetShards, ",") {
-					if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-						targetShardsForIteration = append(targetShardsForIteration, v)
+					v, err := strconv.Atoi(strings.TrimSpace(s))
+					if err != nil {
+						Fail(fmt.Sprintf("CHAOS_TARGET_SHARDS=%q: %q is not a valid shard index", targetShards, s))
 					}
+					if v < 0 || v >= shards {
+						Fail(fmt.Sprintf("CHAOS_TARGET_SHARDS=%q: index %d is outside [0, %d)", targetShards, v, shards))
+					}
+					targetShardsForIteration = append(targetShardsForIteration, v)
 				}
 			}
 
@@ -362,7 +369,7 @@ spec:
 				MinShards:     minShards,
 				MaxShards:     maxShards,
 				Replicas:      replicas,
-				MaxReplicas:   replicas + 2,
+				MaxReplicas:   maxReplicas,
 				TolerationSec: tolerationSec,
 				Rand:          rnd,
 			}
@@ -806,6 +813,9 @@ func scaleShards(ctx *ChaosContext) error {
 }
 
 func scaleReplicas(ctx *ChaosContext) error {
+	if ctx.MaxReplicas == 0 {
+		return fmt.Errorf("skip: replica range is fixed at 0")
+	}
 	// Pick a random replica count in [0, MaxReplicas], excluding current.
 	newReplicas := ctx.Rand.Intn(ctx.MaxReplicas)
 	if newReplicas >= ctx.Replicas {

@@ -134,7 +134,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		cpuMax = envFloat64OrDefault("CHAOS_CPU_MAX", 1.0, cpuMin)
 		writeRPS = envIntOrDefault("CHAOS_WRITE_RPS", 20, 0 /* min */)
 		if cpuPressure {
-			workerNodes = utils.GetWorkerNodes()
+			workerNodes = getWorkerNodes()
 		}
 
 		rnd = rand.New(rand.NewSource(seed))
@@ -225,12 +225,12 @@ spec:
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 			g.Expect(cr.Status.ReadyShards).To(Equal(int32(shards)))
-			err = utils.VerifyClusterHealth(clusterName, "default", shards, replicas)
+			err = verifyClusterHealth(clusterName, "default", shards, replicas)
 			g.Expect(err).NotTo(HaveOccurred())
 		}, recoveryTimeout, 5*time.Second).Should(Succeed())
 
 		By("seeding test data")
-		seededKeys, err = utils.StartBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
+		seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
 		Expect(err).NotTo(HaveOccurred(), "Failed to seed test data")
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 	})
@@ -238,12 +238,12 @@ spec:
 	AfterEach(func() {
 		// Always remove CPU pressure to avoid leaving nodes throttled
 		if cpuPressure {
-			utils.UnthrottleNodes(workerNodes)
+			unthrottleNodes(workerNodes)
 		}
 
 		if CurrentSpecReport().Failed() {
 			// Dump keyspace counts
-			if total, perShard, err := utils.GetTotalKeyCount(clusterName, "default"); err == nil {
+			if total, perShard, err := getTotalKeyCount(clusterName, "default"); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "KEY COUNT at failure: total=%d, per-shard=%v\n", total, perShard)
 			}
 
@@ -288,7 +288,7 @@ spec:
 	})
 
 	AfterAll(func() {
-		utils.StopBackgroundClient("default")
+		stopBackgroundClient("default")
 		By("cleaning up chaos cluster")
 		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
@@ -336,7 +336,7 @@ spec:
 			logClusterState(clusterName, "default", "before")
 
 			// Log per-shard key counts before scenario
-			if _, perShard, err := utils.GetTotalKeyCount(clusterName, "default"); err == nil {
+			if _, perShard, err := getTotalKeyCount(clusterName, "default"); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "  KEY COUNT before: %v\n", perShard)
 			}
 
@@ -369,8 +369,8 @@ spec:
 
 			// Apply random CPU pressure to Kind worker nodes
 			if cpuPressure {
-				utils.UnthrottleNodes(workerNodes)
-				throttledNodes = utils.ThrottleRandomWorkerNodes(rnd, workerNodes, cpuMin, cpuMax)
+				unthrottleNodes(workerNodes)
+				throttledNodes = throttleRandomWorkerNodes(rnd, workerNodes, cpuMin, cpuMax)
 				if len(throttledNodes) > 0 {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  CPU pressure on %v\n", throttledNodes)
 				}
@@ -380,7 +380,7 @@ spec:
 			if err != nil {
 				if strings.Contains(err.Error(), "skip:") {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  Skipped: %s\n", err)
-					utils.UnthrottleNodes(throttledNodes)
+					unthrottleNodes(throttledNodes)
 					continue
 				}
 				Fail(fmt.Sprintf("Iteration %d: scenario %s failed to inject: %v", iteration, scenario.Name, err))
@@ -409,18 +409,18 @@ spec:
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
 					fmt.Sprintf("cluster state: %s, reason: %s", cr.Status.State, cr.Status.Reason))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(shards)))
-				err = utils.VerifyK8sResources(clusterName, "default", workloadType, shards, replicas)
+				err = verifyK8sResources(clusterName, "default", workloadType, shards, replicas)
 				g.Expect(err).NotTo(HaveOccurred(), "K8s resources not ready: %v", err)
-				err = utils.VerifyClusterHealth(clusterName, "default", shards, replicas)
+				err = verifyClusterHealth(clusterName, "default", shards, replicas)
 				g.Expect(err).NotTo(HaveOccurred(), "cluster health: %v", err)
-				err = utils.VerifyClusterConverged(clusterName, "default")
+				err = verifyClusterConverged(clusterName, "default")
 				g.Expect(err).NotTo(HaveOccurred(), "cluster convergence: %v", err)
 			}, recoveryTimeout, 5*time.Second).Should(Succeed(),
 				fmt.Sprintf("Iteration %d: cluster did not recover after %s (scenario=%s, shards=%v, seed=%d)",
 					iteration, recoveryTimeout, scenario.Name, targetShardsForIteration, seed))
 
 			// Remove CPU pressure after recovery
-			utils.UnthrottleNodes(throttledNodes)
+			unthrottleNodes(throttledNodes)
 
 			// Log cluster state after recovery
 			logClusterState(clusterName, "default", "after")
@@ -428,18 +428,18 @@ spec:
 			if !scenario.losesData(replicas) {
 				By(fmt.Sprintf("Iteration %d: verifying test data integrity", iteration))
 				Eventually(func() error {
-					return utils.VerifyTestData(clusterName, "default", seededKeys)
+					return verifyTestData(clusterName, "default", seededKeys)
 				}, 60*time.Second).Should(Succeed(),
 					fmt.Sprintf("Iteration %d: data integrity check failed (seed=%d)", iteration, seed))
 			} else {
 				By(fmt.Sprintf("Iteration %d: checking for data loss (scenario may lose data)", iteration))
-				if err := utils.VerifyTestData(clusterName, "default", seededKeys); err != nil {
+				if err := verifyTestData(clusterName, "default", seededKeys); err != nil {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: data lost (expected): %s\n", err)
 				}
 				By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
-				err := utils.FlushAll(clusterName, "default")
+				err := flushAll(clusterName, "default")
 				Expect(err).NotTo(HaveOccurred(), "Failed to flush data")
-				seededKeys, err = utils.StartBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
+				seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
 				Expect(err).NotTo(HaveOccurred(), "Failed to re-seed test data")
 				_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 			}
@@ -464,7 +464,7 @@ spec:
 func deletePrimaryPod(ctx *ChaosContext) error {
 	var pods []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
@@ -472,7 +472,7 @@ func deletePrimaryPod(ctx *ChaosContext) error {
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
-		if err := utils.DeletePod(pod, ctx.Namespace); err != nil {
+		if err := deletePodByName(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
@@ -485,7 +485,7 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 	}
 	var pods []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
@@ -493,7 +493,7 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
-		if err := utils.DeletePod(pod, ctx.Namespace); err != nil {
+		if err := deletePodByName(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
@@ -518,7 +518,7 @@ func deleteShardPods(ctx *ChaosContext) error {
 	}
 
 	for _, pod := range pods {
-		if err := utils.DeletePod(pod, ctx.Namespace); err != nil {
+		if err := deletePodByName(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
@@ -528,11 +528,11 @@ func deleteShardPods(ctx *ChaosContext) error {
 func deletePrimaryWorkload(ctx *ChaosContext) error {
 	var workloads []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
-		workload, err := utils.GetWorkloadForPod(pod, ctx.Namespace, ctx.WorkloadType)
+		workload, err := getWorkloadForPod(pod, ctx.Namespace, ctx.WorkloadType)
 		if err != nil {
 			return err
 		}
@@ -540,7 +540,7 @@ func deletePrimaryWorkload(ctx *ChaosContext) error {
 		workloads = append(workloads, workload)
 	}
 	for _, workload := range workloads {
-		if err := utils.DeleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
+		if err := deleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
 			return err
 		}
 	}
@@ -553,11 +553,11 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 	}
 	var workloads []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
-		workload, err := utils.GetWorkloadForPod(pod, ctx.Namespace, ctx.WorkloadType)
+		workload, err := getWorkloadForPod(pod, ctx.Namespace, ctx.WorkloadType)
 		if err != nil {
 			return err
 		}
@@ -565,7 +565,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 		workloads = append(workloads, workload)
 	}
 	for _, workload := range workloads {
-		if err := utils.DeleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
+		if err := deleteWorkload(workload, ctx.Namespace, ctx.WorkloadType); err != nil {
 			return err
 		}
 	}
@@ -583,11 +583,11 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 	duration := randomDuration(ctx.Rand, 3*time.Second, maxDuration)
 	var nodes []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
-		nodeName, err := utils.GetPodNodeName(pod, ctx.Namespace)
+		nodeName, err := getPodNodeName(pod, ctx.Namespace)
 		if err != nil {
 			return err
 		}
@@ -600,14 +600,14 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	for _, nodeName := range nodes {
-		if err := utils.PartitionNode(nodeName); err != nil {
+		if err := partitionNode(nodeName); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, nodeName := range nodes {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := utils.HealNode(nodeName); err != nil {
+		if err := healNode(nodeName); err != nil {
 			return err
 		}
 	}
@@ -628,11 +628,11 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	duration := randomDuration(ctx.Rand, 3*time.Second, maxDuration)
 	var nodes []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
-		nodeName, err := utils.GetPodNodeName(pod, ctx.Namespace)
+		nodeName, err := getPodNodeName(pod, ctx.Namespace)
 		if err != nil {
 			return err
 		}
@@ -645,14 +645,14 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	for _, nodeName := range nodes {
-		if err := utils.PartitionNode(nodeName); err != nil {
+		if err := partitionNode(nodeName); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, nodeName := range nodes {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Healing node %s\n", nodeName)
-		if err := utils.HealNode(nodeName); err != nil {
+		if err := healNode(nodeName); err != nil {
 			return err
 		}
 	}
@@ -664,7 +664,7 @@ func pausePrimaryContainer(ctx *ChaosContext) error {
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
 	var pods []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
@@ -672,14 +672,14 @@ func pausePrimaryContainer(ctx *ChaosContext) error {
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
-		if err := utils.PauseContainer(pod, ctx.Namespace); err != nil {
+		if err := pauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, pod := range pods {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing primary container in pod: %s\n", pod)
-		if err := utils.UnpauseContainer(pod, ctx.Namespace); err != nil {
+		if err := unpauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
@@ -694,7 +694,7 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
 	var pods []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return fmt.Errorf("skip: %w", err)
 		}
@@ -702,14 +702,14 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
-		if err := utils.PauseContainer(pod, ctx.Namespace); err != nil {
+		if err := pauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
 	time.Sleep(duration)
 	for _, pod := range pods {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing replica container in pod: %s\n", pod)
-		if err := utils.UnpauseContainer(pod, ctx.Namespace); err != nil {
+		if err := unpauseContainer(pod, ctx.Namespace); err != nil {
 			return err
 		}
 	}
@@ -723,11 +723,11 @@ func pauseWorkerNode(ctx *ChaosContext) error {
 	duration := randomDuration(ctx.Rand, 3*time.Second, evictionThreshold+30*time.Second)
 	var paused []string
 	for _, shard := range ctx.TargetShards {
-		pod, err := utils.GetShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
 			return err
 		}
-		nodeName, err := utils.GetPodNodeName(pod, ctx.Namespace)
+		nodeName, err := getPodNodeName(pod, ctx.Namespace)
 		if err != nil {
 			return err
 		}
@@ -893,10 +893,10 @@ func deleteControllerPod(_ *ChaosContext) error {
 
 // logClusterState logs pod placement and CLUSTER NODES with a label (e.g. "before" or "after").
 func logClusterState(clusterName, namespace, label string) {
-	if output, err := utils.GetPodsWide(clusterName, namespace); err == nil {
+	if output, err := getPodsWide(clusterName, namespace); err == nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  PODS %s:\n%s\n", label, output)
 	}
-	if output, err := utils.GetClusterNodes(clusterName, namespace); err == nil {
+	if output, err := getClusterNodesOutput(clusterName, namespace); err == nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  CLUSTER NODES %s:\n%s", label, output)
 	}
 }

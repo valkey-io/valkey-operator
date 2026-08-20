@@ -124,7 +124,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		maxShards = envIntOrDefault("CHAOS_MAX_SHARDS", shards+3, minShards /* min */)
 		replicas = envIntOrDefault("CHAOS_REPLICAS", 1, 0 /* min */)
 		maxReplicas = envIntOrDefault("CHAOS_MAX_REPLICAS", replicas+2, replicas /* min */)
-		numKeys = envIntOrDefault("CHAOS_NUM_KEYS", 100000, 0 /* min */)
+		numKeys = envIntOrDefault("CHAOS_NUM_KEYS", 100000, 1 /* min */)
 		dataSize = envIntOrDefault("CHAOS_DATA_SIZE", 3, 1 /* min */)
 		targetShards = envOrDefault("CHAOS_TARGET_SHARDS", "random")
 		mode = envOneOf("CHAOS_MODE", "random", []string{"random", "sequential"})
@@ -610,7 +610,8 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 	var partitioned []string
 	for _, nodeName := range nodes {
 		if err := partitionWorkerNode(nodeName); err != nil {
-			_ = healWorkerNodes(partitioned)
+			// Include nodeName: partitionWorkerNode may have applied some rules.
+			_ = healWorkerNodes(append(partitioned, nodeName))
 			return err
 		}
 		partitioned = append(partitioned, nodeName)
@@ -652,7 +653,8 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	var partitioned []string
 	for _, nodeName := range nodes {
 		if err := partitionWorkerNode(nodeName); err != nil {
-			_ = healWorkerNodes(partitioned)
+			// Include nodeName: partitionWorkerNode may have applied some rules.
+			_ = healWorkerNodes(append(partitioned, nodeName))
 			return err
 		}
 		partitioned = append(partitioned, nodeName)
@@ -723,20 +725,6 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 	}
 	time.Sleep(duration)
 	return unpauseContainers(paused, ctx.Namespace)
-}
-
-// unpauseContainers unpauses the server container in every given pod, continuing
-// past failures so a single error cannot leave a container paused. Returns the
-// first error.
-func unpauseContainers(pods []string, namespace string) error {
-	var firstErr error
-	for _, pod := range pods {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Unpausing container in pod: %s\n", pod)
-		if err := unpauseContainer(pod, namespace); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
 }
 
 func pauseWorkerNode(ctx *ChaosContext) error {

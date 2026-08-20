@@ -88,6 +88,19 @@ Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 Scenarios marked "disabled by default" are excluded unless explicitly listed in `CHAOS_SCENARIOS`.
 They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testing.
 
+### Fault Cleanup
+
+Each scenario reverts its own fault, rolling back the targets it already faulted if
+injection fails partway through.
+
+Worker node faults (network partitions, node pauses, CPU throttling) are reverted in
+`AfterSuite` as well, since worker nodes are docker containers that outlive the suite
+and would carry the fault into the next run. Pod faults (container pauses) need no
+such cleanup: teardown deletes the ValkeyCluster and its pods go with it.
+
+A run that fails or is interrupted deliberately keeps the Kind cluster for
+troubleshooting. Remove it with `kind delete cluster --name valkey-operator-test-chaos`.
+
 ### Client
 
 A custom Go client (`test/chaos/client/`) handles seeding and continuous writes.

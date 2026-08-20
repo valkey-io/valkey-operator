@@ -107,9 +107,12 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	// Undo any fault a scenario may have left behind, in case it was interrupted
-	// between injecting the fault and reverting it. Errors are ignored: a worker
-	// that was never faulted is the normal case.
+	// Undo any worker node fault a scenario may have left behind, in case it was
+	// interrupted between injecting the fault and reverting it. Worker nodes are
+	// docker containers that outlive the suite, so a leftover iptables rule or
+	// pause would carry over to the next run. Pod-level faults need no cleanup
+	// here: AfterAll deletes the ValkeyCluster, which removes the pods and their
+	// containers. Errors are ignored, a worker that was never faulted is normal.
 	workers := getWorkerNodes()
 	unthrottleWorkerNodes(workers)
 	_ = healWorkerNodes(workers)

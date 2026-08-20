@@ -594,6 +594,20 @@ func unpauseContainer(podName, namespace string) error {
 	return err
 }
 
+// unpauseContainers unpauses the server container in every given pod, continuing
+// past failures so a single error cannot leave a container paused. Returns the
+// first error.
+func unpauseContainers(pods []string, namespace string) error {
+	var firstErr error
+	for _, pod := range pods {
+		fmt.Printf("  Unpausing container in pod: %s\n", pod)
+		if err := unpauseContainer(pod, namespace); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // getContainerID returns the container ID for the server container in a pod.
 // containerID format: containerd://abc123 or docker://abc123
 func getContainerID(podName, namespace string) (string, error) {
@@ -686,6 +700,9 @@ const (
 // all keys and then continuously overwrites them. Waits for seeding to complete.
 // Returns the number of keys seeded.
 func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps int) (int, error) {
+	if numKeys < 1 {
+		return 0, fmt.Errorf("numKeys must be >= 1, got %d", numKeys)
+	}
 	stopBackgroundClient(namespace)
 
 	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)

@@ -213,7 +213,7 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 
 	assert.Equal(t, "valkey-mynode", ss.Name)
 	assert.Equal(t, "test-ns", ss.Namespace)
-	assert.Equal(t, "valkey-mynode", ss.Spec.ServiceName, "ServiceName should match resource name")
+	assert.Equal(t, "valkey-mynode", ss.Spec.ServiceName, "standalone ServiceName should match resource name")
 	require.NotNil(t, ss.Spec.Replicas)
 	assert.Equal(t, int32(1), *ss.Spec.Replicas)
 
@@ -228,6 +228,121 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	// Verify the template has the right container
 	require.Len(t, ss.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
+}
+
+func TestBuildValkeyNodeStatefulSet_ClusterOwnedUsesHeadlessServiceName(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	ss, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	assert.Equal(t, headlessServiceName("mycluster"), ss.Spec.ServiceName)
+}
+
+func TestValkeyAnnounceArgsAndEnv(t *testing.T) {
+	t.Run("default IP", func(t *testing.T) {
+		node := newTestValkeyNode("n", "ns")
+		args, env := valkeyAnnounceArgsAndEnv(node)
+		assert.Equal(t, []string{"--cluster-announce-ip", "$(POD_IP)"}, args)
+		require.Len(t, env, 1)
+		assert.Equal(t, "POD_IP", env[0].Name)
+	})
+	t.Run("Hostname FQDN", func(t *testing.T) {
+		node := newTestValkeyNode("mycluster-0-0", "ns")
+		node.Labels = map[string]string{LabelCluster: "mycluster"}
+		node.Spec.PreferredEndpointType = valkeyv1.PreferredEndpointTypeHostname
+		node.Spec.ClusterDomain = "example.local"
+		args, env := valkeyAnnounceArgsAndEnv(node)
+		assert.Equal(t, []string{
+			"--cluster-announce-hostname",
+			"$(POD_NAME).valkey-mycluster.ns.svc.example.local.",
+		}, args)
+		require.Len(t, env, 1)
+		assert.Equal(t, "POD_NAME", env[0].Name)
+	})
+}
+
+func TestHeadlessServiceFQDN(t *testing.T) {
+	assert.Equal(t, "valkey-c.default.svc.cluster.local.", headlessServiceFQDN("c", "default", ""))
+	assert.Equal(t, "valkey-c.ns.svc.corp.local.", headlessServiceFQDN("c", "ns", "corp.local"))
+	assert.Equal(t, "valkey-c.ns.svc.corp.local.", headlessServiceFQDN("c", "ns", "corp.local."))
+}
+
+func TestStatefulSetAfterServiceNameChange(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	desired, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	require.Equal(t, headlessServiceName("mycluster"), desired.Spec.ServiceName)
+
+	live := desired.DeepCopy()
+	live.Spec.ServiceName = "valkey-mycluster-0-0" // pre-migration value
+	live.Spec.Template.Annotations = map[string]string{"live": "template"}
+	live.UID = "live-uid"
+	live.ResourceVersion = "99"
+
+	// Desired template differs (would be a real roll if applied now).
+	desired.Spec.Template.Annotations = map[string]string{"desired": "template"}
+
+	out := statefulSetAfterServiceNameChange(desired, live)
+	assert.Equal(t, desired.Spec.ServiceName, out.Spec.ServiceName)
+	assert.Equal(t, live.Spec.Template.Annotations, out.Spec.Template.Annotations)
+	assert.Empty(t, out.ResourceVersion)
+	assert.Empty(t, string(out.UID))
+	// Must not carry the desired template that would bypass WorkloadRevision.
+	assert.NotEqual(t, desired.Spec.Template.Annotations, out.Spec.Template.Annotations)
+}
+
+func TestRefuseDesiredSTSCreate(t *testing.T) {
+	ctrl := true
+	owned := newTestValkeyNode("c-0-0", "ns")
+	owned.OwnerReferences = []metav1.OwnerReference{{
+		Kind:       "ValkeyCluster",
+		Controller: &ctrl,
+	}}
+	pod := &corev1.Pod{}
+	hash := "abc"
+
+	t.Run("missing STS with live pod and WR mismatch", func(t *testing.T) {
+		assert.True(t, refuseDesiredSTSCreate(owned, pod, hash))
+	})
+	t.Run("WR matches", func(t *testing.T) {
+		n := owned.DeepCopy()
+		n.Spec.WorkloadRevision = hash
+		assert.False(t, refuseDesiredSTSCreate(n, pod, hash))
+	})
+	t.Run("no pod is first create", func(t *testing.T) {
+		assert.False(t, refuseDesiredSTSCreate(owned, nil, hash))
+	})
+	t.Run("standalone", func(t *testing.T) {
+		assert.False(t, refuseDesiredSTSCreate(newTestValkeyNode("solo", "ns"), pod, hash))
+	})
+}
+
+func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
+	base := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+	}
+
+	t.Run("default IP leaves announce fields empty", func(t *testing.T) {
+		n := buildClusterValkeyNode(base, 0, 0)
+		assert.Empty(t, n.Spec.PreferredEndpointType)
+		assert.Empty(t, n.Spec.ClusterDomain)
+		assert.Equal(t, "c", n.Labels[LabelCluster])
+	})
+
+	t.Run("Hostname sets PreferredEndpointType and ClusterDomain", func(t *testing.T) {
+		c := base.DeepCopy()
+		c.Spec.Networking = &valkeyv1.NetworkingSpec{
+			ClusterDomain: "example.local",
+			Discovery: &valkeyv1.DiscoverySpec{
+				PreferredEndpointType: valkeyv1.PreferredEndpointTypeHostname,
+			},
+		}
+		n := buildClusterValkeyNode(c, 0, 0)
+		assert.Equal(t, valkeyv1.PreferredEndpointTypeHostname, n.Spec.PreferredEndpointType)
+		assert.Equal(t, "example.local", n.Spec.ClusterDomain)
+	})
 }
 
 func TestBuildValkeyNodePVC(t *testing.T) {

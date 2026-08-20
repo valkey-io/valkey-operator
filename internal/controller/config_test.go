@@ -81,7 +81,7 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 		rollConfig := renderServerConfig(map[string]string{
 			"maxmemory-policy": "allkeys-lru", // allowlisted
 			"appendonly":       "yes",         // not allowlisted
-		}, getBaseConfig(nil), liveConfigAllowlist)
+		}, getBaseConfig(nil, false), liveConfigAllowlist)
 		Expect(rollConfig).NotTo(ContainSubstring("maxmemory-policy"))
 		Expect(rollConfig).To(ContainSubstring("appendonly"))
 		Expect(rollConfig).To(ContainSubstring("cluster-enabled")) // base retained
@@ -111,5 +111,30 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 			"appendonly":       "yes",
 		})
 		Expect(out).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+	})
+})
+
+var _ = Describe("Discovery managed config", func() {
+	It("omits cluster-preferred-endpoint-type for default IP announce", func() {
+		cfg := buildManagedConfig(true, nil, false)
+		Expect(cfg).NotTo(HaveKey("cluster-preferred-endpoint-type"))
+	})
+
+	It("sets cluster-preferred-endpoint-type hostname when Hostname announce is on", func() {
+		cfg := buildManagedConfig(true, nil, true)
+		Expect(cfg["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+	})
+
+	It("getBaseConfig follows PrefersHostnameAnnounce", func() {
+		cluster := getSampleCluster()
+		tls := nodeTLSFromCluster(cluster.GetTLS())
+		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce())).NotTo(HaveKey("cluster-preferred-endpoint-type"))
+
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			Discovery: &valkeyiov1alpha1.DiscoverySpec{
+				PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
+			},
+		}
+		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce())["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 })

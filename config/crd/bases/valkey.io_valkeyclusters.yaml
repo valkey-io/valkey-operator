@@ -1884,9 +1884,35 @@ spec:
                 type: array
               networking:
                 description: |-
-                  Networking groups how clients and peers reach cluster nodes (TLS today;
-                  discovery and external access land in follow-ups under this object).
+                  Networking groups how clients and peers reach cluster nodes (TLS,
+                  in-cluster discovery announce, and later external access).
                 properties:
+                  clusterDomain:
+                    default: cluster.local
+                    description: |-
+                      ClusterDomain is the DNS suffix kubelet publishes Service DNS under
+                      (kubelet --cluster-domain). Used when building Hostname announce FQDNs.
+                      Must match the cluster. Default cluster.local.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$
+                    type: string
+                  discovery:
+                    description: Discovery configures in-cluster endpoint announcement
+                      after CLUSTER SLOTS.
+                    properties:
+                      preferredEndpointType:
+                        default: IP
+                        description: |-
+                          PreferredEndpointType selects IP (default) or Hostname announcement.
+                          Hostname uses per-pod DNS under the cluster headless Service
+                          (<pod>.<headless>.<namespace>.svc.<clusterDomain>) and requires
+                          workloadType StatefulSet (or the default).
+                        enum:
+                        - IP
+                        - Hostname
+                        type: string
+                    type: object
                   tls:
                     description: TLS configuration for the cluster.
                     properties:
@@ -3860,6 +3886,12 @@ spec:
               rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning)
                 || !has(self.scheduling.nodeSelector) || !(''topology.kubernetes.io/zone''
                 in self.scheduling.nodeSelector)'
+            - message: networking.discovery.preferredEndpointType Hostname requires
+                workloadType StatefulSet (or omit workloadType for the StatefulSet
+                default)
+              rule: '!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType)
+                || self.networking.discovery.preferredEndpointType != ''Hostname''
+                || !has(self.workloadType) || self.workloadType == ''StatefulSet'''
           status:
             default:
               readyShards: 0

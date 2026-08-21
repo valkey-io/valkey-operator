@@ -61,6 +61,17 @@ var _ = Describe("exporter enabled defaulting", func() {
 		return stored
 	}
 
+	// expectDefaultedTrue asserts the API server materialised the field rather
+	// than leaving it nil. IsEnabled() alone would also pass on a nil, so it
+	// cannot tell a working default from a dropped marker.
+	expectDefaultedTrue := func(cluster *valkeyiov1alpha1.ValkeyCluster) {
+		GinkgoHelper()
+		Expect(cluster.Spec.Exporter.Enabled).NotTo(BeNil(),
+			"the CRD default must materialise enabled on the stored object")
+		Expect(*cluster.Spec.Exporter.Enabled).To(BeTrue())
+		Expect(cluster.Spec.Exporter.IsEnabled()).To(BeTrue())
+	}
+
 	It("enables the exporter when spec.exporter is omitted", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-omitted", Namespace: "default"},
@@ -73,14 +84,14 @@ var _ = Describe("exporter enabled defaulting", func() {
 
 		stored := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "exp-omitted", Namespace: "default"}, stored)).To(Succeed())
-		Expect(stored.Spec.Exporter.IsEnabled()).To(BeTrue())
+		expectDefaultedTrue(stored)
 	})
 
 	It("keeps the exporter enabled when only image is set", func() {
 		stored := storeCluster("exp-image", valkeyiov1alpha1.ExporterSpec{
 			Image: "oliver006/redis_exporter:v1.80.0",
 		})
-		Expect(stored.Spec.Exporter.IsEnabled()).To(BeTrue())
+		expectDefaultedTrue(stored)
 	})
 
 	It("keeps the exporter enabled when only resources are set", func() {
@@ -89,25 +100,27 @@ var _ = Describe("exporter enabled defaulting", func() {
 				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Mi")},
 			},
 		})
-		Expect(stored.Spec.Exporter.IsEnabled()).To(BeTrue())
+		expectDefaultedTrue(stored)
 	})
 
 	It("keeps the exporter enabled when only args are set", func() {
 		stored := storeCluster("exp-args", valkeyiov1alpha1.ExporterSpec{
 			Args: []string{"--log-format=json"},
 		})
-		Expect(stored.Spec.Exporter.IsEnabled()).To(BeTrue())
+		expectDefaultedTrue(stored)
 	})
 
 	It("keeps the exporter enabled when only securityContext is set", func() {
 		stored := storeCluster("exp-secctx", valkeyiov1alpha1.ExporterSpec{
 			SecurityContext: &corev1.SecurityContext{RunAsNonRoot: boolPtr(true)},
 		})
-		Expect(stored.Spec.Exporter.IsEnabled()).To(BeTrue())
+		expectDefaultedTrue(stored)
 	})
 
 	It("honours an explicit enabled: false", func() {
 		stored := storeCluster("exp-disabled", valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)})
+		Expect(stored.Spec.Exporter.Enabled).NotTo(BeNil())
+		Expect(*stored.Spec.Exporter.Enabled).To(BeFalse())
 		Expect(stored.Spec.Exporter.IsEnabled()).To(BeFalse())
 	})
 
@@ -121,7 +134,8 @@ var _ = Describe("exporter enabled defaulting", func() {
 
 		reread := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "exp-disabled-update", Namespace: "default"}, reread)).To(Succeed())
-		Expect(reread.Spec.Exporter.IsEnabled()).To(BeFalse(),
+		Expect(reread.Spec.Exporter.Enabled).NotTo(BeNil())
+		Expect(*reread.Spec.Exporter.Enabled).To(BeFalse(),
 			"an explicit false must survive a round trip through the API server")
 	})
 })

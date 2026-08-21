@@ -103,6 +103,24 @@ var _ = Describe("users commands validation", func() {
 		}
 	})
 
+	// Character-class-only validation let these through. Valkey rejects every
+	// one of them, so the pattern has to constrain structure, not just the
+	// alphabet.
+	It("rejects entries with the right characters but the wrong shape", func() {
+		for _, entry := range []string{
+			"@",
+			"@@read",
+			"@-read",
+			"|",
+			"get|",
+			"|get",
+			"get||set",
+			"client|no|evict",
+		} {
+			Expect(applyWithCommands(entry)).NotTo(Succeed(), "entry %q must be rejected", entry)
+		}
+	})
+
 	It("rejects a bad entry in commands.deny as well", func() {
 		counter++
 		cluster := &valkeyiov1alpha1.ValkeyCluster{

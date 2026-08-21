@@ -56,6 +56,80 @@ var _ = Describe("Valkey CEL validation", func() {
 		Expect(err.Error()).To(ContainSubstring("replication is not implemented yet"))
 	})
 
+	Describe("spec.config", func() {
+		configValkey := func(name string, config map[string]string) *valkeyiov1alpha1.Valkey {
+			valkey := valkeyFor(name, 0)
+			valkey.Spec.Config = config
+			return valkey
+		}
+
+		It("admits non-cluster keys", func() {
+			valkey := configValkey("cfg-ok", map[string]string{
+				"maxmemory":                 "100mb",
+				"maxmemory-policy":          "allkeys-lru",
+				"appendonly":                "yes",
+				"timeout":                   "0",
+				"maxmemory-clients":         "0",
+				"latency-monitor-threshold": "100",
+			})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		It("admits an empty config", func() {
+			valkey := configValkey("cfg-empty", map[string]string{})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		DescribeTable("rejects cluster mode directives",
+			func(key string) {
+				err := k8sClient.Create(ctx, configValkey("cfg-reject", map[string]string{key: "yes"}))
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+			},
+			Entry("cluster-enabled", "cluster-enabled"),
+			Entry("cluster-node-timeout", "cluster-node-timeout"),
+			Entry("cluster-config-file", "cluster-config-file"),
+			Entry("cluster-require-full-coverage", "cluster-require-full-coverage"),
+			// Valkey config keys are case-insensitive, so the check lowercases
+			// before comparing. A bare startsWith would let these through.
+			Entry("mixed case", "Cluster-Enabled"),
+			Entry("upper case", "CLUSTER-ENABLED"),
+		)
+
+		It("rejects a cluster key mixed in with valid ones", func() {
+			err := k8sClient.Create(ctx, configValkey("cfg-mixed", map[string]string{
+				"maxmemory":       "100mb",
+				"cluster-enabled": "yes",
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+		})
+
+		It("rejects a cluster key added by update", func() {
+			valkey := configValkey("cfg-update", map[string]string{"maxmemory": "100mb"})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Config["cluster-enabled"] = "yes"
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+		})
+
+		It("admits a key that merely contains cluster", func() {
+			// The rule is a prefix test, so it must not catch unrelated keys.
+			valkey := configValkey("cfg-substring", map[string]string{
+				"maxmemory-clients": "0",
+			})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+	})
+
 	DescribeTable("rejects names that collide with derived resource names",
 		func(name string) {
 			err := k8sClient.Create(ctx, valkeyFor(name, 0))

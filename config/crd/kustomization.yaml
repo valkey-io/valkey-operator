@@ -4,6 +4,7 @@
 resources:
 - bases/valkey.io_valkeyclusters.yaml
 - bases/valkey.io_valkeynodes.yaml
+- bases/valkey.io_valkeys.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

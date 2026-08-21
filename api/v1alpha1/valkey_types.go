@@ -119,7 +119,21 @@ type ValkeySpec struct {
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Config holds additional Valkey configuration parameters.
-	// Cluster mode directives are not accepted here by design.
+	//
+	// Cluster mode directives are rejected. A Valkey always runs with
+	// cluster-enabled no, so every cluster- key is either inert or actively
+	// wrong here, and accepting one would store a spec the controller cannot
+	// honour. Every cluster directive Valkey defines carries the prefix, so a
+	// prefix test covers them without enumerating each key.
+	//
+	// The comparison is lowercased because Valkey treats configuration keys
+	// case-insensitively, so Cluster-Enabled has to be caught alongside
+	// cluster-enabled.
+	//
+	// This rejects user input only. The operator's own base config still emits
+	// cluster-config-file for every node, cluster mode or not, to keep the node
+	// state file on the writable /data volume (see buildManagedConfig).
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-'))",message="spec.config must not contain cluster- keys: a Valkey runs standalone, so cluster mode directives are not supported"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

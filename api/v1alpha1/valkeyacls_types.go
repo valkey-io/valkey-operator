@@ -76,11 +76,11 @@ type CommandsAclSpec struct {
 	// Subcommands (client|setname, config|get, etc.)
 
 	// Allowed commands for this user
-	// +kubebuilder:validation:Items:Pattern=^[@a-z|]+$}
+	// +kubebuilder:validation:items:Pattern=`^[@A-Za-z0-9|_-]+$`
 	Allow []string `json:"allow,omitempty"`
 
 	// Denied commands for this user
-	// +kubebuilder:validation:Items:Pattern=^[@a-z|]+$}
+	// +kubebuilder:validation:items:Pattern=`^[@A-Za-z0-9|_-]+$`
 	Deny []string `json:"deny,omitempty"`
 }
 

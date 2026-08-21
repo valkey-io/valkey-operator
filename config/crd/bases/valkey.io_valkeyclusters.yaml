@@ -3619,11 +3619,13 @@ spec:
                         allow:
                           description: Allowed commands for this user
                           items:
+                            pattern: ^[@A-Za-z0-9|_-]+$
                             type: string
                           type: array
                         deny:
                           description: Denied commands for this user
                           items:
+                            pattern: ^[@A-Za-z0-9|_-]+$
                             type: string
                           type: array
                       type: object

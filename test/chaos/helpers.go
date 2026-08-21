@@ -84,6 +84,7 @@ func getClusterNodesOutput(clusterName, namespace string) (string, error) {
 	return utils.Run(cmd)
 }
 
+// getPodsWide returns kubectl get pods -o wide output for the cluster's pods.
 func getPodsWide(clusterName, namespace string) (string, error) {
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace, "-l",
 		fmt.Sprintf("valkey.io/cluster=%s", clusterName),
@@ -233,6 +234,9 @@ func verifyClusterHealth(clusterName, namespace string, shards, replicas int) er
 	return nil
 }
 
+// verifyClusterNodesOutput checks a single pod's CLUSTER NODES output: no node
+// carries a fail or noaddr flag, the node count matches the expected topology,
+// and every primary has the expected number of replicas.
 func verifyClusterNodesOutput(output string, shards, replicas int, pod string) error {
 	expectedNodes := shards * (1 + replicas)
 
@@ -486,6 +490,7 @@ func findReplicaOfPrimary(clusterNodesOutput, primaryIP string) (string, error) 
 	return "", fmt.Errorf("no replica found for primary %s (nodeID=%s)", primaryIP, primaryNodeID)
 }
 
+// labelsToSelector renders a label map as a kubectl -l selector.
 func labelsToSelector(labels map[string]string) string {
 	parts := make([]string, 0, len(labels))
 	for k, v := range labels {
@@ -651,6 +656,8 @@ func throttleWorkerNodes(workers []string, cpus float64) []string {
 
 var hostCPUs string
 
+// getHostCPUs returns the Docker host's CPU count, caching it after the first
+// lookup. Used to restore a throttled worker node to its unthrottled limit.
 func getHostCPUs() string {
 	if hostCPUs == "" {
 		cmd := exec.Command("docker", "info", "--format", "{{.NCPU}}")

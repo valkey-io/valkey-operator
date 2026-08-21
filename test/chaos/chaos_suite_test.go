@@ -37,6 +37,7 @@ var (
 	shouldCleanupCertManager = false
 )
 
+// TestChaos is the entry point for the chaos suite.
 func TestChaos(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting valkey-operator chaos test suite\n")
@@ -133,6 +134,8 @@ var _ = AfterSuite(func() {
 	_, _ = utils.Run(cmd)
 })
 
+// setupCertManager installs CertManager unless it is already present or
+// CERT_MANAGER_INSTALL_SKIP is set, recording whether teardown should remove it.
 func setupCertManager() {
 	if os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true" {
 		return
@@ -145,6 +148,7 @@ func setupCertManager() {
 	Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
 }
 
+// teardownCertManager uninstalls CertManager only if this suite installed it.
 func teardownCertManager() {
 	if !shouldCleanupCertManager {
 		return

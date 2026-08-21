@@ -65,6 +65,9 @@ type Scenario struct {
 	Inject               func(ctx *ChaosContext) error
 }
 
+// losesData reports whether the scenario is expected to lose data at the given
+// replica count. Scenarios that kill a whole shard only lose data when there is
+// no replica to fail over to.
 func (s Scenario) losesData(replicas int) bool {
 	return s.LosesData || (s.LosesDataIfNoReplica && replicas == 0)
 }
@@ -480,6 +483,7 @@ spec:
 
 // Fault scenario implementations
 
+// deletePrimaryPod force deletes the primary pod of every targeted shard.
 func deletePrimaryPod(ctx *ChaosContext) error {
 	var pods []string
 	for _, shard := range ctx.TargetShards {
@@ -498,6 +502,7 @@ func deletePrimaryPod(ctx *ChaosContext) error {
 	return nil
 }
 
+// deleteReplicaPod force deletes one replica pod of every targeted shard.
 func deleteReplicaPod(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
@@ -519,6 +524,7 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 	return nil
 }
 
+// deleteShardPods force deletes every pod of every targeted shard, primary included.
 func deleteShardPods(ctx *ChaosContext) error {
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting all pods for shards %v\n", ctx.TargetShards)
 
@@ -542,6 +548,7 @@ func deleteShardPods(ctx *ChaosContext) error {
 	return nil
 }
 
+// deletePrimaryWorkload deletes the StatefulSet or Deployment owning each targeted primary.
 func deletePrimaryWorkload(ctx *ChaosContext) error {
 	var workloads []string
 	for _, shard := range ctx.TargetShards {
@@ -564,6 +571,7 @@ func deletePrimaryWorkload(ctx *ChaosContext) error {
 	return nil
 }
 
+// deleteReplicaWorkload deletes the StatefulSet or Deployment owning one replica per targeted shard.
 func deleteReplicaWorkload(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
@@ -589,6 +597,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 	return nil
 }
 
+// networkPartitionPrimary isolates the worker nodes hosting the targeted primaries, then heals them.
 func networkPartitionPrimary(ctx *ChaosContext) error {
 	// Without tolerations: 3-5s, enough to trigger failover.
 	// With tolerations: extends up to eviction threshold + 20s to also test pod rescheduling.
@@ -629,6 +638,7 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 	return healWorkerNodes(partitioned)
 }
 
+// networkPartitionReplica isolates the worker nodes hosting the targeted replicas, then heals them.
 func networkPartitionReplica(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
@@ -685,6 +695,7 @@ func healWorkerNodes(workers []string) error {
 	return firstErr
 }
 
+// pausePrimaryContainer freezes the server container of every targeted primary, then resumes it.
 func pausePrimaryContainer(ctx *ChaosContext) error {
 	// 1-5s covers both non-failover (<2s timeout) and failover (>2s) cases
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
@@ -709,6 +720,7 @@ func pausePrimaryContainer(ctx *ChaosContext) error {
 	return unpauseContainers(paused, ctx.Namespace)
 }
 
+// pauseReplicaContainer freezes the server container of one replica per targeted shard, then resumes it.
 func pauseReplicaContainer(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
@@ -736,6 +748,7 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 	return unpauseContainers(paused, ctx.Namespace)
 }
 
+// pauseWorkerNode freezes the worker nodes hosting the targeted primaries, then resumes them.
 func pauseWorkerNode(ctx *ChaosContext) error {
 	// Eviction threshold: 40s (node-monitor-grace) + tolerationSeconds.
 	// Range spans below and above threshold to cover both eviction and non-eviction cases.
@@ -785,6 +798,7 @@ func unpauseWorkerNodes(workers []string) error {
 	return firstErr
 }
 
+// scaleShards patches spec.shards to a new count within the configured range.
 func scaleShards(ctx *ChaosContext) error {
 	if ctx.MinShards == ctx.MaxShards {
 		return fmt.Errorf("skip: shard range is fixed at %d", ctx.MinShards)
@@ -810,6 +824,7 @@ func scaleShards(ctx *ChaosContext) error {
 	return nil
 }
 
+// scaleReplicas patches spec.replicas to a new count within the configured range.
 func scaleReplicas(ctx *ChaosContext) error {
 	if ctx.MaxReplicas == 0 {
 		return fmt.Errorf("skip: replica range is fixed at 0")
@@ -830,6 +845,7 @@ func scaleReplicas(ctx *ChaosContext) error {
 	return nil
 }
 
+// deleteRecreateCluster deletes the ValkeyCluster, waits for its pods to go, then recreates it from the captured spec.
 func deleteRecreateCluster(ctx *ChaosContext) error {
 	// Capture the current spec before deleting. Fetch the typed object so the
 	// spec round-trips as valid JSON for the manifest below.
@@ -872,6 +888,7 @@ func deleteRecreateCluster(ctx *ChaosContext) error {
 	return nil
 }
 
+// rollingUpdate toggles a restart-requiring config value and waits for pods to be replaced.
 func rollingUpdate(ctx *ChaosContext) error {
 	// Toggle io-threads between 1 and 2 to trigger a restart-requiring config change.
 	cmd := exec.Command("kubectl", "get", "valkeycluster", ctx.ClusterName,
@@ -910,6 +927,7 @@ func rollingUpdate(ctx *ChaosContext) error {
 	return nil
 }
 
+// deleteControllerPod force deletes the operator pod and waits for its replacement to be Ready.
 func deleteControllerPod(_ *ChaosContext) error {
 	cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
 		"-n", namespace, "-o", "jsonpath={.items[0].metadata.name}")
@@ -974,6 +992,7 @@ func logIfControllerNode(nodeName string) {
 
 // Helper functions for configuration parsing
 
+// envOrDefault returns the env var value, or defaultVal when unset.
 func envOrDefault(key, defaultVal string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -981,6 +1000,7 @@ func envOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
+// envBool returns the env var as a bool, or defaultVal when unset. Invalid values fail the suite.
 func envBool(key string, defaultVal bool) bool {
 	v := os.Getenv(key)
 	if v == "" {
@@ -993,6 +1013,7 @@ func envBool(key string, defaultVal bool) bool {
 	return b
 }
 
+// envOneOf returns the env var value, which must be one of valid, or defaultVal when unset.
 func envOneOf(key, defaultVal string, valid []string) string {
 	v := envOrDefault(key, defaultVal)
 	for _, opt := range valid {
@@ -1004,6 +1025,7 @@ func envOneOf(key, defaultVal string, valid []string) string {
 	return ""
 }
 
+// envIntOrDefault returns the env var as an int, or defaultVal when unset. Invalid or too small values fail the suite.
 func envIntOrDefault(key string, defaultVal int, minVal ...int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -1019,6 +1041,7 @@ func envIntOrDefault(key string, defaultVal int, minVal ...int) int {
 	return i
 }
 
+// envInt64OrDefault returns the env var as an int64, or defaultVal when unset.
 func envInt64OrDefault(key string, defaultVal int64) int64 {
 	v := os.Getenv(key)
 	if v == "" {
@@ -1040,6 +1063,7 @@ func calcTimeout(shards, replicas int) time.Duration {
 	return t
 }
 
+// envDurationOrDefault returns the env var as a duration, or defaultVal when unset.
 func envDurationOrDefault(key string, defaultVal time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
@@ -1052,6 +1076,9 @@ func envDurationOrDefault(key string, defaultVal time.Duration) time.Duration {
 	return d
 }
 
+// filterScenarios resolves CHAOS_SCENARIOS into the scenarios to run. An empty
+// filter selects everything except DisabledByDefault. Names joined by + become
+// a single compound scenario. Unknown names fail the suite.
 func filterScenarios(all []Scenario, filter string) []Scenario {
 	if filter == "" {
 		var result []Scenario
@@ -1097,6 +1124,7 @@ func filterScenarios(all []Scenario, filter string) []Scenario {
 	return result
 }
 
+// scenarioByName looks up a scenario in allScenarios, returning nil when absent.
 func scenarioByName(name string) *Scenario {
 	for i := range allScenarios {
 		if allScenarios[i].Name == name {
@@ -1106,6 +1134,9 @@ func scenarioByName(name string) *Scenario {
 	return nil
 }
 
+// makeCompoundInject builds an Inject that runs each named scenario in turn with
+// a random delay between them, so their faults overlap. Sub-scenarios that skip
+// are logged and do not abort the group.
 func makeCompoundInject(group []string) func(*ChaosContext) error {
 	return func(ctx *ChaosContext) error {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Compound test: %s\n", strings.Join(group, " + "))
@@ -1131,6 +1162,7 @@ func makeCompoundInject(group []string) func(*ChaosContext) error {
 	}
 }
 
+// envFloat64OrDefault returns the env var as a float64, or defaultVal when unset.
 func envFloat64OrDefault(key string, defaultVal float64, minVal float64) float64 {
 	v := os.Getenv(key)
 	if v == "" {

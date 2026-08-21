@@ -346,6 +346,9 @@ spec:
 					if v < 0 || v >= shards {
 						Fail(fmt.Sprintf("CHAOS_TARGET_SHARDS=%q: index %d is outside [0, %d)", targetShards, v, shards))
 					}
+					if slices.Contains(targetShardsForIteration, v) {
+						Fail(fmt.Sprintf("CHAOS_TARGET_SHARDS=%q: index %d is repeated", targetShards, v))
+					}
 					targetShardsForIteration = append(targetShardsForIteration, v)
 				}
 			}

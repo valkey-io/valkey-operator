@@ -2520,7 +2520,10 @@ spec:
                       type: string
                     type: array
                   enabled:
-                    description: Enable or disable the exporter sidecar container
+                    default: true
+                    description: |-
+                      Enable or disable the exporter sidecar container. Unset means enabled,
+                      so overriding any other exporter field keeps the sidecar running.
                     type: boolean
                   image:
                     description: Override the default exporter image

@@ -90,6 +90,11 @@ func (in *CommandsAclSpec) DeepCopy() *CommandsAclSpec {
 func (in *ExporterSpec) DeepCopyInto(out *ExporterSpec) {
 	*out = *in
 	in.Resources.DeepCopyInto(&out.Resources)
+	if in.Enabled != nil {
+		in, out := &in.Enabled, &out.Enabled
+		*out = new(bool)
+		**out = **in
+	}
 	if in.SecurityContext != nil {
 		in, out := &in.SecurityContext, &out.SecurityContext
 		*out = new(v1.SecurityContext)

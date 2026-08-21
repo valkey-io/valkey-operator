@@ -447,8 +447,11 @@ type ExporterSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Enable or disable the exporter sidecar container
-	Enabled bool `json:"enabled,omitempty"`
+	// Enable or disable the exporter sidecar container. Unset means enabled,
+	// so overriding any other exporter field keeps the sidecar running.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// Override the SecurityContext applied to the exporter sidecar container.
 	// +optional
@@ -457,6 +460,13 @@ type ExporterSpec struct {
 	// Additional cmdline arguments passed to exporter sidecar container.
 	// +optional
 	Args []string `json:"args,omitempty"`
+}
+
+// IsEnabled reports whether the exporter sidecar should run. A nil Enabled
+// means enabled: the CRD defaults the field to true, and a client that builds
+// the spec in Go without setting it gets the same behaviour.
+func (e ExporterSpec) IsEnabled() bool {
+	return e.Enabled == nil || *e.Enabled
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

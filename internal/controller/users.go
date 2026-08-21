@@ -160,7 +160,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	}
 
 	for _, user := range systemUsers {
-		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+		if user == exporterUser && !cluster.Spec.Exporter.IsEnabled() {
 			continue
 		}
 		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
@@ -402,7 +402,7 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 		}
 	}
 	for _, user := range u {
-		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+		if user == exporterUser && !cluster.Spec.Exporter.IsEnabled() {
 			continue
 		}
 		return fmt.Errorf("%w: %s", errMissingSystemUser, user)
@@ -451,7 +451,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
 			continue
 		}
-		if user == exporterUser && !cluster.Spec.Exporter.Enabled {
+		if user == exporterUser && !cluster.Spec.Exporter.IsEnabled() {
 			continue
 		}
 		password, err := generatePassword(passwordLength)

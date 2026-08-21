@@ -569,7 +569,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Shards:   1,
 					Replicas: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
-						Enabled: false,
+						Enabled: boolPtr(false),
 					},
 				},
 			}
@@ -646,7 +646,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Shards:   1,
 					Replicas: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
-						Enabled: false,
+						Enabled: boolPtr(false),
 					},
 				},
 			}
@@ -671,7 +671,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, systemUsersSecret) }()
 			Expect(systemUsersSecret.Data).NotTo(HaveKey(exporterUser))
 
-			cluster.Spec.Exporter.Enabled = true
+			cluster.Spec.Exporter.Enabled = boolPtr(true)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 			err = reconciler.reconcileUsersAcl(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())

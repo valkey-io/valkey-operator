@@ -134,7 +134,7 @@ func TestValidateSystemUserPasswordSecret(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 			Exporter: valkeyiov1alpha1.ExporterSpec{
-				Enabled: true,
+				Enabled: boolPtr(true),
 			},
 		},
 	}
@@ -154,7 +154,7 @@ func TestValidateSystemUserPasswordSecret_UnknownUser(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 			Exporter: valkeyiov1alpha1.ExporterSpec{
-				Enabled: false,
+				Enabled: boolPtr(false),
 			},
 		},
 	}
@@ -172,7 +172,7 @@ func TestValidateSystemUserPasswordSecret_UnknownUserAndMissingRequiredUser(t *t
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 			Exporter: valkeyiov1alpha1.ExporterSpec{
-				Enabled: false,
+				Enabled: boolPtr(false),
 			},
 		},
 	}

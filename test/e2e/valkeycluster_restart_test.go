@@ -67,11 +67,21 @@ spec:
   config:
     appendonly: "yes"
 `, clusterName)
-		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true")
-		_, _ = utils.Run(cmd)
+		// A leftover CR or PVCs from an incomplete earlier run would seed
+		// this run with old nodes.conf and canary data, so their removal
+		// must complete (and be checked) before the cluster is created.
+		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName,
+			"--ignore-not-found=true", "--wait=true", "--timeout=120s")
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to remove a leftover ValkeyCluster CR")
+		cmd = exec.Command("kubectl", "delete", "pvc",
+			"-l", podSelector, "--ignore-not-found=true", "--wait=true", "--timeout=120s")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to remove leftover PVCs")
+
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = strings.NewReader(manifest)
-		_, err := utils.Run(cmd)
+		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create persistent ValkeyCluster CR")
 
 		By("waiting for the cluster to reach Ready")
@@ -104,16 +114,44 @@ spec:
 		clusterUID = strings.TrimSpace(clusterUID)
 		Expect(clusterUID).NotTo(BeEmpty())
 
-		countEvents := func(reason string) int {
+		// countEvents returns an error instead of asserting so Eventually
+		// callbacks can retry a transient kubectl failure (via g.Expect)
+		// rather than aborting the spec.
+		countEvents := func(reason string) (int, error) {
 			cmd := exec.Command("kubectl", "get", "events",
 				"--field-selector", fmt.Sprintf("reason=%s,involvedObject.uid=%s", reason, clusterUID),
 				"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			return len(utils.GetNonEmptyLines(output))
+			if err != nil {
+				return 0, err
+			}
+			return len(utils.GetNonEmptyLines(output)), nil
 		}
-		healEventsBefore := countEvents("StaleAddressesHealed")
-		forgottenEventsBefore := countEvents("StaleNodeForgotten")
+		mustCountEvents := func(reason string) int {
+			count, err := countEvents(reason)
+			Expect(err).NotTo(HaveOccurred())
+			return count
+		}
+		healEventsBefore := mustCountEvents("StaleAddressesHealed")
+		forgottenEventsBefore := mustCountEvents("StaleNodeForgotten")
+
+		// getPodUIDs returns an error for the same Eventually-retry reason.
+		getPodUIDs := func() ([]string, error) {
+			cmd := exec.Command("kubectl", "get", "pod", "-l", podSelector,
+				"-o", "jsonpath={range .items[*]}{.metadata.uid}{\"\\n\"}{end}")
+			output, err := utils.Run(cmd)
+			if err != nil {
+				return nil, err
+			}
+			return utils.GetNonEmptyLines(output), nil
+		}
+		uidsBefore, err := getPodUIDs()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(uidsBefore).To(HaveLen(6), "expected all 6 pods before the restart")
+		oldUIDs := make(map[string]bool, len(uidsBefore))
+		for _, uid := range uidsBefore {
+			oldUIDs[uid] = true
+		}
 
 		By("deleting all pods at once so every pod IP changes")
 		cmd = exec.Command("kubectl", "delete", "pod",
@@ -121,9 +159,25 @@ spec:
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's pods")
 
+		By("waiting for every pod to be replaced")
+		// The recovery assertions below only prove the all-pods restart
+		// scenario if every original pod is actually gone - a partial
+		// restart could heal and pass them. New UIDs are the evidence.
+		verifyAllPodsReplaced := func(g Gomega) {
+			uids, err := getPodUIDs()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(uids).To(HaveLen(6), "expected all 6 replacement pods to exist")
+			for _, uid := range uids {
+				g.Expect(oldUIDs).NotTo(HaveKey(uid), "expected pod %s to have been replaced", uid)
+			}
+		}
+		Eventually(verifyAllPodsReplaced, 3*time.Minute).Should(Succeed())
+
 		By("waiting for the stale-address heal to re-introduce the moved members")
 		verifyHealEvent := func(g Gomega) {
-			g.Expect(countEvents("StaleAddressesHealed")).To(BeNumerically(">", healEventsBefore),
+			count, err := countEvents("StaleAddressesHealed")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(count).To(BeNumerically(">", healEventsBefore),
 				"expected a new StaleAddressesHealed event after the full restart")
 		}
 		Eventually(verifyHealEvent, 5*time.Minute).Should(Succeed())
@@ -153,15 +207,20 @@ spec:
 		// The heal's companion guard: forgetStaleNodes must not CLUSTER
 		// FORGET members whose address changed - a forget here would ban
 		// the node from rejoining for 60s and fight the recovery.
-		Expect(countEvents("StaleNodeForgotten")).To(Equal(forgottenEventsBefore),
+		Expect(mustCountEvents("StaleNodeForgotten")).To(Equal(forgottenEventsBefore),
 			"no member should be forgotten while recovering from an all-pods restart")
 	})
 
 	AfterAll(func() {
-		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
-		_, _ = utils.Run(cmd)
+		// Waited and checked so an incomplete teardown fails loudly here
+		// instead of silently polluting a later run with retained PVCs.
+		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName,
+			"--ignore-not-found=true", "--wait=true", "--timeout=120s")
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the ValkeyCluster during teardown")
 		cmd = exec.Command("kubectl", "delete", "pvc",
-			"-l", podSelector, "--ignore-not-found=true", "--wait=false")
-		_, _ = utils.Run(cmd)
+			"-l", podSelector, "--ignore-not-found=true", "--wait=true", "--timeout=120s")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's PVCs during teardown")
 	})
 })

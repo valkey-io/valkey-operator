@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/aclscan"
 	controller "github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
@@ -659,6 +660,52 @@ EOF`,
 					len(disallowedCommands), output)
 			}
 			Eventually(verifyDeniedPermissionsOfOperatorUser).Should(Succeed())
+
+			By("validating the _operator ACL covers every command the operator runs")
+			verifyOperatorAclCoverage := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
+
+				b64Password, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				decoded, err := base64.StdEncoding.DecodeString(b64Password)
+				g.Expect(err).NotTo(HaveOccurred())
+				defaultPassword := string(decoded)
+
+				cmd = exec.Command("kubectl", "get", "pods",
+					"-l", fmt.Sprintf("valkey.io/cluster=%s", withUserClusterName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podName = strings.TrimSpace(podName)
+				g.Expect(podName).NotTo(BeEmpty())
+
+				// Commands are discovered by statically scanning the operator's own
+				// source (cmd/, internal/) for valkey-go client calls, rather than
+				// relying on a hand-maintained list that can silently drift. This
+				// fails whenever new code issues a command the "_operator" ACL in
+				// internal/controller/users.go doesn't grant.
+				commands, err := aclscan.OperatorCommands()
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(commands).NotTo(BeEmpty())
+
+				valkeyCli := []string{"valkey-cli", "-a", defaultPassword}
+				arities, err := commandArities(podName, valkeyCli, commands)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				var denied []string
+				for _, command := range commands {
+					arity, ok := arities[commandName(command.Tokens)]
+					minArgs := placeholdersNeeded(command.Tokens, arity, ok)
+					result, err := aclDryRun(podName, valkeyCli, "_operator", command.Tokens, minArgs)
+					g.Expect(err).NotTo(HaveOccurred(), "failed to run ACL DRYRUN for %q (%s)", command, command.Pos)
+					if result != "OK" {
+						denied = append(denied, fmt.Sprintf("%s (%s): %s", command, command.Pos, result))
+					}
+				}
+				g.Expect(denied).To(BeEmpty(),
+					"the _operator ACL is missing permissions for commands used in code:\n%s", strings.Join(denied, "\n"))
+			}
+			Eventually(verifyOperatorAclCoverage).Should(Succeed())
 
 		})
 

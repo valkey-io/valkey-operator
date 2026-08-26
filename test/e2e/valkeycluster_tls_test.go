@@ -98,8 +98,9 @@ spec:
   replicas: 1
   networking:
     tls:
-      certificate:
-        secretName: %s
+      certificates:
+        server:
+          secretName: %s
   exporter:
     enabled: true
 `, valkeyClusterName, tlsSecretName)

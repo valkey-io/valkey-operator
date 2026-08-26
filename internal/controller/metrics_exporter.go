@@ -25,7 +25,7 @@ import (
 )
 
 // generateMetricsExporterContainerDef generates the container definition for the metrics exporter sidecar.
-func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string, tlsSpec *valkeyiov1alpha1.TLSConfig) corev1.Container {
+func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec, clusterName string, tlsSpec *valkeyiov1alpha1.NodeTLSSpec) corev1.Container {
 	exporterImage := DefaultExporterImage
 	if exporter.Image != "" {
 		exporterImage = exporter.Image

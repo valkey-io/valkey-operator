@@ -230,13 +230,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 		}
 		return ctrl.Result{}, err
 	}
 	if applied {
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied"); condErr != nil {
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, "Live config applied"); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
 		}
@@ -259,7 +259,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 		}
 		return ctrl.Result{}, err
@@ -269,14 +269,14 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Secret, so it loaded stale content. Report that rather than claiming
 		// the desired passwords are live, and reload again on the requeue.
 		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation",
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation,
 			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 			return ctrl.Result{}, condErr
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, "Applied",
+	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
 		"Desired ACL passwords are live"); condErr != nil {
 		log.Error(condErr, "failed to set ACLApplied condition")
 		return ctrl.Result{}, condErr
@@ -402,14 +402,20 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
 // template, and therefore the ones that feed the WorkloadRevision roll hash.
 // Only the server-config hash lives here: a config change that is not
-// live-settable still needs a rolling restart to take effect. The ACL hash is
-// deliberately absent. ACL edits are applied to the running server live by the
-// ValkeyNode reconciler (see applyLiveACL), so they must not enter the
-// WorkloadRevision and roll the pods.
+// live-settable still needs a rolling restart to take effect, and the config
+// itself lives in a ConfigMap whose content changes never alter the pod
+// template. The hash is derived from the node spec (Config minus live-settable
+// keys, plus TLS), gated on ServerConfigMapName — the spec marker that a parent
+// manages this node's config. The gate must be a spec field, not ownership:
+// the cluster controller computes WorkloadRevision on a freshly built node
+// that has no owner references yet, and both sides must hash identically.
+// The ACL hash is deliberately absent. ACL edits are applied to the running
+// server live by the ValkeyNode reconciler (see applyLiveACL), so they must
+// not enter the WorkloadRevision and roll the pods.
 func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	annotations := map[string]string{}
-	if node.Spec.ServerConfigHash != "" {
-		annotations[configHashKey] = node.Spec.ServerConfigHash
+	if node.Spec.ServerConfigMapName != "" {
+		annotations[configHashKey] = nodeServerConfigRollHash(node)
 	}
 	return annotations
 }
@@ -907,13 +913,17 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 // when available). Shared by resolveRole and the live-config client.
 func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
 	var tlsConfig *tls.Config
-	if node.Spec.TLS != nil && node.Spec.TLS.Certificate.SecretName != "" {
-		secretName := node.Spec.TLS.Certificate.SecretName
+	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
+		secretName := node.Spec.TLS.Certificates.Server.SecretName
 		serverName := ""
 		if clusterName, ok := node.Labels[LabelCluster]; ok {
 			serverName = fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), node.Namespace)
 		}
-		if cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace); err == nil {
+		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
+				"secretName", secretName)
+		} else {
 			tlsConfig = cfg
 		}
 	}

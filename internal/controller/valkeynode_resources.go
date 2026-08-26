@@ -303,8 +303,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
-	// Add exporter sidecar if enabled.
-	if node.Spec.Exporter.Enabled {
+	// Add exporter sidecar only on an explicit true: the sidecar needs the
+	// _exporter credentials only the cluster controller provisions, so a
+	// standalone node must not gain one by default.
+	if node.Spec.Exporter.Enabled != nil && *node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))
 	}
 
@@ -488,7 +490,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name: tlsVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: node.Spec.TLS.Certificate.SecretName,
+					SecretName: node.Spec.TLS.Certificates.Server.SecretName,
 				},
 			},
 		})

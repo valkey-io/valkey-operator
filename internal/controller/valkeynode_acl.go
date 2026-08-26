@@ -64,17 +64,20 @@ func normalizeHashes(hashes []string) []string {
 	return slices.Compact(hashes)
 }
 
-// aclObservablyInSync reports whether the parts of the ACL that can be compared
-// exactly are live on the server: the set of users, and each user's password
+// aclObservablyInSync reports whether the ACL the cluster controller wrote is
+// live on the server, by comparing the set of users and each user's password
 // hashes.
 //
-// Permissions are deliberately not compared. ACL GETUSER returns Valkey's
+// Permissions are not compared field by field. ACL GETUSER returns Valkey's
 // normalized rendering of the rules, while the operator only holds the aclfile
-// text, so comparing the two would mean reimplementing Valkey's own ACL parser
-// and keeping it in step with the server. Correctness of the apply does not
-// depend on this check either way: the reload is unconditional, so permission
-// edits converge regardless. This only scopes what ACLApplied can honestly
-// claim.
+// text, so comparing the two directly would mean reimplementing Valkey's own
+// ACL parser and keeping it in step with the server. Instead the aclfile carries
+// a revision user (see aclRevisionUser): a disabled user whose only
+// password hash is the hash of the whole managed ACL. It is compared here like
+// any other user, so an edit that changes only permissions still changes the
+// revision hash and reads as out of sync until the running server loads the
+// current revision. That closes the window where a permission-only change would
+// otherwise read as applied while a stale mounted aclfile was still in effect.
 func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[string][]string) (bool, error) {
 	actualUsers, err := c.UserNames(ctx)
 	if err != nil {
@@ -114,16 +117,17 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 // The projected volume is refreshed lazily by kubelet, so a LOAD fired right
 // after the Secret changes can read the pre-update file and silently no-op.
 //
-// The reload is therefore unconditional. The operator cannot read the pod's
-// copy of the file, and it cannot compare the whole ACL against the server
-// either (ACL GETUSER renders Valkey's normalized form, the operator holds
-// aclfile text), so there is no reliable way to know the file is current. A
-// repeated LOAD is idempotent and cheap, and it is what makes every kind of
-// change converge, including permission edits and removed users, once the
-// volume catches up.
+// The reload is therefore unconditional: the operator cannot read the pod's copy
+// of the file, so before a LOAD it has no way to know whether the mounted file
+// is current. A repeated LOAD is idempotent and cheap, and it is what makes
+// every kind of change converge, including permission edits and removed users,
+// once the volume catches up.
 //
-// The returned bool reports the parts that can be compared exactly, the user
-// set and their password hashes, which is what a rotation needs to wait on.
+// The returned bool reports whether the load took: aclObservablyInSync compares
+// the user set, their password hashes, and the revision user whose hash
+// covers the whole managed ACL. A True result therefore means the current
+// revision is live, permissions included, not only that users and passwords
+// match.
 func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
 	if node.Spec.UsersACLSecretName == "" {
 		return true, nil

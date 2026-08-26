@@ -42,12 +42,6 @@ jobs:
           # Registry refs must be lowercase; $GITHUB_REPOSITORY may not be.
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Reclaim disk space
-        run: |
-          docker image prune --force --all
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-
       - name: Sanitize platform for artifact name
         id: prep
         run: |

@@ -48,7 +48,7 @@ const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
 	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
+	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.
@@ -124,6 +124,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// During deletion (e.g. a foreground cascading delete, where the garbage
+	// collector removes dependents before the cluster itself) reconciling would
+	// recreate the very children being deleted and deadlock the delete
+	if !cluster.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
 	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {
@@ -149,12 +156,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	// Roll hash ignores live-settable keys, so a change confined to those keys
-	// does not roll the pods (they are applied live by the ValkeyNode controller).
-	// Computed directly from cluster.Spec rather than reading back from the
-	// ConfigMap to avoid a race condition where the cache does not have the ConfigMap
-	configHash := serverConfigRollHash(cluster)
-
 	// Surface a ConfigurationWarning condition when an explicit
 	// terminationGracePeriodSeconds is too short for the graceful failover on
 	// SIGTERM to finish before SIGKILL. The value is honoured; the operator does
@@ -192,7 +193,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, configHash, state); err != nil {
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -401,10 +402,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Cluster is healthy - set all positive conditions
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	// A node whose ACL the operator cannot apply leaves the declared users out of
+	// Valkey while every other check passes, so the cluster would otherwise read
+	// as fully healthy with an ACL that is not in effect.
+	//
+	// Degraded is cleared only in the healthy branch. Removing it first and
+	// setting it again would hand SetStatusCondition an absent condition every
+	// reconcile, which resets LastTransitionTime and loses when the failure
+	// actually started.
+	if failed := nodesWithFailedACL(nodes); len(failed) > 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
+			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
+	} else {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
@@ -548,7 +562,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // It drives replica-first ordering and proactive failover. It is safe to reuse
 // across the loop: after an update we requeue immediately, re-scraping fresh
 // state before any further rolls.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, configHash string, clusterState *valkey.ClusterState) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -572,7 +586,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, configHash, liveHashes)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
 			if err != nil {
 				return false, err
 			}
@@ -615,11 +629,10 @@ const (
 // Returns a nodeResult signaling the outcome or required next action.
 // liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
 // and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, configHash string, liveTemplateHashes map[string]string) (nodeResult, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-	desired.Spec.ServerConfigHash = configHash
 	if err := setDesiredWorkloadRevision(desired); err != nil {
 		return nodeUnchanged, err
 	}
@@ -832,6 +845,21 @@ func effectiveGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 
 	return defaultGracePeriodSeconds
 }
 
+// nodeTLSFromCluster resolves the cluster's TLS intent into the node's TLS
+// view.
+func nodeTLSFromCluster(tlsSpec *valkeyiov1alpha1.TLSSpec) *valkeyiov1alpha1.NodeTLSSpec {
+	if tlsSpec == nil {
+		return nil
+	}
+	return &valkeyiov1alpha1.NodeTLSSpec{
+		Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+			Server: valkeyiov1alpha1.NodeCertificateRef{
+				SecretName: tlsSpec.Certificates.Server.SecretName,
+			},
+		},
+	}
+}
+
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.
 func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *valkeyiov1alpha1.ValkeyNode {
 	// Start with recommended k8s labels; instance is the cluster name and component is "valkey-node".
@@ -893,6 +921,17 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	// supplies, so the escape hatch is left verbatim.
 	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex))
 
+	// Resolve the cluster-level exporter default (nil means enabled) into an
+	// explicit true; a ValkeyNode runs the sidecar only then. Disabled stays
+	// nil: old operators omitted false, so an explicit false would make
+	// nodeRequiresRoll fail over upgraded clusters over a no-op spec diff.
+	exporter := cluster.Spec.Exporter
+	exporter.Enabled = nil
+	if cluster.Spec.ExporterEnabled() {
+		enabled := true
+		exporter.Enabled = &enabled
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -910,11 +949,11 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Tolerations:                   scheduling.Tolerations,
 			PriorityClassName:             scheduling.PriorityClassName,
 			TopologySpreadConstraints:     topologySpreadConstraints,
-			Exporter:                      cluster.Spec.Exporter,
+			Exporter:                      exporter,
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
-			TLS:                           cluster.GetTLS(),
+			TLS:                           nodeTLSFromCluster(cluster.GetTLS()),
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
@@ -943,10 +982,13 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // snapshot.
 func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
 	var tlsConfig *tls.Config
-	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificate.SecretName != "" {
+	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
 		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
-		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificate.SecretName, serverName, cluster.Namespace)
-		if err == nil {
+		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
+				"secretName", tlsSpec.Certificates.Server.SecretName)
+		} else {
 			tlsConfig = cfg
 		}
 	}
@@ -1729,4 +1771,20 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("valkeycluster").
 		Complete(r)
+}
+
+// nodesWithFailedACL returns the names of nodes whose ACL the operator tried to
+// apply and could not. PendingPropagation is deliberately not included: it is
+// the normal state after every ACL edit and clears itself once the mounted
+// aclfile catches up, so reporting it would take the cluster out of healthy on
+// every routine user change.
+func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
+	var failed []string
+	for i := range nodes.Items {
+		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
+			failed = append(failed, nodes.Items[i].Name)
+		}
+	}
+	return failed
 }

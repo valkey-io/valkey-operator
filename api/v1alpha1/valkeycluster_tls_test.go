@@ -47,12 +47,16 @@ func TestGetTLS(t *testing.T) {
 		c := &ValkeyCluster{
 			Spec: ValkeyClusterSpec{
 				Networking: &NetworkingSpec{
-					TLS: &TLSConfig{Certificate: CertificateRef{SecretName: "net-tls"}},
+					TLS: &TLSSpec{
+						Certificates: TLSCertificates{
+							Server: CertificateSource{SecretName: "net-tls"},
+						},
+					},
 				},
 			},
 		}
 		tls := c.GetTLS()
 		require.NotNil(t, tls)
-		assert.Equal(t, "net-tls", tls.Certificate.SecretName)
+		assert.Equal(t, "net-tls", tls.Certificates.Server.SecretName)
 	})
 }

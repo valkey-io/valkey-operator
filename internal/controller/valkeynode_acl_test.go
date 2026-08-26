@@ -55,6 +55,17 @@ func TestDesiredUserPasswordHashesEmpty(t *testing.T) {
 	assert.Empty(t, desiredUserPasswordHashes("\n\n"))
 }
 
+func TestDesiredUserPasswordHashesParsesRevisionUser(t *testing.T) {
+	// The revision user is an ordinary "user <name> ... #hash" line, so it is
+	// parsed like any other user and flows through aclObservablyInSync with no
+	// special handling.
+	got := desiredUserPasswordHashes(
+		"user alice on #aaa ~* +@all\n" +
+			"user " + aclRevisionUser + " off resetchannels -@all #deadbeef\n")
+	assert.Equal(t, []string{"aaa"}, got["alice"])
+	assert.Equal(t, []string{"deadbeef"}, got[aclRevisionUser], "the revision user is parsed as a normal user")
+}
+
 func TestACLObservablyInSync(t *testing.T) {
 	ctx := context.Background()
 	desired := map[string][]string{"alice": {"aaa", "bbb"}, "bob": {"ccc"}}
@@ -125,5 +136,49 @@ func TestACLObservablyInSync(t *testing.T) {
 		f := &fakeConfigClient{aclErr: assert.AnError}
 		_, err := aclObservablyInSync(ctx, f, desired)
 		require.Error(t, err)
+	})
+
+	t.Run("a stale revision user reads as out of sync even when users and passwords match", func(t *testing.T) {
+		// A permission-only edit leaves every user and password identity
+		// unchanged but changes the managed-content hash the revision user carries.
+		// It must read as out of sync until the current revision loads,
+		// or a permission change would be reported applied while the stale
+		// mounted aclfile is still in effect.
+		withRevision := map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"}, aclRevisionUser: {"newrev"},
+		}
+		f := &fakeConfigClient{aclHashes: map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"}, aclRevisionUser: {"oldrev"},
+		}}
+		inSync, err := aclObservablyInSync(ctx, f, withRevision)
+		require.NoError(t, err)
+		assert.False(t, inSync, "a stale revision must keep the node out of sync")
+	})
+
+	t.Run("a matching revision user reads as in sync", func(t *testing.T) {
+		withRevision := map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"}, aclRevisionUser: {"rev1"},
+		}
+		f := &fakeConfigClient{aclHashes: map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"}, aclRevisionUser: {"rev1"},
+		}}
+		inSync, err := aclObservablyInSync(ctx, f, withRevision)
+		require.NoError(t, err)
+		assert.True(t, inSync)
+	})
+
+	t.Run("a server missing the revision user reads as out of sync", func(t *testing.T) {
+		// Until the server loads a revision that includes the revision user, the
+		// desired revision user is absent from the server, so the node is not yet
+		// in sync even if every real user and password already matches.
+		withRevision := map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"}, aclRevisionUser: {"rev1"},
+		}
+		f := &fakeConfigClient{aclHashes: map[string][]string{
+			"alice": {"aaa", "bbb"}, "bob": {"ccc"},
+		}}
+		inSync, err := aclObservablyInSync(ctx, f, withRevision)
+		require.NoError(t, err)
+		assert.False(t, inSync, "a server without the revision user must not read as in sync")
 	})
 }

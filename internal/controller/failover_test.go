@@ -146,9 +146,8 @@ func TestNodeRequiresRollIgnoresConfig(t *testing.T) {
 	withConfig := func(policy string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				Image:            "valkey:8",
-				ServerConfigHash: "abc",
-				Config:           map[string]string{"maxmemory-policy": policy},
+				Image:  "valkey:8",
+				Config: map[string]string{"maxmemory-policy": policy},
 			},
 		}
 	}

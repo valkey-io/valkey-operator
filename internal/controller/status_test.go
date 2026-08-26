@@ -57,3 +57,32 @@ func TestSetCondition(t *testing.T) {
 	g.Expect(progressingCond).NotTo(BeNil())
 	g.Expect(progressingCond.Status).To(Equal(metav1.ConditionTrue))
 }
+
+// TestNodesWithFailedACL pins the distinction the cluster status depends on:
+// a failed apply is surfaced, propagation is not. Reporting propagation would
+// take the cluster out of healthy on every routine ACL edit, since it is the
+// normal state until the mounted aclfile catches up.
+func TestNodesWithFailedACL(t *testing.T) {
+	g := NewWithT(t)
+
+	node := func(name, reason string, status metav1.ConditionStatus) valkeyiov1alpha1.ValkeyNode {
+		n := valkeyiov1alpha1.ValkeyNode{}
+		n.Name = name
+		meta.SetStatusCondition(&n.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
+			Status: status,
+			Reason: reason,
+		})
+		return n
+	}
+
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+		node("applied", valkeyiov1alpha1.ValkeyNodeReasonApplied, metav1.ConditionTrue),
+		node("propagating", valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation, metav1.ConditionFalse),
+		node("broken", valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, metav1.ConditionFalse),
+		{}, // no ACLApplied condition at all
+	}}
+
+	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken"}))
+	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
+}

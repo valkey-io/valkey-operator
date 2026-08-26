@@ -51,6 +51,9 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 		Spec: valkeyv1.ValkeyNodeSpec{
 			Image:               "valkey/valkey:9.0.0",
 			ServerConfigMapName: "valkey-config",
+			// Off by default here so the exporter-agnostic cases assert on the
+			// server container alone. A nil Enabled means enabled.
+			Exporter: valkeyv1.ExporterSpec{Enabled: boolPtr(false)},
 		},
 	}
 }
@@ -252,7 +255,7 @@ func TestBuildValkeyNodePVC(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec_WithExporter(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Exporter = valkeyv1.ExporterSpec{
-		Enabled: true,
+		Enabled: boolPtr(true),
 	}
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
@@ -278,7 +281,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithExporter(t *testing.T) {
 func TestBuildValkeyNodePodTemplateSpec_WithExporterCustomImage(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Exporter = valkeyv1.ExporterSpec{
-		Enabled: true,
+		Enabled: boolPtr(true),
 		Image:   "my-exporter:v2.0.0",
 	}
 	lbls := valkeyNodeLabels(node)
@@ -287,6 +290,19 @@ func TestBuildValkeyNodePodTemplateSpec_WithExporterCustomImage(t *testing.T) {
 
 	require.Len(t, pts.Spec.Containers, 2)
 	assert.Equal(t, "my-exporter:v2.0.0", pts.Spec.Containers[1].Image)
+}
+
+// A ValkeyNode runs the sidecar only on an explicit enabled: true. The default
+// is resolved at the cluster level; a standalone node must not gain a sidecar
+// whose _exporter credentials nothing provisions.
+func TestBuildValkeyNodePodTemplateSpec_ExporterUnsetOmitsSidecar(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Exporter = valkeyv1.ExporterSpec{}
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.Containers, 1)
+	assert.Equal(t, "server", pts.Spec.Containers[0].Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_Scheduling(t *testing.T) {
@@ -414,8 +430,10 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
-	node.Spec.TLS = &valkeyv1.TLSConfig{
-		Certificate: valkeyv1.CertificateRef{SecretName: "tls-secret"},
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
 	}
 
 	cm, err := buildValkeyNodeConfigMap(node)
@@ -538,7 +556,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithContainerPatches(t *testing.T) {
 	node.Spec.Containers = []corev1.Container{
 		{Name: "metrics-exporter", Image: "custom-exporter:v2.0"},
 	}
-	node.Spec.Exporter = valkeyv1.ExporterSpec{Enabled: true}
+	node.Spec.Exporter = valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
@@ -666,14 +684,14 @@ func TestParseClusterNodesRole(t *testing.T) {
 
 func TestBuildExporterContainer(t *testing.T) {
 	t.Run("default image", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, DefaultExporterImage, c.Image)
 		assert.Equal(t, "metrics-exporter", c.Name)
 	})
 
 	t.Run("custom image", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true, Image: "custom:1.0"}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true), Image: "custom:1.0"}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, "custom:1.0", c.Image)
 	})
@@ -684,13 +702,13 @@ func TestBuildExporterContainer(t *testing.T) {
 				corev1.ResourceCPU: resource.MustParse("100m"),
 			},
 		}
-		exporter := valkeyv1.ExporterSpec{Enabled: true, Resources: resources}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true), Resources: resources}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, resources, c.Resources)
 	})
 
 	t.Run("env contains redis addr", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
 		assert.Equal(t, "redis://localhost:6379", redisAddr.Value)
@@ -699,8 +717,12 @@ func TestBuildExporterContainer(t *testing.T) {
 	})
 
 	t.Run("env contains rediss addr with tls", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true}
-		tlsSpec := &valkeyv1.TLSConfig{Certificate: valkeyv1.CertificateRef{SecretName: "my-tls-secret"}}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
 		redisAddr := getEnvVar(t, c.Env, "REDIS_ADDR")
@@ -713,7 +735,7 @@ func TestBuildExporterContainer(t *testing.T) {
 	})
 
 	t.Run("args set from spec", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true, Args: []string{"-append-instance-role-label"}}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true), Args: []string{"-append-instance-role-label"}}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, []string{"-append-instance-role-label"}, c.Args)
 	})
@@ -727,13 +749,13 @@ func TestBuildExporterContainer(t *testing.T) {
 				Drop: []corev1.Capability{"ALL"},
 			},
 		}
-		exporter := valkeyv1.ExporterSpec{Enabled: true, SecurityContext: sc}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true), SecurityContext: sc}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Equal(t, sc, c.SecurityContext, "SecurityContext should pass through verbatim")
 	})
 
 	t.Run("nil security context is noop", func(t *testing.T) {
-		exporter := valkeyv1.ExporterSpec{Enabled: true}
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
 		c := generateMetricsExporterContainerDef(exporter, "", nil)
 		assert.Nil(t, c.SecurityContext, "omitting SecurityContext must leave container SecurityContext nil")
 	})
@@ -889,7 +911,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 				},
 				PriorityClassName: "high-priority",
 			},
-			Exporter: valkeyv1.ExporterSpec{Enabled: true},
+			Exporter: valkeyv1.ExporterSpec{Enabled: boolPtr(true)},
 			Containers: []corev1.Container{
 				{Name: "sidecar", Image: "sidecar:latest"},
 			},

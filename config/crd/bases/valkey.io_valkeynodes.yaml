@@ -2520,7 +2520,10 @@ spec:
                       type: string
                     type: array
                   enabled:
-                    description: Enable or disable the exporter sidecar container
+                    description: |-
+                      Enable or disable the exporter sidecar container. Unset means enabled
+                      on a ValkeyCluster; a ValkeyNode runs the sidecar only on an explicit
+                      true, which the cluster controller propagates when enabled.
                     type: boolean
                   image:
                     description: Override the default exporter image

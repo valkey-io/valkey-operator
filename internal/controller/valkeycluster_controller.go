@@ -917,6 +917,17 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	// supplies, so the escape hatch is left verbatim.
 	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex))
 
+	// Resolve the cluster-level exporter default (nil means enabled) into an
+	// explicit true; a ValkeyNode runs the sidecar only then. Disabled stays
+	// nil: old operators omitted false, so an explicit false would make
+	// nodeRequiresRoll fail over upgraded clusters over a no-op spec diff.
+	exporter := cluster.Spec.Exporter
+	exporter.Enabled = nil
+	if cluster.Spec.ExporterEnabled() {
+		enabled := true
+		exporter.Enabled = &enabled
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -934,7 +945,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Tolerations:                   scheduling.Tolerations,
 			PriorityClassName:             scheduling.PriorityClassName,
 			TopologySpreadConstraints:     topologySpreadConstraints,
-			Exporter:                      cluster.Spec.Exporter,
+			Exporter:                      exporter,
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),

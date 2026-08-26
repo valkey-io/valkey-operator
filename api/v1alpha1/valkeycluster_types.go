@@ -542,6 +542,7 @@ const (
 	ReasonNoSlots                  = "NoSlotsAvailable"
 	ReasonRebalancingSlots         = "RebalancingSlots"
 	ReasonRebalanceFailed          = "RebalanceFailed"
+	ReasonACLApplyFailed           = "ACLApplyFailed"
 	ReasonUsersAclError            = "UsersACLError"
 	ReasonUpdatingNodes            = "UpdatingNodes"
 	ReasonSystemUsersAclError      = "SystemUsersACLError"

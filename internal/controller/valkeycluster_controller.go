@@ -48,7 +48,7 @@ const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
 	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.80.0"
+	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.
@@ -401,10 +401,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Cluster is healthy - set all positive conditions
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	// A node whose ACL the operator cannot apply leaves the declared users out of
+	// Valkey while every other check passes, so the cluster would otherwise read
+	// as fully healthy with an ACL that is not in effect.
+	//
+	// Degraded is cleared only in the healthy branch. Removing it first and
+	// setting it again would hand SetStatusCondition an absent condition every
+	// reconcile, which resets LastTransitionTime and loses when the failure
+	// actually started.
+	if failed := nodesWithFailedACL(nodes); len(failed) > 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
+			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
+	} else {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
@@ -1755,4 +1768,20 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("valkeycluster").
 		Complete(r)
+}
+
+// nodesWithFailedACL returns the names of nodes whose ACL the operator tried to
+// apply and could not. PendingPropagation is deliberately not included: it is
+// the normal state after every ACL edit and clears itself once the mounted
+// aclfile catches up, so reporting it would take the cluster out of healthy on
+// every routine user change.
+func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
+	var failed []string
+	for i := range nodes.Items {
+		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
+			failed = append(failed, nodes.Items[i].Name)
+		}
+	}
+	return failed
 }

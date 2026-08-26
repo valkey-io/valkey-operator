@@ -223,6 +223,14 @@ const (
 	// is a hash of the managed ACL (see aclRevisionUser); permission-only
 	// edits are therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
+	// ValkeyNodeReasonApplied, ValkeyNodeReasonPendingPropagation and
+	// ValkeyNodeReasonApplyFailed are the reasons ACLApplied and
+	// LiveConfigApplied carry. The distinction matters to anything aggregating
+	// them: propagation is the normal state after an edit and clears itself once
+	// the mounted file catches up, while a failed apply does not clear on its own.
+	ValkeyNodeReasonApplied            = "Applied"
+	ValkeyNodeReasonPendingPropagation = "PendingPropagation"
+	ValkeyNodeReasonApplyFailed        = "ApplyFailed"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means

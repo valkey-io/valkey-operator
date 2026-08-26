@@ -213,13 +213,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 		}
 		return ctrl.Result{}, err
 	}
 	if applied {
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied"); condErr != nil {
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, "Live config applied"); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
 		}
@@ -242,7 +242,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", err.Error()); condErr != nil {
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 		}
 		return ctrl.Result{}, err
@@ -252,14 +252,14 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Secret, so it loaded stale content. Report that rather than claiming
 		// the desired passwords are live, and reload again on the requeue.
 		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation",
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation,
 			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 			return ctrl.Result{}, condErr
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, "Applied",
+	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
 		"Desired ACL passwords are live"); condErr != nil {
 		log.Error(condErr, "failed to set ACLApplied condition")
 		return ctrl.Result{}, condErr

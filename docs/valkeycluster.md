@@ -68,7 +68,7 @@ containers:
 ```yaml
 exporter:
   enabled: true   # default
-  image: oliver006/redis_exporter:v1.80.0
+  image: oliver006/redis_exporter:v1.88.0
   args: # optional command-line flags for exporter
     - -ping-on-connect
   resources:
@@ -390,7 +390,7 @@ users:
 `users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
 
 - `passwordSecret` — one or more password keys from a Secret (multiple keys supported for rotation)
-- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, and subcommands to allow or deny
+- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys` — key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
 - `channels` — pub/sub channel patterns
 - `permissions` — raw ACL string appended after any generated rules

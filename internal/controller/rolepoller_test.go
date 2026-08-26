@@ -201,6 +201,32 @@ var _ = Describe("RolePoller", func() {
 		Expect(scrapes).To(BeZero())
 	})
 
+	It("does not scrape a cluster that is being deleted", func() {
+		By("pinning the cluster under deletion with a finalizer")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Finalizers = []string{"test.valkey.io/block-deletion"}
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() {
+			latest := &valkeyiov1alpha1.ValkeyCluster{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), latest); err == nil {
+				latest.Finalizers = nil
+				Expect(k8sClient.Update(ctx, latest)).To(Succeed())
+			}
+		})
+
+		By("making both nodes look drifted, so only the deletion guard can keep it quiet")
+		for _, node := range []*valkeyiov1alpha1.ValkeyNode{primary, replica} {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			node.Status.Role = ""
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		}
+
+		poller.tick(ctx, nowStamp)
+		Expect(scrapes).To(BeZero(), "a cluster being torn down must not be dialled")
+		Expect(names()).To(BeEmpty())
+	})
+
 	Describe("per-node backoff", func() {
 		BeforeEach(func() {
 			// The replica's address never answers: it is absent from the scrape.

@@ -144,6 +144,15 @@ func (p *RolePoller) tick(ctx context.Context, now time.Time) {
 func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, now time.Time, seen map[types.NamespacedName]struct{}) {
 	log := logf.FromContext(ctx).WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 
+	// The cluster reconcile skips a cluster under deletion; the poller matches it.
+	// Dialling pods that are being torn down yields nothing but dial failures and
+	// triggers for nodes that are already going away. Returning before the seen
+	// bookkeeping is deliberate: the nodes go unmarked, so tick prunes their
+	// backoff entries on this same pass.
+	if !cluster.DeletionTimestamp.IsZero() {
+		return
+	}
+
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := p.Client.List(ctx, nodes,
 		client.InNamespace(cluster.Namespace),

@@ -814,6 +814,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+						// Keep the pod to the server container so the assertions
+						// below are about the workload, not the exporter.
+						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)},
 					},
 				})).To(Succeed())
 			}

@@ -266,6 +266,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "ValkeyNode")
 		os.Exit(1)
 	}
+	// +kubebuilder:scaffold:builder
 
 	if err := mgr.Add(&controller.RolePoller{
 		Client:    mgr.GetClient(),
@@ -276,7 +277,6 @@ func main() {
 		setupLog.Error(err, "Failed to add role poller")
 		os.Exit(1)
 	}
-	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

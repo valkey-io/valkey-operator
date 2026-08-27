@@ -23,6 +23,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -58,6 +60,15 @@ func oneShardState() *valkey.ClusterState {
 			},
 		}},
 	}
+}
+
+// counterValue reads a counter's current value. Prometheus' own testutil would
+// do this, but it pulls a module into the dependency graph for one assertion.
+func counterValue(c prometheus.Counter) float64 {
+	GinkgoHelper()
+	var m dto.Metric
+	Expect(c.Write(&m)).To(Succeed())
+	return m.GetCounter().GetValue()
 }
 
 var _ = Describe("liveRoleForAddress", func() {
@@ -155,7 +166,7 @@ var _ = Describe("RolePoller", func() {
 	})
 
 	It("emits nothing when every live role matches the recorded role", func() {
-		poller.tick(ctx, nowStamp)
+		poller.pollOnce(ctx, nowStamp)
 		Expect(names()).To(BeEmpty())
 	})
 
@@ -167,17 +178,17 @@ var _ = Describe("RolePoller", func() {
 			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 		}
 
-		poller.tick(ctx, nowStamp)
+		poller.pollOnce(ctx, nowStamp)
 		Expect(names()).To(ConsistOf(primary.Name), "only the node that changed role should be woken")
 	})
 
-	It("emits for a node whose role has not been resolved yet", func() {
+	It("does not emit for a node whose role is blank", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(replica), replica)).To(Succeed())
 		replica.Status.Role = ""
 		Expect(k8sClient.Status().Update(ctx, replica)).To(Succeed())
 
-		poller.tick(ctx, nowStamp)
-		Expect(names()).To(ConsistOf(replica.Name))
+		poller.pollOnce(ctx, nowStamp)
+		Expect(names()).To(BeEmpty(), "a blank role is not a role change")
 	})
 
 	It("skips a node that has no pod IP to dial", func() {
@@ -186,8 +197,27 @@ var _ = Describe("RolePoller", func() {
 		replica.Status.Role = ""
 		Expect(k8sClient.Status().Update(ctx, replica)).To(Succeed())
 
-		poller.tick(ctx, nowStamp)
+		poller.pollOnce(ctx, nowStamp)
 		Expect(names()).To(BeEmpty(), "a node with no pod IP has nothing to compare against")
+	})
+
+	// Scrapes dial serially with a 5s timeout each, so without a deadline a
+	// partitioned cluster would stretch the interval for every other cluster.
+	It("bounds each pass with a deadline", func() {
+		var deadline time.Time
+		var bounded bool
+		poller.scrapeFunc = func(scrapeCtx context.Context, c *valkeyiov1alpha1.ValkeyCluster, _ []string) *valkey.ClusterState {
+			if c.Name != clusterName {
+				return nil
+			}
+			deadline, bounded = scrapeCtx.Deadline()
+			return oneShardState()
+		}
+
+		poller.pollOnceWithin(ctx, 5*time.Second)
+
+		Expect(bounded).To(BeTrue(), "a scrape must not be able to outlast the poll interval")
+		Expect(time.Until(deadline)).To(BeNumerically("<=", 5*time.Second))
 	})
 
 	It("does not scrape a cluster whose nodes all lack a pod IP", func() {
@@ -197,7 +227,7 @@ var _ = Describe("RolePoller", func() {
 			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 		}
 
-		poller.tick(ctx, nowStamp)
+		poller.pollOnce(ctx, nowStamp)
 		Expect(scrapes).To(BeZero())
 	})
 
@@ -215,16 +245,58 @@ var _ = Describe("RolePoller", func() {
 			}
 		})
 
-		By("making both nodes look drifted, so only the deletion guard can keep it quiet")
-		for _, node := range []*valkeyiov1alpha1.ValkeyNode{primary, replica} {
+		By("swapping both recorded roles, so only the deletion guard can keep it quiet")
+		for node, role := range map[*valkeyiov1alpha1.ValkeyNode]string{primary: RoleReplica, replica: RolePrimary} {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
-			node.Status.Role = ""
+			node.Status.Role = role
 			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 		}
 
-		poller.tick(ctx, nowStamp)
+		poller.pollOnce(ctx, nowStamp)
 		Expect(scrapes).To(BeZero(), "a cluster being torn down must not be dialled")
 		Expect(names()).To(BeEmpty())
+	})
+
+	Describe("trigger metrics", func() {
+		// Counters are process-global, so assert on deltas rather than absolutes.
+		counts := func() (raised, dropped float64) {
+			return counterValue(roleTriggersTotal.WithLabelValues(clusterName, "default")),
+				counterValue(roleTriggersDroppedTotal.WithLabelValues(clusterName, "default"))
+		}
+
+		// driftPrimary leaves the primary's recorded role contradicting the scrape.
+		driftPrimary := func() {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(primary), primary)).To(Succeed())
+			primary.Status.Role = RoleReplica
+			Expect(k8sClient.Status().Update(ctx, primary)).To(Succeed())
+		}
+
+		It("counts a trigger it raised", func() {
+			driftPrimary()
+			raisedBefore, droppedBefore := counts()
+
+			poller.pollOnce(ctx, nowStamp)
+
+			raisedAfter, droppedAfter := counts()
+			Expect(raisedAfter - raisedBefore).To(Equal(float64(1)))
+			Expect(droppedAfter - droppedBefore).To(BeZero())
+		})
+
+		It("counts a trigger it had to drop", func() {
+			// An unbuffered channel with no reader takes emit's default branch,
+			// which is the same path a full buffer takes.
+			emitted = make(chan crevent.GenericEvent)
+			poller.Events = emitted
+			driftPrimary()
+			raisedBefore, droppedBefore := counts()
+
+			poller.pollOnce(ctx, nowStamp)
+
+			raisedAfter, droppedAfter := counts()
+			Expect(droppedAfter - droppedBefore).To(Equal(float64(1)),
+				"a dropped trigger is otherwise invisible")
+			Expect(raisedAfter - raisedBefore).To(BeZero())
+		})
 	})
 
 	Describe("per-node backoff", func() {
@@ -242,7 +314,7 @@ var _ = Describe("RolePoller", func() {
 		})
 
 		It("backs off an unreachable node and stops dialling it until the delay expires", func() {
-			poller.tick(ctx, nowStamp)
+			poller.pollOnce(ctx, nowStamp)
 			Expect(poller.backoff).To(HaveKey(client.ObjectKeyFromObject(replica)))
 			Expect(poller.backoff[client.ObjectKeyFromObject(replica)].failures).To(Equal(1))
 
@@ -255,7 +327,7 @@ var _ = Describe("RolePoller", func() {
 				dialled = addresses
 				return oneShardState()
 			}
-			poller.tick(ctx, nowStamp.Add(time.Second))
+			poller.pollOnce(ctx, nowStamp.Add(time.Second))
 			Expect(dialled).To(ConsistOf(pollPrimaryIP), "a backed-off node must not be dialled")
 		})
 
@@ -266,14 +338,14 @@ var _ = Describe("RolePoller", func() {
 				5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
 				rolePollMaxBackoff, rolePollMaxBackoff,
 			} {
-				poller.tick(ctx, at)
+				poller.pollOnce(ctx, at)
 				Expect(poller.backoff[key].nextAttempt.Sub(at)).To(Equal(want))
 				at = poller.backoff[key].nextAttempt
 			}
 		})
 
 		It("clears the backoff once the node answers again", func() {
-			poller.tick(ctx, nowStamp)
+			poller.pollOnce(ctx, nowStamp)
 			key := client.ObjectKeyFromObject(replica)
 			Expect(poller.backoff).To(HaveKey(key))
 
@@ -283,12 +355,12 @@ var _ = Describe("RolePoller", func() {
 				}
 				return oneShardState()
 			}
-			poller.tick(ctx, poller.backoff[key].nextAttempt)
+			poller.pollOnce(ctx, poller.backoff[key].nextAttempt)
 			Expect(poller.backoff).NotTo(HaveKey(key))
 		})
 
 		It("forgets backoff state for a node that no longer exists", func() {
-			poller.tick(ctx, nowStamp)
+			poller.pollOnce(ctx, nowStamp)
 			key := client.ObjectKeyFromObject(replica)
 			Expect(poller.backoff).To(HaveKey(key))
 
@@ -297,7 +369,7 @@ var _ = Describe("RolePoller", func() {
 				return apierrors.IsNotFound(k8sClient.Get(ctx, key, &valkeyiov1alpha1.ValkeyNode{}))
 			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 
-			poller.tick(ctx, nowStamp.Add(time.Hour))
+			poller.pollOnce(ctx, nowStamp.Add(time.Hour))
 			Expect(poller.backoff).NotTo(HaveKey(key), "backoff state must not outlive the node")
 		})
 	})

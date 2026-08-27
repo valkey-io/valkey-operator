@@ -1045,6 +1045,9 @@ func parseClusterNodesRole(clusterNodes string) string {
 		if !slices.Contains(flags, "myself") {
 			continue
 		}
+		// Migration markers ([5461-<-id]) count as slot fields, so a master
+		// mid-import reads as primary. GetSlots keeps them too, so
+		// GetClusterState gives the same answer.
 		if slices.Contains(flags, "master") && len(fields) > 8 {
 			return RolePrimary
 		}

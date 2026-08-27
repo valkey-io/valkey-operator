@@ -68,7 +68,7 @@ type RolePoller struct {
 	scrapeFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState
 
 	// backoff tracks consecutive scrape failures per node. Entries are pruned
-	// each tick for nodes that no longer exist. Only Start's goroutine touches
+	// each pass for nodes that no longer exist. Only Start's goroutine touches
 	// it, so it needs no lock.
 	backoff map[types.NamespacedName]nodeBackoff
 }
@@ -105,17 +105,35 @@ func (p *RolePoller) Start(ctx context.Context) error {
 			log.Info("stopping role poller")
 			return nil
 		case <-ticker.C:
-			p.tick(logf.IntoContext(ctx, log), time.Now())
+			p.pollOnceWithin(logf.IntoContext(ctx, log), interval)
 		}
 	}
 }
 
-// tick samples every cluster once and emits an event per drifted node. A tick
+// pollOnceWithin runs one pass under a deadline of budget.
+//
+// Scrapes dial each address in turn and valkey-go waits DefaultDialTimeout (5s)
+// on each, so a handful of unreachable nodes can outlast the poll interval many
+// times over. The loop itself is safe, since a Ticker drops missed ticks rather
+// than queueing them, but one partitioned cluster would stretch the effective
+// interval for every other cluster, since a single goroutine walks them all.
+// Per-node backoff caps the repeat cost of a dead node, never the first round.
+//
+// A late pass is dropped rather than finished; the next one redoes it. Nodes
+// that were cut off don't appear in the scrape, so they read as "did not
+// answer" and take a backoff step.
+func (p *RolePoller) pollOnceWithin(ctx context.Context, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	p.pollOnce(ctx, time.Now())
+}
+
+// pollOnce samples every cluster once and emits an event per drifted node. A pass
 // where every role matches performs no API writes at all.
 //
 // now is passed in rather than read from the clock so tests can drive the
 // per-node backoff deterministically.
-func (p *RolePoller) tick(ctx context.Context, now time.Time) {
+func (p *RolePoller) pollOnce(ctx context.Context, now time.Time) {
 	log := logf.FromContext(ctx)
 
 	clusters := &valkeyiov1alpha1.ValkeyClusterList{}
@@ -126,11 +144,19 @@ func (p *RolePoller) tick(ctx context.Context, now time.Time) {
 
 	seen := make(map[types.NamespacedName]struct{})
 	for i := range clusters.Items {
+		if ctx.Err() != nil {
+			// Out of budget. Return before pruning: seen only covers the clusters
+			// we reached, so pruning now would clear backoff for nodes we never
+			// dialled and send us straight back at them on the next pass.
+			log.V(1).Info("poll pass cut short by its deadline", "clustersNotPolled", len(clusters.Items)-i)
+			return
+		}
 		p.pollCluster(ctx, &clusters.Items[i], now, seen)
 	}
 
 	// Drop backoff state for nodes that have gone away, so the map cannot grow
-	// without bound across cluster deletions and scale-in.
+	// without bound across cluster deletions and scale-in. Unlocked: parallelising
+	// pollCluster would need a mutex here.
 	for key := range p.backoff {
 		if _, ok := seen[key]; !ok {
 			delete(p.backoff, key)
@@ -139,15 +165,15 @@ func (p *RolePoller) tick(ctx context.Context, now time.Time) {
 }
 
 // pollCluster scrapes one cluster and emits drift events for its nodes. Every
-// node it considers is recorded in seen, which tick uses to prune stale backoff
-// entries.
+// node it considers is recorded in seen, which pollOnce uses to prune stale backoff
+// entries. Not safe to call concurrently: it mutates p.backoff without a lock.
 func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, now time.Time, seen map[types.NamespacedName]struct{}) {
 	log := logf.FromContext(ctx).WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
 
 	// The cluster reconcile skips a cluster under deletion; the poller matches it.
 	// Dialling pods that are being torn down yields nothing but dial failures and
 	// triggers for nodes that are already going away. Returning before the seen
-	// bookkeeping is deliberate: the nodes go unmarked, so tick prunes their
+	// bookkeeping is deliberate: the nodes go unmarked, so pollOnce prunes their
 	// backoff entries on this same pass.
 	if !cluster.DeletionTimestamp.IsZero() {
 		return
@@ -166,18 +192,28 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	// node still waiting for an IP has nothing to dial, and a node in backoff is
 	// left out of the address list entirely so no connection is attempted.
 	var addresses []string
+	var noPodIP int
+	var backedOff []string
 	candidates := make([]*valkeyiov1alpha1.ValkeyNode, 0, len(nodes.Items))
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 		seen[client.ObjectKeyFromObject(node)] = struct{}{}
 		if node.Status.PodIP == "" {
+			noPodIP++
 			continue
 		}
 		if state, ok := p.backoff[client.ObjectKeyFromObject(node)]; ok && now.Before(state.nextAttempt) {
+			backedOff = append(backedOff, node.Name)
 			continue
 		}
 		candidates = append(candidates, node)
 		addresses = append(addresses, node.Status.PodIP)
+	}
+	// Skips are invisible otherwise, but they're routine while a cluster comes
+	// up, so only log when there's something to report.
+	if noPodIP > 0 || len(backedOff) > 0 {
+		log.V(1).Info("nodes skipped this pass",
+			"dialled", len(addresses), "noPodIP", noPodIP, "backedOff", backedOff)
 	}
 	if len(addresses) == 0 {
 		return
@@ -205,22 +241,28 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 		}
 		delete(p.backoff, key)
 
+		// A blank role isn't a role change. Either the pod isn't ready, where ""
+		// is what the node controller intends, or the resolve failed. Both
+		// already requeue within 10s on their own, and a loading server answers
+		// CLUSTER NODES throughout, so treating "" as drift would wake a
+		// reconcile every tick for the whole of an AOF load without being able
+		// to change the outcome.
+		if node.Status.Role == "" {
+			continue
+		}
+
 		if liveRole == node.Status.Role {
 			continue
 		}
-		// A disagreement the node controller cannot settle — it failed to resolve
-		// the role, or the pod is not ready — is re-emitted every tick until it
-		// clears. That is bounded to one reconcile per interval per node, and the
-		// workqueue's rate limiter collapses repeats while one is already queued.
 		log.V(1).Info("live role differs from status, triggering reconcile",
 			"node", node.Name, "live", liveRole, "status", node.Status.Role)
-		p.emit(node)
+		p.emit(cluster, node)
 	}
 }
 
 // scrape reads live cluster state, through scrapeFunc when a test has injected
 // one. Fetching the operator password is what can fail here; without it every
-// connection would be rejected, so the tick is skipped rather than dialled.
+// connection would be rejected, so the pass is skipped rather than dialled.
 func (p *RolePoller) scrape(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState {
 	if p.scrapeFunc != nil {
 		return p.scrapeFunc(ctx, cluster, addresses)
@@ -237,10 +279,13 @@ func (p *RolePoller) scrape(ctx context.Context, cluster *valkeyiov1alpha1.Valke
 // emit pushes a reconcile trigger for the node, dropping it if the channel is
 // full. Dropping is correct: the backstop requeue still catches the change,
 // whereas blocking would stall every other cluster behind one slow consumer.
-func (p *RolePoller) emit(node *valkeyiov1alpha1.ValkeyNode) {
+// Counted either way; see roleTriggersDroppedTotal for why the drop matters.
+func (p *RolePoller) emit(cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode) {
 	select {
 	case p.Events <- event.GenericEvent{Object: node.DeepCopy()}:
+		roleTriggersTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	default:
+		roleTriggersDroppedTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	}
 }
 

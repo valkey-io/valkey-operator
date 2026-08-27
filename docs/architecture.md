@@ -48,7 +48,7 @@ The role follows the pod, not the workload: it is cleared when the pod is not re
 
 It exists because a failover between two healthy pods moves nothing in Kubernetes: no restart, no readiness flip, no IP change. No watch can fire, so without the poller the only detector is the 30s backstop requeue.
 
-- **It triggers; it never writes.** The ValkeyNode controller stays the sole writer of `status.role`, so a false positive costs one extra reconcile and nothing else.
+- It triggers, it never writes. The ValkeyNode controller stays the sole writer of `status.role`, so a false positive costs one extra reconcile and nothing else.
 - Triggers travel in-process over a channel (`source.Channel`), so a tick where every role matches performs no API operations at all.
 - It runs only on the elected leader
 - A Valkey instance that fails to answer is backed off exponentially (up to a minute) rather than dialled every tick.

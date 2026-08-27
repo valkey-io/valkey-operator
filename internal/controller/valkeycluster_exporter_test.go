@@ -159,10 +159,9 @@ var _ = Describe("exporter enabled defaulting", func() {
 	})
 
 	// Old operators serialised Enabled as a plain bool with omitempty, so a
-	// disabled exporter was stored with the field absent. The desired spec
-	// must reproduce that shape: nodeRequiresRoll compares specs, and a
-	// nil-vs-false mismatch triggers a proactive failover on operator upgrade
-	// even though the rendered pod template is identical (#401).
+	// disabled exporter was stored with the field absent. A nil-vs-false
+	// encoding difference renders the same template, so it must not fail
+	// over on operator upgrade.
 	It("predicts no roll for nodes stored by an older operator", func() {
 		stored := storeCluster("exp-upgrade", valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)})
 
@@ -171,8 +170,11 @@ var _ = Describe("exporter enabled defaulting", func() {
 		old.Status.PodIP = "10.0.0.1"
 
 		desired := buildClusterValkeyNode(stored, 0, 0)
-		Expect(nodeRequiresRoll(old, desired)).To(BeFalse(),
-			"a spec-shape-only change must not fail over upgraded clusters")
+		Expect(setDesiredWorkloadRevision(desired)).To(Succeed())
+		liveTmpl, err := buildNodePodTemplate(old)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(needsProactiveFailoverForRoll(old, desired, podTemplateRollHash(liveTmpl))).To(BeFalse(),
+			"a spec-encoding-only change must not fail over upgraded clusters")
 	})
 
 	// Enabled is a *bool so that an explicit false is serialised rather than

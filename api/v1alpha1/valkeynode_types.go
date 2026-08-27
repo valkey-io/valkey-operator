@@ -146,6 +146,13 @@ type ValkeyNodeSpec struct {
 // API is the resolved view the node controller renders into valkey.conf and
 // volume mounts.
 type NodeTLSSpec struct {
+	// ServerName is the hostname used for TLS verification when connecting
+	// to the pod IP. The cluster controller copies this from
+	// spec.networking.tls.serverName for cluster-owned nodes.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	ServerName string `json:"serverName,omitempty"`
+
 	// Certificates holds the certificate slots mounted into the node pod.
 	// +kubebuilder:validation:Required
 	Certificates NodeTLSCertificates `json:"certificates"`

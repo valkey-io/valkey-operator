@@ -39,6 +39,19 @@ func TestNodeTLSFromCluster(t *testing.T) {
 		})
 		require.NotNil(t, got)
 		assert.Equal(t, "valkey-server-tls", got.Certificates.Server.SecretName)
+		assert.Empty(t, got.ServerName)
+	})
+
+	t.Run("copies serverName", func(t *testing.T) {
+		got := nodeTLSFromCluster(&valkeyv1.TLSSpec{
+			ServerName: "custom.example",
+			Certificates: valkeyv1.TLSCertificates{
+				Server: valkeyv1.CertificateSource{SecretName: "valkey-server-tls"},
+			},
+		})
+		require.NotNil(t, got)
+		assert.Equal(t, "custom.example", got.ServerName)
+		assert.Equal(t, "valkey-server-tls", got.Certificates.Server.SecretName)
 	})
 }
 
@@ -58,6 +71,28 @@ func TestBuildClusterValkeyNodeTLS(t *testing.T) {
 
 	node := buildClusterValkeyNode(cluster, 0, 0)
 	require.NotNil(t, node.Spec.TLS)
+	assert.Equal(t, "valkey-server-tls", node.Spec.TLS.Certificates.Server.SecretName)
+	assert.Empty(t, node.Spec.TLS.ServerName)
+}
+
+func TestBuildClusterValkeyNodeTLSServerName(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Networking: &valkeyv1.NetworkingSpec{
+				TLS: &valkeyv1.TLSSpec{
+					ServerName: "custom.example",
+					Certificates: valkeyv1.TLSCertificates{
+						Server: valkeyv1.CertificateSource{SecretName: "valkey-server-tls"},
+					},
+				},
+			},
+		},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	require.NotNil(t, node.Spec.TLS)
+	assert.Equal(t, "custom.example", node.Spec.TLS.ServerName)
 	assert.Equal(t, "valkey-server-tls", node.Spec.TLS.Certificates.Server.SecretName)
 }
 

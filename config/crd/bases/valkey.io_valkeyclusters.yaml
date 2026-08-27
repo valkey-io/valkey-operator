@@ -1917,6 +1917,13 @@ spec:
                         required:
                         - server
                         type: object
+                      serverName:
+                        description: |-
+                          ServerName is the hostname used for TLS verification when the operator
+                          connects to a node by pod IP. When unset, the operator uses
+                          valkey-<name>.<namespace>.svc.cluster.local.
+                        maxLength: 253
+                        type: string
                     required:
                     - certificates
                     type: object

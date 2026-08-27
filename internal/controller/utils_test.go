@@ -422,3 +422,9 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestTLSServerName(t *testing.T) {
+	assert.Equal(t, "custom.example", tlsServerName("custom.example", "foo", "valkey"))
+	assert.Equal(t, "valkey-foo.valkey.svc.cluster.local", tlsServerName("", "foo", "valkey"))
+	assert.Empty(t, tlsServerName("", "", "valkey"))
+}

@@ -3173,6 +3173,13 @@ spec:
                     required:
                     - server
                     type: object
+                  serverName:
+                    description: |-
+                      ServerName is the hostname used for TLS verification when connecting
+                      to the pod IP. The cluster controller copies this from
+                      spec.networking.tls.serverName for cluster-owned nodes.
+                    maxLength: 253
+                    type: string
                 required:
                 - certificates
                 type: object

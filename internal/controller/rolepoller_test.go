@@ -293,7 +293,7 @@ var _ = Describe("RolePoller", func() {
 			poller.pollOnce(ctx, nowStamp)
 
 			raisedAfter, droppedAfter := counts()
-			Expect(droppedAfter - droppedBefore).To(Equal(float64(1)),
+			Expect(droppedAfter-droppedBefore).To(Equal(float64(1)),
 				"a dropped trigger is otherwise invisible")
 			Expect(raisedAfter - raisedBefore).To(BeZero())
 		})

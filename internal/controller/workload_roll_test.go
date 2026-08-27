@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -109,4 +110,60 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 	h3, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, h1, h3)
+}
+
+func TestPodSupersededAndStuck(t *testing.T) {
+	sts := func(updateRevision string) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{Status: appsv1.StatefulSetStatus{UpdateRevision: updateRevision}}
+	}
+	pod := func(revision string, ready bool) *corev1.Pod {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "valkey-node-0",
+				Labels: map[string]string{appsv1.StatefulSetRevisionLabel: revision},
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
+			},
+		}
+	}
+
+	t.Run("not ready on a superseded revision is stuck", func(t *testing.T) {
+		// The StatefulSet holds the revision that replaces this pod, and
+		// OrderedReady keeps it from acting while the pod is not ready.
+		assert.True(t, podSupersededAndStuck(pod("old", false), sts("new")))
+	})
+
+	t.Run("not ready on the current revision is left alone", func(t *testing.T) {
+		// Deleting this one recreates the same pod and the same crash, so a
+		// configuration error would become an endless restart loop.
+		assert.False(t, podSupersededAndStuck(pod("new", false), sts("new")))
+	})
+
+	t.Run("ready on a superseded revision is left to the StatefulSet", func(t *testing.T) {
+		// An ordinary rolling update: the StatefulSet controller is able to
+		// replace a ready pod on its own.
+		assert.False(t, podSupersededAndStuck(pod("old", true), sts("new")))
+	})
+
+	t.Run("a pod already terminating is left alone", func(t *testing.T) {
+		terminating := pod("old", false)
+		now := metav1.Now()
+		terminating.DeletionTimestamp = &now
+		assert.False(t, podSupersededAndStuck(terminating, sts("new")))
+	})
+
+	t.Run("no revision observed yet", func(t *testing.T) {
+		// Nothing has superseded the pod, so there is nothing to unblock.
+		assert.False(t, podSupersededAndStuck(pod("old", false), sts("")))
+	})
+
+	t.Run("missing pod or statefulset", func(t *testing.T) {
+		assert.False(t, podSupersededAndStuck(nil, sts("new")))
+		assert.False(t, podSupersededAndStuck(pod("old", false), nil))
+	})
 }

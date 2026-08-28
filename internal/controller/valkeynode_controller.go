@@ -1010,15 +1010,34 @@ func podSupersededAndStuck(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	if pod == nil || sts == nil || pod.DeletionTimestamp != nil {
 		return false
 	}
+	// getPod selects on labels alone, so confirm the StatefulSet being
+	// reconciled actually controls this pod before considering it for
+	// deletion. A pod that merely carries the same labels is not ours.
+	if !podControlledBy(pod, sts) {
+		return false
+	}
 	// Before the StatefulSet controller has observed the template there is no
-	// revision to be superseded by.
+	// revision to be superseded by, and a pod it has not yet stamped cannot be
+	// judged against one.
 	if sts.Status.UpdateRevision == "" {
 		return false
 	}
-	if pod.Labels[appsv1.StatefulSetRevisionLabel] == sts.Status.UpdateRevision {
+	podRevision := pod.Labels[appsv1.StatefulSetRevisionLabel]
+	if podRevision == "" || podRevision == sts.Status.UpdateRevision {
 		return false
 	}
 	return !podReady(pod)
+}
+
+// podControlledBy reports whether the StatefulSet is the pod's controller.
+func podControlledBy(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
+	for _, ref := range pod.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller &&
+			ref.Kind == "StatefulSet" && ref.Name == sts.Name && ref.UID == sts.UID {
+			return true
+		}
+	}
+	return false
 }
 
 // replaceSupersededPod deletes the node's pod when its StatefulSet cannot do it.

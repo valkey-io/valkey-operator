@@ -113,18 +113,30 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 }
 
 func TestPodSupersededAndStuck(t *testing.T) {
+	owner := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-node", UID: "sts-uid"},
+	}
 	sts := func(updateRevision string) *appsv1.StatefulSet {
-		return &appsv1.StatefulSet{Status: appsv1.StatefulSetStatus{UpdateRevision: updateRevision}}
+		out := owner.DeepCopy()
+		out.Status.UpdateRevision = updateRevision
+		return out
 	}
 	pod := func(revision string, ready bool) *corev1.Pod {
 		status := corev1.ConditionFalse
 		if ready {
 			status = corev1.ConditionTrue
 		}
+		controller := true
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "valkey-node-0",
 				Labels: map[string]string{appsv1.StatefulSetRevisionLabel: revision},
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind:       "StatefulSet",
+					Name:       owner.Name,
+					UID:        owner.UID,
+					Controller: &controller,
+				}},
 			},
 			Status: corev1.PodStatus{
 				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
@@ -160,6 +172,26 @@ func TestPodSupersededAndStuck(t *testing.T) {
 	t.Run("no revision observed yet", func(t *testing.T) {
 		// Nothing has superseded the pod, so there is nothing to unblock.
 		assert.False(t, podSupersededAndStuck(pod("old", false), sts("")))
+	})
+
+	t.Run("a pod the StatefulSet has not stamped yet", func(t *testing.T) {
+		// Without a revision on the pod there is nothing to call superseded,
+		// so it must not be read as different from the StatefulSet's.
+		noRevision := pod("", false)
+		delete(noRevision.Labels, appsv1.StatefulSetRevisionLabel)
+		assert.False(t, podSupersededAndStuck(noRevision, sts("new")))
+	})
+
+	t.Run("a pod this StatefulSet does not control", func(t *testing.T) {
+		// getPod selects on labels alone, so a pod that merely carries them
+		// must never be deleted by this controller.
+		foreign := pod("old", false)
+		foreign.OwnerReferences = nil
+		assert.False(t, podSupersededAndStuck(foreign, sts("new")))
+
+		otherOwner := pod("old", false)
+		otherOwner.OwnerReferences[0].UID = "someone-else"
+		assert.False(t, podSupersededAndStuck(otherOwner, sts("new")))
 	})
 
 	t.Run("missing pod or statefulset", func(t *testing.T) {

@@ -404,7 +404,9 @@ type TLSSpec struct {
 	// connects to a node by pod IP. When unset, the operator uses
 	// valkey-<name>.<namespace>.svc.cluster.local.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots used by the cluster.

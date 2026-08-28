@@ -147,10 +147,13 @@ type ValkeyNodeSpec struct {
 // volume mounts.
 type NodeTLSSpec struct {
 	// ServerName is the hostname used for TLS verification when connecting
-	// to the pod IP. The cluster controller copies this from
-	// spec.networking.tls.serverName for cluster-owned nodes.
+	// to the pod IP. For cluster-owned nodes this is
+	// spec.networking.tls.serverName, or valkey-<cluster>.<ns>.svc.cluster.local
+	// if that is unset.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots mounted into the node pod.

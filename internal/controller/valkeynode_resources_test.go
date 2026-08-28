@@ -653,9 +653,23 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
 		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
 		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
+		assert.Empty(t, getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_SERVER_NAME").Value)
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("env contains tls server name when set", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			ServerName: "custom.example",
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+		}
+
+		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
+		assert.Equal(t, "custom.example", getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_SERVER_NAME").Value)
 	})
 
 	t.Run("args set from spec", func(t *testing.T) {

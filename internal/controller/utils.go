@@ -321,9 +321,6 @@ func tlsServerName(override, clusterName, namespace string) string {
 	if override != "" {
 		return override
 	}
-	if clusterName == "" {
-		return ""
-	}
 	return fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), namespace)
 }
 

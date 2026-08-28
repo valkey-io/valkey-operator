@@ -881,8 +881,7 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 	var tlsConfig *tls.Config
 	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
 		secretName := node.Spec.TLS.Certificates.Server.SecretName
-		serverName := tlsServerName(node.Spec.TLS.ServerName, node.Labels[LabelCluster], node.Namespace)
-		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, serverName, node.Namespace)
+		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, node.Spec.TLS.ServerName, node.Namespace)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
 				"secretName", secretName)

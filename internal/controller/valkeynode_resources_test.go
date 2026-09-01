@@ -42,6 +42,15 @@ func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVa
 	return nil
 }
 
+func hasEnvVar(envVars []corev1.EnvVar, name string) bool {
+	for i := range envVars {
+		if envVars[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 	return &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -653,7 +662,7 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Equal(t, "rediss://localhost:6379", redisAddr.Value)
 		tlsCaCertFile := getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CA_CERT_FILE")
 		assert.Equal(t, fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA), tlsCaCertFile.Value)
-		assert.Empty(t, getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_SERVER_NAME").Value)
+		assert.False(t, hasEnvVar(c.Env, "REDIS_EXPORTER_TLS_SERVER_NAME"))
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)

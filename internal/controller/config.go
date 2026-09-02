@@ -177,7 +177,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster.GetTLS())), nil)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster)), nil)
 }
 
 // nodeServerConfigRollHash derives the config roll hash from the node spec:

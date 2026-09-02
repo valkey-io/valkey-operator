@@ -1917,6 +1917,18 @@ spec:
                         required:
                         - server
                         type: object
+                      serverName:
+                        description: |-
+                          ServerName is the hostname used for TLS verification when the operator
+                          connects to a node by pod IP. When unset, the operator uses
+                          valkey-<name>.<namespace>.svc.cluster.local.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                        x-kubernetes-validations:
+                        - message: must be a valid DNS-1123 subdomain (lowercase alphanumerics,
+                            '-' and '.', starting and ending with an alphanumeric)
+                          rule: '!format.dns1123Subdomain().validate(self).hasValue()'
                     required:
                     - certificates
                     type: object

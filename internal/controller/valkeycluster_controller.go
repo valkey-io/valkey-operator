@@ -856,11 +856,13 @@ func effectiveGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 
 
 // nodeTLSFromCluster resolves the cluster's TLS intent into the node's TLS
 // view.
-func nodeTLSFromCluster(tlsSpec *valkeyiov1alpha1.TLSSpec) *valkeyiov1alpha1.NodeTLSSpec {
+func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.NodeTLSSpec {
+	tlsSpec := cluster.GetTLS()
 	if tlsSpec == nil {
 		return nil
 	}
 	return &valkeyiov1alpha1.NodeTLSSpec{
+		ServerName: tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace),
 		Certificates: valkeyiov1alpha1.NodeTLSCertificates{
 			Server: valkeyiov1alpha1.NodeCertificateRef{
 				SecretName: tlsSpec.Certificates.Server.SecretName,
@@ -962,7 +964,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Containers:                    cluster.Spec.Containers,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
-			TLS:                           nodeTLSFromCluster(cluster.GetTLS()),
+			TLS:                           nodeTLSFromCluster(cluster),
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
@@ -980,7 +982,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	}
 	var tlsConfig *tls.Config
 	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		serverName := fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(cluster.Name), cluster.Namespace)
+		serverName := tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace)
 		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",

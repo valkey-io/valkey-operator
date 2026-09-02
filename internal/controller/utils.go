@@ -315,6 +315,15 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }
 
+// tlsServerName is the hostname the operator pins on TLS connections to a
+// pod IP. override wins; otherwise valkey-<cluster>.<ns>.svc.cluster.local.
+func tlsServerName(override, clusterName, namespace string) string {
+	if override != "" {
+		return override
+	}
+	return fmt.Sprintf("%s.%s.svc.cluster.local", headlessServiceName(clusterName), namespace)
+}
+
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
 	secret := &corev1.Secret{}

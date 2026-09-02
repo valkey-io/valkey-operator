@@ -366,6 +366,8 @@ networking:
 
 `certificates` is a set of named slots. `server` is the only one today; the trust-source override, the outbound peer identity and the control-plane identity land as sibling slots in later phases of [#360](https://github.com/valkey-io/valkey-operator/issues/360).
 
+`serverName` is the hostname the operator verifies when it dials a node by pod IP. When unset, it uses `valkey-<name>.<namespace>.svc.cluster.local`. The cluster writes that resolved name onto each `ValkeyNode`; the node client and the metrics exporter (`REDIS_EXPORTER_TLS_SERVER_NAME`) use it as-is. The exporter still dials `localhost`. This does not change what nodes announce in `CLUSTER SLOTS`.
+
 ### Users
 
 ```yaml

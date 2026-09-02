@@ -49,6 +49,24 @@ func TestNodeTLSFromCluster(t *testing.T) {
 		assert.Equal(t, "valkey-mycluster.default.svc.cluster.local", got.ServerName)
 	})
 
+	t.Run("default serverName uses clusterDomain", func(t *testing.T) {
+		got := nodeTLSFromCluster(&valkeyv1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+			Spec: valkeyv1.ValkeyClusterSpec{
+				Networking: &valkeyv1.NetworkingSpec{
+					ClusterDomain: "corp.local",
+					TLS: &valkeyv1.TLSSpec{
+						Certificates: valkeyv1.TLSCertificates{
+							Server: valkeyv1.CertificateSource{SecretName: "valkey-server-tls"},
+						},
+					},
+				},
+			},
+		})
+		require.NotNil(t, got)
+		assert.Equal(t, "valkey-mycluster.default.svc.corp.local", got.ServerName)
+	})
+
 	t.Run("copies serverName", func(t *testing.T) {
 		got := nodeTLSFromCluster(&valkeyv1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},

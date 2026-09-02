@@ -174,6 +174,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort)
 	}
 
+	// Soft guard: TLS with IP announce (including default IP). Non-blocking.
+	if cluster.GetTLS() != nil && !cluster.PrefersHostnameAnnounce() {
+		msg := "networking.tls is set with preferredEndpointType IP (default when discovery is omitted); clients that re-dial announced pod IPs after CLUSTER SLOTS often fail certificate name checks. Prefer networking.discovery.preferredEndpointType Hostname and cert SANs for pod FQDNs under the headless Service"
+		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSEndpointWarning) {
+			log.Info("TLS enabled with IP endpoint announce", "preferredEndpointType", cluster.GetPreferredEndpointType())
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonTLSWithIPAnnounce, "ReconcileValkeyCluster", "%s", msg)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionTLSEndpointWarning, valkeyiov1alpha1.ReasonTLSWithIPAnnounce, msg, metav1.ConditionTrue)
+	} else {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSEndpointWarning)
+	}
+
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		log.Error(err, "failed to list ValkeyNodes")
@@ -862,7 +874,7 @@ func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alph
 		return nil
 	}
 	return &valkeyiov1alpha1.NodeTLSSpec{
-		ServerName: tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace),
+		ServerName: tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace, cluster.GetClusterDomain()),
 		Certificates: valkeyiov1alpha1.NodeTLSCertificates{
 			Server: valkeyiov1alpha1.NodeCertificateRef{
 				SecretName: tlsSpec.Certificates.Server.SecretName,
@@ -943,6 +955,14 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		exporter.Enabled = &enabled
 	}
 
+	// Hostname announce only when discovery selects Hostname. ClusterDomain is
+	// always written so node TLS ServerName matches getValkeyClusterState.
+	var preferredEndpoint valkeyiov1alpha1.PreferredEndpointType
+	if cluster.PrefersHostnameAnnounce() {
+		preferredEndpoint = valkeyiov1alpha1.PreferredEndpointTypeHostname
+	}
+	clusterDomain := cluster.GetClusterDomain()
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -968,6 +988,8 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: gracePeriod,
+			PreferredEndpointType:         preferredEndpoint,
+			ClusterDomain:                 clusterDomain,
 		},
 	}
 }
@@ -982,7 +1004,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 	}
 	var tlsConfig *tls.Config
 	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		serverName := tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace)
+		serverName := tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace, cluster.GetClusterDomain())
 		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",

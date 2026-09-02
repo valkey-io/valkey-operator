@@ -975,6 +975,11 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              clusterDomain:
+                description: |-
+                  ClusterDomain is set by the ValkeyCluster controller from
+                  spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
+                type: string
               config:
                 additionalProperties:
                   type: string
@@ -3071,6 +3076,16 @@ spec:
                         type: string
                     type: object
                 type: object
+              preferredEndpointType:
+                description: |-
+                  PreferredEndpointType is set by the ValkeyCluster controller from
+                  spec.networking.discovery. PreferredEndpointTypeHostname switches announce
+                  flags and managed config to hostname mode. Standalone nodes leave this empty
+                  (IP announce).
+                enum:
+                - IP
+                - Hostname
+                type: string
               priorityClassName:
                 description: |-
                   PriorityClassName is the name of an existing PriorityClass applied to
@@ -3177,8 +3192,8 @@ spec:
                     description: |-
                       ServerName is the hostname used for TLS verification when connecting
                       to the pod IP. For cluster-owned nodes this is
-                      spec.networking.tls.serverName, or valkey-<cluster>.<ns>.svc.cluster.local
-                      if that is unset.
+                      spec.networking.tls.serverName, or
+                      valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset.
                     maxLength: 253
                     minLength: 1
                     type: string

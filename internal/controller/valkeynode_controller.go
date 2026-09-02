@@ -1050,7 +1050,15 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 		return nil
 	}
 	podRevision := pod.Labels[appsv1.StatefulSetRevisionLabel]
-	if err := r.Delete(ctx, pod); err != nil {
+	// getPod reads from the informer cache, so the decision above is made on a
+	// snapshot that can already be stale. Delete addresses the pod by name, so
+	// without a precondition a replacement created in that window would be the
+	// one removed. A UID mismatch fails the request instead, and the next
+	// reconcile judges the pod that actually exists.
+	if err := r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID}); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
 		return client.IgnoreNotFound(err)
 	}
 	logf.FromContext(ctx).Info("deleted a pod its StatefulSet could not replace",

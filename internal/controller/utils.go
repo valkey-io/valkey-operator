@@ -316,6 +316,13 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 	return fmt.Sprintf("%s-%d-%d", clusterName, shardIndex, nodeIndex)
 }
 
+// sniHostname is the RFC 6066 HostName: ASCII without a trailing dot.
+// Announce / DNS may use the absolute form from headlessServiceFQDN; SNI and
+// cert SAN matching must not.
+func sniHostname(name string) string {
+	return strings.TrimSuffix(name, ".")
+}
+
 // tlsServerName is the hostname the operator pins on TLS connections to a
 // pod IP. override wins; otherwise the cluster headless Service FQDN under
 // clusterDomain (default cluster.local). The trailing dot from
@@ -325,7 +332,7 @@ func tlsServerName(override, clusterName, namespace, clusterDomain string) strin
 	if override != "" {
 		return override
 	}
-	return strings.TrimSuffix(headlessServiceFQDN(clusterName, namespace, clusterDomain), ".")
+	return sniHostname(headlessServiceFQDN(clusterName, namespace, clusterDomain))
 }
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
@@ -349,7 +356,7 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 
 	tlsCfg := &tls.Config{
 		RootCAs:    caCertPool,
-		ServerName: serverName,
+		ServerName: sniHostname(serverName),
 		MinVersion: tls.VersionTLS12,
 	}
 	return tlsCfg, nil

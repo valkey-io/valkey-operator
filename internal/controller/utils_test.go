@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -428,4 +429,12 @@ func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "valkey-foo.valkey.svc.cluster.local", tlsServerName("", "foo", "valkey", ""))
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local"))
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local."))
+}
+
+func TestSNIHostnameStripsAnnounceDot(t *testing.T) {
+	announce := headlessServiceFQDN("foo", "valkey", "")
+	assert.True(t, strings.HasSuffix(announce, "."))
+	assert.Equal(t, strings.TrimSuffix(announce, "."), sniHostname(announce))
+	assert.Equal(t, sniHostname(announce), tlsServerName("", "foo", "valkey", ""))
+	assert.Equal(t, "custom.example", sniHostname("custom.example."))
 }

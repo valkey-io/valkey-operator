@@ -23,14 +23,20 @@ For each release tag the script reads that file via `git show <tag>:...`
 directive appears in. HIDDEN_CONFIG directives are skipped: they are internal,
 absent from CONFIG GET, and not a supported user-facing setting.
 
-One release per minor line is scanned, chosen as follows:
-  - The final X.Y.0 release if it exists. Patch releases (X.Y.Z, Z>0) are
-    ignored: Valkey backports new directives into them (e.g. the 9.1 feature
-    tls-auto-reload-interval also ships in 8.0.8), so scanning only .0
-    attributes a directive to the minor that introduced it.
-  - Otherwise the highest release candidate, so users testing an rc image get
-    gating for directives that rc introduces. Once the final ships it wins and
-    the entry retightens from the rc version to the final version.
+All release candidates and the final X.Y.0 of each minor line are scanned.
+Patch releases (X.Y.Z, Z>0) are ignored: Valkey backports new directives into
+them (e.g. the 9.1 feature tls-auto-reload-interval also ships in 8.0.8), so
+scanning only .0 (and its rcs) attributes a directive to the minor that
+introduced it.
+
+A directive is gated at the earliest version it is seen in, with two
+adjustments (see combine_gates):
+  - If the directive no longer exists in the newest release scanned for its
+    minor line, it is dropped (added in an rc but removed before a later rc or
+    the final).
+  - While only release candidates exist for a line, a directive introduced in
+    an rc is gated at that rc, so users testing any rc still get it. Once the
+    final X.Y.0 ships, the gate snaps to the final version.
 
 --baseline filters the output only: directives first seen at or before it are
 assumed universally known and omitted. It defaults to 7.2.5 (emit everything);
@@ -108,35 +114,47 @@ def parse_tag(tag: str) -> Version | None:
     return Version(int(m.group(1)), int(m.group(2)), int(m.group(3)), rc)
 
 
-def git(repo: str, *args: str) -> str:
+def git(repo: str, *args: str, allow_missing: bool = False) -> str | None:
+    """Run git in repo and return stdout; raises on failure, or returns None
+    for a path missing from the tree when allow_missing is set."""
     result = subprocess.run(
         ["git", "-C", repo, *args], capture_output=True, text=True
     )
     if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if allow_missing and (
+            "does not exist" in stderr or "exists on disk, but not in" in stderr
+        ):
+            return None
         raise RuntimeError(
             f"git -C {repo} {' '.join(args)} failed "
-            f"(rc={result.returncode}): {result.stderr.strip()}"
+            f"(rc={result.returncode}): {stderr}"
         )
     return result.stdout
 
 
 def list_release_tags(
     repo: str, minimum: Version
-) -> list[tuple[Version, str]]:
-    """Return the (version, tag) pairs to scan, sorted by version.
+) -> tuple[list[tuple[Version, str]], dict[tuple[int, int], Version]]:
+    """Return the (version, tag) pairs to scan and the released finals per line.
 
-    One release per minor line is scanned: its final X.Y.0 if released,
-    otherwise the highest release candidate (so users testing an rc image get
-    gating for directives that rc introduces; the entry retightens to the
-    final version once it ships). Patch releases are ignored -- see the module
-    docstring. `minimum` itself is always kept as the scan anchor, even if it
-    is a patch release.
+    All release candidates and the final X.Y.0 of each minor line at or above
+    `minimum` are scanned, in ascending order, so a directive can be attributed
+    to the earliest rc it appears in. Patch releases (X.Y.Z, Z>0) are ignored --
+    see the module docstring. `minimum` itself is always kept as the scan
+    anchor, even if it is a patch release.
+
+    The second return value maps each minor line (major, minor) that has a
+    released final X.Y.0 to that final's Version. The caller uses it to apply
+    the hybrid gating rule: while only rcs exist, a directive is gated at the
+    earliest rc that introduced it; once the final ships, the gate snaps to the
+    final version (see combine_gates).
     """
     # Candidate tags per minor line: the .0 final and its -rcN prereleases.
     # value: {"final": (v, tag), "rcs": [(v, tag), ...]}
     by_line: dict[tuple[int, int], dict] = {}
     anchor: tuple[Version, str] | None = None
-    for tag in git(repo, "tag").splitlines():
+    for tag in (git(repo, "tag") or "").splitlines():
         v = parse_tag(tag)
         if v is None or v < minimum:
             continue
@@ -152,37 +170,30 @@ def list_release_tags(
             line["final"] = (v, tag)
 
     chosen: list[tuple[Version, str]] = []
+    finals: dict[tuple[int, int], Version] = {}
     if anchor is not None:
         chosen.append(anchor)
-    for line in by_line.values():
+    for key, line in by_line.items():
+        # Scan every rc so a directive is attributed to the earliest rc it
+        # appears in, plus the final if released.
+        chosen.extend(line["rcs"])
         if line["final"] is not None:
-            chosen.append(line["final"])  # released final wins over any rc
-        elif line["rcs"]:
-            chosen.append(max(line["rcs"], key=lambda vt: vt[0]))  # highest rc
-    return sorted(chosen, key=lambda vt: vt[0])
+            chosen.append(line["final"])
+            finals[key] = line["final"][0]
+    return sorted(chosen, key=lambda vt: vt[0]), finals
 
 
 def directives_at_tag(repo: str, tag: str) -> set[str]:
     """Return the directive names (and aliases) declared at a tag.
 
-    Raises on an unexpected git failure so a broken checkout (e.g. a shallow
-    clone missing tree content) fails loudly instead of yielding an empty set.
+    A tag whose tree has no src/config.c yields an empty set; any other git
+    failure propagates (see git's allow_missing).
     """
-    proc = subprocess.run(
-        ["git", "-C", repo, "show", f"refs/tags/{tag}:src/config.c"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()
-        if "does not exist" in stderr or "exists on disk, but not in" in stderr:
-            return set()
-        raise RuntimeError(
-            f"git show refs/tags/{tag}:src/config.c failed "
-            f"(rc={proc.returncode}): {stderr}"
-        )
+    source = git(repo, "show", f"refs/tags/{tag}:src/config.c", allow_missing=True)
+    if source is None:
+        return set()
     names: set[str] = set()
-    for name, alias, flags in _CONFIG_RE.findall(proc.stdout):
+    for name, alias, flags in _CONFIG_RE.findall(source):
         # HIDDEN_CONFIG directives are internal: absent from CONFIG GET and not
         # a supported user-facing setting, so they are not gated.
         if "HIDDEN_CONFIG" in flags:
@@ -195,11 +206,24 @@ def directives_at_tag(repo: str, tag: str) -> set[str]:
 
 def compute_first_seen(
     repo: str, tags: list[tuple[Version, str]], debug: bool
-) -> dict[str, Version]:
-    """Map each directive name to the earliest version that declares it."""
+) -> tuple[dict[str, Version], dict[tuple[int, int], set[str]]]:
+    """Scan tags in ascending order and return two mappings.
+
+    - first_seen: each directive name -> the earliest scanned version that
+      declares it.
+    - latest_line_directives: each minor line (major, minor) -> the directive
+      set of the newest tag scanned for that line. The caller uses this to drop
+      directives that no longer exist in the latest release of their line (see
+      combine_gates), so a directive added in an rc but removed before a later
+      rc or the final is not emitted.
+    """
     first_seen: dict[str, Version] = {}
+    latest_line_directives: dict[tuple[int, int], set[str]] = {}
     for version, tag in tags:
         directives = directives_at_tag(repo, tag)
+        # Tags arrive in ascending order, so the last one seen for a line is
+        # its newest scanned release.
+        latest_line_directives[(version.major, version.minor)] = directives
         new_here = sorted(n for n in directives if n not in first_seen)
         for name in new_here:
             first_seen[name] = version
@@ -210,7 +234,37 @@ def compute_first_seen(
                 + (f" -> {', '.join(new_here)}" if new_here else ""),
                 file=sys.stderr,
             )
-    return first_seen
+    return first_seen, latest_line_directives
+
+
+def combine_gates(
+    first_seen: dict[str, Version],
+    finals: dict[tuple[int, int], Version],
+    latest_line_directives: dict[tuple[int, int], set[str]],
+) -> dict[str, Version]:
+    """Apply the hybrid gating rule to first-seen versions.
+
+    For each directive, gated at the version it was first seen in:
+      - Drop it if it no longer exists in the newest release scanned for its
+        minor line (added in an rc but removed before a later rc or the final).
+      - If that line has a released final X.Y.0, snap the gate up to the final
+        version, so a released image is stated once available.
+      - Otherwise (rc-only phase) keep the earliest rc version, so images
+        running any rc of that line still get the directive.
+    """
+    result: dict[str, Version] = {}
+    for name, version in first_seen.items():
+        line = (version.major, version.minor)
+        # Drop directives that vanished from the newest scanned release.
+        latest = latest_line_directives.get(line, set())
+        if name not in latest:
+            continue
+        final = finals.get(line)
+        if version.is_prerelease and final is not None:
+            result[name] = final  # released final wins once it ships
+        else:
+            result[name] = version  # rc-only phase, or introduced at a final
+    return result
 
 
 def go_quote(s: str) -> str:
@@ -312,7 +366,7 @@ def main() -> int:
         return 2
     scan_from = parse_tag(SCAN_FROM)
 
-    tags = list_release_tags(args.valkey_repo, scan_from)
+    tags, finals = list_release_tags(args.valkey_repo, scan_from)
     if not tags:
         print(
             f"error: no release tags >= {scan_from} in {args.valkey_repo}; is it "
@@ -325,12 +379,17 @@ def main() -> int:
         order = " ".join(str(v) for v, _ in tags)
         print(f"[debug] scan order ({len(tags)} tags): {order}", file=sys.stderr)
 
-    first_seen = compute_first_seen(args.valkey_repo, tags, debug=args.debug)
+    first_seen, latest_line_directives = compute_first_seen(
+        args.valkey_repo, tags, debug=args.debug
+    )
+    first_seen = combine_gates(first_seen, finals, latest_line_directives)
 
     # Sanity guard: the newest tag must parse a non-trivial directive set, or
     # the checkout/parser is broken (wrong path, shallow clone, format change).
-    _, newest_tag = tags[-1]
-    if len(directives_at_tag(args.valkey_repo, newest_tag)) < 10:
+    # Reuses the set compute_first_seen already parsed for that tag's line.
+    newest_version, newest_tag = tags[-1]
+    newest_line = (newest_version.major, newest_version.minor)
+    if len(latest_line_directives.get(newest_line, set())) < 10:
         print(
             f"error: <10 directives parsed from {newest_tag}:src/config.c; the "
             "checkout or parser is likely broken.",

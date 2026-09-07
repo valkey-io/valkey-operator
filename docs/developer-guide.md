@@ -126,12 +126,13 @@ hack/gen_config_version_metadata.py \
 
 - `--baseline` is the lowest Valkey version to gate against (the operator's
   supported floor); directives present at or before it are omitted.
-- For each Valkey minor version (9.0, 9.1, 9.2, ...), the script reads one
-  release: the final `X.Y.0` if it has been released, otherwise the newest
-  release candidate (so an rc image being tested still gets gating). Once the
-  final is released it takes over, and its versions replace the rc ones. Patch
-  releases and hidden (internal) directives are skipped. Do not edit the
-  generated file by hand.
+- For each Valkey minor version (9.0, 9.1, 9.2, ...), the script scans every
+  release candidate and the final `X.Y.0`. A directive is gated at the earliest
+  version it appears in; while only rcs exist it is gated at that rc (so an rc
+  image being tested still gets it), and once the final ships the gate snaps to
+  the final. A directive that disappears from the newest scanned release of its
+  line is dropped. Patch releases and hidden (internal) directives are skipped.
+  Do not edit the generated file by hand.
 
 Verify the committed file is up to date with `--check`, which exits non-zero
 if regeneration would change it:

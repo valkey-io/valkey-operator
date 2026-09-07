@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -152,4 +153,56 @@ func TestNodesWithFailedACL(t *testing.T) {
 
 	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken"}))
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
+}
+
+func TestCountReadyPrimaryPods(t *testing.T) {
+	g := NewWithT(t)
+
+	pod := func(name, shard, node string, ready bool, deleting bool) corev1.Pod {
+		p := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+				Labels: map[string]string{
+					LabelShardIndex: shard,
+					LabelNodeIndex:  node,
+				},
+			},
+		}
+		if ready {
+			p.Status.Conditions = []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}}
+		}
+		if deleting {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+		}
+		return p
+	}
+
+	g.Expect(countReadyPrimaryPods(nil, 3)).To(Equal(int32(0)))
+	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+		pod("s0", "0", "0", false, false),
+		pod("s1", "1", "0", true, false),
+		pod("s2", "2", "0", true, false),
+	}, 3)).To(Equal(int32(2)))
+	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+		pod("s0-replica", "0", "1", true, false),
+		pod("s1", "1", "0", true, false),
+		pod("s2", "2", "0", true, false),
+	}, 3)).To(Equal(int32(2)))
+	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+		pod("s0", "0", "0", true, true),
+		pod("s1", "1", "0", true, false),
+		pod("s2", "2", "0", true, false),
+	}, 3)).To(Equal(int32(2)))
+	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+		pod("s0", "0", "0", true, false),
+		pod("s1", "1", "0", true, false),
+		pod("s2", "2", "0", true, false),
+	}, 3)).To(Equal(int32(3)))
+	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+		pod("drain", "3", "0", true, false),
+	}, 3)).To(Equal(int32(0)))
 }

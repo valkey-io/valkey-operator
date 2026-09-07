@@ -155,7 +155,7 @@ func TestNodesWithFailedACL(t *testing.T) {
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
 }
 
-func TestCountReadyPrimaryPods(t *testing.T) {
+func TestCountShardsWithReadyPod(t *testing.T) {
 	g := NewWithT(t)
 
 	pod := func(name, shard, node string, ready bool, deleting bool) corev1.Pod {
@@ -181,28 +181,28 @@ func TestCountReadyPrimaryPods(t *testing.T) {
 		return p
 	}
 
-	g.Expect(countReadyPrimaryPods(nil, 3)).To(Equal(int32(0)))
-	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+	g.Expect(countShardsWithReadyPod(nil, 3)).To(Equal(int32(0)))
+	g.Expect(countShardsWithReadyPod([]corev1.Pod{
 		pod("s0", "0", "0", false, false),
 		pod("s1", "1", "0", true, false),
 		pod("s2", "2", "0", true, false),
 	}, 3)).To(Equal(int32(2)))
-	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+	g.Expect(countShardsWithReadyPod([]corev1.Pod{
 		pod("s0-replica", "0", "1", true, false),
 		pod("s1", "1", "0", true, false),
 		pod("s2", "2", "0", true, false),
-	}, 3)).To(Equal(int32(2)))
-	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+	}, 3)).To(Equal(int32(3)))
+	g.Expect(countShardsWithReadyPod([]corev1.Pod{
 		pod("s0", "0", "0", true, true),
 		pod("s1", "1", "0", true, false),
 		pod("s2", "2", "0", true, false),
 	}, 3)).To(Equal(int32(2)))
-	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+	g.Expect(countShardsWithReadyPod([]corev1.Pod{
 		pod("s0", "0", "0", true, false),
 		pod("s1", "1", "0", true, false),
 		pod("s2", "2", "0", true, false),
 	}, 3)).To(Equal(int32(3)))
-	g.Expect(countReadyPrimaryPods([]corev1.Pod{
+	g.Expect(countShardsWithReadyPod([]corev1.Pod{
 		pod("drain", "3", "0", true, false),
 	}, 3)).To(Equal(int32(0)))
 }

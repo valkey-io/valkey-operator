@@ -524,9 +524,9 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// countReadyPrimaryPods counts shards that have a Ready Pod at node-index 0.
-// Node-index 0 is the initial primary. This path does not use CLUSTER NODES.
-func countReadyPrimaryPods(pods []corev1.Pod, desiredShards int32) int32 {
+// countShardsWithReadyPod counts shards that have at least one Ready Pod.
+// Node-index is ignored: after failover the live primary may not be index 0.
+func countShardsWithReadyPod(pods []corev1.Pod, desiredShards int32) int32 {
 	if desiredShards <= 0 {
 		return 0
 	}
@@ -534,9 +534,6 @@ func countReadyPrimaryPods(pods []corev1.Pod, desiredShards int32) int32 {
 	for i := range pods {
 		pod := &pods[i]
 		if !isPodReady(pod) {
-			continue
-		}
-		if pod.Labels[LabelNodeIndex] != "0" {
 			continue
 		}
 		si, err := strconv.Atoi(pod.Labels[LabelShardIndex])
@@ -554,8 +551,8 @@ func countReadyPrimaryPods(pods []corev1.Pod, desiredShards int32) int32 {
 	return n
 }
 
-// refreshTopologyStatusFromPods sets readyShards from Ready primary Pods.
-// A missing or not-Ready required primary sets ClusterFormed and SlotsAssigned False.
+// refreshTopologyStatusFromPods sets readyShards from shards that have a Ready Pod.
+// A shard with no Ready Pod sets ClusterFormed and SlotsAssigned False.
 func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) {
 	log := logf.FromContext(ctx)
 	pods := &corev1.PodList{}
@@ -563,11 +560,11 @@ func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Cont
 		log.Error(err, "failed to list Valkey pods for topology status")
 		return
 	}
-	ready := countReadyPrimaryPods(pods.Items, cluster.Spec.Shards)
+	ready := countShardsWithReadyPod(pods.Items, cluster.Spec.Shards)
 	cluster.Status.ReadyShards = ready
 	if ready < cluster.Spec.Shards {
-		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonUpdatingNodes, "A required primary Pod is not Ready", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonUpdatingNodes, "A required primary Pod is not Ready", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
 		return
 	}
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed); c != nil && c.Status == metav1.ConditionTrue {

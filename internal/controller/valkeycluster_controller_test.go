@@ -907,7 +907,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 	}
 
-	It("sets readyShards and ClusterFormed from pods when a primary is not Ready", func() {
+	It("sets readyShards and ClusterFormed from pods when a shard has no Ready Pod", func() {
 		cluster, r := createCluster("roll-status-missing-primary")
 		DeferCleanup(func() { cleanupCluster(cluster) })
 
@@ -947,6 +947,32 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(progressing).NotTo(BeNil())
 		Expect(progressing.Status).To(Equal(metav1.ConditionTrue))
 		Expect(progressing.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("keeps ClusterFormed True when a replica Pod is Ready after failover", func() {
+		cluster, r := createCluster("roll-status-replica-ready")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		createClusterPod(cluster.Name, 0, 1, true)
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.ReadyShards).To(Equal(int32(3)))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.ObservedGeneration).To(Equal(updated.Generation))
 	})
 
 	It("keeps ClusterFormed True when every primary Pod is Ready during a roll", func() {

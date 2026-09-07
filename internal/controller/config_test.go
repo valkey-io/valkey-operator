@@ -21,6 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // getSampleCluster returns a ValkeyCluster object with config options.
@@ -250,13 +251,13 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 	})
 
 	It("versionGateConfigWarnings returns unsupported directives in sorted order", func() {
-		original := versionGatedConfig
-		versionGatedConfig = map[string]*semver.Version{
+		original := valkey.ConfigIntroducedIn
+		valkey.ConfigIntroducedIn = map[string]*semver.Version{
 			"beta-directive":  semver.MustParse("9.3.0"),
 			"alpha-directive": semver.MustParse("9.2.0"),
 		}
 		defer func() {
-			versionGatedConfig = original
+			valkey.ConfigIntroducedIn = original
 		}()
 
 		cluster := newTLSCluster("valkey/valkey:9.1.0", map[string]string{

@@ -47,10 +47,6 @@ const (
 	averageParameterLength = 20
 )
 
-// versionGatedConfig maps user-facing config directives to the minimum Valkey
-// version that understands them. It is generated from the Valkey source tree
-// by hack/gen_version_gated_config.py; see version_gated_config.go.
-
 //go:embed scripts/*
 var scripts embed.FS
 var scriptsHash string
@@ -177,7 +173,7 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 
 	warnings := make([]configWarning, 0, len(droppedKeys))
 	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
-		minVersion := versionGatedConfig[key]
+		minVersion := valkey.ConfigIntroducedIn[key]
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
 			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, %s", key, minVersion, versionDetail),
@@ -194,7 +190,7 @@ func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[str
 	skipKeys := map[string]struct{}{}
 	image = effectiveImage(image)
 
-	for key, minVersion := range versionGatedConfig {
+	for key, minVersion := range valkey.ConfigIntroducedIn {
 		if _, userSet := userConfig[key]; !userSet {
 			continue
 		}

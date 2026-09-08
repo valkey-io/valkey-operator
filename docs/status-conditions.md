@@ -119,7 +119,7 @@ Indicates whether all **16384** hash slots are assigned to primaries.
 | Status | Meaning |
 |---|---|
 | `True` | All slots are assigned. |
-| `False` (or absent) | Some slots remain unassigned. |
+| `False` (or absent) | Some slots remain unassigned, or a shard has no Ready Pod. |
 
 Common reasons:
 - `AllSlotsAssigned` – all 16384 slots are assigned

@@ -24,19 +24,16 @@ directive appears in. HIDDEN_CONFIG directives are skipped: they are internal,
 absent from CONFIG GET, and not a supported user-facing setting.
 
 All release candidates and the final X.Y.0 of each minor line are scanned.
-Patch releases (X.Y.Z, Z>0) are ignored: Valkey backports new directives into
-them (e.g. the 9.1 feature tls-auto-reload-interval also ships in 8.0.8), so
-scanning only .0 (and its rcs) attributes a directive to the minor that
-introduced it.
+Patch releases (X.Y.Z, Z>0) are ignored so a directive is credited to the minor
+that introduced it.
 
-A directive is gated at the earliest version it is seen in, with two
-adjustments (see combine_gates):
-  - If the directive no longer exists in the newest release scanned for its
-    minor line, it is dropped (added in an rc but removed before a later rc or
-    the final).
-  - While only release candidates exist for a line, a directive introduced in
-    an rc is gated at that rc, so users testing any rc still get it. Once the
-    final X.Y.0 ships, the gate snaps to the final version.
+A directive is emitted only if it still exists in the newest release scanned
+for its minor line, so one dropped during an rc cycle never reaches users.
+
+The version a directive is gated at is the earliest release it appears in,
+resolved per minor line: once the final X.Y.0 ships that final is the gate,
+and until then it is the earliest rc declaring the directive, so any rc of
+that line satisfies it.
 
 --baseline filters the output only: directives first seen at or before it are
 assumed universally known and omitted. It defaults to 7.2.5 (emit everything);
@@ -145,10 +142,8 @@ def list_release_tags(
     anchor, even if it is a patch release.
 
     The second return value maps each minor line (major, minor) that has a
-    released final X.Y.0 to that final's Version. The caller uses it to apply
-    the hybrid gating rule: while only rcs exist, a directive is gated at the
-    earliest rc that introduced it; once the final ships, the gate snaps to the
-    final version (see combine_gates).
+    released final X.Y.0 to that final's Version. A line missing from it has
+    only release candidates so far.
     """
     # Candidate tags per minor line: the .0 final and its -rcN prereleases.
     # value: {"final": (v, tag), "rcs": [(v, tag), ...]}
@@ -162,7 +157,7 @@ def list_release_tags(
             anchor = (v, tag)  # scan anchor, kept regardless of patch level
             continue
         if v.patch != 0:
-            continue  # patch releases are ignored (backport attribution)
+            continue  # patch releases are ignored, see the module docstring
         line = by_line.setdefault((v.major, v.minor), {"final": None, "rcs": []})
         if v.is_prerelease:
             line["rcs"].append((v, tag))
@@ -212,10 +207,8 @@ def compute_first_seen(
     - first_seen: each directive name -> the earliest scanned version that
       declares it.
     - latest_line_directives: each minor line (major, minor) -> the directive
-      set of the newest tag scanned for that line. The caller uses this to drop
-      directives that no longer exist in the latest release of their line (see
-      combine_gates), so a directive added in an rc but removed before a later
-      rc or the final is not emitted.
+      set of the newest tag scanned for that line. Only directives in that set
+      still exist in the release users run.
     """
     first_seen: dict[str, Version] = {}
     latest_line_directives: dict[tuple[int, int], set[str]] = {}
@@ -242,28 +235,26 @@ def combine_gates(
     finals: dict[tuple[int, int], Version],
     latest_line_directives: dict[tuple[int, int], set[str]],
 ) -> dict[str, Version]:
-    """Apply the hybrid gating rule to first-seen versions.
+    """Resolve the version each directive is gated at.
 
-    For each directive, gated at the version it was first seen in:
-      - Drop it if it no longer exists in the newest release scanned for its
-        minor line (added in an rc but removed before a later rc or the final).
-      - If that line has a released final X.Y.0, snap the gate up to the final
-        version, so a released image is stated once available.
-      - Otherwise (rc-only phase) keep the earliest rc version, so images
-        running any rc of that line still get the directive.
+    A directive is returned only if it still exists in the newest release
+    scanned for its minor line.
+
+    Its gate is the earliest release it appears in, resolved per minor line:
+    once the final X.Y.0 ships that final is the gate, and until then it is the
+    earliest rc declaring the directive, so any rc of that line satisfies it.
     """
     result: dict[str, Version] = {}
     for name, version in first_seen.items():
         line = (version.major, version.minor)
-        # Drop directives that vanished from the newest scanned release.
         latest = latest_line_directives.get(line, set())
         if name not in latest:
             continue
         final = finals.get(line)
         if version.is_prerelease and final is not None:
-            result[name] = final  # released final wins once it ships
+            result[name] = final
         else:
-            result[name] = version  # rc-only phase, or introduced at a final
+            result[name] = version
     return result
 
 
@@ -366,11 +357,33 @@ def main() -> int:
         return 2
     scan_from = parse_tag(SCAN_FROM)
 
+    # --baseline filters first_seen; it does not widen the scan, which always
+    # starts at SCAN_FROM. Directives older than that have no dating evidence.
+    if baseline.core < scan_from.core:
+        print(
+            f"error: --baseline {args.baseline} is below the scan floor "
+            f"{scan_from}; directives older than {scan_from} cannot be dated, "
+            f"so pass --baseline {scan_from} or newer.",
+            file=sys.stderr,
+        )
+        return 2
+
     tags, finals = list_release_tags(args.valkey_repo, scan_from)
     if not tags:
         print(
             f"error: no release tags >= {scan_from} in {args.valkey_repo}; is it "
             "a Valkey git checkout with tags fetched?",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Directives present at the earliest scanned tag are attributed to it, so
+    # that tag must be the anchor rather than some later release.
+    if tags[0][0].core != scan_from.core:
+        print(
+            f"error: scan anchor {scan_from} not found in {args.valkey_repo} "
+            f"(earliest release tag is {tags[0][0]}); directives predating it "
+            "would be attributed to it. Fetch the full tag history.",
             file=sys.stderr,
         )
         return 1

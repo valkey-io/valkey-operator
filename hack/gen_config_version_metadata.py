@@ -345,11 +345,29 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--print-latest-release",
+        action="store_true",
+        help="Print the highest released version tag, excluding release candidates",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Log per-tag directive counts and new directives to stderr",
     )
     args = parser.parse_args()
+
+    if args.print_latest_release:
+        tags = (parse_tag(t) for t in (git(args.valkey_repo, "tag") or "").splitlines())
+        releases = [v for v in tags if v is not None and not v.is_prerelease]
+        if not releases:
+            print(
+                f"error: no release tags in {args.valkey_repo}; is it a Valkey "
+                "git checkout with tags fetched?",
+                file=sys.stderr,
+            )
+            return 1
+        print(max(releases))
+        return 0
 
     baseline = parse_tag(args.baseline)
     if baseline is None:
@@ -359,7 +377,7 @@ def main() -> int:
 
     # --baseline filters first_seen; it does not widen the scan, which always
     # starts at SCAN_FROM. Directives older than that have no dating evidence.
-    if baseline.core < scan_from.core:
+    if baseline < scan_from:
         print(
             f"error: --baseline {args.baseline} is below the scan floor "
             f"{scan_from}; directives older than {scan_from} cannot be dated, "
@@ -413,7 +431,7 @@ def main() -> int:
     gated = {
         name: version
         for name, version in first_seen.items()
-        if version.core > baseline.core
+        if version > baseline
     }
 
     # Reconstruct the invocation for the "Regenerate with" header.

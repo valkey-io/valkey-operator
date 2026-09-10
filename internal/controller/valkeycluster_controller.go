@@ -1407,7 +1407,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 		for _, node := range shard.Nodes {
 			for _, failing := range node.GetFailingNodes() {
 				idx := slices.IndexFunc(nodes.Items, func(n valkeyiov1alpha1.ValkeyNode) bool {
-					return n.Status.PodIP == failing.Address
+					return n.Status.PodIP == failing.Host
 				})
 				if idx != -1 {
 					continue
@@ -1419,7 +1419,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				// healStaleAddressPeers re-MEETs it instead.
 				if state.FindNodeById(failing.Id) != nil {
 					log.V(1).Info("skipping forget; node is alive at a new address",
-						"staleAddress", failing.Address, "Id", failing.Id)
+						"staleAddress", failing.Host, "Id", failing.Id)
 					continue
 				}
 				// A live replica still considers this failing node its
@@ -1430,19 +1430,19 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				if state.HasReplicaOf(failing.Id) {
 					if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
 						log.V(1).Info("skipping forget; failover pending for node",
-							"address", failing.Address, "Id", failing.Id)
+							"address", failing.Host, "Id", failing.Id)
 						continue
 					}
 					log.Info("forget node despite pending replica; quorum unreachable",
-						"address", failing.Address, "Id", failing.Id)
+						"address", failing.Host, "Id", failing.Id)
 				} else {
-					log.V(1).Info("forget a failing node", "address", failing.Address, "Id", failing.Id)
+					log.V(1).Info("forget a failing node", "address", failing.Host, "Id", failing.Id)
 				}
 				if err := node.Client.Do(ctx, node.Client.B().ClusterForget().NodeId(failing.Id).Build()).Error(); err != nil {
 					log.Error(err, "command failed: CLUSTER FORGET")
 					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "NodeForgetFailed", "ForgetNode", "Failed to forget node: %v", err)
 				} else {
-					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Address)
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleNodeForgotten", "ForgetNode", "Forgot stale node %v", failing.Host)
 				}
 			}
 		}

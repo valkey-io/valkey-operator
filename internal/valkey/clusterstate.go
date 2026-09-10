@@ -480,20 +480,18 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 	return stale
 }
 
-// GetFailingNodes returns all known nodes that are failing.
+// GetFailingNodes returns the peer-table entries this node considers failing.
 //
 // Only "fail" and "noaddr" count here, deliberately not "fail?": the caller
 // forgets these nodes, and a pfail entry may still recover on its own.
-func (n *NodeState) GetFailingNodes() []NodeState {
-	nodes := []NodeState{}
+func (n *NodeState) GetFailingNodes() []ClusterNode {
+	var nodes []ClusterNode
 	for _, entry := range n.nodes {
 		if entry.IsMyself() {
 			continue
 		}
 		if entry.HasFlag("fail") || entry.HasNoAddress() {
-			// A noaddr entry has no endpoint (":0@0"), so Host is empty; the
-			// entry is still reported so the caller can act on the ID.
-			nodes = append(nodes, NodeState{Address: entry.Host, Id: entry.Id})
+			nodes = append(nodes, entry)
 		}
 	}
 	return nodes

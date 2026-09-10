@@ -98,10 +98,5 @@ wrong. `HasFlag` remains available for the one caller that wants `fail` but not
 
 ## Known limitations
 
-**`GetFailingNodes` returns the wrong type.** Its `NodeState` values have only ID and
-address set; they are peer-table rows, not scraped nodes, so `ClusterNode` would be
-honest. The signature stands because changing it reaches into the controller's forget
-path.
-
 **`Info` keeps the whole INFO map.** Only `slave_repl_offset` and
 `master_link_status` are read, so the rest is retained per node for nothing.

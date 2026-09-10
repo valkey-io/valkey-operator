@@ -907,11 +907,11 @@ func TestNodeState_GetFailingNodes(t *testing.T) {
 	if len(failing) != 2 {
 		t.Fatalf("expected 2 failing nodes, got %d: %v", len(failing), failing)
 	}
-	if failing[0].Id != "dead1" || failing[0].Address != "10.0.0.99" {
+	if failing[0].Id != "dead1" || failing[0].Host != "10.0.0.99" {
 		t.Errorf("unexpected first entry %+v", failing[0])
 	}
 	// A noaddr entry is still reported so the caller can act on the ID.
-	if failing[1].Id != "gone1" || failing[1].Address != "" {
+	if failing[1].Id != "gone1" || failing[1].Host != "" {
 		t.Errorf("unexpected second entry %+v", failing[1])
 	}
 }
@@ -929,7 +929,7 @@ func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
 	if len(failing) != 1 {
 		t.Fatalf("expected 1 failing node, got %d", len(failing))
 	}
-	if failing[0].Address != "fd00::2" {
-		t.Errorf("expected fd00::2, got %q", failing[0].Address)
+	if failing[0].Host != "fd00::2" {
+		t.Errorf("expected fd00::2, got %q", failing[0].Host)
 	}
 }

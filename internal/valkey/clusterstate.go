@@ -31,15 +31,31 @@ import (
 
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
-	Client       vclient.Client
-	Address      string
-	Port         int
-	Id           string
-	Flags        []string
-	ShardId      string
-	Info         map[string]string
-	ClusterInfo  map[string]string
-	ClusterNodes string
+	Client      vclient.Client
+	Address     string
+	Port        int
+	Id          string
+	Flags       []string
+	ShardId     string
+	Info        map[string]string
+	ClusterInfo map[string]string
+
+	// nodes is this node's peer table, parsed once from CLUSTER NODES by the
+	// scrape.
+	nodes []ClusterNode
+}
+
+// KnowsNode reports whether this node's peer table holds an entry for the given
+// node ID, i.e. whether gossip has introduced that member yet. An ID that only
+// appears as another entry's primary, or as a migration marker peer, does not
+// count.
+func (n *NodeState) KnowsNode(id string) bool {
+	for _, entry := range n.nodes {
+		if entry.Id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplicationOffset returns this node's processed replication offset from
@@ -232,7 +248,7 @@ func (s *ShardState) GetSyncedReplicas() []*NodeState {
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
 // nil when the output held no "myself" line.
 func (n *NodeState) Myself() *ClusterNode {
-	return FindMyself(ParseClusterNodes(n.ClusterNodes))
+	return FindMyself(n.nodes)
 }
 
 // GetSlots returns the slot ranges this node owns, in CLUSTER NODES order.
@@ -331,7 +347,7 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 func (s *ClusterState) IsNodeFailed(nodeId string) bool {
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
-			for _, entry := range ParseClusterNodes(node.ClusterNodes) {
+			for _, entry := range node.nodes {
 				if entry.Id == nodeId && entry.IsFailing() {
 					return true
 				}
@@ -434,7 +450,7 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 	}
 	var stale []StaleAddressPeer
 	for _, viewer := range all {
-		for _, entry := range ParseClusterNodes(viewer.ClusterNodes) {
+		for _, entry := range viewer.nodes {
 			if entry.IsMyself() {
 				continue
 			}
@@ -470,7 +486,7 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 // forgets these nodes, and a pfail entry may still recover on its own.
 func (n *NodeState) GetFailingNodes() []NodeState {
 	nodes := []NodeState{}
-	for _, entry := range ParseClusterNodes(n.ClusterNodes) {
+	for _, entry := range n.nodes {
 		if entry.IsMyself() {
 			continue
 		}
@@ -553,7 +569,7 @@ func getNodeState(ctx context.Context, address string, port int, username string
 			log.Error(err, "command failed: CLUSTER NODES")
 		}
 		// Remove the encoding string included in a verbatim string.
-		node.ClusterNodes = strings.TrimPrefix(cnodes, "txt:")
+		node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
 	} else {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
 	}

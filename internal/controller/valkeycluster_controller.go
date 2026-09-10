@@ -1563,7 +1563,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		return true, nil
 	}
 
-	if !strings.Contains(move.Src.ClusterNodes, move.Dst.Id) {
+	if !move.Src.KnowsNode(move.Dst.Id) {
 		log.V(1).Info("destination not yet visible to source via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
 		return true, nil
@@ -1679,7 +1679,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			return true, nil
 		}
 
-		if !strings.Contains(move.Src.ClusterNodes, move.Dst.Id) {
+		if !move.Src.KnowsNode(move.Dst.Id) {
 			log.V(1).Info("drain destination not yet known to source", "src", move.Src.Address, "dst", move.Dst.Address)
 			return true, nil
 		}

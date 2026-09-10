@@ -51,13 +51,16 @@ ClusterState
   |            |
   |            +-- Nodes []*NodeState   (one per scraped node)
   |                        |
-  |                        +-- ClusterNodes   (raw output string)
-  |                        +-- []ClusterNode  (N peer views)
+  |                        +-- nodes []ClusterNode  (N peer views)
   .
 ```
 
 `NodeState.Myself()` is where the two types meet, selecting the row that describes
 the scraped node itself; `GetSlots` and `PrimaryIdFromSelf` read through it.
+
+The scrape parses `CLUSTER NODES` once and keeps only the result. The raw output is
+not retained, and the parsed table is unexported, so callers reach it through
+`Myself()`, `GetSlots`, `KnowsNode` and the other accessors rather than directly.
 
 ## Owned slots and migration markers stay separate
 
@@ -95,21 +98,10 @@ wrong. `HasFlag` remains available for the one caller that wants `fail` but not
 
 ## Known limitations
 
-**The raw output is parsed on every access.** Each accessor calls
-`ParseClusterNodes` again, so one reconcile re-parses the same output many times and
-the cost grows with cluster size. Parsing once when the scrape stores the output is
-the intended fix, and it is the step that would let the raw string be dropped
-entirely.
-
-**Two consumers still bypass the parser.** In `rebalanceSlots` and
-`drainExcessShards`, the test for "has gossip introduced the destination yet" is a
-`strings.Contains` over the raw string looking for the destination ID. A substring
-match cannot tell a node's own entry from an ID that merely appears in another line,
-since IDs also occur as a replica's primary field and as a migration marker peer
-(`[5461->-<id>]`). The correct question is whether any parsed entry carries that ID.
-Both sites should move onto parsed entries when the raw string goes.
-
 **`GetFailingNodes` returns the wrong type.** Its `NodeState` values have only ID and
 address set; they are peer-table rows, not scraped nodes, so `ClusterNode` would be
 honest. The signature stands because changing it reaches into the controller's forget
 path.
+
+**`Info` keeps the whole INFO map.** Only `slave_repl_offset` and
+`master_link_status` are read, so the rest is retained per node for nothing.

@@ -400,7 +400,7 @@ func TestClusterState_IsNodeFailed(t *testing.T) {
 		Shards: []*ShardState{
 			{
 				Nodes: []*NodeState{
-					{ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\ndead1 10.0.0.99:6379@16379 master,fail - 0 0 2 connected 5462-10922\npfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n"},
+					{nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\ndead1 10.0.0.99:6379@16379 master,fail - 0 0 2 connected 5462-10922\npfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n")},
 				},
 			},
 		},
@@ -437,10 +437,10 @@ func TestClusterState_BestReplicaOf(t *testing.T) {
 			{
 				PrimaryId: "primary1",
 				Nodes: []*NodeState{
-					{Id: "primary1", Flags: []string{"master"}, ClusterNodes: "primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n"},
-					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, ClusterNodes: "r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n"},
-					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, ClusterNodes: "r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n"},
-					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, ClusterNodes: "r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n"},
+					{Id: "primary1", Flags: []string{"master"}, nodes: ParseClusterNodes("primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n")},
+					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
 				},
 			},
 		},
@@ -509,7 +509,7 @@ func TestClusterState_FindStaleAddressPeers(t *testing.T) {
 	// Node table template: viewer knows itself at its new address and its
 	// peers at whatever address the persisted nodes.conf recorded.
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("full restart: all peers stale", func(t *testing.T) {
@@ -660,7 +660,7 @@ func TestHostFromClusterNodesEndpoint(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_IPv6(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("failing IPv6 peer at its current address is not stale", func(t *testing.T) {
@@ -720,7 +720,7 @@ func TestHostFromClusterNodesEndpoint_UnbracketedIPv6(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_UnbracketedIPv6(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("failing unbracketed IPv6 peer at its current address is not stale", func(t *testing.T) {
@@ -761,7 +761,7 @@ func TestClusterState_FindStaleAddressPeers_UnbracketedIPv6(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("noaddr entry with a live node is stale despite empty endpoint", func(t *testing.T) {
@@ -800,7 +800,7 @@ func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
 
 func TestNodeState_Myself(t *testing.T) {
 	node := &NodeState{
-		ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n",
+		nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"),
 	}
 	myself := node.Myself()
 	if myself == nil {
@@ -819,7 +819,7 @@ func TestNodeState_Myself(t *testing.T) {
 func TestNodeState_GetSlots(t *testing.T) {
 	t.Run("primary returns owned ranges only", func(t *testing.T) {
 		node := &NodeState{
-			ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n",
+			nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n"),
 		}
 		if want := []SlotsRange{{0, 5460}}; !reflect.DeepEqual(node.GetSlots(), want) {
 			t.Errorf("expected %v, got %v", want, node.GetSlots())
@@ -828,7 +828,7 @@ func TestNodeState_GetSlots(t *testing.T) {
 
 	t.Run("replica returns nil", func(t *testing.T) {
 		node := &NodeState{
-			ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,slave def456 0 0 1 connected\n",
+			nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,slave def456 0 0 1 connected\n"),
 		}
 		if slots := node.GetSlots(); slots != nil {
 			t.Errorf("expected nil, got %v", slots)
@@ -837,7 +837,7 @@ func TestNodeState_GetSlots(t *testing.T) {
 
 	t.Run("no myself line returns nil", func(t *testing.T) {
 		node := &NodeState{
-			ClusterNodes: "def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-16383\n",
+			nodes: ParseClusterNodes("def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-16383\n"),
 		}
 		if slots := node.GetSlots(); slots != nil {
 			t.Errorf("expected nil, got %v", slots)
@@ -851,11 +851,11 @@ func TestClusterState_IsNodeFailed_ViewersDisagree(t *testing.T) {
 	// Viewer aaa still has bbb at its old address and marks it failed; bbb
 	// reports itself alive at the new address.
 	viewerA := &NodeState{Id: "aaa", Address: "10.0.0.1",
-		ClusterNodes: "aaa 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
-			"bbb 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n"}
+		nodes: ParseClusterNodes("aaa 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n")}
 	viewerB := &NodeState{Id: "bbb", Address: "10.0.0.2",
-		ClusterNodes: "bbb 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
-			"aaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n"}
+		nodes: ParseClusterNodes("bbb 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
+			"aaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n")}
 
 	state := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{viewerA, viewerB}}}}
 
@@ -867,14 +867,40 @@ func TestClusterState_IsNodeFailed_ViewersDisagree(t *testing.T) {
 	}
 }
 
+func TestNodeState_KnowsNode(t *testing.T) {
+	node := &NodeState{}
+	node.nodes = ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
+		"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
+
+	if !node.KnowsNode("def456") {
+		t.Error("expected the peer entry to be known")
+	}
+	if !node.KnowsNode("abc123") {
+		t.Error("expected the myself entry to be known")
+	}
+	if node.KnowsNode("ghi789") {
+		t.Error("expected an unknown id to be reported absent")
+	}
+
+	// An ID is only known when it names an entry. Appearing as another entry's
+	// primary or as a migration marker peer is not the same thing, which a
+	// substring search over the raw output could not distinguish.
+	referencing := &NodeState{}
+	referencing.nodes = ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-ghi789]\n" +
+		"def456 10.0.0.2:6379@16379 slave ghi789 0 0 1 connected\n")
+	if referencing.KnowsNode("ghi789") {
+		t.Error("ghi789 has no entry; it is only referenced by others")
+	}
+}
+
 func TestNodeState_GetFailingNodes(t *testing.T) {
 	// fail and noaddr are reported; fail? is not, because the caller forgets
 	// these nodes and a pfail entry may still recover.
 	node := &NodeState{
-		ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
+		nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
 			"dead1 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 5461-10922\n" +
 			"pfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n" +
-			"gone1 :0@0 master,noaddr - 0 0 4 disconnected\n",
+			"gone1 :0@0 master,noaddr - 0 0 4 disconnected\n"),
 	}
 
 	failing := node.GetFailingNodes()
@@ -895,8 +921,8 @@ func TestNodeState_GetFailingNodes(t *testing.T) {
 // still compare equal to the bare pod IP Kubernetes reports.
 func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
 	node := &NodeState{
-		ClusterNodes: "aaa fd00::1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
-			"bbb fd00::2:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n",
+		nodes: ParseClusterNodes("aaa fd00::1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb fd00::2:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n"),
 	}
 
 	failing := node.GetFailingNodes()

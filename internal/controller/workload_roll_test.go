@@ -144,6 +144,17 @@ func TestPodSupersededAndStuck(t *testing.T) {
 		}
 	}
 
+	t.Run("a StatefulSet status that has not caught up to the spec", func(t *testing.T) {
+		// The controller mutates pods before it writes status, and it writes
+		// ObservedGeneration and UpdateRevision together. A status one
+		// generation behind therefore names the previous revision, and the pod
+		// on the new one is the replacement it just created, not a stuck pod.
+		stale := sts("old")
+		stale.Generation = 2
+		stale.Status.ObservedGeneration = 1
+		assert.False(t, podSupersededAndStuck(pod("new", false), stale))
+	})
+
 	t.Run("not ready on a superseded revision is stuck", func(t *testing.T) {
 		// The StatefulSet holds the revision that replaces this pod, and
 		// OrderedReady keeps it from acting while the pod is not ready.

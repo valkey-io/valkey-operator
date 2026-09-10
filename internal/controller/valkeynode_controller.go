@@ -1018,8 +1018,13 @@ func podSupersededAndStuck(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	}
 	// Before the StatefulSet controller has observed the template there is no
 	// revision to be superseded by, and a pod it has not yet stamped cannot be
-	// judged against one.
-	if sts.Status.UpdateRevision == "" {
+	// judged against one. A status behind the spec is the same problem one step
+	// later: the controller writes ObservedGeneration and UpdateRevision in a
+	// single status update, and applies it only after it has already mutated
+	// pods, so a stale status names the previous revision while the pod may
+	// already carry the new one. Deleting on that pairing would remove the
+	// replacement the controller just created.
+	if sts.Status.ObservedGeneration < sts.Generation || sts.Status.UpdateRevision == "" {
 		return false
 	}
 	podRevision := pod.Labels[appsv1.StatefulSetRevisionLabel]

@@ -797,3 +797,113 @@ func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
 		}
 	})
 }
+
+func TestNodeState_Myself(t *testing.T) {
+	node := &NodeState{
+		ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n",
+	}
+	myself := node.Myself()
+	if myself == nil {
+		t.Fatal("expected a myself entry")
+	}
+	if myself.Id != "abc123" {
+		t.Errorf("expected abc123, got %q", myself.Id)
+	}
+
+	empty := &NodeState{}
+	if empty.Myself() != nil {
+		t.Error("expected nil for empty CLUSTER NODES output")
+	}
+}
+
+func TestNodeState_GetSlots(t *testing.T) {
+	t.Run("primary returns owned ranges only", func(t *testing.T) {
+		node := &NodeState{
+			ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n",
+		}
+		if want := []SlotsRange{{0, 5460}}; !reflect.DeepEqual(node.GetSlots(), want) {
+			t.Errorf("expected %v, got %v", want, node.GetSlots())
+		}
+	})
+
+	t.Run("replica returns nil", func(t *testing.T) {
+		node := &NodeState{
+			ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,slave def456 0 0 1 connected\n",
+		}
+		if slots := node.GetSlots(); slots != nil {
+			t.Errorf("expected nil, got %v", slots)
+		}
+	})
+
+	t.Run("no myself line returns nil", func(t *testing.T) {
+		node := &NodeState{
+			ClusterNodes: "def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-16383\n",
+		}
+		if slots := node.GetSlots(); slots != nil {
+			t.Errorf("expected nil, got %v", slots)
+		}
+	})
+}
+
+// IsNodeFailed reports a failure when any single viewer sees one, even while
+// another viewer still considers the same member healthy.
+func TestClusterState_IsNodeFailed_ViewersDisagree(t *testing.T) {
+	// Viewer aaa still has bbb at its old address and marks it failed; bbb
+	// reports itself alive at the new address.
+	viewerA := &NodeState{Id: "aaa", Address: "10.0.0.1",
+		ClusterNodes: "aaa 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n"}
+	viewerB := &NodeState{Id: "bbb", Address: "10.0.0.2",
+		ClusterNodes: "bbb 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
+			"aaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n"}
+
+	state := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{viewerA, viewerB}}}}
+
+	if !state.IsNodeFailed("bbb") {
+		t.Error("expected bbb failed: viewer aaa reports it so")
+	}
+	if state.IsNodeFailed("aaa") {
+		t.Error("expected aaa healthy: no viewer reports it failed")
+	}
+}
+
+func TestNodeState_GetFailingNodes(t *testing.T) {
+	// fail and noaddr are reported; fail? is not, because the caller forgets
+	// these nodes and a pfail entry may still recover.
+	node := &NodeState{
+		ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
+			"dead1 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 5461-10922\n" +
+			"pfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n" +
+			"gone1 :0@0 master,noaddr - 0 0 4 disconnected\n",
+	}
+
+	failing := node.GetFailingNodes()
+	if len(failing) != 2 {
+		t.Fatalf("expected 2 failing nodes, got %d: %v", len(failing), failing)
+	}
+	if failing[0].Id != "dead1" || failing[0].Address != "10.0.0.99" {
+		t.Errorf("unexpected first entry %+v", failing[0])
+	}
+	// A noaddr entry is still reported so the caller can act on the ID.
+	if failing[1].Id != "gone1" || failing[1].Address != "" {
+		t.Errorf("unexpected second entry %+v", failing[1])
+	}
+}
+
+// Valkey writes the endpoint as "%s:%i@%i" with a bare IP, so an IPv6 address is
+// unbracketed and its own colons run into the port. The extracted address must
+// still compare equal to the bare pod IP Kubernetes reports.
+func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
+	node := &NodeState{
+		ClusterNodes: "aaa fd00::1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb fd00::2:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n",
+	}
+
+	failing := node.GetFailingNodes()
+	if len(failing) != 1 {
+		t.Fatalf("expected 1 failing node, got %d", len(failing))
+	}
+	if failing[0].Address != "fd00::2" {
+		t.Errorf("expected fd00::2, got %q", failing[0].Address)
+	}
+}

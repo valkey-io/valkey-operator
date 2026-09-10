@@ -44,7 +44,7 @@ per-node type could not represent it.
 A scrape therefore yields one `NodeState` per reachable node, and each of those
 carries N `ClusterNode`s, one per member it knows about:
 
-```
+```text
 ClusterState
   |
   +-- Shards []*ShardState

@@ -1406,8 +1406,10 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
 			for _, failing := range node.GetFailingNodes() {
+				// Two empty addresses do not identify a node: such an entry
+				// requires the node ID checks below.
 				idx := slices.IndexFunc(nodes.Items, func(n valkeyiov1alpha1.ValkeyNode) bool {
-					return n.Status.PodIP == failing.Host
+					return n.Status.PodIP != "" && n.Status.PodIP == failing.Host
 				})
 				if idx != -1 {
 					continue

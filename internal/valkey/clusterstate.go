@@ -511,6 +511,14 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		Username:          username,
 		Password:          password,
 		TLSConfig:         tlsConfig,
+		// valkey-go defaults to data-plane sizes per connection: 0.5 MiB
+		// buffers each way and a 1024-entry ring. Tuned to this controller's
+		// usage: few commands, with CLUSTER NODES the largest response and
+		// CLUSTER MIGRATESLOTS the largest request.
+		// Exceeding a buffer costs a flush, no error.
+		ReadBufferEachConn:  16 * 1024,
+		WriteBufferEachConn: 8 * 1024,
+		RingScaleEachConn:   4, // 2^4 entries; DoMulti sends 5 commands
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {

@@ -272,3 +272,76 @@ kubectl get valkeycluster -w
 ```
 
 The operator should now be able to connect to Valkey containers in the kind cluster.
+
+## Profiling the operator
+
+The operator can serve Go's pprof endpoints, which attribute memory, CPU and
+goroutine use to the code responsible. Container metrics say how much the process
+consumes; a profile says which call sites account for it.
+
+pprof is disabled by default and only serves when `--pprof-bind-address` is set.
+Unlike the metrics endpoint, which is served over HTTPS with authentication, the
+pprof server is plain HTTP with no authentication, and its profiles expose heap
+contents. Bind it to localhost and never add it to a Service.
+
+### Running locally
+
+`make run` passes no arguments, so run the binary directly. This needs a cluster
+to talk to, as described in [Run the operator locally](#run-the-operator-locally):
+
+```bash
+go run ./cmd/main.go --pprof-bind-address=localhost:8082
+```
+
+### Running in a cluster
+
+Add the flag to the manager container and port-forward to reach it:
+
+```bash
+kubectl -n valkey-operator-system patch deployment valkey-operator-controller-manager \
+  --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--pprof-bind-address=localhost:8082"}]'
+
+kubectl -n valkey-operator-system port-forward deploy/valkey-operator-controller-manager 8082:8082
+```
+
+Port-forwarding is for debugging a specific operator instance, not a way to
+expose pprof as a service. Remove the flag when finished; if the endpoint ever
+has to be reachable remotely, restrict it with network policies and access
+controls first.
+
+### Collecting profiles
+
+`-http=:8080` starts pprof's own web UI locally to render the profile; it is
+unrelated to the operator's port.
+
+```bash
+# Total bytes allocated since start. Use for allocation churn and GC pressure,
+# where memory is freed again but the rate is the problem.
+go tool pprof -http=:8080 http://localhost:8082/debug/pprof/allocs
+
+# Live heap at this instant. Use for retained memory, such as caches and
+# long-lived state that never gets released.
+go tool pprof -http=:8080 http://localhost:8082/debug/pprof/heap
+
+# 30s CPU profile. Use for hot loops and slow reconciles.
+go tool pprof -http=:8080 "http://localhost:8082/debug/pprof/profile?seconds=30"
+
+# Goroutine dump. Use for leaks, deadlocks, and reconciles that never return.
+curl -s "http://localhost:8082/debug/pprof/goroutine?debug=2"
+```
+
+To attribute a change rather than just measure a total, save a baseline and diff:
+
+```bash
+curl -s http://localhost:8082/debug/pprof/allocs > before.pprof
+# apply load, or deploy the change
+curl -s http://localhost:8082/debug/pprof/allocs > after.pprof
+
+go tool pprof -top -nodecount=25 -base before.pprof after.pprof
+go tool pprof -top -nodecount=20 -cum -base before.pprof after.pprof
+```
+
+Profile while the operator is doing the work you want to understand. It is mostly
+idle between reconciles, so a sample taken at rest shows little beyond the Go
+runtime and the informer cache. Reproduce the workload first, whether that is
+creating clusters, scaling shards, or a failover, and sample while it runs.

@@ -156,6 +156,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	configWarnings := make([]configWarning, 0, 2)
 	// Surface a ConfigurationWarning condition when an explicit
 	// terminationGracePeriodSeconds is too short for the graceful failover on
 	// SIGTERM to finish before SIGKILL. The value is honoured; the operator does
@@ -164,15 +165,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	rec := recommendedGracePeriodSeconds(cluster)
 	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < rec {
 		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
-		if !meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning) {
-			log.Info("terminationGracePeriodSeconds is below the recommended minimum for graceful failover",
-				"requested", *g, "recommended", rec)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, "ReconcileValkeyCluster", "%s", msg)
-		}
-		setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort, msg, metav1.ConditionTrue)
-	} else {
-		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning, valkeyiov1alpha1.ReasonGracePeriodTooShort)
+		configWarnings = append(configWarnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonGracePeriodTooShort,
+			message: msg,
+		})
 	}
+
+	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
+	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
 
 	// Soft guard: TLS with IP announce (including default IP). Non-blocking.
 	if cluster.GetTLS() != nil && !cluster.PrefersHostnameAnnounce() {
@@ -194,7 +194,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes); err != nil {
+	// One cluster-state snapshot per reconcile, shared throughout reconcile
+	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	if err != nil {
+		log.Error(err, "failed to retrieve system user password")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+	defer state.CloseClients()
+
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -211,16 +222,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-	if err != nil {
-		log.Error(err, "failed to retrieve system user password")
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, nil
-	}
-	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
-	defer state.CloseClients()
-
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
 	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
@@ -568,30 +569,20 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-0-0, mycluster-0-1, mycluster-0-2,
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+//
+// clusterState is the reconcile's single live-topology snapshot (see Reconcile).
+// It drives replica-first ordering and proactive failover. It is safe to reuse
+// across the loop: after an update we requeue immediately, re-scraping fresh
+// state before any further rolls.
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	totalCreated := 0
 
-	// Scrape cluster state once for proactive failover decisions, but only
-	// when at least one node needs a failover-aware roll. During initial
-	// bootstrap no nodes exist, so state stays nil. The snapshot is safe to
-	// reuse across the loop: replicaFirstNodeOrder uses it to place the actual
-	// primary last within each shard, and after an update we requeue
-	// immediately, re-scraping fresh state before any further rolls.
-	var clusterState *valkey.ClusterState
 	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
 	if err != nil {
 		return false, err
-	}
-	if anyNodeRequiresFailoverAwareRoll(cluster, nodes, liveHashes) {
-		operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
-		if err != nil {
-			return false, fmt.Errorf("failed to fetch operator password for proactive failover: %w", err)
-		}
-		clusterState = r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
-		defer clusterState.CloseClients()
 	}
 
 	for shardIndex := range int(cluster.Spec.Shards) {
@@ -995,6 +986,12 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+	return scrapeClusterState(ctx, r.APIReader, cluster, nodeAddresses(nodes), username, password)
+}
+
+// nodeAddresses returns the pod IPs of every node that has one. Nodes still
+// waiting for an IP are skipped: there is nothing to dial.
+func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	ips := []string{}
 	for _, node := range nodes.Items {
 		if node.Status.PodIP == "" {
@@ -1002,10 +999,16 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 		}
 		ips = append(ips, node.Status.PodIP)
 	}
+	return ips
+}
+
+// scrapeClusterState connects to the given addresses and builds a live topology
+// snapshot.
+func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
 	var tlsConfig *tls.Config
 	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
 		serverName := tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace, cluster.GetClusterDomain())
-		cfg, err := getTLSConfig(ctx, r.APIReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
+		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
 				"secretName", tlsSpec.Certificates.Server.SecretName)
@@ -1013,7 +1016,7 @@ func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, clu
 			tlsConfig = cfg
 		}
 	}
-	return valkey.GetClusterState(ctx, ips, DefaultPort, username, password, tlsConfig)
+	return valkey.GetClusterState(ctx, addresses, DefaultPort, username, password, tlsConfig)
 }
 
 // healStaleAddressPeers re-introduces live cluster members to nodes whose

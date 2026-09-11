@@ -129,6 +129,13 @@ func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)
 }
 
+func effectiveImage(image string) string {
+	if image == "" {
+		return DefaultImage
+	}
+	return image
+}
+
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
 // and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated
@@ -318,9 +325,9 @@ func valkeyNodeName(clusterName string, shardIndex int, nodeIndex int) string {
 
 // tlsServerName is the hostname the operator pins on TLS connections to a
 // pod IP. override wins; otherwise the cluster headless Service FQDN under
-// clusterDomain (default cluster.local). The trailing dot from
-// headlessServiceFQDN is stripped so the name is a DNS-1123 subdomain and
-// matches typical certificate SANs.
+// clusterDomain (default cluster.local). headlessServiceFQDN is already a
+// DNS-1123 subdomain (no trailing dot) matching typical certificate SANs; the
+// TrimSuffix is a defensive no-op should a trailing dot ever be reintroduced.
 func tlsServerName(override, clusterName, namespace, clusterDomain string) string {
 	if override != "" {
 		return override

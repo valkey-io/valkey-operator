@@ -25,7 +25,9 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +47,12 @@ const (
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 )
+
+// versionGatedConfig maps user-facing config directives to the minimum Valkey
+// version that understands them.
+var versionGatedConfig = map[string]*semver.Version{
+	"tls-auto-reload-interval": semver.MustParse("9.1.0-rc1"),
+}
 
 //go:embed scripts/*
 var scripts embed.FS
@@ -150,6 +158,57 @@ func liveConfigToApply(config map[string]string) map[string]string {
 	return out
 }
 
+// versionGateConfigWarnings returns warnings when user-set directives are not
+// supported by the detected Valkey version. It reports exactly the directives
+// the renderer drops.
+func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	if len(droppedKeys) == 0 {
+		return nil
+	}
+
+	image := effectiveImage(cluster.Spec.Image)
+	imageSource := "spec.image"
+	if cluster.Spec.Image == "" {
+		imageSource = "default image"
+	}
+
+	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
+	if version, ok := valkey.VersionFromImage(image); ok {
+		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
+	}
+
+	warnings := make([]configWarning, 0, len(droppedKeys))
+	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
+		minVersion := versionGatedConfig[key]
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
+			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, %s", key, minVersion, versionDetail),
+		})
+	}
+
+	return warnings
+}
+
+// gatedUserKeysToSuppress returns user-set directives that should be omitted
+// from the rendered config because the detected Valkey version does not
+// support them.
+func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[string]struct{} {
+	skipKeys := map[string]struct{}{}
+	image = effectiveImage(image)
+
+	for key, minVersion := range versionGatedConfig {
+		if _, userSet := userConfig[key]; !userSet {
+			continue
+		}
+		if !valkey.MeetsMinVersion(image, minVersion) {
+			skipKeys[key] = struct{}{}
+		}
+	}
+
+	return skipKeys
+}
+
 // renderServerConfig renders the full valkey.conf from the given user and base
 // config maps. User-provided config is written first and base config last, so
 // users cannot override key base directives (Valkey uses the last value in the
@@ -182,7 +241,8 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce()), nil)
+	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce()), excludeKeys)
 }
 
 // nodeServerConfigRollHash derives the config roll hash from the node spec:
@@ -192,7 +252,9 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 // since a divergence would change every pod template on operator upgrade and
 // roll every pod (see config_rollhash_test.go).
 func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname), liveConfigAllowlist)
+	excludedKeys := maps.Clone(liveConfigAllowlist)
+	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
+	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname), excludedKeys)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
 }
 

@@ -21,7 +21,7 @@ The operator simplifies deploying Valkey Clusters on Kubernetes, handling scalin
 > - 🙏 [Ask questions](https://github.com/valkey-io/valkey-operator/discussions/categories/q-a)
 > - 🐛 [Report bugs](https://github.com/valkey-io/valkey-operator/issues)
 >
-> Want to discuss the operator development? Join the [tech call every Friday at 11:00-11:30 US Eastern](https://zoom-lfx.platform.linuxfoundation.org/meeting/99658320446?password=2eae4006-633e-4fed-aa93-631ab2101421).
+> Want to discuss the operator development? Join the [tech call every Thursday at 14:00 UTC](https://zoom-lfx.platform.linuxfoundation.org/meeting/99658320446?password=2eae4006-633e-4fed-aa93-631ab2101421).
 
 ## Getting Started
 

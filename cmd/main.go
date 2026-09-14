@@ -78,6 +78,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var pprofAddr string
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces []string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -97,6 +98,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&pprofAddr, "pprof-bind-address", "",
+		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
+			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
+			"bind it to localhost and do not add it to a Service.")
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -224,6 +229,7 @@ func main() {
 		Cache:                  cacheOpts,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
+		PprofBindAddress:       pprofAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "73d40801.valkey.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily

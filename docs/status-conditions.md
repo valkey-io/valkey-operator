@@ -134,6 +134,19 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
+- `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
+- `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
+
+#### `TLSEndpointWarning`
+Non-blocking warning when TLS is enabled and discovery still uses IP announce (default or explicit `preferredEndpointType: IP`). `Ready` may stay `True`.
+
+| Status | Meaning |
+|---|---|
+| `True` | TLS is set and announce is IP; clients re-dialing pod IPs after `CLUSTER SLOTS` often fail certificate name checks. Prefer `networking.discovery.preferredEndpointType: Hostname` and DNS SANs for pod FQDNs. |
+| `False` (or absent) | No TLS, or Hostname announce is selected. |
+
+Common reasons:
+- `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
 ---
 

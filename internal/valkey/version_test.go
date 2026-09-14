@@ -60,6 +60,41 @@ func TestVersionFromImage(t *testing.T) {
 	}
 }
 
+func TestMeetsMinVersionFinalRelease(t *testing.T) {
+	// A directive introduced in the 9.1.0 line, recorded by its final release.
+	min := semver.MustParse("9.1.0")
+	tests := []struct {
+		name  string
+		image string
+		want  bool
+	}{
+		{name: "release candidate of the minimum itself", image: "valkey/valkey:9.1.0-rc1", want: true},
+		{name: "later release candidate of the minimum", image: "valkey/valkey:9.1.0-rc2", want: true},
+		{name: "the minimum", image: "valkey/valkey:9.1.0", want: true},
+		{name: "patch above the minimum", image: "valkey/valkey:9.1.2", want: true},
+		{name: "release candidate of a later minor", image: "valkey/valkey:9.2.0-rc1", want: true},
+		{name: "distro suffix on the minimum", image: "valkey/valkey:9.1.0-alpine", want: true},
+		{name: "patch below the minimum", image: "valkey/valkey:9.0.6", want: false},
+		{name: "release candidate below the minimum", image: "valkey/valkey:9.0.0-rc1", want: false},
+		{name: "unknown version floating tag", image: "valkey/valkey:latest", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, MeetsMinVersion(tt.image, min))
+		})
+	}
+}
+
+// A prerelease minimum orders its own release candidates correctly on its own,
+// so an earlier candidate than the one that introduced the directive stays out.
+func TestMeetsMinVersionPrereleaseMinimumKeepsOrder(t *testing.T) {
+	min := semver.MustParse("9.1.0-rc2")
+	assert.False(t, MeetsMinVersion("valkey/valkey:9.1.0-rc1", min))
+	assert.True(t, MeetsMinVersion("valkey/valkey:9.1.0-rc2", min))
+	assert.True(t, MeetsMinVersion("valkey/valkey:9.1.0", min))
+}
+
 func TestMeetsMinVersion(t *testing.T) {
 	min := semver.MustParse("9.1.0-rc1")
 	tests := []struct {

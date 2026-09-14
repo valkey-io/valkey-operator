@@ -74,6 +74,7 @@ func TestMeetsMinVersionFinalRelease(t *testing.T) {
 		{name: "patch above the minimum", image: "valkey/valkey:9.1.2", want: true},
 		{name: "release candidate of a later minor", image: "valkey/valkey:9.2.0-rc1", want: true},
 		{name: "distro suffix on the minimum", image: "valkey/valkey:9.1.0-alpine", want: true},
+		{name: "release candidate with a distro suffix", image: "valkey/valkey:9.1.0-rc1-alpine", want: true},
 		{name: "patch below the minimum", image: "valkey/valkey:9.0.6", want: false},
 		{name: "release candidate below the minimum", image: "valkey/valkey:9.0.0-rc1", want: false},
 		{name: "unknown version floating tag", image: "valkey/valkey:latest", want: false},

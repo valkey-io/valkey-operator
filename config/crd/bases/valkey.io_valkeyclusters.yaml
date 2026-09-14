@@ -3626,7 +3626,7 @@ spec:
                   ValkeyCluster pods. If unset, the namespace's default ServiceAccount is used.
                 maxLength: 253
                 minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                 type: string
               shards:
                 description: The number of shards groups. Each shard group contains

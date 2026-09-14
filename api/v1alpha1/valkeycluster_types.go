@@ -393,7 +393,7 @@ type ValkeyClusterSpec struct {
 
 	// ServiceAccountName specifies the name of the ServiceAccount to use for
 	// ValkeyCluster pods. If unset, the namespace's default ServiceAccount is used.
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +optional

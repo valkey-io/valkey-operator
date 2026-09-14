@@ -139,6 +139,19 @@ type ValkeyNodeSpec struct {
 	// the field and apply immediately.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
+
+	// PreferredEndpointType is set by the ValkeyCluster controller from
+	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
+	// flags and managed config to hostname mode. Standalone nodes leave this empty
+	// (IP announce).
+	// +kubebuilder:validation:Enum=IP;Hostname
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
+
+	// ClusterDomain is set by the ValkeyCluster controller from
+	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
 }
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
@@ -146,6 +159,16 @@ type ValkeyNodeSpec struct {
 // API is the resolved view the node controller renders into valkey.conf and
 // volume mounts.
 type NodeTLSSpec struct {
+	// ServerName is the hostname used for TLS verification when connecting
+	// to the pod IP. For cluster-owned nodes this is
+	// spec.networking.tls.serverName, or
+	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	ServerName string `json:"serverName,omitempty"`
+
 	// Certificates holds the certificate slots mounted into the node pod.
 	// +kubebuilder:validation:Required
 	Certificates NodeTLSCertificates `json:"certificates"`

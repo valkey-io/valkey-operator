@@ -98,18 +98,15 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command
+	// The fixture has no cluster label, so this is a standalone node: no replication
+	// flags, since the Secret they read is only provisioned for a ValkeyCluster.
 	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
-		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
+		"--cluster-announce-ip", "$(POD_IP)"}, c.Command)
 
 	// Env
-	require.Len(t, c.Env, 2)
+	require.Len(t, c.Env, 1)
 	assert.Equal(t, "POD_IP", c.Env[0].Name)
 	assert.Equal(t, "status.podIP", c.Env[0].ValueFrom.FieldRef.FieldPath)
-	assert.Equal(t, "PRIMARY_AUTH", c.Env[1].Name)
-	assert.Equal(t, getSystemPasswordSecretName(node.Labels[LabelCluster]), c.Env[1].ValueFrom.SecretKeyRef.Name)
 
 	// Ports
 	require.Len(t, c.Ports, 2)
@@ -163,6 +160,28 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
 	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
+}
+
+// A cluster-owned node still gets the replication credential, read from its
+// cluster's system-passwords Secret.
+func TestBuildValkeyNodePodTemplateSpec_ClusterNodeHasReplicationAuth(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	c := pts.Spec.Containers[0]
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
+
+	e := getEnvVar(t, c.Env, "PRIMARY_AUTH")
+	require.NotNil(t, e.ValueFrom)
+	require.NotNil(t, e.ValueFrom.SecretKeyRef)
+	assert.Equal(t, getSystemPasswordSecretName("mycluster"), e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, replicationUser, e.ValueFrom.SecretKeyRef.Key)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {

@@ -186,6 +186,30 @@ func valkeyAnnounceArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []co
 	return []string{"--cluster-announce-hostname", fqdn}, []corev1.EnvVar{podNameEnv}
 }
 
+// replicationArgsAndEnv returns the --primaryuser/--primaryauth flags and the
+// PRIMARY_AUTH env for the server container. Both are omitted for a node with no
+// cluster label: the system-passwords Secret they read is provisioned by the
+// cluster controller, and a standalone node has nothing to replicate from anyway.
+func replicationArgsAndEnv(node *valkeyiov1alpha1.ValkeyNode) ([]string, []corev1.EnvVar) {
+	clusterName := node.Labels[LabelCluster]
+	if clusterName == "" {
+		return nil, nil
+	}
+	args := []string{"--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)"}
+	env := []corev1.EnvVar{{
+		Name: "PRIMARY_AUTH",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: getSystemPasswordSecretName(clusterName),
+				},
+				Key: replicationUser,
+			},
+		},
+	}}
+	return args, env
+}
+
 // statefulSetServiceName is the governing Service for STS pod DNS. Cluster-owned
 // nodes use the shared cluster headless Service so multi 1-pod STS get per-pod
 // FQDNs. Standalone nodes keep the resource name (historical behaviour).
@@ -245,6 +269,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	}
 
 	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+	replicationArgs, replicationEnv := replicationArgsAndEnv(node)
 
 	containers := []corev1.Container{
 		{
@@ -254,23 +279,8 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			Command: append([]string{
 				"valkey-server",
 				"/config/valkey.conf",
-			}, append(announceArgs, []string{
-				"--primaryuser",
-				replicationUser,
-				"--primaryauth",
-				"$(PRIMARY_AUTH)",
-			}...)...),
-			Env: append(announceEnv, corev1.EnvVar{
-				Name: "PRIMARY_AUTH",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
-						},
-						Key: replicationUser,
-					},
-				},
-			}),
+			}, append(announceArgs, replicationArgs...)...),
+			Env: append(announceEnv, replicationEnv...),
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "client",

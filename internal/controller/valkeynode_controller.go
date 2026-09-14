@@ -502,20 +502,41 @@ func (r *ValkeyNodeReconciler) orphanAndRecreateStatefulSet(
 	log.Info("StatefulSet serviceName changed; orphan-recreating STS with live template",
 		"name", live.Name, "from", from, "to", to)
 	recreated := statefulSetAfterServiceNameChange(desired, live)
+	if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
+		return nil, err
+	}
 	policy := metav1.DeletePropagationOrphan
 	if err := r.Delete(ctx, live, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			return nil, err
 		}
 	}
-	if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
-		return nil, err
-	}
 	if err := r.Create(ctx, recreated); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil, errTransientRequeue
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, err
 		}
-		return nil, err
+		// Create raced with delete. Read uncached; if the name is free, Create
+		// the live-template STS already built. Do not Create full desired.
+		existing := &appsv1.StatefulSet{}
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		getErr := reader.Get(ctx, client.ObjectKeyFromObject(recreated), existing)
+		if apierrors.IsNotFound(getErr) {
+			if err := r.Create(ctx, recreated); err != nil {
+				if apierrors.IsAlreadyExists(err) {
+					return nil, errTransientRequeue
+				}
+				return nil, err
+			}
+		} else if getErr != nil {
+			return nil, getErr
+		} else if existing.Spec.ServiceName != to {
+			return nil, errTransientRequeue
+		} else {
+			recreated = existing
+		}
 	}
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
 		"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q; pod template left unchanged until WorkloadRevision allows a roll",

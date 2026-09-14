@@ -196,15 +196,21 @@ func statefulSetServiceName(node *valkeyiov1alpha1.ValkeyNode) string {
 	return valkeyNodeResourceName(node)
 }
 
-// headlessServiceFQDN is the absolute Service DNS name (trailing dot) used for
-// Hostname announce. Default TLS ServerName is this name without the trailing
-// dot.
+// headlessServiceFQDN is the cluster headless Service DNS name used for Hostname
+// announce. It is deliberately relative (no trailing dot): the announced name
+// ends up in CLUSTER SLOTS and becomes the client's TLS SNI value, where a
+// trailing dot is invalid (RFC 6066) and a poor cert SAN, so announce must match
+// the default TLS ServerName (which is this name). Do not re-add the trailing
+// dot on resolver grounds: the per-pod announce name (<pod>.<this>) has >=5 dots,
+// so under the pod default ndots:5 it resolves absolute-first in one query; only
+// short custom clusterDomains fall below the threshold and walk the search list,
+// a cost accepted over breaking SNI.
 func headlessServiceFQDN(clusterName, namespace, clusterDomain string) string {
 	if clusterDomain == "" {
 		clusterDomain = valkeyiov1alpha1.DefaultClusterDomain
 	}
 	domain := strings.TrimSuffix(clusterDomain, ".")
-	return fmt.Sprintf("%s.%s.svc.%s.", headlessServiceName(clusterName), namespace, domain)
+	return fmt.Sprintf("%s.%s.svc.%s", headlessServiceName(clusterName), namespace, domain)
 }
 
 // statefulSetAfterServiceNameChange builds a create-ready STS with desired

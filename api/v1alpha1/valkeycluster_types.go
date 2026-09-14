@@ -412,7 +412,7 @@ const (
 	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
 
 	// DefaultClusterDomain matches kubelet --cluster-domain when the CR omits
-	// networking.clusterDomain. Announce and TLS FQDNs append a trailing dot.
+	// networking.clusterDomain. Announce and TLS FQDNs have no trailing dot.
 	DefaultClusterDomain = "cluster.local"
 )
 

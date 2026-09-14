@@ -23,6 +23,7 @@ rules:
   - ""
   resources:
   - pods
+  - serviceaccounts
   verbs:
   - get
   - list

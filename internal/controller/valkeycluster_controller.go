@@ -73,6 +73,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -170,6 +171,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			message: msg,
 		})
 	}
+	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
 
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
 	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
@@ -881,6 +883,24 @@ func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alph
 			},
 		},
 	}
+}
+
+// serviceAccountConfigWarnings returns a ConfigurationWarning if the
+// cluster's explicitly requested ServiceAccount does not exist.
+func (r *ValkeyClusterReconciler) serviceAccountConfigWarnings(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	if sa := cluster.Spec.ServiceAccountName; sa != "" {
+		saObj := &corev1.ServiceAccount{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: sa}, saObj); err != nil {
+			if apierrors.IsNotFound(err) {
+				msg := fmt.Sprintf("ServiceAccount %q does not exist; Pods will fail to create until it is created", sa)
+				return []configWarning{{
+					reason:  valkeyiov1alpha1.ReasonServiceAccountNotFound,
+					message: msg,
+				}}
+			}
+		}
+	}
+	return nil
 }
 
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.

@@ -1275,7 +1275,7 @@ func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.
 		"omitting PodSecurityContext must produce the empty SecurityContext the API server defaults to")
 }
 
-func TestBuildValkeyNodePodTemplateSpec_ContainerSecurityContext_Passthrough(t *testing.T) {
+func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_Passthrough(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.ServiceAccountName = "my-sa"
 
@@ -1284,7 +1284,7 @@ func TestBuildValkeyNodePodTemplateSpec_ContainerSecurityContext_Passthrough(t *
 	assert.Equal(t, "my-sa", pts.Spec.ServiceAccountName, "ServiceAccountName should be set on pod spec")
 }
 
-func TestBuildValkeyNodePodTemplateSpec_ContainerSecurityContext_EmptyIsNoop(t *testing.T) {
+func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_EmptyIsNoop(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)

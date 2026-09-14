@@ -119,6 +119,57 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 	})
 
+	Context("When the ValkeyCluster specifies a missing ServiceAccountName", func() {
+		const resourceName = "missing-sa-cluster"
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+
+		It("should emit a ConfigurationWarning condition", func() {
+			By("creating a ValkeyCluster with a missing ServiceAccountName")
+			resource := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:             3,
+					Replicas:           1,
+					ServiceAccountName: "missing-sa",
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			defer func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}()
+
+			fakeRecorder := events.NewFakeRecorder(100)
+			controllerReconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  fakeRecorder,
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Check status conditions for ConfigurationWarning
+			updatedValkeyCluster := &valkeyiov1alpha1.ValkeyCluster{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updatedValkeyCluster)).To(Succeed())
+
+			warningCond := testutils.FindCondition(updatedValkeyCluster.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+			Expect(warningCond).NotTo(BeNil(), "ConfigurationWarning condition should be set")
+			Expect(warningCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(warningCond.Reason).To(Equal(valkeyiov1alpha1.ReasonServiceAccountNotFound))
+			Expect(warningCond.Message).To(ContainSubstring("ServiceAccount \"missing-sa\" does not exist"))
+		})
+	})
+
 	Context("When the ValkeyCluster is being deleted", func() {
 		const resourceName = "deleting-resource"
 

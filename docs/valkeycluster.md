@@ -43,7 +43,7 @@ maxmemory-policy
 
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
 
-Version gating applies only to keys the user sets in `spec.config`. Operator-managed directives rendered through the base config (for example `cluster-enabled`, TLS ports) are not filtered by `versionGatedConfig`; any future operator-owned directive that requires a newer Valkey minor must be gated explicitly where it is added.
+Version gating applies only to keys the user sets in `spec.config`. Operator-managed directives rendered through the base config (for example `cluster-enabled`, TLS ports) are not filtered by `valkey.ConfigIntroducedIn`; any future operator-owned directive that requires a newer Valkey minor must be gated explicitly where it is added.
 
 If more than one configuration warning is active at the same time, the operator combines them into a single `ConfigurationWarning` condition with reason `MultipleConfigurationWarnings`.
 

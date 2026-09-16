@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 
-	semver "github.com/Masterminds/semver/v3"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
@@ -47,12 +46,6 @@ const (
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
 )
-
-// versionGatedConfig maps user-facing config directives to the minimum Valkey
-// version that understands them.
-var versionGatedConfig = map[string]*semver.Version{
-	"tls-auto-reload-interval": semver.MustParse("9.1.0-rc1"),
-}
 
 //go:embed scripts/*
 var scripts embed.FS
@@ -180,7 +173,7 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 
 	warnings := make([]configWarning, 0, len(droppedKeys))
 	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
-		minVersion := versionGatedConfig[key]
+		minVersion := valkey.ConfigIntroducedIn[key]
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
 			message: fmt.Sprintf("spec.config.%s requires Valkey %s+, %s", key, minVersion, versionDetail),
@@ -197,7 +190,7 @@ func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[str
 	skipKeys := map[string]struct{}{}
 	image = effectiveImage(image)
 
-	for key, minVersion := range versionGatedConfig {
+	for key, minVersion := range valkey.ConfigIntroducedIn {
 		if _, userSet := userConfig[key]; !userSet {
 			continue
 		}

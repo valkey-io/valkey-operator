@@ -287,7 +287,9 @@ func scanFunc(body *ast.BlockStmt, fset *token.FileSet, builderTokens map[string
 				commands = append(commands, Command{Tokens: tok, Pos: pos})
 			}
 		case isBuilderVarRef(sel.X, builderVars):
-			scanErr = fmt.Errorf("%s: builder call made through a variable (e.g. `b := client.B(); b.%s(...)`); aclscan only recognizes the inline client.B().Method() form", pos, sel.Sel.Name)
+			scanErr = fmt.Errorf(
+				"%s: builder call made through a variable (e.g. `b := client.B(); b.%s(...)`); "+
+					"aclscan only recognizes the inline client.B().Method() form", pos, sel.Sel.Name)
 			return false
 		}
 		return true

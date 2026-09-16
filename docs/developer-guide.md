@@ -45,7 +45,7 @@ hand-maintained in `internal/controller/users.go`. If reconciliation code starts
 issuing a new command, that ACL has to grant it too, or the operator locks itself
 out at runtime.
 
-Rather than trust that ACL to be kept up to date by hand, `internal/aclscan`
+Rather than trust that ACL to be kept up to date by hand, `hack/aclscan/scan`
 statically discovers every Valkey command the operator's reconciliation code
 (`cmd/`, `internal/`) actually issues, by scanning its source for valkey-go
 client calls — both the builder pattern (`client.B().ClusterInfo()...Build()`)

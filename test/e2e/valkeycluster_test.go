@@ -33,7 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/aclscan"
+	aclscan "github.com/valkey-io/valkey-operator/hack/aclscan/scan"
 	controller "github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
@@ -710,14 +710,14 @@ EOF`,
 				g.Expect(commands).NotTo(BeEmpty())
 
 				valkeyCli := []string{"valkey-cli", "-a", defaultPassword}
-				arities, err := commandArities(podName, valkeyCli, commands)
+				arities, err := utils.CommandArities(podName, valkeyCli, commands)
 				g.Expect(err).NotTo(HaveOccurred())
 
 				var denied []string
 				for _, command := range commands {
-					arity, ok := arities[commandName(command.Tokens)]
-					minArgs := placeholdersNeeded(command.Tokens, arity, ok)
-					result, err := aclDryRun(podName, valkeyCli, "_operator", command.Tokens, minArgs)
+					arity, ok := arities[utils.CommandName(command.Tokens)]
+					minArgs := utils.PlaceholdersNeeded(command.Tokens, arity, ok)
+					result, err := utils.AclDryRun(podName, valkeyCli, "_operator", command.Tokens, minArgs)
 					g.Expect(err).NotTo(HaveOccurred(), "failed to run ACL DRYRUN for %q (%s)", command, command.Pos)
 					if result != "OK" {
 						denied = append(denied, fmt.Sprintf("%s (%s): %s", command, command.Pos, result))

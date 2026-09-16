@@ -17,7 +17,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e
+package utils
 
 import (
 	"fmt"
@@ -25,27 +25,26 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/valkey-io/valkey-operator/internal/aclscan"
-	"github.com/valkey-io/valkey-operator/test/utils"
+	aclscan "github.com/valkey-io/valkey-operator/hack/aclscan/scan"
 )
 
-// maxAclDryRunPlaceholders bounds how many placeholder arguments aclDryRun
+// maxAclDryRunPlaceholders bounds how many placeholder arguments AclDryRun
 // will pad a command with to satisfy its arity, as a safety net for
-// commands commandArities couldn't resolve (see its doc comment). Since ACL
+// commands CommandArities couldn't resolve (see its doc comment). Since ACL
 // DRYRUN never executes the command, placeholder values are never
 // interpreted; only the argument count matters for admin/cluster commands.
 const maxAclDryRunPlaceholders = 8
 
-// commandName is the "container|subcommand" form Valkey uses to name a
+// CommandName is the "container|subcommand" form Valkey uses to name a
 // command in COMMAND INFO and in ACL rules (e.g. "+cluster|info"). aclscan
 // discovers commands as token slices (e.g. []string{"CLUSTER", "INFO"}); this
 // is the inverse of that for the handful of places that need the string form.
-func commandName(tokens []string) string {
+func CommandName(tokens []string) string {
 	return strings.ToLower(strings.Join(tokens, "|"))
 }
 
-// commandArities looks up the arity Valkey's own command table reports for
-// each discovered command, via a single COMMAND INFO call, so aclDryRun can
+// CommandArities looks up the arity Valkey's own command table reports for
+// each discovered command, via a single COMMAND INFO call, so AclDryRun can
 // pad a command with exactly the right number of placeholder arguments up
 // front instead of probing one at a time (a wrong-arity ACL DRYRUN call for
 // e.g. CLUSTER MEET is itself a round-trip to the cluster over kubectl exec).
@@ -54,12 +53,12 @@ func commandName(tokens []string) string {
 // exact total token count (command name and subcommand included), a
 // negative value is the minimum. Commands missing from the result (e.g. if
 // the output format doesn't parse as expected) are simply absent from the
-// returned map; callers fall back to aclDryRun's own probing for those.
-func commandArities(podName string, valkeyCli []string, commands []aclscan.Command) (map[string]int, error) {
+// returned map; callers fall back to AclDryRun's own probing for those.
+func CommandArities(podName string, valkeyCli []string, commands []aclscan.Command) (map[string]int, error) {
 	wanted := make(map[string]bool, len(commands))
 	names := make([]string, 0, len(commands))
 	for _, c := range commands {
-		name := commandName(c.Tokens)
+		name := CommandName(c.Tokens)
 		if !wanted[name] {
 			wanted[name] = true
 			names = append(names, name)
@@ -74,7 +73,7 @@ func commandArities(podName string, valkeyCli []string, commands []aclscan.Comma
 	kubectlArgs = append(kubectlArgs, "COMMAND", "INFO")
 	kubectlArgs = append(kubectlArgs, names...)
 
-	output, err := utils.Run(exec.Command("kubectl", kubectlArgs...))
+	output, err := Run(exec.Command("kubectl", kubectlArgs...))
 	if err != nil {
 		return nil, err
 	}
@@ -100,10 +99,10 @@ func commandArities(podName string, valkeyCli []string, commands []aclscan.Comma
 	return arities, nil
 }
 
-// placeholdersNeeded returns how many placeholder arguments must be
-// appended to tokens to satisfy arity (as returned by commandArities), or 0
+// PlaceholdersNeeded returns how many placeholder arguments must be
+// appended to tokens to satisfy arity (as returned by CommandArities), or 0
 // if arity is unknown (ok is false) or already satisfied.
-func placeholdersNeeded(tokens []string, arity int, ok bool) int {
+func PlaceholdersNeeded(tokens []string, arity int, ok bool) int {
 	if !ok {
 		return 0
 	}
@@ -117,14 +116,14 @@ func placeholdersNeeded(tokens []string, arity int, ok bool) int {
 	return 0
 }
 
-// aclDryRun execs `<valkeyCli...> ACL DRYRUN <user> <tokens...>` in
+// AclDryRun execs `<valkeyCli...> ACL DRYRUN <user> <tokens...>` in
 // podName's server container, padding tokens with minArgs placeholder
-// arguments up front (see commandArities/placeholdersNeeded) and, if that
+// arguments up front (see CommandArities/PlaceholdersNeeded) and, if that
 // wasn't enough, growing the padding further until Valkey stops reporting a
 // wrong-arity error. It returns the command's own last line of output (i.e.
 // with any valkey-cli warnings, such as the insecure-password-on-the-
 // command-line notice, stripped).
-func aclDryRun(podName string, valkeyCli []string, user string, tokens []string, minArgs int) (string, error) {
+func AclDryRun(podName string, valkeyCli []string, user string, tokens []string, minArgs int) (string, error) {
 	args := append([]string{}, tokens...)
 	for i := 0; i < minArgs; i++ {
 		args = append(args, "x")
@@ -135,7 +134,7 @@ func aclDryRun(podName string, valkeyCli []string, user string, tokens []string,
 		kubectlArgs = append(kubectlArgs, "ACL", "DRYRUN", user)
 		kubectlArgs = append(kubectlArgs, args...)
 
-		output, err := utils.Run(exec.Command("kubectl", kubectlArgs...))
+		output, err := Run(exec.Command("kubectl", kubectlArgs...))
 		if err != nil {
 			return "", err
 		}
@@ -152,7 +151,7 @@ func aclDryRun(podName string, valkeyCli []string, user string, tokens []string,
 // used to strip valkey-cli's warnings (printed on their own line before the
 // actual reply) from combined stdout+stderr output.
 func lastNonEmptyLine(output string) string {
-	lines := utils.GetNonEmptyLines(output)
+	lines := GetNonEmptyLines(output)
 	if len(lines) == 0 {
 		return ""
 	}

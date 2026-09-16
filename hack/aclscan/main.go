@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/valkey-io/valkey-operator/internal/aclscan"
+	aclscan "github.com/valkey-io/valkey-operator/hack/aclscan/scan"
 )
 
 func main() {

@@ -27,8 +27,7 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
-// valkeyFor builds a minimal Valkey for exercising the CEL validation on
-// ValkeySpec and on the object's metadata.name.
+// valkeyFor builds a minimal Valkey for exercising the CEL validation.
 func valkeyFor(name string, replicas int32) *valkeyiov1alpha1.Valkey {
 	return &valkeyiov1alpha1.Valkey{
 		ObjectMeta: metav1.ObjectMeta{
@@ -92,8 +91,8 @@ var _ = Describe("Valkey CEL validation", func() {
 			Entry("cluster-node-timeout", "cluster-node-timeout"),
 			Entry("cluster-config-file", "cluster-config-file"),
 			Entry("cluster-require-full-coverage", "cluster-require-full-coverage"),
-			// Valkey config keys are case-insensitive, so the check lowercases
-			// before comparing. A bare startsWith would let these through.
+			// Valkey config keys are case-insensitive, so the rule lowercases.
+			// A bare startsWith would let these through.
 			Entry("mixed case", "Cluster-Enabled"),
 			Entry("upper case", "CLUSTER-ENABLED"),
 		)
@@ -130,30 +129,91 @@ var _ = Describe("Valkey CEL validation", func() {
 		})
 	})
 
-	DescribeTable("rejects names that collide with derived resource names",
+	DescribeTable("rejects names that collide with derived ValkeyNode names",
 		func(name string) {
 			err := k8sClient.Create(ctx, valkeyFor(name, 0))
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("reserved for derived resource names"))
+			Expect(err.Error()).To(ContainSubstring("reserved for derived ValkeyNode names"))
 		},
-		Entry("primary Service suffix", "val-primary"),
-		Entry("replicas Service suffix", "val-replicas"),
-		Entry("per-node Service suffix", "val-0"),
+		Entry("per-node suffix", "val-0"),
 		Entry("multi-digit per-node suffix", "val-12"),
 	)
 
+	DescribeTable("admits names whose suffix is not a derived one",
+		func(name string) {
+			valkey := valkeyFor(name, 0)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		},
+		// These were reserved while the design still had role Services.
+		// Those Services were dropped, so the names are legal again.
+		Entry("former primary Service suffix", "val-primary"),
+		Entry("former replicas Service suffix", "val-replicas"),
+	)
+
 	It("rejects a name too long for derived child names", func() {
-		// 48 characters: one over the limit that keeps
-		// "valkey-<name>-replicas" inside the 63 character DNS label limit.
-		err := k8sClient.Create(ctx, valkeyFor(strings.Repeat("a", 48), 0))
+		// 38 characters, one over the limit.
+		// The system password Secret is the longest derived name.
+		// The limit keeps it inside the 63 character DNS label cap.
+		err := k8sClient.Create(ctx, valkeyFor(strings.Repeat("a", 38), 0))
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("at most 47 characters"))
+		Expect(err.Error()).To(ContainSubstring("at most 37 characters"))
 	})
 
 	It("admits a name at the length limit", func() {
-		valkey := valkeyFor(strings.Repeat("b", 47), 0)
+		valkey := valkeyFor(strings.Repeat("b", 37), 0)
 		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	Describe("spec.failover", func() {
+		It("defaults mode to None when the block is omitted", func() {
+			valkey := valkeyFor("fo-default", 0)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+			Expect(valkey.FailoverMode()).To(Equal(valkeyiov1alpha1.FailoverModeNone))
+		})
+
+		It("admits mode None set explicitly", func() {
+			valkey := valkeyFor("fo-none", 0)
+			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverModeNone,
+			}
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		It("rejects mode Sentinel until it is implemented", func() {
+			valkey := valkeyFor("fo-sentinel", 0)
+			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverModeSentinel,
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must be None"))
+		})
+
+		It("rejects an unknown mode", func() {
+			valkey := valkeyFor("fo-bogus", 0)
+			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverMode("Operator"),
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("rejects a sentinel block under mode None", func() {
+			valkey := valkeyFor("fo-orphan-block", 0)
+			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
+				Mode:     valkeyiov1alpha1.FailoverModeNone,
+				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{},
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("only valid when failover.mode is Sentinel"))
+		})
 	})
 
 	It("holds workloadType immutable", func() {

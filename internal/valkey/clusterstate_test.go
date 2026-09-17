@@ -184,27 +184,29 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 		Flags:   []string{"slave"},
 		Info:    map[string]string{"role": "slave", "master_link_status": "down"},
 	}
-	failingReplica := &NodeState{
+	// A replica whose own scrape looks healthy: its link is up and its own
+	// CLUSTER NODES entry, like every node's own entry, carries no failure
+	// flag. Only the primary's view of the cluster says it is failing.
+	partitionedReplica := &NodeState{
 		Id:      "replica-3-id",
 		Address: "10.0.0.4",
-		Flags:   []string{"slave", "fail"},
+		Flags:   []string{"slave"},
 		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
-	pfailReplica := &NodeState{
-		Id:      "replica-4-id",
-		Address: "10.0.0.5",
-		Flags:   []string{"slave", "pfail"},
-		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
-	}
+	primary.ClusterNodes = "primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
+		"replica-1-id 10.0.0.2:6379@16379 slave primary-id 0 0 1 connected\n" +
+		"replica-2-id 10.0.0.3:6379@16379 slave primary-id 0 0 1 connected\n" +
+		"replica-3-id 10.0.0.4:6379@16379 slave,fail? primary-id 0 0 1 connected\n"
 
 	shard := &ShardState{
 		Id:        "shard-0",
 		PrimaryId: "primary-id",
 		Slots:     []SlotsRange{{0, 5461}},
-		Nodes:     []*NodeState{primary, syncedReplica, unsyncedReplica, failingReplica, pfailReplica},
+		Nodes:     []*NodeState{primary, syncedReplica, unsyncedReplica, partitionedReplica},
 	}
+	state := &ClusterState{Shards: []*ShardState{shard}}
 
-	replicas := shard.GetSyncedReplicas()
+	replicas := shard.GetSyncedReplicas(state)
 	if len(replicas) != 1 {
 		t.Fatalf("expected 1 synced replica, got %d", len(replicas))
 	}
@@ -227,7 +229,7 @@ func TestShardState_GetSyncedReplicas_Empty(t *testing.T) {
 		Nodes:     []*NodeState{primary},
 	}
 
-	replicas := shard.GetSyncedReplicas()
+	replicas := shard.GetSyncedReplicas(&ClusterState{Shards: []*ShardState{shard}})
 	if len(replicas) != 0 {
 		t.Fatalf("expected 0 synced replicas, got %d", len(replicas))
 	}

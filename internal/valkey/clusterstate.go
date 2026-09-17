@@ -238,15 +238,17 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 }
 
 // GetSyncedReplicas returns replica nodes that are connected and have their
-// replication link up (master_link_status:up). Nodes with fail/pfail flags
-// are excluded.
-func (s *ShardState) GetSyncedReplicas() []*NodeState {
+// replication link up (master_link_status:up). A replica that any live node
+// in state reports as failing ("fail" or "fail?") is excluded. That view has
+// to come from the peers: a node's own CLUSTER NODES entry never carries a
+// failure flag, so node.Flags cannot answer this.
+func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	var replicas []*NodeState
 	for _, node := range s.Nodes {
 		if node.Id == s.PrimaryId {
 			continue
 		}
-		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+		if state.IsNodeFailed(node.Id) {
 			continue
 		}
 		if node.Info["master_link_status"] != "up" {

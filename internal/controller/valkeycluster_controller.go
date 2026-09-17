@@ -1528,10 +1528,13 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
 			continue
 		}
-		// Check if all nodes in this shard are healthy and in sync
+		// Check if all nodes in this shard are healthy and in sync. Health is
+		// what the peers report about the node, not what the node reports
+		// about itself: a node's own CLUSTER NODES entry never carries a
+		// failure flag.
 		allHealthy := true
 		for _, node := range shard.Nodes {
-			if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+			if state.IsNodeFailed(node.Id) {
 				allHealthy = false
 				break
 			}

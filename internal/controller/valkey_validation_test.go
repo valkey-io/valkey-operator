@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -166,6 +167,137 @@ var _ = Describe("Valkey CEL validation", func() {
 		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
 	})
 
+	// The persistence rules are copied from ValkeyClusterSpec.
+	// They are exercised against the Valkey spec shape rather than trusted.
+	Describe("spec.persistence", func() {
+		persistentValkey := func(name, size string, class *string) *valkeyiov1alpha1.Valkey {
+			valkey := valkeyFor(name, 0)
+			valkey.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size:             resource.MustParse(size),
+				StorageClassName: class,
+			}
+			return valkey
+		}
+
+		It("admits an instance created with persistence", func() {
+			valkey := persistentValkey("pv-ok", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		It("rejects persistence with workloadType Deployment", func() {
+			valkey := persistentValkey("pv-deploy", "1Gi", nil)
+			valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence requires workloadType StatefulSet"))
+		})
+
+		It("rejects persistence added after creation", func() {
+			valkey := valkeyFor("pv-added", 0)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("1Gi"),
+			}
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence cannot be added after creation"))
+		})
+
+		It("rejects persistence removed once set", func() {
+			valkey := persistentValkey("pv-removed", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence = nil
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence cannot be removed once set"))
+		})
+
+		It("admits an expanded size", func() {
+			valkey := persistentValkey("pv-expand", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("2Gi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("rejects a shrunk size", func() {
+			valkey := persistentValkey("pv-shrink", "2Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1Gi")
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.size may only be expanded"))
+		})
+
+		It("admits an equal size, so a no-op update is not a shrink", func() {
+			valkey := persistentValkey("pv-same", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1Gi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("treats equivalent quantities as equal, not as a shrink", func() {
+			// 1Gi and 1024Mi are the same size written differently.
+			// The rule compares quantities, so neither ordering is a shrink.
+			valkey := persistentValkey("pv-equiv", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1024Mi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("holds storageClassName immutable", func() {
+			fast, slow := "fast", "slow"
+			valkey := persistentValkey("pv-class", "1Gi", &fast)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.StorageClassName = &slow
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
+		})
+
+		It("rejects adding a storageClassName that was unset", func() {
+			class := "fast"
+			valkey := persistentValkey("pv-class-add", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.StorageClassName = &class
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
+		})
+	})
+
 	Describe("spec.failover", func() {
 		It("defaults mode to None when the block is omitted", func() {
 			valkey := valkeyFor("fo-default", 0)
@@ -203,6 +335,11 @@ var _ = Describe("Valkey CEL validation", func() {
 			err := k8sClient.Create(ctx, valkey)
 			Expect(err).To(HaveOccurred())
 		})
+
+		// The two monitorName transition rules are not covered, and cannot be.
+		// They need a sentinel block, which needs mode Sentinel.
+		// The spec-level rule above rejects that mode.
+		// Add those cases with the change that admits it.
 
 		It("rejects a sentinel block under mode None", func() {
 			valkey := valkeyFor("fo-orphan-block", 0)

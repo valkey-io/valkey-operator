@@ -38,13 +38,19 @@ spec:
         description: |-
           Valkey is the Schema for the valkeys API.
 
-          The name is bounded because child resource names are derived from it. The
-          longest derived name in the planned scheme is a role Service,
-          "valkey-<name>-replicas", which must stay within the 63 character DNS label
-          limit. That leaves 47 characters for the name. The suffixes are reserved for
-          the same reason, so that two instances cannot derive the same child name.
-          Both rules are in place from the start, because tightening validation later
-          would reject objects that already exist.
+          The name is bounded because child resource names are derived from it.
+          Every one of them is a DNS label capped at 63 characters.
+
+          The binding child is the Secret "internal-<name>-system-passwords".
+          Its 26 fixed characters leave 37 for the name.
+          No other derived name is tighter, so this is the only limit stated.
+
+          The limit is in place from the start.
+          Tightening it later would reject objects that already exist.
+
+          A trailing "-<number>" is reserved.
+          ValkeyNode names are derived as "<name>-<index>".
+          An instance "cache-1" would otherwise collide with node 1 of "cache".
         properties:
           apiVersion:
             description: |-
@@ -72,19 +78,20 @@ spec:
                 description: |-
                   Config holds additional Valkey configuration parameters.
 
-                  Cluster mode directives are rejected. A Valkey always runs with
-                  cluster-enabled no, so every cluster- key is either inert or actively
-                  wrong here, and accepting one would store a spec the controller cannot
-                  honour. Every cluster directive Valkey defines carries the prefix, so a
-                  prefix test covers them without enumerating each key.
+                  Cluster mode directives are rejected.
+                  A Valkey always runs with cluster-enabled no.
+                  Every cluster- key is therefore inert or actively wrong here.
+                  Accepting one would store an unhonourable spec.
+                  Every cluster directive carries the prefix.
+                  A prefix test therefore covers them all without enumerating each key.
 
-                  The comparison is lowercased because Valkey treats configuration keys
-                  case-insensitively, so Cluster-Enabled has to be caught alongside
-                  cluster-enabled.
+                  The comparison is lowercased because Valkey keys are case-insensitive.
+                  Cluster-Enabled has to be caught alongside cluster-enabled.
 
-                  This rejects user input only. The operator's own base config still emits
-                  cluster-config-file for every node, cluster mode or not, to keep the node
-                  state file on the writable /data volume (see buildManagedConfig).
+                  This rejects user input only.
+                  The base config still emits cluster-config-file for every node.
+                  That keeps the node state file on the writable /data volume.
+                  See buildManagedConfig.
                 type: object
                 x-kubernetes-validations:
                 - message: 'spec.config must not contain cluster- keys: a Valkey runs
@@ -92,8 +99,8 @@ spec:
                   rule: self.all(key, !key.lowerAscii().startsWith('cluster-'))
               containers:
                 description: |-
-                  Containers holds additional containers, or overrides for the default
-                  ones, applied as a strategic merge patch.
+                  Containers holds additional containers, or overrides for the default ones.
+                  Applied as a strategic merge patch.
                 items:
                   description: A single application container that you want to run
                     within a pod.
@@ -1886,13 +1893,76 @@ spec:
                         type: object
                     type: object
                 type: object
+              failover:
+                description: |-
+                  Failover declares how primary failover is performed for this instance.
+                  Only mode None is accepted today.
+                properties:
+                  mode:
+                    default: None
+                    description: |-
+                      Mode selects the failover engine.
+                      Values may be added in future versions.
+                      Clients must tolerate values they do not recognise.
+                    enum:
+                    - None
+                    - Sentinel
+                    type: string
+                  sentinel:
+                    description: |-
+                      Sentinel configures Sentinel-mode failover.
+                      Only valid when mode is Sentinel.
+                      This block does not by itself cause monitoring.
+                      A ValkeySentinel must also select this object.
+                    properties:
+                      config:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Config is per-master Sentinel tuning.
+                          Forwarded as SENTINEL SET <monitorName> <key> <value>.
+                          Values are not validated by the operator.
+                          Operator-owned keys are skipped with a ConfigurationWarning.
+                        type: object
+                      monitorName:
+                        description: |-
+                          MonitorName is the Sentinel master-name for this instance.
+                          Defaults to metadata.name, resolved by Valkey.MonitorName().
+                          There is no kubebuilder default.
+                          A materialized default is indistinguishable from a user-set value.
+                          It stays settable so an adopted deployment keeps its existing name.
+                        maxLength: 37
+                        minLength: 1
+                        type: string
+                      quorum:
+                        description: |-
+                          Quorum is the number of Sentinels that must agree the primary is down.
+                          Passed to SENTINEL MONITOR.
+                          Defaults to (selecting sentinel's replicas / 2) + 1.
+                          The default is computed at registration time.
+                          It depends on the size of the ValkeySentinel that selects this instance.
+                          Set it explicitly to pin it.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - message: monitorName cannot be added or removed after the sentinel
+                        block is created
+                      rule: has(self.monitorName) == has(oldSelf.monitorName)
+                    - message: monitorName is immutable
+                      rule: '!has(self.monitorName) || self.monitorName == oldSelf.monitorName'
+                type: object
+                x-kubernetes-validations:
+                - message: failover.sentinel is only valid when failover.mode is Sentinel
+                  rule: '!has(self.sentinel) || self.mode == ''Sentinel'''
               image:
                 description: Image overrides the default Valkey image.
                 type: string
               imagePullSecrets:
                 description: |-
-                  ImagePullSecrets is a list of references to Secrets in the same namespace
-                  used for pulling any of the pod's images from private registries.
+                  ImagePullSecrets references Secrets in this namespace.
+                  They are used to pull the pod's images from private registries.
                 items:
                   description: |-
                     LocalObjectReference contains enough information to let you locate the
@@ -1970,6 +2040,23 @@ spec:
                     type: string
                 required:
                 - size
+                type: object
+              podDisruptionBudget:
+                description: |-
+                  PodDisruptionBudget configures the budget over this instance's pods.
+                  No budget is created while spec.replicas is 0, whatever the mode.
+                  A single-pod budget either allows evicting it or blocks drains.
+                properties:
+                  mode:
+                    default: Managed
+                    description: |-
+                      Mode selects how the operator manages the budget.
+                      Managed renders maxUnavailable 1 over this instance's pods.
+                      Disabled creates none, and deletes an existing one.
+                    enum:
+                    - Managed
+                    - Disabled
+                    type: string
                 type: object
               podSecurityContext:
                 description: PodSecurityContext overrides the PodSecurityContext applied
@@ -3697,9 +3784,8 @@ spec:
                 x-kubernetes-list-type: map
               workloadType:
                 default: StatefulSet
-                description: |-
-                  WorkloadType specifies whether the underlying ValkeyNode creates a
-                  StatefulSet or a Deployment. It is immutable.
+                description: WorkloadType picks the ValkeyNode's workload kind. It
+                  is immutable.
                 enum:
                 - StatefulSet
                 - Deployment
@@ -3712,6 +3798,10 @@ spec:
             - message: 'spec.replicas must be 0: replication is not implemented yet,
                 only standalone Valkey is supported'
               rule: '!has(self.replicas) || self.replicas == 0'
+            - message: 'spec.failover.mode must be None: Sentinel-managed failover
+                is not implemented yet'
+              rule: '!has(self.failover) || !has(self.failover.mode) || self.failover.mode
+                == ''None'''
             - message: persistence requires workloadType StatefulSet
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
             - message: persistence cannot be removed once set
@@ -3823,9 +3913,8 @@ spec:
                 type: string
               replicas:
                 default: 0
-                description: |-
-                  Replicas is the number of ValkeyNodes that exist for this instance,
-                  excluding the primary.
+                description: Replicas counts this instance's ValkeyNodes, excluding
+                  the primary.
                 format: int32
                 type: integer
               state:
@@ -3844,13 +3933,12 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: metadata.name must be at most 47 characters, because child resource
+        - message: metadata.name must be at most 37 characters, because child resource
             names are derived from it
-          rule: self.metadata.name.size() <= 47
-        - message: 'metadata.name must not end with ''-primary'', ''-replicas'', or
-            ''-<number>'': those suffixes are reserved for derived resource names'
-          rule: '!self.metadata.name.endsWith(''-primary'') && !self.metadata.name.endsWith(''-replicas'')
-            && !self.metadata.name.matches(''-[0-9]+$'')'
+          rule: self.metadata.name.size() <= 37
+        - message: 'metadata.name must not end with ''-<number>'': that suffix is
+            reserved for derived ValkeyNode names'
+          rule: '!self.metadata.name.matches(''-[0-9]+$'')'
     served: true
     storage: true
     subresources:

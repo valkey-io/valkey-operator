@@ -305,6 +305,9 @@ type ZonePinning struct {
 //
 // zone.pinning: reject a passthrough nodeSelector that sets the zone key the pinning render owns.
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.nodeSelector) || !('topology.kubernetes.io/zone' in self.scheduling.nodeSelector)",message="scheduling.nodeSelector cannot set topology.kubernetes.io/zone while zone.pinning is set: pinning renders that key itself, and the curated value would overwrite yours"
+//
+// discovery: Hostname announce needs stable StatefulSet pod names.
+// +kubebuilder:validation:XValidation:rule="!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType) || self.networking.discovery.preferredEndpointType != 'Hostname' || !has(self.workloadType) || self.workloadType == 'StatefulSet'",message="networking.discovery.preferredEndpointType Hostname requires workloadType StatefulSet (or omit workloadType for the StatefulSet default)"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -373,8 +376,8 @@ type ValkeyClusterSpec struct {
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
-	// Networking groups how clients and peers reach cluster nodes (TLS today;
-	// discovery and external access land in follow-ups under this object).
+	// Networking groups how clients and peers reach cluster nodes (TLS,
+	// in-cluster discovery announce, and later external access).
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
 
@@ -389,17 +392,65 @@ type ValkeyClusterSpec struct {
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
+// PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
+// +kubebuilder:validation:Enum=IP;Hostname
+type PreferredEndpointType string
+
+const (
+	// PreferredEndpointTypeIP announces pod IPs (default).
+	PreferredEndpointTypeIP PreferredEndpointType = "IP"
+	// PreferredEndpointTypeHostname announces stable per-pod DNS names under the
+	// cluster headless Service.
+	PreferredEndpointTypeHostname PreferredEndpointType = "Hostname"
+
+	// DefaultClusterDomain matches kubelet --cluster-domain when the CR omits
+	// networking.clusterDomain. Announce and TLS FQDNs have no trailing dot.
+	DefaultClusterDomain = "cluster.local"
+)
+
 // NetworkingSpec groups connectivity configuration for the cluster.
-// Phase 1 of the networking API (#318): TLS only. Discovery (in-cluster
-// endpoint announcement) and external access will nest here later.
 type NetworkingSpec struct {
+	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under
+	// (kubelet --cluster-domain). Used when building Hostname announce FQDNs
+	// and the default TLS ServerName. Must match the cluster. Default cluster.local.
+	// +kubebuilder:default="cluster.local"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$`
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// Discovery configures in-cluster endpoint announcement after CLUSTER SLOTS.
+	// +optional
+	Discovery *DiscoverySpec `json:"discovery,omitempty"`
+
 	// TLS configuration for the cluster.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
 }
 
+// DiscoverySpec configures how nodes announce themselves for in-cluster clients.
+type DiscoverySpec struct {
+	// PreferredEndpointType selects IP (default) or Hostname announcement.
+	// Hostname uses per-pod DNS under the cluster headless Service
+	// (<pod>.<headless>.<namespace>.svc.<clusterDomain>) and requires
+	// workloadType StatefulSet (or the default).
+	// +kubebuilder:default=IP
+	// +optional
+	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
+}
+
 // TLSSpec defines the TLS configuration for ValkeyCluster.
 type TLSSpec struct {
+	// ServerName is the hostname used for TLS verification when the operator
+	// connects to a node by pod IP. When unset, the operator uses
+	// valkey-<name>.<namespace>.svc.<clusterDomain> (default cluster.local).
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	ServerName string `json:"serverName,omitempty"`
+
 	// Certificates holds the certificate slots used by the cluster.
 	// +kubebuilder:validation:Required
 	Certificates TLSCertificates `json:"certificates"`
@@ -427,6 +478,28 @@ func (c *ValkeyCluster) GetTLS() *TLSSpec {
 	return c.Spec.Networking.TLS
 }
 
+// GetPreferredEndpointType returns discovery preferred endpoint type, default IP.
+func (c *ValkeyCluster) GetPreferredEndpointType() PreferredEndpointType {
+	if c == nil || c.Spec.Networking == nil || c.Spec.Networking.Discovery == nil ||
+		c.Spec.Networking.Discovery.PreferredEndpointType == "" {
+		return PreferredEndpointTypeIP
+	}
+	return c.Spec.Networking.Discovery.PreferredEndpointType
+}
+
+// GetClusterDomain returns networking.clusterDomain, default cluster.local.
+func (c *ValkeyCluster) GetClusterDomain() string {
+	if c == nil || c.Spec.Networking == nil || c.Spec.Networking.ClusterDomain == "" {
+		return DefaultClusterDomain
+	}
+	return c.Spec.Networking.ClusterDomain
+}
+
+// PrefersHostnameAnnounce reports whether discovery announces hostnames.
+func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
+	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
+}
+
 // CertificateSource references a certificate and its private key. Today the
 // only source is a Secret; future sources (cert-manager, operator-generated)
 // are added as sibling fields forming a union where exactly one may be set.
@@ -447,8 +520,11 @@ type ExporterSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Enable or disable the exporter sidecar container
-	Enabled bool `json:"enabled,omitempty"`
+	// Enable or disable the exporter sidecar container. Unset means enabled
+	// on a ValkeyCluster; a ValkeyNode runs the sidecar only on an explicit
+	// true, which the cluster controller propagates when enabled.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// Override the SecurityContext applied to the exporter sidecar container.
 	// +optional
@@ -457,6 +533,13 @@ type ExporterSpec struct {
 	// Additional cmdline arguments passed to exporter sidecar container.
 	// +optional
 	Args []string `json:"args,omitempty"`
+}
+
+// ExporterEnabled resolves the cluster-level default: a nil
+// spec.exporter.enabled means enabled, so overriding any other exporter
+// field keeps the sidecar.
+func (s ValkeyClusterSpec) ExporterEnabled() bool {
+	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
@@ -508,35 +591,44 @@ const (
 	// considers risky, for example a terminationGracePeriodSeconds too short for
 	// graceful failover.
 	ConditionConfigurationWarning = "ConfigurationWarning"
+	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
+	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
+	ConditionTLSEndpointWarning = "TLSEndpointWarning"
 )
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing             = "Initializing"
-	ReasonReconciling              = "Reconciling"
-	ReasonClusterHealthy           = "ClusterHealthy"
-	ReasonServiceError             = "ServiceError"
-	ReasonConfigMapError           = "ConfigMapError"
-	ReasonValkeyNodeError          = "ValkeyNodeError"
-	ReasonValkeyNodeListError      = "ValkeyNodeListError"
-	ReasonAddingNodes              = "AddingNodes"
-	ReasonNodeAddFailed            = "NodeAddFailed"
-	ReasonMissingShards            = "MissingShards"
-	ReasonMissingReplicas          = "MissingReplicas"
-	ReasonReconcileComplete        = "ReconcileComplete"
-	ReasonTopologyComplete         = "TopologyComplete"
-	ReasonAllSlotsAssigned         = "AllSlotsAssigned"
-	ReasonSlotsUnassigned          = "SlotsUnassigned"
-	ReasonGracePeriodTooShort      = "GracePeriodTooShort"
-	ReasonPrimaryLost              = "PrimaryLost"
-	ReasonNoSlots                  = "NoSlotsAvailable"
-	ReasonRebalancingSlots         = "RebalancingSlots"
-	ReasonRebalanceFailed          = "RebalanceFailed"
-	ReasonUsersAclError            = "UsersACLError"
-	ReasonUpdatingNodes            = "UpdatingNodes"
-	ReasonSystemUsersAclError      = "SystemUsersACLError"
-	ReasonPodDisruptionBudgetError = "PodDisruptionBudgetError"
-	ReasonPodUnschedulable         = "PodUnschedulable"
+	ReasonInitializing                  = "Initializing"
+	ReasonReconciling                   = "Reconciling"
+	ReasonClusterHealthy                = "ClusterHealthy"
+	ReasonServiceError                  = "ServiceError"
+	ReasonConfigMapError                = "ConfigMapError"
+	ReasonValkeyNodeError               = "ValkeyNodeError"
+	ReasonValkeyNodeListError           = "ValkeyNodeListError"
+	ReasonAddingNodes                   = "AddingNodes"
+	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonMissingShards                 = "MissingShards"
+	ReasonMissingReplicas               = "MissingReplicas"
+	ReasonReconcileComplete             = "ReconcileComplete"
+	ReasonTopologyComplete              = "TopologyComplete"
+	ReasonAllSlotsAssigned              = "AllSlotsAssigned"
+	ReasonSlotsUnassigned               = "SlotsUnassigned"
+	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
+	ReasonPrimaryLost                   = "PrimaryLost"
+	ReasonNoSlots                       = "NoSlotsAvailable"
+	ReasonRebalancingSlots              = "RebalancingSlots"
+	ReasonRebalanceFailed               = "RebalanceFailed"
+	ReasonACLApplyFailed                = "ACLApplyFailed"
+	ReasonUsersAclError                 = "UsersACLError"
+	ReasonUpdatingNodes                 = "UpdatingNodes"
+	ReasonSystemUsersAclError           = "SystemUsersACLError"
+	ReasonPodDisruptionBudgetError      = "PodDisruptionBudgetError"
+	ReasonPodUnschedulable              = "PodUnschedulable"
+	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
+	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
+	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
+	// is enabled and preferred endpoint type is IP (default or explicit).
+	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
 )
 
 // +kubebuilder:object:root=true

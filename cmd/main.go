@@ -40,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -57,6 +58,10 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// roleEventBufferSize matches the default buffer of source.Channel, so a burst
+// of role changes is absorbed rather than dropped by the poller.
+const roleEventBufferSize = 1024
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -73,6 +78,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var pprofAddr string
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces []string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -92,6 +98,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&pprofAddr, "pprof-bind-address", "",
+		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
+			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
+			"bind it to localhost and do not add it to a Service.")
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -219,6 +229,7 @@ func main() {
 		Cache:                  cacheOpts,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
+		PprofBindAddress:       pprofAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "73d40801.valkey.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
@@ -247,15 +258,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The RolePoller detects role changes that move nothing in Kubernetes (a
+	// failover between two healthy pods) and pushes a trigger down this channel;
+	// the ValkeyNode controller does the resolving and the writing.
+	roleEvents := make(chan event.GenericEvent, roleEventBufferSize)
+
 	if err := (&controller.ValkeyNodeReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("valkeynode-controller"),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorder("valkeynode-controller"),
+		RoleEvents: roleEvents,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ValkeyNode")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	if err := mgr.Add(&controller.RolePoller{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Interval:  controller.DefaultRolePollInterval,
+		Events:    roleEvents,
+	}); err != nil {
+		setupLog.Error(err, "Failed to add role poller")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

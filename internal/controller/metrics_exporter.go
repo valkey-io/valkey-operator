@@ -58,6 +58,12 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 			Name:  "REDIS_EXPORTER_TLS_CA_CERT_FILE",
 			Value: fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA),
 		})
+		if tlsSpec.ServerName != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "REDIS_EXPORTER_TLS_SERVER_NAME",
+				Value: tlsSpec.ServerName,
+			})
+		}
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      tlsVolumeName,
 			MountPath: tlsCertMountPath,

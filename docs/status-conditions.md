@@ -93,6 +93,7 @@ Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
+- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 
 ---
 
@@ -133,6 +134,19 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
+- `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
+- `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
+
+#### `TLSEndpointWarning`
+Non-blocking warning when TLS is enabled and discovery still uses IP announce (default or explicit `preferredEndpointType: IP`). `Ready` may stay `True`.
+
+| Status | Meaning |
+|---|---|
+| `True` | TLS is set and announce is IP; clients re-dialing pod IPs after `CLUSTER SLOTS` often fail certificate name checks. Prefer `networking.discovery.preferredEndpointType: Hostname` and DNS SANs for pod FQDNs. |
+| `False` (or absent) | No TLS, or Hostname announce is selected. |
+
+Common reasons:
+- `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
 ---
 
@@ -216,7 +230,7 @@ Common reasons when `ACLApplied=False`:
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
 
-> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition is informational and does not block the cluster controller's one-at-a-time progress. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

@@ -71,6 +71,25 @@ var (
 		},
 		[]string{labelValkeyCluster, labelTargetNamespace},
 	)
+
+	roleTriggersTotal = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "valkey_operator_role_triggers_total",
+			Help: "Total number of role-change reconcile triggers raised by the role poller.",
+		},
+		[]string{labelValkeyCluster, labelTargetNamespace},
+	)
+
+	// A dropped trigger leaves the node stale until the backstop with nothing in
+	// the logs. The channel buffers 1024 against a 5s tick, so any drop at all
+	// means the ValkeyNode workqueue is not draining.
+	roleTriggersDroppedTotal = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "valkey_operator_role_triggers_dropped_total",
+			Help: "Role-change reconcile triggers discarded because the event channel was full.",
+		},
+		[]string{labelValkeyCluster, labelTargetNamespace},
+	)
 )
 
 // initClusterMetrics creates empty metrics for a valkey cluster
@@ -85,6 +104,8 @@ func initClusterMetrics(name, namespace string) {
 	clusterShards.WithLabelValues(name, namespace)
 	clusterShardsReady.WithLabelValues(name, namespace)
 	slotMigrationBatchesTotal.WithLabelValues(name, namespace)
+	roleTriggersTotal.WithLabelValues(name, namespace)
+	roleTriggersDroppedTotal.WithLabelValues(name, namespace)
 }
 
 // updateClusterMetrics sets the Prometheus gauges for a ValkeyCluster.
@@ -114,4 +135,6 @@ func deleteClusterMetrics(name, namespace string) {
 	clusterShardsReady.DeleteLabelValues(name, namespace)
 	failoversTotal.DeletePartialMatch(prometheus.Labels{labelValkeyCluster: name, labelTargetNamespace: namespace})
 	slotMigrationBatchesTotal.DeleteLabelValues(name, namespace)
+	roleTriggersTotal.DeleteLabelValues(name, namespace)
+	roleTriggersDroppedTotal.DeleteLabelValues(name, namespace)
 }

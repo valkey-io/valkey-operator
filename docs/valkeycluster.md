@@ -29,7 +29,7 @@ config:
   maxmemory-policy: noeviction
 ```
 
-Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf/) to all nodes in the cluster.
+Use `config` to pass [Valkey configuration](https://valkey.io/topics/valkey.conf/) to all nodes in the cluster. Some directives require a newer Valkey release; see [Version-gated config](#version-gated-config)
 
 Listed below are configurations can be applied live without rolling pods. We are adopting configs that can be applied live on a case-by-case basis. For any requests please [raise an issue](https://github.com/valkey-io/valkey-operator/issues/new).
 
@@ -38,6 +38,20 @@ maxclients
 maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
 maxmemory-policy
 ```
+
+#### Version-gated config
+
+Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
+
+Version gating applies only to keys the user sets in `spec.config`. Operator-managed directives rendered through the base config (for example `cluster-enabled`, TLS ports) are not filtered by `versionGatedConfig`; any future operator-owned directive that requires a newer Valkey minor must be gated explicitly where it is added.
+
+If more than one configuration warning is active at the same time, the operator combines them into a single `ConfigurationWarning` condition with reason `MultipleConfigurationWarnings`.
+
+The warning message names the directive, the minimum supported Valkey version, and the detected version or detection failure. The operator also emits a Kubernetes `Warning` event on the transition into this state. If you later switch to a supporting image, the condition clears on the next reconcile.
+
+For example, `tls-auto-reload-interval` requires Valkey `9.1.0` or newer.
+
+Apply the image change and wait for the roll to finish before adding a version-gated directive. Adding both in one spec change can write the new config to the shared ConfigMap before every node has the new image, and a node still on the old image can crash-loop if it restarts.
 
 #### Constraints
 
@@ -68,7 +82,7 @@ containers:
 ```yaml
 exporter:
   enabled: true   # default
-  image: oliver006/redis_exporter:v1.80.0
+  image: oliver006/redis_exporter:v1.88.0
   args: # optional command-line flags for exporter
     - -ping-on-connect
   resources:
@@ -346,15 +360,37 @@ If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`
 >
 > A milder form of this applies to `zone.spread.*` set to `Required`: a recreated pod can be pushed away from its volume's zone.
 
-### TLS
+### Networking
 
 ```yaml
 networking:
+  clusterDomain: cluster.local   # optional; default cluster.local
+  discovery:
+    preferredEndpointType: IP    # IP (default) | Hostname
   tls:
     certificates:
       server:
         secretName: valkey-tls
 ```
+
+#### Discovery (in-cluster announce)
+
+`networking.discovery.preferredEndpointType` controls how nodes advertise themselves after `CLUSTER SLOTS`:
+
+| Value | Behaviour |
+|---|---|
+| `IP` (default) | Announce pod IPs. Same as historical behaviour. |
+| `Hostname` | Announce `<pod>.<headlessService>.<namespace>.svc.<clusterDomain>`. Requires `workloadType: StatefulSet` (or omit for the default). |
+
+Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service.
+
+Changing `serviceName` on an existing StatefulSet is immutable. The operator deletes the StatefulSet with **orphan** cascade and recreates it with the new `serviceName` while **keeping the live pod template**. Existing pods are adopted, not deleted by that step. Per-pod DNS names under the headless Service (and the pod `subdomain` the STS controller sets) become reliable after a later pod replace (for example a WorkloadRevision-staged roll), not after the STS-only recreate alone.
+
+`networking.clusterDomain` must match the kubelet cluster domain (`--cluster-domain`). The field is a DNS subdomain (a trailing dot on input is trimmed). Hostname announce uses an FQDN **without** a trailing dot, so it is a valid TLS SNI name (RFC 6066) and matches typical cert SANs and the default TLS `serverName`. The per-pod announce name has at least five dots, so under the pod default `ndots:5` resolvers try it as absolute first (one query); only short custom cluster domains fall back to the search list, which is accepted over breaking SNI.
+
+**TLS tip:** with TLS and IP announce (including the default), clients that re-dial announced pod IPs often fail certificate name checks. Prefer `preferredEndpointType: Hostname` and a server cert SAN such as `*.<headlessService>.<namespace>.svc.<clusterDomain>`. The operator sets a non-blocking `TLSEndpointWarning` condition when TLS is on and announce stays IP; Ready is not forced False for that alone.
+
+#### TLS
 
 `networking.tls` enables TLS for all cluster communication. When set, `certificates.server.secretName` is required. The Secret must contain:
 
@@ -365,6 +401,15 @@ networking:
 | `tls.key` | Private key for the certificate |
 
 `certificates` is a set of named slots. `server` is the only one today; the trust-source override, the outbound peer identity and the control-plane identity land as sibling slots in later phases of [#360](https://github.com/valkey-io/valkey-operator/issues/360).
+
+`serverName` is the hostname the operator verifies when it dials a node by pod IP. When unset, it uses `valkey-<name>.<namespace>.svc.<clusterDomain>` (default `cluster.local`). The cluster writes that resolved name onto each `ValkeyNode`; the node client and the metrics exporter (`REDIS_EXPORTER_TLS_SERVER_NAME`) use it as-is. The exporter still dials `localhost`. This does not change what nodes announce in `CLUSTER SLOTS`.
+
+Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of certificates (for example certificates auto-renewed from cert-manager) without a restart. It requires Valkey `9.1.0` or newer; on unsupported or indeterminate images the directive is ignored and a `ConfigurationWarning` condition is emitted. See [Version-gated config](#version-gated-config) for rollout ordering when upgrading the image.
+
+```yaml
+config:
+  tls-auto-reload-interval: "3600"
+```
 
 ### Users
 
@@ -390,7 +435,7 @@ users:
 `users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
 
 - `passwordSecret` — one or more password keys from a Secret (multiple keys supported for rotation)
-- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, and subcommands to allow or deny
+- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys` — key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
 - `channels` — pub/sub channel patterns
 - `permissions` — raw ACL string appended after any generated rules

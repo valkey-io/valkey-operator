@@ -22,6 +22,35 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// FailoverMode selects which component promotes a replica to primary.
+//
+// Only None is accepted today.
+// Sentinel is declared so the vocabulary is fixed.
+// A spec-level rule rejects it until the controllers that honour it exist.
+// Admitting a mode nothing implements would store an unactionable spec.
+// +kubebuilder:validation:Enum=None;Sentinel
+type FailoverMode string
+
+const (
+	// FailoverModeNone means nothing promotes automatically.
+	// A standalone instance, or replication with manual failover.
+	FailoverModeNone FailoverMode = "None"
+	// FailoverModeSentinel means a ValkeySentinel quorum is the failover authority.
+	// Not implemented yet.
+	FailoverModeSentinel FailoverMode = "Sentinel"
+)
+
+// ValkeyPDBMode selects how the operator manages the PodDisruptionBudget.
+// +kubebuilder:validation:Enum=Managed;Disabled
+type ValkeyPDBMode string
+
+const (
+	// ValkeyPDBModeManaged means the operator owns the budget.
+	ValkeyPDBModeManaged ValkeyPDBMode = "Managed"
+	// ValkeyPDBModeDisabled means no budget is created, and an existing one is deleted.
+	ValkeyPDBModeDisabled ValkeyPDBMode = "Disabled"
+)
+
 // ValkeyState represents the high-level state of a Valkey.
 // It uses the same vocabulary as ClusterState so both kinds read alike.
 // +kubebuilder:validation:Enum=Initializing;Reconciling;Ready;Degraded;Failed
@@ -49,6 +78,86 @@ var ValkeyStates = []ValkeyState{
 	ValkeyStateFailed,
 }
 
+// FailoverSpec declares which component promotes a replica to primary.
+//
+// It is deliberately self-contained and references no sibling or parent field.
+// A future parent kind can therefore embed it for the Valkeys it manages.
+//
+// The sentinel block is only meaningful under mode Sentinel.
+// Accepting it under any other mode would store ignored configuration.
+// +kubebuilder:validation:XValidation:rule="!has(self.sentinel) || self.mode == 'Sentinel'",message="failover.sentinel is only valid when failover.mode is Sentinel"
+type FailoverSpec struct {
+	// Mode selects the failover engine.
+	// Values may be added in future versions.
+	// Clients must tolerate values they do not recognise.
+	// +kubebuilder:default=None
+	// +optional
+	Mode FailoverMode `json:"mode,omitempty"`
+
+	// Sentinel configures Sentinel-mode failover.
+	// Only valid when mode is Sentinel.
+	// This block does not by itself cause monitoring.
+	// A ValkeySentinel must also select this object.
+	// +optional
+	Sentinel *SentinelFailoverSpec `json:"sentinel,omitempty"`
+}
+
+// SentinelFailoverSpec is the data-plane half of Sentinel integration.
+//
+// monitorName is frozen once the block exists.
+// Renaming a monitor means deregistering and re-registering it.
+// That is a deliberate teardown, not an edit.
+// Both transition rules are needed.
+// The first stops the field appearing or disappearing.
+// The second stops its value changing.
+// +kubebuilder:validation:XValidation:rule="has(self.monitorName) == has(oldSelf.monitorName)",message="monitorName cannot be added or removed after the sentinel block is created"
+// +kubebuilder:validation:XValidation:rule="!has(self.monitorName) || self.monitorName == oldSelf.monitorName",message="monitorName is immutable"
+type SentinelFailoverSpec struct {
+	// MonitorName is the Sentinel master-name for this instance.
+	// Defaults to metadata.name, resolved by Valkey.MonitorName().
+	// There is no kubebuilder default.
+	// A materialized default is indistinguishable from a user-set value.
+	// It stays settable so an adopted deployment keeps its existing name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=37
+	// +optional
+	MonitorName string `json:"monitorName,omitempty"`
+
+	// Quorum is the number of Sentinels that must agree the primary is down.
+	// Passed to SENTINEL MONITOR.
+	// Defaults to (selecting sentinel's replicas / 2) + 1.
+	// The default is computed at registration time.
+	// It depends on the size of the ValkeySentinel that selects this instance.
+	// Set it explicitly to pin it.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	Quorum *int32 `json:"quorum,omitempty"`
+
+	// Config is per-master Sentinel tuning.
+	// Forwarded as SENTINEL SET <monitorName> <key> <value>.
+	// Values are not validated by the operator.
+	// Operator-owned keys are skipped with a ConfigurationWarning.
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
+}
+
+// ValkeyPodDisruptionBudgetConfig manages the budget over a Valkey's pods.
+//
+// This is a separate type from the ValkeyCluster config of the same shape.
+// The two kinds can then grow different fields independently.
+//
+// It also drops two things from that type.
+// The Cluster mode value, which describes nothing outside a cluster.
+// The legacy UnmarshalJSON, which only serves pre-existing stored objects.
+type ValkeyPodDisruptionBudgetConfig struct {
+	// Mode selects how the operator manages the budget.
+	// Managed renders maxUnavailable 1 over this instance's pods.
+	// Disabled creates none, and deletes an existing one.
+	// +kubebuilder:default=Managed
+	// +optional
+	Mode ValkeyPDBMode `json:"mode,omitempty"`
+}
+
 // ValkeySpec defines the desired state of Valkey.
 //
 // Replication is not implemented yet, so spec.replicas is pinned to 0 for now.
@@ -60,6 +169,11 @@ var ValkeyStates = []ValkeyState{
 // case: replicas: 0 --> admitted
 // case: replicas: 2 --> rejected
 // +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas == 0",message="spec.replicas must be 0: replication is not implemented yet, only standalone Valkey is supported"
+//
+// Sentinel-mode failover is pinned off and relaxed the same way.
+// The field exists from the start so that adding a mode later is compatible.
+// Adding the field later would not be.
+// +kubebuilder:validation:XValidation:rule="!has(self.failover) || !has(self.failover.mode) || self.failover.mode == 'None'",message="spec.failover.mode must be None: Sentinel-managed failover is not implemented yet"
 //
 // Persistence rules are copied from ValkeyClusterSpec so both kinds behave alike.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
@@ -74,12 +188,17 @@ type ValkeySpec struct {
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
+	// Failover declares how primary failover is performed for this instance.
+	// Only mode None is accepted today.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
+
 	// Image overrides the default Valkey image.
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// ImagePullSecrets is a list of references to Secrets in the same namespace
-	// used for pulling any of the pod's images from private registries.
+	// ImagePullSecrets references Secrets in this namespace.
+	// They are used to pull the pod's images from private registries.
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
@@ -96,8 +215,7 @@ type ValkeySpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// WorkloadType specifies whether the underlying ValkeyNode creates a
-	// StatefulSet or a Deployment. It is immutable.
+	// WorkloadType picks the ValkeyNode's workload kind. It is immutable.
 	// +kubebuilder:default=StatefulSet
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
 	// +optional
@@ -113,26 +231,27 @@ type ValkeySpec struct {
 	// +optional
 	Users []UserAclSpec `json:"users,omitempty"`
 
-	// Containers holds additional containers, or overrides for the default
-	// ones, applied as a strategic merge patch.
+	// Containers holds additional containers, or overrides for the default ones.
+	// Applied as a strategic merge patch.
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Config holds additional Valkey configuration parameters.
 	//
-	// Cluster mode directives are rejected. A Valkey always runs with
-	// cluster-enabled no, so every cluster- key is either inert or actively
-	// wrong here, and accepting one would store a spec the controller cannot
-	// honour. Every cluster directive Valkey defines carries the prefix, so a
-	// prefix test covers them without enumerating each key.
+	// Cluster mode directives are rejected.
+	// A Valkey always runs with cluster-enabled no.
+	// Every cluster- key is therefore inert or actively wrong here.
+	// Accepting one would store an unhonourable spec.
+	// Every cluster directive carries the prefix.
+	// A prefix test therefore covers them all without enumerating each key.
 	//
-	// The comparison is lowercased because Valkey treats configuration keys
-	// case-insensitively, so Cluster-Enabled has to be caught alongside
-	// cluster-enabled.
+	// The comparison is lowercased because Valkey keys are case-insensitive.
+	// Cluster-Enabled has to be caught alongside cluster-enabled.
 	//
-	// This rejects user input only. The operator's own base config still emits
-	// cluster-config-file for every node, cluster mode or not, to keep the node
-	// state file on the writable /data volume (see buildManagedConfig).
+	// This rejects user input only.
+	// The base config still emits cluster-config-file for every node.
+	// That keeps the node state file on the writable /data volume.
+	// See buildManagedConfig.
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-'))",message="spec.config must not contain cluster- keys: a Valkey runs standalone, so cluster mode directives are not supported"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
@@ -140,6 +259,12 @@ type ValkeySpec struct {
 	// Networking groups how clients and peers reach the instance.
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
+
+	// PodDisruptionBudget configures the budget over this instance's pods.
+	// No budget is created while spec.replicas is 0, whatever the mode.
+	// A single-pod budget either allows evicting it or blocks drains.
+	// +optional
+	PodDisruptionBudget *ValkeyPodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
 
 	// PodSecurityContext overrides the PodSecurityContext applied to the pod.
 	// +optional
@@ -170,8 +295,7 @@ type ValkeyStatus struct {
 	// +optional
 	Primary string `json:"primary,omitempty"`
 
-	// Replicas is the number of ValkeyNodes that exist for this instance,
-	// excluding the primary.
+	// Replicas counts this instance's ValkeyNodes, excluding the primary.
 	// +kubebuilder:default=0
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
@@ -201,15 +325,21 @@ type ValkeyStatus struct {
 
 // Valkey is the Schema for the valkeys API.
 //
-// The name is bounded because child resource names are derived from it. The
-// longest derived name in the planned scheme is a role Service,
-// "valkey-<name>-replicas", which must stay within the 63 character DNS label
-// limit. That leaves 47 characters for the name. The suffixes are reserved for
-// the same reason, so that two instances cannot derive the same child name.
-// Both rules are in place from the start, because tightening validation later
-// would reject objects that already exist.
-// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 47",message="metadata.name must be at most 47 characters, because child resource names are derived from it"
-// +kubebuilder:validation:XValidation:rule="!self.metadata.name.endsWith('-primary') && !self.metadata.name.endsWith('-replicas') && !self.metadata.name.matches('-[0-9]+$')",message="metadata.name must not end with '-primary', '-replicas', or '-<number>': those suffixes are reserved for derived resource names"
+// The name is bounded because child resource names are derived from it.
+// Every one of them is a DNS label capped at 63 characters.
+//
+// The binding child is the Secret "internal-<name>-system-passwords".
+// Its 26 fixed characters leave 37 for the name.
+// No other derived name is tighter, so this is the only limit stated.
+//
+// The limit is in place from the start.
+// Tightening it later would reject objects that already exist.
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 37",message="metadata.name must be at most 37 characters, because child resource names are derived from it"
+//
+// A trailing "-<number>" is reserved.
+// ValkeyNode names are derived as "<name>-<index>".
+// An instance "cache-1" would otherwise collide with node 1 of "cache".
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.matches('-[0-9]+$')",message="metadata.name must not end with '-<number>': that suffix is reserved for derived ValkeyNode names"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the instance"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="Primary",type="string",JSONPath=".status.primary",description="ValkeyNode currently serving as primary",priority=1
@@ -229,6 +359,26 @@ type Valkey struct {
 	// +kubebuilder:default:={state: "Initializing", replicas:0, readyReplicas:0}
 	// +optional
 	Status ValkeyStatus `json:"status,omitzero"`
+}
+
+// MonitorName resolves the effective Sentinel master-name for this instance.
+// It exists for two reasons.
+// The Valkey and ValkeySentinel controllers cannot then disagree on the name.
+// The default also stays out of the schema, which would defeat immutability.
+func (v *Valkey) MonitorName() string {
+	if v.Spec.Failover != nil && v.Spec.Failover.Sentinel != nil &&
+		v.Spec.Failover.Sentinel.MonitorName != "" {
+		return v.Spec.Failover.Sentinel.MonitorName
+	}
+	return v.Name
+}
+
+// FailoverMode returns the effective failover mode, defaulting to None.
+func (v *Valkey) FailoverMode() FailoverMode {
+	if v.Spec.Failover == nil || v.Spec.Failover.Mode == "" {
+		return FailoverModeNone
+	}
+	return v.Spec.Failover.Mode
 }
 
 // +kubebuilder:object:root=true

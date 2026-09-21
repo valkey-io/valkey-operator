@@ -336,7 +336,7 @@ func tlsServerName(override, clusterName, namespace, clusterDomain string) strin
 }
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
-func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
+func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
@@ -359,5 +359,20 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
 	}
+	if !presentClientCert {
+		return tlsCfg, nil
+	}
+
+	certData, certOk := secret.Data[tlsSecretKeyCert]
+	keyData, keyOk := secret.Data[tlsSecretKeyKey]
+	if !certOk || !keyOk {
+		return nil, fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secretName, certOk, keyOk)
+	}
+
+	cert, err := tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secretName, err)
+	}
+	tlsCfg.Certificates = []tls.Certificate{cert}
 	return tlsCfg, nil
 }

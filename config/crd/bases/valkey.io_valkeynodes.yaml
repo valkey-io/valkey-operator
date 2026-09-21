@@ -3188,6 +3188,45 @@ spec:
                     required:
                     - server
                     type: object
+                  clientAuth:
+                    description: |-
+                      ClientAuth is the resolved client certificate authentication settings
+                      rendered into `tls-auth-clients` and `tls-auth-clients-user`. For
+                      cluster-owned nodes the ValkeyCluster controller copies
+                      spec.networking.tls.clientAuth here.
+                    properties:
+                      certificateUser:
+                        default: Disabled
+                        description: |-
+                          CertificateUser configures how Valkey maps an authenticated client
+                          certificate to an ACL user. Set to `CN` to use the certificate's Common Name
+                          (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
+                          certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
+                          Defaults to `Disabled`, which leaves the directive unset.
+                        enum:
+                        - CN
+                        - URI
+                        - Disabled
+                        type: string
+                      mode:
+                        default: Optional
+                        description: |-
+                          Mode controls whether clients must authenticate with a TLS certificate.
+                          `Required` enforces mTLS, `Optional` allows both authenticated and
+                          unauthenticated clients, and `Disabled` turns client certificate processing
+                          off entirely.
+                          Defaults to `Optional`.
+                        enum:
+                        - Required
+                        - Optional
+                        - Disabled
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'certificateUser has no effect when mode=Disabled:
+                        Valkey ignores client certificates in that mode'
+                      rule: '!(has(self.mode) && self.mode == ''Disabled'' && has(self.certificateUser)
+                        && self.certificateUser != ''Disabled'')'
                   serverName:
                     description: |-
                       ServerName is the hostname used for TLS verification when connecting

@@ -21,6 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // getSampleCluster returns a ValkeyCluster object with config options.
@@ -71,6 +72,164 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 	})
 })
 
+var _ = Describe("TLS client auth admission rules", Label("tls", "cel"), func() {
+	newCluster := func(name string, authClients valkeyiov1alpha1.TLSAuthClients, authClientsUser valkeyiov1alpha1.TLSAuthClientsUser) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					TLS: &valkeyiov1alpha1.TLSSpec{
+						Certificates: valkeyiov1alpha1.TLSCertificates{
+							Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"}},
+						ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+							Mode:            authClients,
+							CertificateUser: authClientsUser,
+						},
+					},
+				},
+			},
+		}
+	}
+
+	It("rejects authClients=Disabled with authClientsUser=CN", func() {
+		cluster := newCluster("cel-disabled-cn", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserCN)
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("certificateUser has no effect when mode=Disabled"))
+	})
+
+	It("rejects authClients=Disabled with authClientsUser=URI", func() {
+		cluster := newCluster("cel-disabled-uri", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserURI)
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("certificateUser has no effect when mode=Disabled"))
+	})
+
+	It("rejects a ValkeyNode with disabled client auth and CN mapping", func() {
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "cel-node-disabled-cn", Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				TLS: &valkeyiov1alpha1.NodeTLSSpec{
+					Certificates: valkeyiov1alpha1.NodeTLSCertificates{Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "tls-secret"}},
+					ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+						Mode:            valkeyiov1alpha1.TLSAuthClientsDisabled,
+						CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserCN,
+					},
+				},
+			},
+		}
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("certificateUser has no effect when mode=Disabled"))
+	})
+
+	It("accepts authClients=Required with authClientsUser=CN", func() {
+		cluster := newCluster("cel-required-cn", valkeyiov1alpha1.TLSAuthClientsRequired, valkeyiov1alpha1.TLSAuthClientsUserCN)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("accepts authClients=Required with authClientsUser=URI", func() {
+		cluster := newCluster("cel-required-uri", valkeyiov1alpha1.TLSAuthClientsRequired, valkeyiov1alpha1.TLSAuthClientsUserURI)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("accepts authClients=Disabled with authClientsUser=Disabled", func() {
+		cluster := newCluster("cel-disabled-off", valkeyiov1alpha1.TLSAuthClientsDisabled, valkeyiov1alpha1.TLSAuthClientsUserDisabled)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	It("defaults authClients to Optional and authClientsUser to Disabled", func() {
+		cluster := newCluster("cel-default", "", "")
+
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		defer func() {
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+		}()
+
+		Expect(cluster.Spec.Networking.TLS.ClientAuthMode()).To(Equal(valkeyiov1alpha1.TLSAuthClientsOptional))
+		Expect(cluster.Spec.Networking.TLS.ClientAuthCertificateUser()).To(Equal(valkeyiov1alpha1.TLSAuthClientsUserDisabled))
+	})
+})
+
+var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
+	It("renders mTLS directives when AuthClients=Required and AuthClientsUser=CN", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"}},
+				ClientAuth:   &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired, CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserCN},
+			},
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients yes"))
+		Expect(conf).To(ContainSubstring("tls-auth-clients-user CN"))
+	})
+
+	It("renders mTLS directives when AuthClients=Required and AuthClientsUser=URI", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.Image = "valkey/valkey:9.1.0"
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"}},
+				ClientAuth:   &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired, CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserURI},
+			},
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients yes"))
+		Expect(conf).To(ContainSubstring("tls-auth-clients-user URI"))
+	})
+
+	It("does not render URI client auth mapping before Valkey 9.1", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.Image = "valkey/valkey:9.0.0"
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"}},
+				ClientAuth:   &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired, CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserURI},
+			},
+		}
+
+		Expect(buildServerConfig(cluster)).NotTo(ContainSubstring("tls-auth-clients-user URI"))
+	})
+
+	It("renders tls-auth-clients no when AuthClients=Disabled", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"}},
+				ClientAuth:   &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsDisabled},
+			},
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients no"))
+	})
+
+	It("renders tls-auth-clients optional when AuthClients=Optional", func() {
+		cluster := getSampleCluster()
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			TLS: &valkeyiov1alpha1.TLSSpec{
+				Certificates: valkeyiov1alpha1.TLSCertificates{
+					Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls-secret"},
+				},
+				ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsOptional},
+			},
+		}
+		conf := buildServerConfig(cluster)
+		Expect(conf).To(ContainSubstring("tls-auth-clients optional"))
+	})
+
+	It("does not render TLS directives when TLS is unset", func() {
+		cluster := getSampleCluster()
+		conf := buildServerConfig(cluster)
+		Expect(conf).NotTo(ContainSubstring("tls-port"))
+		Expect(conf).NotTo(ContainSubstring("tls-auth-clients"))
+	})
+})
+
 var _ = Describe("Live config", Label("liveconfig"), func() {
 	newNode := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
@@ -82,7 +241,7 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 		rollConfig := renderServerConfig(map[string]string{
 			"maxmemory-policy": "allkeys-lru", // allowlisted
 			"appendonly":       "yes",         // not allowlisted
-		}, getBaseConfig(nil, false), liveConfigAllowlist)
+		}, getBaseConfig(nil, false, ""), liveConfigAllowlist)
 		Expect(rollConfig).NotTo(ContainSubstring("maxmemory-policy"))
 		Expect(rollConfig).To(ContainSubstring("appendonly"))
 		Expect(rollConfig).To(ContainSubstring("cluster-enabled")) // base retained
@@ -217,6 +376,21 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
 	})
 
+	It("surfaces a warning for URI client auth on an unsupported Valkey version", func() {
+		cluster := newTLSCluster("valkey/valkey:9.0.0", nil)
+		cluster.Spec.Networking.TLS.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{
+			Mode:            valkeyiov1alpha1.TLSAuthClientsRequired,
+			CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserURI,
+		}
+
+		warnings := versionGateConfigWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].reason).To(Equal(valkeyiov1alpha1.ReasonUnsupportedConfigDirective))
+		Expect(warnings[0].message).To(ContainSubstring("spec.networking.tls.clientAuth.certificateUser=URI"))
+		Expect(warnings[0].message).To(ContainSubstring("9.1.0"))
+		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
+	})
+
 	It("versionGateConfigWarnings says so when the detected version cannot be determined", func() {
 		cluster := newTLSCluster("valkey/valkey:latest", map[string]string{
 			"tls-auto-reload-interval": "3600",
@@ -273,25 +447,25 @@ var _ = Describe("TLS auto reload interval", Label("tls-auto-reload"), func() {
 
 var _ = Describe("Discovery managed config", func() {
 	It("omits cluster-preferred-endpoint-type for default IP announce", func() {
-		cfg := buildManagedConfig(true, nil, false)
+		cfg := buildManagedConfig(true, nil, false, "")
 		Expect(cfg).NotTo(HaveKey("cluster-preferred-endpoint-type"))
 	})
 
 	It("sets cluster-preferred-endpoint-type hostname when Hostname announce is on", func() {
-		cfg := buildManagedConfig(true, nil, true)
+		cfg := buildManagedConfig(true, nil, true, "")
 		Expect(cfg["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 
 	It("getBaseConfig follows PrefersHostnameAnnounce", func() {
 		cluster := getSampleCluster()
 		tls := nodeTLSFromCluster(cluster)
-		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce())).NotTo(HaveKey("cluster-preferred-endpoint-type"))
+		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)).NotTo(HaveKey("cluster-preferred-endpoint-type"))
 
 		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
 			Discovery: &valkeyiov1alpha1.DiscoverySpec{
 				PreferredEndpointType: valkeyiov1alpha1.PreferredEndpointTypeHostname,
 			},
 		}
-		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce())["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 })

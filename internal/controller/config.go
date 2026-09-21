@@ -62,6 +62,18 @@ var tlsAuthClientsUserMinVersion = map[valkeyiov1alpha1.TLSAuthClientsUser]*semv
 	valkeyiov1alpha1.TLSAuthClientsUserURI: semver.MustParse("9.1.0"),
 }
 
+//nolint:goconst
+var tlsAuthClientsDirective = map[valkeyiov1alpha1.TLSAuthClients]string{
+	valkeyiov1alpha1.TLSAuthClientsRequired: "yes",
+	valkeyiov1alpha1.TLSAuthClientsOptional: "optional",
+	valkeyiov1alpha1.TLSAuthClientsDisabled: "no",
+}
+
+var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string{
+	valkeyiov1alpha1.TLSAuthClientsUserCN:  "CN",
+	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
+}
+
 //go:embed scripts/*
 var scripts embed.FS
 var scriptsHash string
@@ -96,12 +108,12 @@ func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, host
 		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
 		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
 
-		if directive, ok := tls.ClientAuthMode().AuthClientsDirective(); ok {
+		if directive, ok := tlsAuthClientsDirective[tls.ClientAuthMode()]; ok {
 			config["tls-auth-clients"] = directive
 		}
 
 		certificateUser := tls.ClientAuthCertificateUser()
-		if directive, ok := certificateUser.AuthClientsUserDirective(); ok &&
+		if directive, ok := tlsAuthClientsUserDirective[certificateUser]; ok &&
 			clientAuthUserSupported(certificateUser, effectiveImage(image)) {
 			config["tls-auth-clients-user"] = directive
 		}

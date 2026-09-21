@@ -457,21 +457,6 @@ const (
 	TLSAuthClientsDisabled TLSAuthClients = "Disabled"
 )
 
-// tlsAuthClientsDirective maps the valkey CRD API spec field onto the values the
-// `tls-auth-clients` directive accepts.
-var tlsAuthClientsDirective = map[TLSAuthClients]string{
-	TLSAuthClientsRequired: "yes",
-	TLSAuthClientsOptional: "optional",
-	TLSAuthClientsDisabled: "no",
-}
-
-// AuthClientsDirective returns the `tls-auth-clients` value for input, and
-// whether the input is a value the operator knows how to render.
-func (input TLSAuthClients) AuthClientsDirective() (string, bool) {
-	directive, ok := tlsAuthClientsDirective[input]
-	return directive, ok
-}
-
 // TLSAuthClientsUser controls how Valkey maps an authenticated client
 // certificate to an ACL user. It mirrors the Valkey `tls-auth-clients-user` directive.
 // +kubebuilder:validation:Enum=CN;URI;Disabled
@@ -489,22 +474,6 @@ const (
 	// TLSAuthClientsUserDisabled disables certificate-to-user mapping (default).
 	TLSAuthClientsUserDisabled TLSAuthClientsUser = "Disabled"
 )
-
-// tlsAuthClientsUserDirective maps the valkey CRD API enum onto the values the
-// `tls-auth-clients-user` directive accepts.
-
-var tlsAuthClientsUserDirective = map[TLSAuthClientsUser]string{
-	TLSAuthClientsUserCN:  "CN",
-	TLSAuthClientsUserURI: "URI",
-}
-
-// AuthClientsUserDirective returns the `tls-auth-clients-user` value for input,
-// and whether the directive should be renddered at all. Disabled and unset both
-// return false, leaving Valkey on its own default of off.
-func (input TLSAuthClientsUser) AuthClientsUserDirective() (string, bool) {
-	directive, ok := tlsAuthClientsUserDirective[input]
-	return directive, ok
-}
 
 // TLSClientAuthSpec configures client certificate authentication for incoming
 // TLS connections.

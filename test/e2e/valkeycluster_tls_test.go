@@ -555,9 +555,9 @@ spec:
 			return err
 		}).Should(Succeed())
 
-		By("waiting for both leaf certificate Secrets to be created")
+		By("waiting for both leaf certificates to be ready")
 		Eventually(func() error {
-			_, err := utils.Run(exec.Command("kubectl", "get", "secret", serverCertSecret))
+			_, err := utils.Run(exec.Command("kubectl", "wait", "certificate/"+serverCertSecret, "--for=condition=Ready", "--timeout=120s"))
 			return err
 		}).Should(Succeed())
 		Eventually(func() error {
@@ -582,8 +582,14 @@ spec:
       clientAuth:
         mode: Required
         certificateUser: CN
+  exporter:
+    enabled: true
   users:
     - name: alice
+      enabled: true
+      resetpass: true
+      permissions: "+@all ~* &*"
+    - name: valkey-cluster-mtls.default.svc.cluster.local
       enabled: true
       resetpass: true
       permissions: "+@all ~* &*"

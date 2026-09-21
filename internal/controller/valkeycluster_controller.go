@@ -1010,9 +1010,8 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // snapshot.
 func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
 	var tlsConfig *tls.Config
-	if tlsSpec := cluster.GetTLS(); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		serverName := tlsServerName(tlsSpec.ServerName, cluster.Name, cluster.Namespace, cluster.GetClusterDomain())
-		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, serverName, cluster.Namespace, tlsSpec.ClientAuthMode() == valkeyiov1alpha1.TLSAuthClientsRequired)
+	if tlsSpec := nodeTLSFromCluster(cluster); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
+		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate())
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
 				"secretName", tlsSpec.Certificates.Server.SecretName)

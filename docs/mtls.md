@@ -72,8 +72,10 @@ Setting `clientAuth.certificateUser` to `CN` or `URI` while `clientAuth.mode` is
 ### Rendered Valkey configuration (valkey.conf)
 
 ```text
-tls-auth-clients "yes"    # rendered from clientAuth.mode: Required
-tls-auth-clients-user CN/URI   # rendered from clientAuth.certificateUser: CN or clientAuth.certificateUser: URI
+tls-auth-clients yes      # rendered from clientAuth.mode: Required
+tls-auth-clients-user CN  # rendered from clientAuth.certificateUser: CN
+# or:
+tls-auth-clients-user URI # rendered from clientAuth.certificateUser: URI
 ```
 
 The rest of the rendered TLS block (`tls-port`, `tls-cluster yes`, `tls-replication yes`, and the certificate paths) is unchanged from the existing TLS feature documented in [valkeycluster.md](./valkeycluster.md#tls).
@@ -138,7 +140,7 @@ valkey-cli \
 
 ## Operator-managed connections
 
-When `clientAuth.mode` is `Required`, the operator, readiness and liveness probes, and metrics exporter present the node's **server** certificate as their client certificate so the TLS handshake succeeds.
+When `clientAuth.mode` is `Required`, the operator, readiness and liveness probes, metrics exporter, and TLS replication links present the node's **server** certificate as their client certificate so the TLS handshake succeeds.
 
 When `clientAuth.mode` is `Optional` or `Disabled`, those connections do not present a client certificate. With `clientAuth.certificateUser: CN` or `URI`, presenting the server certificate would map its CN or URI to an ACL user, so the operator avoids sending one unless client certificates are required.
 

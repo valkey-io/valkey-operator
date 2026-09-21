@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 const (
@@ -1119,27 +1120,18 @@ func parseClusterEnabled(info string) bool {
 // the cluster-wide view, where GetClusterState holds slot-less masters in
 // PendingNodes rather than assigning them a shard primary.
 //
-// CLUSTER NODES line layout:
-// <id> <ip:port@cport> <flags> <master> <ping> <pong> <epoch> <link-state> <slot>...
+// A master mid-reshard holding only a migration marker counts as owning slots
+// (see ClusterNode.HasSlotAssignment), which is the same answer GetClusterState
+// gives.
 func parseClusterNodesRole(clusterNodes string) string {
-	for line := range strings.SplitSeq(clusterNodes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
-			continue
-		}
-		flags := strings.Split(fields[2], ",")
-		if !slices.Contains(flags, "myself") {
-			continue
-		}
-		// Migration markers ([5461-<-id]) count as slot fields, so a master
-		// mid-import reads as primary. GetSlots keeps them too, so
-		// GetClusterState gives the same answer.
-		if slices.Contains(flags, "master") && len(fields) > 8 {
-			return RolePrimary
-		}
-		return RoleReplica
+	myself := valkey.FindMyself(valkey.ParseClusterNodes(clusterNodes))
+	if myself == nil {
+		return ""
 	}
-	return ""
+	if myself.IsPrimary() && myself.HasSlotAssignment() {
+		return RolePrimary
+	}
+	return RoleReplica
 }
 
 // parseValkeyRole extracts the replication role from the output of INFO replication,

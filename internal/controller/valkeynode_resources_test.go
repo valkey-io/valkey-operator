@@ -762,7 +762,7 @@ func TestParseClusterNodesRole(t *testing.T) {
 		expected     string
 	}{
 		{
-			// A real primary owns a slot range (fields beyond the fixed 8).
+			// A real primary owns a slot range.
 			name:         "myself master owning slots is primary",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 5462-10922\n",
 			expected:     RolePrimary,

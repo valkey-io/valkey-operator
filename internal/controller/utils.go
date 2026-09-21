@@ -175,6 +175,18 @@ func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	return nodeIndex
 }
 
+// hasNodeWithPodIP reports whether any ValkeyNode has podIP as its pod IP.
+// An empty podIP never matches, including against a ValkeyNode that has no pod
+// IP yet: two empty addresses do not identify the same node.
+func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
+	if podIP == "" {
+		return false
+	}
+	return slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
+		return n.Status.PodIP == podIP
+	})
+}
+
 // nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
 // and reads its CR labels to determine the intended role and shard index.
 //

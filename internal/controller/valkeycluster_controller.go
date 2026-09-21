@@ -1403,27 +1403,14 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 	return ctrl.Result{}, false
 }
 
-// hasNodeWithPodIP reports whether any ValkeyNode has podIP as its pod IP.
-//
-// A `noaddr` entry carries no address, and a ValkeyNode whose pod has not been
-// assigned an IP yet has none either. Two empty addresses do not identify the
-// same node, so an empty podIP never matches: such an entry is resolved by the
-// node ID checks in forgetStaleNodes instead.
-func hasNodeWithPodIP(nodes []valkeyiov1alpha1.ValkeyNode, podIP string) bool {
-	if podIP == "" {
-		return false
-	}
-	return slices.ContainsFunc(nodes, func(n valkeyiov1alpha1.ValkeyNode) bool {
-		return n.Status.PodIP == podIP
-	})
-}
-
 // Check each cluster node and forget stale nodes (noaddr or status fail)
 func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
 	log := logf.FromContext(ctx)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
 			for _, failing := range node.GetFailingNodes() {
+				// A noaddr entry has no address to match on, so it falls
+				// through to the node ID checks below.
 				if hasNodeWithPodIP(nodes.Items, failing.Host) {
 					continue
 				}

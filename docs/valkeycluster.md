@@ -371,6 +371,9 @@ networking:
     certificates:
       server:
         secretName: valkey-tls
+    clientAuth:
+      mode: Optional             # Optional (default) | Required | Disabled
+      certificateUser: Disabled  # Disabled (default) | CN | URI
 ```
 
 #### Discovery (in-cluster announce)
@@ -410,6 +413,8 @@ Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of cert
 config:
   tls-auto-reload-interval: "3600"
 ```
+
+For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
 
 ### Users
 

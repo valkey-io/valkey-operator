@@ -210,3 +210,10 @@ func TestPodSupersededAndStuck(t *testing.T) {
 		assert.False(t, podSupersededAndStuck(pod("old", false), nil))
 	})
 }
+
+func TestSyncInProgress(t *testing.T) {
+	assert.True(t, syncInProgress("# Persistence\r\nloading:1\r\nasync_loading:0\r\n"))
+	assert.True(t, syncInProgress("# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:1\r\n"))
+	assert.False(t, syncInProgress("# Persistence\r\nloading:0\r\n# Replication\r\nmaster_sync_in_progress:0\r\n"))
+	assert.False(t, syncInProgress(""))
+}

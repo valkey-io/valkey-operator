@@ -163,6 +163,9 @@ type ValkeyNodeReconciler struct {
 	// replication role. Tests set it to a fake (envtest has no running Valkey
 	// server); when nil, resolveRole connects to the pod directly.
 	resolveRoleFunc func(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string
+	// nodeInfoFunc, when set, overrides how nodeInfo reads a node's INFO output.
+	// Tests set it to a fake; when nil, nodeInfo connects to the pod directly.
+	nodeInfoFunc func(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error)
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeynodes,verbs=get;list;watch;create;update;patch;delete
@@ -1034,6 +1037,34 @@ func podSupersededAndStuck(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	return !podReady(pod)
 }
 
+// nodeInfo returns the node's INFO output, or an error when the pod cannot be
+// reached. Tests inject nodeInfoFunc to bypass the live connection.
+func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	if r.nodeInfoFunc != nil {
+		return r.nodeInfoFunc(ctx, node)
+	}
+	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	return c.Do(ctx, c.B().Info().Build()).ToString()
+}
+
+// syncInProgress reports whether INFO shows the server still loading a dataset:
+// loading:1 while an RDB is read into memory, master_sync_in_progress:1 while a
+// replica is receiving one from its primary. Both are states a pod leaves on
+// its own once the transfer completes.
+func syncInProgress(info string) bool {
+	for line := range strings.SplitSeq(info, "\n") {
+		switch strings.TrimSpace(line) {
+		case "loading:1", "master_sync_in_progress:1":
+			return true
+		}
+	}
+	return false
+}
+
 // podControlledBy reports whether the StatefulSet is the pod's controller.
 func podControlledBy(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	for _, ref := range pod.OwnerReferences {
@@ -1053,6 +1084,16 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	}
 	if !podSupersededAndStuck(pod, sts) {
 		return nil
+	}
+	// A pod restoring an RDB, or a replica receiving one from its primary, is
+	// not Ready for as long as that takes, and it can sit on a superseded
+	// revision the whole time. Deleting it would only throw the transfer away:
+	// the StatefulSet rolls it as soon as it turns Ready anyway. Leave it to
+	// finish. A pod that cannot answer INFO at all is crash-looping, not
+	// syncing, and stays eligible.
+	if info, err := r.nodeInfo(ctx, node); err == nil && syncInProgress(info) {
+		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)
+		return errTransientRequeue
 	}
 	podRevision := pod.Labels[appsv1.StatefulSetRevisionLabel]
 	// getPod reads from the informer cache, so the decision above is made on a

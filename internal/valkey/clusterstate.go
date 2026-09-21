@@ -198,6 +198,18 @@ func (s *ClusterState) FindShardForAddress(address string) *ShardState {
 	return nil
 }
 
+// HasAddress reports whether the node at the given address answered the scrape,
+// whether it joined a shard or is still pending. It distinguishes "unreachable"
+// from "reachable but not in any shard", which FindShardForAddress alone cannot.
+func (s *ClusterState) HasAddress(address string) bool {
+	for _, node := range s.AllNodes() {
+		if node.Address == address {
+			return true
+		}
+	}
+	return false
+}
+
 // GetPrimaryNode returns the primary NodeState object
 func (s *ShardState) GetPrimaryNode() *NodeState {
 	idx := slices.IndexFunc(s.Nodes, func(n *NodeState) bool { return n.Id == s.PrimaryId })
@@ -511,6 +523,16 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		Username:          username,
 		Password:          password,
 		TLSConfig:         tlsConfig,
+		// valkey-go defaults to data-plane sizes: up to 4 connections per
+		// client, each with 0.5 MiB buffers either way and a 1024-entry ring.
+		// Tuned to this controller's usage: one connection issuing a few
+		// commands with no concurrency, CLUSTER NODES the largest response and
+		// CLUSTER MIGRATESLOTS the largest request. Exceeding a buffer costs a
+		// flush, no error.
+		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
+		ReadBufferEachConn:  16 * 1024,
+		WriteBufferEachConn: 8 * 1024,
+		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {

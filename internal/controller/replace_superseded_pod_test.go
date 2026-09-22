@@ -62,8 +62,12 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 	}
 	require.True(t, podSupersededAndStuck(pod, sts), "fixture must be a superseded, stuck pod")
 
-	newReconciler := func(info string, infoErr error) (*ValkeyNodeReconciler, client.Client) {
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod.DeepCopy()).Build()
+	// newReconciler seeds the fake API with the pod in a given server
+	// container state and answers INFO with the given result.
+	newReconciler := func(info string, infoErr error, server corev1.ContainerState) (*ValkeyNodeReconciler, client.Client) {
+		p := pod.DeepCopy()
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "server", State: server}}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(p).Build()
 		return &ValkeyNodeReconciler{
 			Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(8),
 			nodeInfoFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) (string, error) { return info, infoErr },
@@ -74,28 +78,46 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 		return !apierrors.IsNotFound(err)
 	}
 
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	crashLooping := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+	pullFailed := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}
+
 	t.Run("loading an RDB is deferred, not deleted", func(t *testing.T) {
-		r, c := newReconciler("# Persistence\r\nloading:1\r\n", nil)
+		r, c := newReconciler("# Persistence\r\nloading:1\r\n", nil, running)
 		err := r.replaceSupersededPod(context.Background(), node, sts)
 		assert.ErrorIs(t, err, errTransientRequeue)
 		assert.True(t, podExists(c))
 	})
 
 	t.Run("receiving a sync from the primary is deferred, not deleted", func(t *testing.T) {
-		r, c := newReconciler("# Replication\r\nmaster_sync_in_progress:1\r\n", nil)
+		r, c := newReconciler("# Replication\r\nmaster_sync_in_progress:1\r\n", nil, running)
 		err := r.replaceSupersededPod(context.Background(), node, sts)
 		assert.ErrorIs(t, err, errTransientRequeue)
 		assert.True(t, podExists(c))
 	})
 
-	t.Run("a pod that cannot answer INFO is crash-looping and is deleted", func(t *testing.T) {
-		r, c := newReconciler("", errors.New("connection refused"))
+	t.Run("a crash-looping container that cannot answer INFO is deleted", func(t *testing.T) {
+		r, c := newReconciler("", errors.New("connection refused"), crashLooping)
 		require.NoError(t, r.replaceSupersededPod(context.Background(), node, sts))
 		assert.False(t, podExists(c))
 	})
 
+	t.Run("a container that never pulled is deleted", func(t *testing.T) {
+		r, c := newReconciler("", errors.New("connection refused"), pullFailed)
+		require.NoError(t, r.replaceSupersededPod(context.Background(), node, sts))
+		assert.False(t, podExists(c))
+	})
+
+	t.Run("a running container that cannot answer INFO is deferred, not deleted", func(t *testing.T) {
+		// The server is up but the read failed: state unknown, so wait.
+		r, c := newReconciler("", errors.New("i/o timeout"), running)
+		err := r.replaceSupersededPod(context.Background(), node, sts)
+		assert.ErrorIs(t, err, errTransientRequeue)
+		assert.True(t, podExists(c))
+	})
+
 	t.Run("a pod that answered and is not syncing is deleted", func(t *testing.T) {
-		r, c := newReconciler("# Persistence\r\nloading:0\r\n", nil)
+		r, c := newReconciler("# Persistence\r\nloading:0\r\n", nil, running)
 		require.NoError(t, r.replaceSupersededPod(context.Background(), node, sts))
 		assert.False(t, podExists(c))
 	})

@@ -1065,6 +1065,17 @@ func syncInProgress(info string) bool {
 	return false
 }
 
+// serverContainerRunning reports whether the kubelet has the pod's server
+// container in the Running state. A missing status counts as not running.
+func serverContainerRunning(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "server" {
+			return cs.State.Running != nil
+		}
+	}
+	return false
+}
+
 // podControlledBy reports whether the StatefulSet is the pod's controller.
 func podControlledBy(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	for _, ref := range pod.OwnerReferences {
@@ -1089,10 +1100,20 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	// not Ready for as long as that takes, and it can sit on a superseded
 	// revision the whole time. Deleting it would only throw the transfer away:
 	// the StatefulSet rolls it as soon as it turns Ready anyway. Leave it to
-	// finish. A pod that cannot answer INFO at all is crash-looping, not
-	// syncing, and stays eligible.
-	if info, err := r.nodeInfo(ctx, node); err == nil && syncInProgress(info) {
+	// finish.
+	//
+	// When INFO cannot be read the server's state is unknown, and deleting on
+	// unknown would discard a restore over a dropped connection. The kubelet
+	// settles it: a server container that is not running (crash-looping on a
+	// bad config, or never pulled) is not loading anything and stays eligible.
+	// A running container that will not answer is left alone and retried.
+	info, err := r.nodeInfo(ctx, node)
+	switch {
+	case err == nil && syncInProgress(info):
 		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)
+		return errTransientRequeue
+	case err != nil && serverContainerRunning(pod):
+		logf.FromContext(ctx).Info("superseded pod is running but INFO failed; deferring replacement", "pod", pod.Name, "error", err.Error())
 		return errTransientRequeue
 	}
 	podRevision := pod.Labels[appsv1.StatefulSetRevisionLabel]

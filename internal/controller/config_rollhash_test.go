@@ -38,9 +38,6 @@ import (
 // Do NOT update this copy to track production code. Change it only when a pod
 // roll on operator upgrade is intended and understood.
 //
-// cluster-node-timeout was dropped from the base config so users can set it via spec.config (#434).
-// Existing clusters roll once on upgrade and pick up the Valkey default of 15s.
-//
 // The frozen pin covers the RENDER only. The input-copying contract that feeds
 // it — parent controllers copying Config/TLS verbatim onto the node spec, and
 // GetTLS's nil-semantics — is not frozen here; it is exercised relatively via

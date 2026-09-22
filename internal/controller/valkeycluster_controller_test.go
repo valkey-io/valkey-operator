@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
@@ -1058,6 +1060,29 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, nil)
 	}
 
+	// reconcileNodesWithState is reconcileNodes with a live topology snapshot, so
+	// the roll guard is reachable (it short-circuits on a nil cluster state).
+	reconcileNodesWithState := func(state *valkey.ClusterState) (bool, error) {
+		GinkgoHelper()
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(testCtx, nodeList,
+			client.InNamespace("default"),
+			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, state)
+	}
+
+	// setPodIP publishes a pod IP so shardExistsInTopology and findShardPrimary
+	// can match this ValkeyNode against the cluster state.
+	setPodIP := func(name, ip string) {
+		GinkgoHelper()
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+		node.Status.PodIP = ip
+		node.Status.Ready = true
+		node.Status.ObservedGeneration = node.Generation
+		Expect(k8sClient.Status().Update(testCtx, node)).To(Succeed())
+	}
+
 	// createAllNodes runs a single reconcile that creates all 4 ValkeyNode CRs.
 	// On first reconcile every position is Created so the loop completes without
 	// triggering an early-exit requeue.
@@ -1194,6 +1219,56 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
+	})
+
+	It("skips only the shard whose primary is unidentifiable", func() {
+		By("creating all nodes, marking them ready and publishing pod IPs")
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+
+		By("building a topology where shard 0 owns no slots and shard 1 is healthy")
+		// Shard 0 is present in the topology (its pod IPs appear) but owns no
+		// slots, so findShardPrimary cannot name a primary for it. Shard 1 has a
+		// slot-bearing primary at node index 0.
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "id-00",
+					Slots:     nil,
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "id-00", Flags: []string{"master"}},
+						{Address: "10.0.0.2", Id: "id-01", Flags: []string{"slave"}},
+					},
+				},
+				{
+					Id:        "shard-1",
+					PrimaryId: "id-10",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.1.1", Id: "id-10", Flags: []string{"master"}},
+						{Address: "10.0.1.2", Id: "id-11", Flags: []string{"slave"}},
+					},
+				},
+			},
+		}
+
+		By("reconciling with no roll pending, so the skip is the only outcome")
+		// reconcileValkeyNodes returns as soon as it updates one node, so the
+		// skip is reported only once no node needs rolling. With the spec
+		// unchanged, shard 1 is a no-op and shard 0's skip reaches the caller.
+		requeue, err := reconcileNodesWithState(state)
+
+		// The skip is reported as a sentinel, not as a plain requeue: Reconcile
+		// needs to continue to the phases that make shard 0's primary
+		// identifiable again. Returning requeue here would abort it, and shard 0
+		// would stay unidentifiable forever.
+		Expect(stderrors.Is(err, errShardRollSkipped)).To(BeTrue(),
+			"expected errShardRollSkipped, got %v", err)
+		Expect(requeue).To(BeFalse())
 	})
 })
 

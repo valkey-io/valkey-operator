@@ -89,7 +89,9 @@ type ValkeyClusterReconciler struct {
 //     (upsertConfigMap).
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
-//     replicas updated before the primary (reconcileValkeyNodes).
+//     replicas updated before the primary (reconcileValkeyNodes). A shard whose
+//     primary cannot be identified has its roll skipped; the remaining shards and
+//     the phases below still run.
 //   - Build the Valkey cluster state by connecting to each node and scraping
 //     CLUSTER INFO / CLUSTER NODES.
 //   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
@@ -205,7 +207,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); err != nil {
+	rollSkipped := false
+	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); errors.Is(err, errShardRollSkipped) {
+		// A shard's roll was skipped because its primary is not identifiable, as
+		// opposed to a node being mid-roll, which still requeues below. Only the
+		// phases further down can repair an unidentifiable primary, so continue
+		// through them and withhold Ready at the end.
+		rollSkipped = true
+	} else if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -413,6 +422,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
+	// A shard's roll was skipped because its primary is not identifiable. The
+	// phases above have run and may have repaired it; withhold Ready and requeue
+	// so the next pass re-evaluates.
+	if rollSkipped {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	// Cluster is healthy - set all positive conditions
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
@@ -585,14 +604,23 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		return false, err
 	}
 
+	// Set when a shard's roll is skipped; reported to the caller after the loop.
+	shardRollSkipped := false
+
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// If rolls are in progress but the primary of an active shard cannot be
-		// identified from cluster state, defer rather than roll in an unknown order.
+		// identified from cluster state, skip it rather than roll in an unknown order.
 		// New shards (not yet in the topology) are exempt — they need creation, not rolling.
 		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
 			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 {
-			log.Info("cannot identify primary for shard, deferring roll", "shardIndex", shardIndex)
-			return true, nil
+			// Skip this shard only, never the whole reconcile: the later phases
+			// (MEET/ADDSLOTSRANGE/REPLICATE, forgetStaleNodes, handleScaleIn,
+			// rebalance) are what make an unidentifiable primary identifiable
+			// again. The nodeDeferred and nodeRequeued cases below still return,
+			// as those wait on a roll already under way.
+			log.Info("cannot identify primary for shard, skipping its roll", "shardIndex", shardIndex)
+			shardRollSkipped = true
+			continue
 		}
 		// Iterate nodes replica-first: use live cluster state to identify the
 		// actual primary (which may differ from node-index=0 after a failover)
@@ -623,6 +651,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 
 	if totalCreated > 0 {
 		log.V(1).Info("created ValkeyNodes", "count", totalCreated)
+	}
+	if shardRollSkipped {
+		return false, errShardRollSkipped
 	}
 	return false, nil
 }
@@ -1275,6 +1306,12 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 // propagated the primary's node ID to the replica yet. This is not a
 // fatal error — the replica will be retried on a future reconcile.
 var errPrimaryNotReady = errors.New("primary not yet in cluster state (awaiting rebalance)")
+
+// errShardRollSkipped reports that at least one shard's roll was skipped because
+// its primary could not be identified in the live topology. It is not a failure:
+// the reconcile continues through the phases that repair that state, and only the
+// Ready condition is withheld.
+var errShardRollSkipped = errors.New("shard roll skipped; primary not identifiable")
 
 // replicatePendingReplicas issues CLUSTER REPLICATE for all pending nodes
 // whose pod labels indicate they are replicas (node index 1+), as well as

@@ -32,14 +32,16 @@ func TestCountReadyShards(t *testing.T) {
 	// link up. peerView is the primary's CLUSTER NODES output, which is where
 	// a failure flag on the replica would appear.
 	shard := func(peerView string) *valkey.ClusterState {
+		primary := &valkey.NodeState{Id: "node-1", Address: "10.0.0.1", Flags: []string{"myself", "master"},
+			Info: map[string]string{"role": "master"}}
+		primary.SetClusterNodes(peerView)
 		return &valkey.ClusterState{
 			Shards: []*valkey.ShardState{
 				{
 					Id:        "shard-0",
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
-						{Id: "node-1", Address: "10.0.0.1", Flags: []string{"myself", "master"},
-							Info: map[string]string{"role": "master"}, ClusterNodes: peerView},
+						primary,
 						{Id: "node-2", Address: "10.0.0.2", Flags: []string{"slave"},
 							Info: map[string]string{"role": "slave", "master_link_status": "up"}},
 					},

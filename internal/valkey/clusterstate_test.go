@@ -193,10 +193,10 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 		Flags:   []string{"slave"},
 		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
-	primary.ClusterNodes = "primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
+	primary.nodes = ParseClusterNodes("primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
 		"replica-1-id 10.0.0.2:6379@16379 slave primary-id 0 0 1 connected\n" +
 		"replica-2-id 10.0.0.3:6379@16379 slave primary-id 0 0 1 connected\n" +
-		"replica-3-id 10.0.0.4:6379@16379 slave,fail? primary-id 0 0 1 connected\n"
+		"replica-3-id 10.0.0.4:6379@16379 slave,fail? primary-id 0 0 1 connected\n")
 
 	shard := &ShardState{
 		Id:        "shard-0",

@@ -259,6 +259,13 @@ func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	return replicas
 }
 
+// SetClusterNodes replaces the node's peer table with one parsed from raw
+// CLUSTER NODES output. The scrape fills the table for live nodes; tests in
+// other packages use this to build a node with a particular view of its peers.
+func (n *NodeState) SetClusterNodes(raw string) {
+	n.nodes = ParseClusterNodes(raw)
+}
+
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
 // nil when the output held no "myself" line.
 func (n *NodeState) Myself() *ClusterNode {

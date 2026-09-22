@@ -820,7 +820,7 @@ func TestParseClusterNodesRole(t *testing.T) {
 		expected     string
 	}{
 		{
-			// A real primary owns a slot range (fields beyond the fixed 8).
+			// A real primary owns a slot range.
 			name:         "myself master owning slots is primary",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 5462-10922\n",
 			expected:     RolePrimary,
@@ -858,6 +858,14 @@ func TestParseClusterNodesRole(t *testing.T) {
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n" +
 				"37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
 			expected: RoleReplica,
+		},
+		{
+			// A master mid-reshard holds only a migration marker, no owned
+			// range. HasSlotAssignment counts the marker, so it stays primary
+			// and matches what GetClusterState reports.
+			name:         "myself master holding only a migration marker is primary",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected [5461-<-37349cd33fe18465f36b46f09e392f6bb90688e1]\n",
+			expected:     RolePrimary,
 		},
 		{
 			name:         "no myself line returns empty",

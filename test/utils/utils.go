@@ -284,6 +284,91 @@ func GetValkeyClusterNodes(clusterName string) (*valkeyiov1alpha1.ValkeyNodeList
 	return &list, nil
 }
 
+// ValkeyCLIOptions configures a valkey-cli invocation in a pod.
+type ValkeyCLIOptions struct {
+	// Password authenticates as the default user. Leave empty for a cluster
+	// with no declared users: valkey-cli would otherwise inherit a stale
+	// VALKEYCLI_AUTH from the pod environment and print an AUTH warning.
+	Password string
+	// ConnectTimeoutSeconds bounds each connect. A stale MOVED redirect can
+	// point at a terminated pod's unroutable IP, where a connect otherwise
+	// hangs for the TCP SYN timeout. Zero omits the flag.
+	ConnectTimeoutSeconds int
+}
+
+// valkeyCLIPrefix builds the shell prologue and valkey-cli invocation shared by
+// the helpers below.
+func valkeyCLIPrefix(opts ValkeyCLIOptions) (prologue, cli string) {
+	prologue = "unset VALKEYCLI_AUTH REDISCLI_AUTH; "
+	if opts.Password != "" {
+		prologue = fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", opts.Password)
+	}
+	cli = "valkey-cli -c -h 127.0.0.1"
+	if opts.ConnectTimeoutSeconds > 0 {
+		cli = fmt.Sprintf("valkey-cli -t %d -c -h 127.0.0.1", opts.ConnectTimeoutSeconds)
+	}
+	return prologue, cli
+}
+
+// WriteValkeyKeys writes count keys named <prefix>:<n> with value val:<n>
+// through a single valkey-cli in pod, following cluster redirects. It fails
+// unless every write is acknowledged, so a partial write is reported here rather
+// than leaving a later read to show a confusing count.
+func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf(
+		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s | grep -c '^OK$'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return fmt.Errorf("writing %d keys to %s: %w (output: %s)", count, pod, err, out)
+	}
+	if got := strings.TrimSpace(out); got != fmt.Sprintf("%d", count) {
+		return fmt.Errorf("wrote %s of %d keys to %s", got, count, pod)
+	}
+	return nil
+}
+
+// CountValkeyKeys reads back the keys WriteValkeyKeys wrote and returns how many
+// held their expected value.
+func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int, error) {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf(
+		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s | grep -c '^val:'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return 0, fmt.Errorf("reading %d keys from %s: %w (output: %s)", count, pod, err, out)
+	}
+	var found int
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d", &found); err != nil {
+		return 0, fmt.Errorf("parsing key count from %q: %w", out, err)
+	}
+	return found, nil
+}
+
+// ValkeyCLI runs a valkey-cli command in pod's server container. valkey-cli
+// exits 0 and prints the reply even when the server returns an error, so an
+// error reply is reported here rather than being left to a confusing downstream
+// assertion.
+func ValkeyCLI(pod string, opts ValkeyCLIOptions, args ...string) (string, error) {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf("%s%s %s", prologue, cli, strings.Join(args, " "))
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return out, err
+	}
+	for _, line := range GetNonEmptyLines(out) {
+		line = strings.TrimSpace(line)
+		for _, p := range []string{"ERR ", "WRONGPASS", "NOPERM", "NOAUTH", "CLUSTERDOWN", "MASTERDOWN"} {
+			if strings.HasPrefix(line, p) {
+				return out, fmt.Errorf("valkey-cli %s replied: %s", strings.Join(args, " "), line)
+			}
+		}
+	}
+	return out, nil
+}
+
 // GetEvents fetches and categorizes Kubernetes events for a given resource.
 func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
 	cmd := exec.Command("kubectl", "get", "events", "--field-selector",

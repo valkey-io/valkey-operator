@@ -154,7 +154,6 @@ func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, ima
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",
-		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
 		// On SIGTERM (graceful pod shutdown from a node drain, eviction, or

@@ -444,7 +444,7 @@ The operator does not create NetworkPolicies. In a namespace that denies traffic
 
 Ports do not change with TLS: the TLS listener takes over 6379 and the bus stays on 16379. The operator dials every node by pod IP, so its rule is a pod selector on the operator namespace, not the client Service. The node pods need no DNS egress, even with `preferredEndpointType: Hostname`: the cluster bus and replication dial pod IPs, and the announced names are for clients. Cluster clients follow `MOVED` redirects straight to the node pods, so the client rule applies even when they connect through the Service, and with `Hostname` announce their own namespace must let them resolve the names.
 
-The operator pod has its own policy: the Helm chart renders one with `networkPolicy.enabled`, covering its egress to DNS, the API server and the node pods on 6379, and the kustomize install ships `config/network-policy` for its metrics ingress.
+The operator pod needs a policy of its own when its namespace denies egress: to the node pods on 6379 in every namespace it watches, and to the API server on its endpoint port (6443 on kubeadm and k3s, 443 on most managed distributions; `kubectl get endpoints kubernetes` shows it). It does not need DNS: it reaches the API server by the ClusterIP from its environment and the nodes by pod IP, and reconciles a cluster to Ready with DNS egress denied. Whether a policy can restrict traffic to the API server at all depends on the CNI. The Helm chart renders such a policy with `networkPolicy.enabled`, DNS included. The kustomize install has only the metrics ingress policy in `config/network-policy`, disabled by default, so write the egress rules yourself; the chart's `netpolicy.yaml` is a working reference.
 
 ### Users
 

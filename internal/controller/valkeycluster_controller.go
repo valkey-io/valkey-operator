@@ -336,6 +336,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// This runs before pod scheduling checks so that excess shard pods from a
 	// prior scale-up don't block scale-down when they can't be scheduled.
 	if result, requeue := r.handleScaleIn(ctx, cluster, state, nodes); requeue {
+		// handleScaleIn only sets conditions, so persist them here.
+		_ = r.updateStatus(ctx, cluster, state)
 		return result, nil
 	}
 
@@ -1660,14 +1662,12 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed, err.Error(), metav1.ConditionTrue)
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
-			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 		}
 		if drained {
 			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
-			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 		}
 	}

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,15 +78,20 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 		"n2 10.0.0.2:6379@16379 master - 0 0 1 connected 10923-16383\n"
 	allFailing := "n0 10.0.0.0:6379@16379 master,fail? - 0 0 1 connected 0-5460\n" +
 		"n1 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 5461-10922\n" +
-		"n2 10.0.0.2:6379@16379 myself,master - 0 0 1 connected 10923-16383\n"
+		"n2 10.0.0.2:6379@16379 master - 0 0 1 connected 10923-16383\n"
 	n2Failing := "n0 10.0.0.0:6379@16379 master - 0 0 1 connected 0-5460\n" +
 		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +
 		"n2 10.0.0.2:6379@16379 master,fail? - 0 0 1 connected 10923-16383\n"
+	// Each node's table marks its own line myself, so it counts as a voting
+	// primary for the others.
+	withMyself := func(view, id string) string {
+		return strings.Replace(view, id+" 10.0.0."+id[1:]+":6379@16379 master", id+" 10.0.0."+id[1:]+":6379@16379 myself,master", 1)
+	}
 	build := func(views ...string) *valkey.ClusterState {
 		st := &valkey.ClusterState{}
 		for i, id := range ids {
 			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
-			n.SetClusterNodes(views[i])
+			n.SetClusterNodes(withMyself(views[i], id))
 			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Nodes: []*valkey.NodeState{n}})
 		}
 		return st

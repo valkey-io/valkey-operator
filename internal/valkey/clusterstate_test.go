@@ -938,16 +938,39 @@ func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
 
 func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 	// Four nodes. Views of "target" are injected per viewer.
+	// Viewers a, b and c are voting primaries (own slots) unless built as
+	// replicas below. Each viewer's table carries its own myself line plus
+	// its view of "target".
+	primary := func(id, view string) *NodeState {
+		return &NodeState{Id: id, Flags: []string{"myself", "master"},
+			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n" + view)}
+	}
+	replica := func(id, view string) *NodeState {
+		return &NodeState{Id: id, Flags: []string{"myself", "slave"},
+			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n" + view)}
+	}
+	target := &NodeState{Id: "target", Flags: []string{"myself", "slave"},
+		nodes: ParseClusterNodes("target 10.0.0.9:6379@16379 myself,slave p1 0 0 1 connected\n")}
 	build := func(a, b, c string) *ClusterState {
-		mk := func(id, view string) *NodeState { return &NodeState{Id: id, nodes: ParseClusterNodes(view)} }
 		return &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
-			mk("target", "target 10.0.0.9:6379@16379 myself,slave p1 0 0 1 connected\n"),
-			mk("a", a), mk("b", b), mk("c", c),
+			target, primary("a", a), primary("b", b), primary("c", c),
 		}}}}
 	}
 	healthy := "target 10.0.0.9:6379@16379 slave p1 0 0 1 connected\n"
 	failing := "target 10.0.0.9:6379@16379 slave,fail? p1 0 0 1 connected\n"
 	confirmed := "target 10.0.0.9:6379@16379 slave,fail p1 0 0 1 connected\n"
+
+	t.Run("replica suspicion does not count, however many replicas", func(t *testing.T) {
+		// Two replicas and one primary know the target; only the replicas
+		// suspect it. Valkey would never promote that to fail, so neither
+		// does the operator.
+		st := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			target, replica("r1", failing), replica("r2", failing), primary("a", healthy),
+		}}}}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false when only replicas suspect the node")
+		}
+	})
 
 	t.Run("a confirmed fail from one viewer is authoritative", func(t *testing.T) {
 		// Valkey sets fail only after a majority of primaries agreed and
@@ -985,9 +1008,8 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
 	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
 	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
-	clean := "p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n"
-	primary.nodes = ParseClusterNodes(clean)
-	r1.nodes = ParseClusterNodes(clean)
+	primary.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
+	r1.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 myself,slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
 	// r2 is cut off and sees everyone as fail?.
 	r2.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave,fail? p 0 0 1 connected\nr2 10.0.0.3:6379@16379 myself,slave p 0 0 1 connected\n")
 

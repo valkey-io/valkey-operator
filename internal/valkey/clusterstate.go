@@ -364,9 +364,6 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	return livePrimaries > (clusterSize / 2)
 }
 
-// IsNodeFailed returns true if any live node reports the given node ID as
-// "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
-// majority of primaries are down, pfail can never promote to fail.
 // IsNodeFailedByMajority reports whether nodeId is down by the evidence the
 // peers hold, weighing the two flags the way Valkey does. A confirmed "fail"
 // is authoritative from any viewer: Valkey only sets it once a majority of
@@ -374,9 +371,11 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 // table carrying it already stands for a cluster-wide decision. A "fail?" is
 // one node's own opinion, and a node cut off from the cluster bus marks every
 // peer that way in its own table, so it counts only when more than half of
-// the other live nodes that know nodeId agree. IsNodeFailed keeps the
-// any-viewer rule for both flags on the takeover path, where one report is
-// the trigger.
+// the voting primaries that know nodeId agree. Only primaries that own slots
+// take part, which is the set Valkey itself polls before promoting "fail?"
+// to "fail"; a replica's suspicion never reaches that vote. IsNodeFailed
+// keeps the any-viewer rule for both flags on the takeover path, where one
+// report is the trigger.
 func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 	var viewers, suspecting int
 	for _, shard := range s.Shards {
@@ -391,6 +390,9 @@ func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 				if entry.HasFlag("fail") {
 					return true
 				}
+				if !node.isVotingPrimary() {
+					break
+				}
 				viewers++
 				if entry.HasFlag("fail?") {
 					suspecting++
@@ -402,6 +404,16 @@ func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 	return viewers > 0 && suspecting*2 > viewers
 }
 
+// isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns
+// slots, which is the only kind of node whose failure reports Valkey counts.
+func (n *NodeState) isVotingPrimary() bool {
+	myself := n.Myself()
+	return n.IsPrimary() && myself != nil && myself.HasSlotAssignment()
+}
+
+// IsNodeFailed returns true if any live node reports the given node ID as
+// "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
+// majority of primaries are down, pfail can never promote to fail.
 func (s *ClusterState) IsNodeFailed(nodeId string) bool {
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {

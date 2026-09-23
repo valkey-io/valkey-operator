@@ -211,9 +211,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); errors.Is(err, errShardRollSkipped) {
 		// A shard's roll was skipped because its primary is not identifiable, as
 		// opposed to a node being mid-roll, which still requeues below. Only the
-		// phases further down can repair an unidentifiable primary, so continue
-		// through them and withhold Ready at the end.
+		// steps further down can repair an unidentifiable primary, so continue
+		// through them rather than returning here. Set the conditions now, since
+		// a step below may return before the Ready gate at the end.
 		rollSkipped = true
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	} else if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
@@ -231,9 +234,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
 	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+		// Reports via an event, not status, so persist any conditions set above.
+		_ = r.updateStatus(ctx, cluster, state)
 		return result, nil
 	}
 
@@ -422,12 +428,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// A shard's roll was skipped because its primary is not identifiable. The
-	// phases above have run and may have repaired it; withhold Ready and requeue
-	// so the next pass re-evaluates.
+	// A shard's roll was skipped. Conditions were set at detection; persist them
+	// and requeue so the next pass re-evaluates.
 	if rollSkipped {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}

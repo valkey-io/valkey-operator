@@ -1528,12 +1528,13 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 			continue
 		}
 		// Check if all nodes in this shard are healthy and in sync. Health is
-		// what the peers report about the node, not what the node reports
-		// about itself: a node's own CLUSTER NODES entry never carries a
-		// failure flag.
+		// what a majority of the peers report about the node, not what the
+		// node reports about itself (its own CLUSTER NODES entry never carries
+		// a failure flag) and not what any single peer reports (a node cut off
+		// from the bus flags everyone, and would zero this count on its own).
 		allHealthy := true
 		for _, node := range shard.Nodes {
-			if state.IsNodeFailed(node.Id) {
+			if state.IsNodeFailedByMajority(node.Id) {
 				allHealthy = false
 				break
 			}

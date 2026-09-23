@@ -935,3 +935,65 @@ func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
 		t.Errorf("expected fd00::2, got %q", failing[0].Host)
 	}
 }
+
+func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
+	// Four nodes. Views of "target" are injected per viewer.
+	build := func(a, b, c string) *ClusterState {
+		mk := func(id, view string) *NodeState { return &NodeState{Id: id, nodes: ParseClusterNodes(view)} }
+		return &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			mk("target", "target 10.0.0.9:6379@16379 myself,slave p1 0 0 1 connected\n"),
+			mk("a", a), mk("b", b), mk("c", c),
+		}}}}
+	}
+	healthy := "target 10.0.0.9:6379@16379 slave p1 0 0 1 connected\n"
+	failing := "target 10.0.0.9:6379@16379 slave,fail? p1 0 0 1 connected\n"
+
+	t.Run("one of three viewers is not a majority", func(t *testing.T) {
+		if build(failing, healthy, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected false for a single report")
+		}
+	})
+	t.Run("two of three viewers is", func(t *testing.T) {
+		if !build(failing, failing, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected true for a majority")
+		}
+	})
+	t.Run("own entry is not a viewer", func(t *testing.T) {
+		// Nobody else knows the target: no viewers, so not failed.
+		if build("", "", "").IsNodeFailedByMajority("target") {
+			t.Error("expected false with no viewers")
+		}
+	})
+	t.Run("any single report still satisfies IsNodeFailed", func(t *testing.T) {
+		if !build(failing, healthy, healthy).IsNodeFailed("target") {
+			t.Error("expected the any-viewer rule to report true")
+		}
+	})
+}
+
+// A node cut off from the cluster bus marks every peer fail? in its own
+// table. That one opinion must not empty the failover target list.
+func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *testing.T) {
+	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
+	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	clean := "p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n"
+	primary.nodes = ParseClusterNodes(clean)
+	r1.nodes = ParseClusterNodes(clean)
+	// r2 is cut off and sees everyone as fail?.
+	r2.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave,fail? p 0 0 1 connected\nr2 10.0.0.3:6379@16379 myself,slave p 0 0 1 connected\n")
+
+	shard := &ShardState{Id: "s", PrimaryId: "p", Nodes: []*NodeState{primary, r1, r2}}
+	state := &ClusterState{Shards: []*ShardState{shard}}
+	got := shard.GetSyncedReplicas(state)
+	if len(got) != 2 {
+		t.Fatalf("expected both replicas to stay synced, got %d", len(got))
+	}
+	seen := map[string]bool{}
+	for _, n := range got {
+		seen[n.Id] = true
+	}
+	if !seen["r1"] || !seen["r2"] {
+		t.Errorf("expected r1 and r2, got %v", seen)
+	}
+}

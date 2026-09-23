@@ -238,17 +238,19 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 }
 
 // GetSyncedReplicas returns replica nodes that are connected and have their
-// replication link up (master_link_status:up). A replica that any live node
-// in state reports as failing ("fail" or "fail?") is excluded. That view has
-// to come from the peers: a node's own CLUSTER NODES entry never carries a
-// failure flag, so node.Flags cannot answer this.
+// replication link up (master_link_status:up). A replica that a majority of
+// the other live nodes report as failing ("fail" or "fail?") is excluded.
+// That view has to come from the peers, since a node's own CLUSTER NODES
+// entry never carries a failure flag, and it has to be a majority, since a
+// node cut off from the bus flags every peer in its own table and would
+// otherwise leave no failover target anywhere.
 func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	var replicas []*NodeState
 	for _, node := range s.Nodes {
 		if node.Id == s.PrimaryId {
 			continue
 		}
-		if state.IsNodeFailed(node.Id) {
+		if state.IsNodeFailedByMajority(node.Id) {
 			continue
 		}
 		if node.Info["master_link_status"] != "up" {
@@ -365,6 +367,34 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 // IsNodeFailed returns true if any live node reports the given node ID as
 // "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
 // majority of primaries are down, pfail can never promote to fail.
+// IsNodeFailedByMajority reports whether more than half of the other live
+// nodes that know nodeId mark it "fail" or "fail?". A lone "fail?" is one
+// node's opinion, and a node cut off from the cluster bus marks every peer
+// that way in its own table, so a single report is not enough where the
+// answer decides readiness or a failover target. IsNodeFailed keeps the
+// any-viewer rule for the takeover path, where one report is the trigger.
+func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
+	var viewers, failing int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Id == nodeId {
+				continue // its own entry never carries a failure flag
+			}
+			for _, entry := range node.nodes {
+				if entry.Id != nodeId {
+					continue
+				}
+				viewers++
+				if entry.IsFailing() {
+					failing++
+				}
+				break
+			}
+		}
+	}
+	return viewers > 0 && failing*2 > viewers
+}
+
 func (s *ClusterState) IsNodeFailed(nodeId string) bool {
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {

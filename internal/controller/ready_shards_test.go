@@ -65,3 +65,37 @@ func TestCountReadyShards(t *testing.T) {
 		assert.Equal(t, int32(0), r.countReadyShards(state, cluster))
 	})
 }
+
+// One node cut off from the cluster bus flags every peer fail? in its own
+// table. That single opinion must not zero the ready count; a majority of the
+// peers agreeing on a node must.
+func TestCountReadyShardsUnderPartition(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 0}}
+	ids := []string{"n0", "n1", "n2"}
+	clean := "n0 10.0.0.0:6379@16379 master - 0 0 1 connected 0-5460\n" +
+		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +
+		"n2 10.0.0.2:6379@16379 master - 0 0 1 connected 10923-16383\n"
+	allFailing := "n0 10.0.0.0:6379@16379 master,fail? - 0 0 1 connected 0-5460\n" +
+		"n1 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 5461-10922\n" +
+		"n2 10.0.0.2:6379@16379 myself,master - 0 0 1 connected 10923-16383\n"
+	n2Failing := "n0 10.0.0.0:6379@16379 master - 0 0 1 connected 0-5460\n" +
+		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +
+		"n2 10.0.0.2:6379@16379 master,fail? - 0 0 1 connected 10923-16383\n"
+	build := func(views ...string) *valkey.ClusterState {
+		st := &valkey.ClusterState{}
+		for i, id := range ids {
+			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
+			n.SetClusterNodes(views[i])
+			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Nodes: []*valkey.NodeState{n}})
+		}
+		return st
+	}
+	r := &ValkeyClusterReconciler{}
+
+	t.Run("one cut-off node flagging everyone changes nothing", func(t *testing.T) {
+		assert.Equal(t, int32(3), r.countReadyShards(build(clean, clean, allFailing), cluster))
+	})
+	t.Run("a node the other two agree is failing is not ready", func(t *testing.T) {
+		assert.Equal(t, int32(2), r.countReadyShards(build(n2Failing, n2Failing, clean), cluster))
+	})
+}

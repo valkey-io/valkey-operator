@@ -166,11 +166,14 @@ func TestClusterState_FindShardForAddress(t *testing.T) {
 }
 
 func TestShardState_GetSyncedReplicas(t *testing.T) {
+	// The one primary owning slots reports cluster_size 1, so its own
+	// report is the whole quorum.
 	primary := &NodeState{
-		Id:      "primary-id",
-		Address: "10.0.0.1",
-		Flags:   []string{"myself", "master"},
-		Info:    map[string]string{"role": "master"},
+		Id:          "primary-id",
+		Address:     "10.0.0.1",
+		Flags:       []string{"myself", "master"},
+		Info:        map[string]string{"role": "master"},
+		ClusterInfo: map[string]string{"cluster_size": "1"},
 	}
 	syncedReplica := &NodeState{
 		Id:      "replica-1-id",
@@ -940,13 +943,15 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 	// Four nodes. Views of "target" are injected per viewer.
 	// Viewers a, b and c are voting primaries (own slots) unless built as
 	// replicas below. Each viewer's table carries its own myself line plus
-	// its view of "target".
+	// its view of "target", and each reports cluster_size 3: three primaries
+	// own slots, so the quorum is two reports.
+	size := func(n string) map[string]string { return map[string]string{"cluster_size": n} }
 	primary := func(id, view string) *NodeState {
-		return &NodeState{Id: id, Flags: []string{"myself", "master"},
+		return &NodeState{Id: id, Flags: []string{"myself", "master"}, ClusterInfo: size("3"),
 			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n" + view)}
 	}
 	replica := func(id, view string) *NodeState {
-		return &NodeState{Id: id, Flags: []string{"myself", "slave"},
+		return &NodeState{Id: id, Flags: []string{"myself", "slave"}, ClusterInfo: size("3"),
 			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n" + view)}
 	}
 	target := &NodeState{Id: "target", Flags: []string{"myself", "slave"},
@@ -979,6 +984,30 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 			t.Error("expected true for a confirmed fail")
 		}
 	})
+	t.Run("a primary that has not learned the node is still a voter", func(t *testing.T) {
+		// Only a knows the target and suspects it; b and c own slots but
+		// have no entry yet. The quorum is still 2 of 3, so one report is
+		// not enough. Counting only the primaries that know the node would
+		// have made this a one-of-one majority.
+		if build(failing, "", "").IsNodeFailedByMajority("target") {
+			t.Error("expected false: one report out of three voting primaries")
+		}
+	})
+	t.Run("primaries the scrape did not reach still count", func(t *testing.T) {
+		// cluster_size says five primaries own slots. The scrape reached
+		// three, and two of those suspect the target. Valkey needs three
+		// reports out of five, so two is not a majority, even though it
+		// would be a majority of the primaries the operator can see.
+		st := build(failing, failing, healthy)
+		for _, n := range st.Shards[0].Nodes {
+			if n.Id != "target" {
+				n.ClusterInfo = size("5")
+			}
+		}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: two reports out of five voting primaries")
+		}
+	})
 	t.Run("one of three viewers is not a majority", func(t *testing.T) {
 		if build(failing, healthy, healthy).IsNodeFailedByMajority("target") {
 			t.Error("expected false for a single report")
@@ -1005,7 +1034,8 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 // A node cut off from the cluster bus marks every peer fail? in its own
 // table. That one opinion must not empty the failover target list.
 func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *testing.T) {
-	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
+	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"},
+		ClusterInfo: map[string]string{"cluster_size": "1"}}
 	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
 	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
 	primary.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")

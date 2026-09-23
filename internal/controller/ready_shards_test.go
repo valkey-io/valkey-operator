@@ -34,8 +34,9 @@ func TestCountReadyShards(t *testing.T) {
 	// a failure flag on the replica would appear.
 	shard := func(peerView string) *valkey.ClusterState {
 		primary := &valkey.NodeState{Id: "node-1", Address: "10.0.0.1", Flags: []string{"myself", "master"},
-			Info: map[string]string{"role": "master"}}
-		primary.SetClusterNodes(peerView)
+			ClusterInfo: map[string]string{"cluster_size": "1"},
+			Info:        map[string]string{"role": "master"}}
+		primary.SetClusterNodesForTesting(peerView)
 		return &valkey.ClusterState{
 			Shards: []*valkey.ShardState{
 				{
@@ -83,15 +84,16 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +
 		"n2 10.0.0.2:6379@16379 master,fail? - 0 0 1 connected 10923-16383\n"
 	// Each node's table marks its own line myself, so it counts as a voting
-	// primary for the others.
+	// primary for the others, and each reports cluster_size 3.
 	withMyself := func(view, id string) string {
 		return strings.Replace(view, id+" 10.0.0."+id[1:]+":6379@16379 master", id+" 10.0.0."+id[1:]+":6379@16379 myself,master", 1)
 	}
 	build := func(views ...string) *valkey.ClusterState {
 		st := &valkey.ClusterState{}
 		for i, id := range ids {
-			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"}}
-			n.SetClusterNodes(withMyself(views[i], id))
+			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"},
+				Info: map[string]string{"role": "master"}, ClusterInfo: map[string]string{"cluster_size": "3"}}
+			n.SetClusterNodesForTesting(withMyself(views[i], id))
 			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Nodes: []*valkey.NodeState{n}})
 		}
 		return st

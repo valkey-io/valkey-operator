@@ -261,10 +261,11 @@ func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	return replicas
 }
 
-// SetClusterNodes replaces the node's peer table with one parsed from raw
-// CLUSTER NODES output. The scrape fills the table for live nodes; tests in
-// other packages use this to build a node with a particular view of its peers.
-func (n *NodeState) SetClusterNodes(raw string) {
+// SetClusterNodesForTesting replaces the node's peer table with one parsed
+// from raw CLUSTER NODES output. The scrape fills the table for live nodes;
+// tests in other packages use this to build a node with a particular view of
+// its peers, and nothing else should.
+func (n *NodeState) SetClusterNodesForTesting(raw string) {
 	n.nodes = ParseClusterNodes(raw)
 }
 
@@ -337,6 +338,21 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// clusterSize returns cluster_size from CLUSTER INFO: cluster->size in Valkey,
+// every primary that owns slots, reachable or not. Takes the largest value any
+// scraped node reports, in case gossip has not fully propagated.
+func (s *ClusterState) clusterSize() int {
+	var size int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if n, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && n > size {
+				size = n
+			}
+		}
+	}
+	return size
+}
+
 // HasFailoverQuorum returns true if a majority of slot-owning primaries are
 // reachable. Valkey requires a majority of primaries to vote in a failover
 // election; if quorum is unreachable, no automatic failover can succeed.
@@ -346,18 +362,13 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	if len(s.Shards) == 0 {
 		return false
 	}
-	var livePrimaries, clusterSize int
+	var livePrimaries int
 	for _, shard := range s.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
 			livePrimaries++
 		}
-		for _, node := range shard.Nodes {
-			// Take the max across nodes in case gossip hasn't fully propagated.
-			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
-				clusterSize = size
-			}
-		}
 	}
+	clusterSize := s.clusterSize()
 	if clusterSize == 0 {
 		return false
 	}
@@ -370,14 +381,17 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 // primaries reported the node unreachable, and then broadcasts it, so one
 // table carrying it already stands for a cluster-wide decision. A "fail?" is
 // one node's own opinion, and a node cut off from the cluster bus marks every
-// peer that way in its own table, so it counts only when more than half of
-// the voting primaries that know nodeId agree. Only primaries that own slots
-// take part, which is the set Valkey itself polls before promoting "fail?"
-// to "fail"; a replica's suspicion never reaches that vote. IsNodeFailed
-// keeps the any-viewer rule for both flags on the takeover path, where one
-// report is the trigger.
+// peer that way in its own table, so it counts only with the quorum Valkey
+// itself requires before promoting it: reports from at least size/2+1 voting
+// primaries, where size is cluster_size from CLUSTER INFO, every primary that
+// owns slots. That is cluster->size in Valkey and the denominator
+// HasFailoverQuorum already uses, so a primary the scrape never reached, or
+// one that has no entry for nodeId yet, still counts as a voter that has not
+// reported. A replica's suspicion never reaches that vote. IsNodeFailed keeps
+// the any-viewer rule for both flags on the takeover path, where one report
+// is the trigger.
 func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
-	var viewers, suspecting int
+	var reports int
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
 			if node.Id == nodeId {
@@ -390,18 +404,15 @@ func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 				if entry.HasFlag("fail") {
 					return true
 				}
-				if !node.isVotingPrimary() {
-					break
-				}
-				viewers++
-				if entry.HasFlag("fail?") {
-					suspecting++
+				if node.isVotingPrimary() && entry.HasFlag("fail?") {
+					reports++
 				}
 				break
 			}
 		}
 	}
-	return viewers > 0 && suspecting*2 > viewers
+	size := s.clusterSize()
+	return size > 0 && reports >= size/2+1
 }
 
 // isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns

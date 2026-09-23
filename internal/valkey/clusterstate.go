@@ -367,14 +367,18 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 // IsNodeFailed returns true if any live node reports the given node ID as
 // "fail" or "fail?" in CLUSTER NODES. Includes "fail?" (pfail) because when
 // majority of primaries are down, pfail can never promote to fail.
-// IsNodeFailedByMajority reports whether more than half of the other live
-// nodes that know nodeId mark it "fail" or "fail?". A lone "fail?" is one
-// node's opinion, and a node cut off from the cluster bus marks every peer
-// that way in its own table, so a single report is not enough where the
-// answer decides readiness or a failover target. IsNodeFailed keeps the
-// any-viewer rule for the takeover path, where one report is the trigger.
+// IsNodeFailedByMajority reports whether nodeId is down by the evidence the
+// peers hold, weighing the two flags the way Valkey does. A confirmed "fail"
+// is authoritative from any viewer: Valkey only sets it once a majority of
+// primaries reported the node unreachable, and then broadcasts it, so one
+// table carrying it already stands for a cluster-wide decision. A "fail?" is
+// one node's own opinion, and a node cut off from the cluster bus marks every
+// peer that way in its own table, so it counts only when more than half of
+// the other live nodes that know nodeId agree. IsNodeFailed keeps the
+// any-viewer rule for both flags on the takeover path, where one report is
+// the trigger.
 func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
-	var viewers, failing int
+	var viewers, suspecting int
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
 			if node.Id == nodeId {
@@ -384,15 +388,18 @@ func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 				if entry.Id != nodeId {
 					continue
 				}
+				if entry.HasFlag("fail") {
+					return true
+				}
 				viewers++
-				if entry.IsFailing() {
-					failing++
+				if entry.HasFlag("fail?") {
+					suspecting++
 				}
 				break
 			}
 		}
 	}
-	return viewers > 0 && failing*2 > viewers
+	return viewers > 0 && suspecting*2 > viewers
 }
 
 func (s *ClusterState) IsNodeFailed(nodeId string) bool {

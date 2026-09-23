@@ -947,7 +947,15 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 	}
 	healthy := "target 10.0.0.9:6379@16379 slave p1 0 0 1 connected\n"
 	failing := "target 10.0.0.9:6379@16379 slave,fail? p1 0 0 1 connected\n"
+	confirmed := "target 10.0.0.9:6379@16379 slave,fail p1 0 0 1 connected\n"
 
+	t.Run("a confirmed fail from one viewer is authoritative", func(t *testing.T) {
+		// Valkey sets fail only after a majority of primaries agreed and
+		// broadcasts it, so a single table carrying it is not one opinion.
+		if !build(confirmed, healthy, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected true for a confirmed fail")
+		}
+	})
 	t.Run("one of three viewers is not a majority", func(t *testing.T) {
 		if build(failing, healthy, healthy).IsNodeFailedByMajority("target") {
 			t.Error("expected false for a single report")

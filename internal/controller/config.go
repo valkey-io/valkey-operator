@@ -54,6 +54,26 @@ var versionGatedConfig = map[string]*semver.Version{
 	"tls-auto-reload-interval": semver.MustParse("9.1.0-rc1"),
 }
 
+// tlsAuthClientsUserMinVersion lists client certificate-to-user mappings that
+// need a newer Valkey release. Values absent from this map have no additional
+// version requirement.
+// TODO make this generic enough to fetch from enum values https://github.com/valkey-io/valkey-operator/issues/423
+var tlsAuthClientsUserMinVersion = map[valkeyiov1alpha1.TLSAuthClientsUser]*semver.Version{
+	valkeyiov1alpha1.TLSAuthClientsUserURI: semver.MustParse("9.1.0"),
+}
+
+//nolint:goconst
+var tlsAuthClientsDirective = map[valkeyiov1alpha1.TLSAuthClients]string{
+	valkeyiov1alpha1.TLSAuthClientsRequired: "yes",
+	valkeyiov1alpha1.TLSAuthClientsOptional: "optional",
+	valkeyiov1alpha1.TLSAuthClientsDisabled: "no",
+}
+
+var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string{
+	valkeyiov1alpha1.TLSAuthClientsUserCN:  "CN",
+	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
+}
+
 //go:embed scripts/*
 var scripts embed.FS
 var scriptsHash string
@@ -66,7 +86,7 @@ func GetServerConfigMapName(clusterName string) string {
 // cluster and standalone ValkeyNode config paths.
 //
 //nolint:goconst
-func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool) map[string]string {
+func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, image string) map[string]string {
 	config := map[string]string{}
 
 	if includeACL {
@@ -87,7 +107,16 @@ func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, host
 		config["tls-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCert
 		config["tls-key-file"] = tlsCertMountPath + "/" + tlsSecretKeyKey
 		config["tls-ca-cert-file"] = tlsCertMountPath + "/" + tlsSecretKeyCA
-		config["tls-auth-clients"] = "optional" // allow clients to connect without client certificate
+
+		if directive, ok := tlsAuthClientsDirective[tls.ClientAuthMode()]; ok {
+			config["tls-auth-clients"] = directive
+		}
+
+		certificateUser := tls.ClientAuthCertificateUser()
+		if directive, ok := tlsAuthClientsUserDirective[certificateUser]; ok &&
+			clientAuthUserSupported(certificateUser, effectiveImage(image)) {
+			config["tls-auth-clients-user"] = directive
+		}
 	}
 
 	if hostnameAnnounce {
@@ -112,7 +141,7 @@ func renderConfig(config map[string]string) string {
 
 func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname))
+	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, node.Spec.Image))
 }
 
 // Return a base config of parameters that users shouldn't be able to override.
@@ -120,12 +149,11 @@ func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 // controller and the ValkeyNode pod-template builders render identical bytes.
 //
 //nolint:goconst
-func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool) map[string]string {
-	baseConfig := buildManagedConfig(true, tls, hostnameAnnounce)
+func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, image string) map[string]string {
+	baseConfig := buildManagedConfig(true, tls, hostnameAnnounce, image)
 	maps.Copy(baseConfig, map[string]string{
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",
-		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
 		// On SIGTERM (graceful pod shutdown from a node drain, eviction, or
@@ -158,14 +186,11 @@ func liveConfigToApply(config map[string]string) map[string]string {
 	return out
 }
 
-// versionGateConfigWarnings returns warnings when user-set directives are not
-// supported by the detected Valkey version. It reports exactly the directives
-// the renderer drops.
+// versionGateConfigWarnings returns warnings when user-set configuration or TLS
+// features are not supported by the detected Valkey version. It reports exactly
+// the settings the renderer drops.
 func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
 	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-	if len(droppedKeys) == 0 {
-		return nil
-	}
 
 	image := effectiveImage(cluster.Spec.Image)
 	imageSource := "spec.image"
@@ -178,7 +203,7 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
 	}
 
-	warnings := make([]configWarning, 0, len(droppedKeys))
+	warnings := make([]configWarning, 0, len(droppedKeys)+1)
 	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
 		minVersion := versionGatedConfig[key]
 		warnings = append(warnings, configWarning{
@@ -187,7 +212,25 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 		})
 	}
 
+	if tls := cluster.GetTLS(); tls != nil {
+		certificateUser := tls.ClientAuthCertificateUser()
+		if minVersion, requiresVersion := tlsAuthClientsUserMinVersion[certificateUser]; requiresVersion &&
+			!valkey.MeetsMinVersion(image, minVersion) {
+			warnings = append(warnings, configWarning{
+				reason:  valkeyiov1alpha1.ReasonUnsupportedConfigDirective,
+				message: fmt.Sprintf("spec.networking.tls.clientAuth.certificateUser=%s requires Valkey %s+, %s", certificateUser, minVersion, versionDetail),
+			})
+		}
+	}
+
 	return warnings
+}
+
+// clientAuthUserSupported reports whether the selected certificate-to-user
+// mapping is supported by image.
+func clientAuthUserSupported(user valkeyiov1alpha1.TLSAuthClientsUser, image string) bool {
+	minVersion, requiresVersion := tlsAuthClientsUserMinVersion[user]
+	return !requiresVersion || valkey.MeetsMinVersion(image, minVersion)
 }
 
 // gatedUserKeysToSuppress returns user-set directives that should be omitted
@@ -242,7 +285,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce()), excludeKeys)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
 // nodeServerConfigRollHash derives the config roll hash from the node spec:
@@ -254,7 +297,7 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
 	excludedKeys := maps.Clone(liveConfigAllowlist)
 	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname), excludedKeys)
+	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
 }
 

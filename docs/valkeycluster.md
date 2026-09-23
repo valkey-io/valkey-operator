@@ -39,6 +39,19 @@ maxmemory         # There are no safeguards, ensure you do not exceed your conta
 maxmemory-policy
 ```
 
+#### Failover tuning
+
+`cluster-node-timeout` controls how long a node may be unreachable before the cluster marks it failed and starts a failover. The operator does not set it, so the Valkey default of 15 seconds applies. Set it in `spec.config` to tune failover for your network.
+
+```yaml
+config:
+  cluster-node-timeout: "5000"
+```
+
+Lower values fail over faster but make the cluster more sensitive to network blips and to latency spikes on a busy primary. Values under 1 second are rarely a good idea outside a low-latency single-zone network. There is no validation on it by operator as it would require the type to be config aware instead of plain string. Changing it rolls the pods.
+
+Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
+
 #### Version-gated config
 
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
@@ -371,6 +384,9 @@ networking:
     certificates:
       server:
         secretName: valkey-tls
+    clientAuth:
+      mode: Optional             # Optional (default) | Required | Disabled
+      certificateUser: Disabled  # Disabled (default) | CN | URI
 ```
 
 #### Discovery (in-cluster announce)
@@ -410,6 +426,8 @@ Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of cert
 config:
   tls-auto-reload-interval: "3600"
 ```
+
+For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
 
 ### Users
 

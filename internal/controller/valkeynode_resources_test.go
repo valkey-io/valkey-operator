@@ -577,7 +577,65 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
 	assert.Contains(t, conf, "tls-port 6379")
 	assert.Contains(t, conf, "port 0")
-	assert.Contains(t, conf, "tls-auth-clients optional")
+}
+
+func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		authClients     valkeyv1.TLSAuthClients
+		authClientsUser valkeyv1.TLSAuthClientsUser
+		image           string
+		want            []string
+		notWant         []string
+	}{
+		{
+			name:            "required with CN mapping",
+			authClients:     valkeyv1.TLSAuthClientsRequired,
+			authClientsUser: valkeyv1.TLSAuthClientsUserCN,
+			want:            []string{"tls-auth-clients yes", "tls-auth-clients-user CN"},
+		},
+		{
+			name:            "required with URI mapping",
+			authClients:     valkeyv1.TLSAuthClientsRequired,
+			authClientsUser: valkeyv1.TLSAuthClientsUserURI,
+			image:           "valkey/valkey:9.1.0",
+			want:            []string{"tls-auth-clients yes", "tls-auth-clients-user URI"},
+		},
+		{
+			name:            "disabled drops client certificate processing",
+			authClients:     valkeyv1.TLSAuthClientsDisabled,
+			authClientsUser: valkeyv1.TLSAuthClientsUserDisabled,
+			want:            []string{"tls-auth-clients no"},
+			notWant:         []string{"tls-auth-clients-user"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newTestValkeyNode("mynode", "test-ns")
+			if tc.image != "" {
+				node.Spec.Image = tc.image
+			}
+			node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+				Certificates: valkeyv1.NodeTLSCertificates{
+					Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+				},
+				ClientAuth: &valkeyv1.TLSClientAuthSpec{
+					Mode:            tc.authClients,
+					CertificateUser: tc.authClientsUser,
+				},
+			}
+
+			cm, err := buildValkeyNodeConfigMap(node)
+			require.NoError(t, err)
+
+			conf := cm.Data["valkey.conf"]
+			for _, want := range tc.want {
+				assert.Contains(t, conf, want)
+			}
+			for _, notWant := range tc.notWant {
+				assert.NotContains(t, conf, notWant)
+			}
+		})
+	}
 }
 
 func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
@@ -762,7 +820,7 @@ func TestParseClusterNodesRole(t *testing.T) {
 		expected     string
 	}{
 		{
-			// A real primary owns a slot range (fields beyond the fixed 8).
+			// A real primary owns a slot range.
 			name:         "myself master owning slots is primary",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 5462-10922\n",
 			expected:     RolePrimary,
@@ -800,6 +858,14 @@ func TestParseClusterNodesRole(t *testing.T) {
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n" +
 				"37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
 			expected: RoleReplica,
+		},
+		{
+			// A master mid-reshard holds only a migration marker, no owned
+			// range. HasSlotAssignment counts the marker, so it stays primary
+			// and matches what GetClusterState reports.
+			name:         "myself master holding only a migration marker is primary",
+			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected [5461-<-37349cd33fe18465f36b46f09e392f6bb90688e1]\n",
+			expected:     RolePrimary,
 		},
 		{
 			name:         "no myself line returns empty",
@@ -865,6 +931,22 @@ func TestBuildExporterContainer(t *testing.T) {
 		assert.Len(t, c.VolumeMounts, 1)
 		assert.Equal(t, tlsVolumeName, c.VolumeMounts[0].Name)
 		assert.Equal(t, tlsCertMountPath, c.VolumeMounts[0].MountPath)
+	})
+
+	t.Run("presents a client certificate when client auth is required", func(t *testing.T) {
+		exporter := valkeyv1.ExporterSpec{Enabled: boolPtr(true)}
+		tlsSpec := &valkeyv1.NodeTLSSpec{
+			Certificates: valkeyv1.NodeTLSCertificates{
+				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
+			},
+			ClientAuth: &valkeyv1.TLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
+		}
+
+		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
+		assert.Equal(t, tlsCertMountPath+"/"+tlsSecretKeyCert,
+			getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CLIENT_CERT_FILE").Value)
+		assert.Equal(t, tlsCertMountPath+"/"+tlsSecretKeyKey,
+			getEnvVar(t, c.Env, "REDIS_EXPORTER_TLS_CLIENT_KEY_FILE").Value)
 	})
 
 	t.Run("env contains tls server name when set", func(t *testing.T) {

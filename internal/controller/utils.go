@@ -175,6 +175,18 @@ func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	return nodeIndex
 }
 
+// hasNodeWithPodIP reports whether any ValkeyNode has podIP as its pod IP.
+// An empty podIP never matches, including against a ValkeyNode that has no pod
+// IP yet: two empty addresses do not identify the same node.
+func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
+	if podIP == "" {
+		return false
+	}
+	return slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
+		return n.Status.PodIP == podIP
+	})
+}
+
 // nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
 // and reads its CR labels to determine the intended role and shard index.
 //
@@ -336,7 +348,7 @@ func tlsServerName(override, clusterName, namespace, clusterDomain string) strin
 }
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
-func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string) (*tls.Config, error) {
+func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
@@ -359,5 +371,20 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
 	}
+	if !presentClientCert {
+		return tlsCfg, nil
+	}
+
+	certData, certOk := secret.Data[tlsSecretKeyCert]
+	keyData, keyOk := secret.Data[tlsSecretKeyKey]
+	if !certOk || !keyOk {
+		return nil, fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secretName, certOk, keyOk)
+	}
+
+	cert, err := tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secretName, err)
+	}
+	tlsCfg.Certificates = []tls.Certificate{cert}
 	return tlsCfg, nil
 }

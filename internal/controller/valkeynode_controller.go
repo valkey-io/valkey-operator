@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"maps"
@@ -80,7 +79,8 @@ type valkeyConfigClient interface {
 
 // realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
 type realValkeyConfigClient struct {
-	client vclient.Client
+	client  vclient.Client
+	release func()
 }
 
 func (rc *realValkeyConfigClient) SetConfig(ctx context.Context, params map[string]string) error {
@@ -131,15 +131,15 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	return normalizeHashes(hashes), nil
 }
 
-func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
+func (rc *realValkeyConfigClient) Close() { rc.release() }
 
 // realConfigClient opens a real Valkey connection to the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, release, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		return nil, err
 	}
-	return &realValkeyConfigClient{client: c}, nil
+	return &realValkeyConfigClient{client: c, release: release}, nil
 }
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -148,6 +148,9 @@ type ValkeyNodeReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
+	// ValkeyClients dials the node's pod. Nil falls back to a provider built from
+	// Client and APIReader.
+	ValkeyClients ClientProvider
 	// newConfigClient opens a Valkey client to a node's pod for live config
 	// application. SetupWithManager defaults it to realConfigClient; tests
 	// override it with a fake.
@@ -1067,11 +1070,11 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, release, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		return "", err
 	}
-	defer c.Close()
+	defer release()
 	return c.Do(ctx, c.B().Info().Build()).ToString()
 }
 
@@ -1159,48 +1162,6 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	return nil
 }
 
-// buildNodeClientOption builds the valkey-go client option for connecting to a
-// node's pod, on a best-effort basis (TLS and operator credentials are applied
-// when available). Shared by resolveRole and the live-config client.
-func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
-	var tlsConfig *tls.Config
-	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
-		secretName := node.Spec.TLS.Certificates.Server.SecretName
-		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, nodeTLSServerName(node), node.Namespace, node.Spec.TLS.RequiresClientCertificate())
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
-				"secretName", secretName)
-		} else {
-			tlsConfig = cfg
-		}
-	}
-
-	var username, operatorPassword string
-	if clusterName, ok := node.Labels[LabelCluster]; ok {
-		operatorPassword, _ = fetchSystemUserPassword(ctx, operatorUser, r.Client, clusterName, node.Namespace)
-		if operatorPassword != "" {
-			username = operatorUser
-		}
-	}
-
-	return vclient.ClientOption{
-		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
-		ForceSingleClient: true,
-		TLSConfig:         tlsConfig,
-		Username:          username,
-		Password:          operatorPassword,
-		// valkey-go defaults to data-plane sizes: up to 4 connections per
-		// client, each with 0.5 MiB buffers either way and a 1024-entry ring.
-		// Tuned to this controller's usage: one connection issuing a few
-		// commands with no concurrency, none returning large responses.
-		// Exceeding a buffer costs a flush, no error.
-		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
-		ReadBufferEachConn:  16 * 1024,
-		WriteBufferEachConn: 8 * 1024,
-		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
-	}
-}
-
 // resolveRole returns the node's live replication role ("primary" or "replica"),
 // or "" if it cannot be determined. Tests inject resolveRoleFunc to bypass the
 // live Valkey connection (envtest has no running Valkey server).
@@ -1216,12 +1177,12 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, release, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""
 	}
-	defer c.Close()
+	defer release()
 
 	info, err := c.Do(ctx, c.B().Info().Build()).ToString()
 	if err != nil {

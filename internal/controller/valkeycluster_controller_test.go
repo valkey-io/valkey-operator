@@ -73,7 +73,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				APIReader: k8sClient,
 				Scheme:    k8sClient.Scheme(),
 				Recorder:  events.NewFakeRecorder(200),
-				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyCluster, *valkeyiov1alpha1.ValkeyNodeList, string, string) *valkey.ClusterState {
+				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
 					return scraped
 				},
 			}

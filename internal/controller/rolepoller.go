@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -53,8 +54,8 @@ const (
 type RolePoller struct {
 	// Client is cache-backed, so the per-tick List calls cost nothing.
 	Client client.Client
-	// APIReader is uncached, used only to read the TLS secret when scraping.
-	APIReader client.Reader
+	// ValkeyClients dials the nodes each pass scrapes.
+	ValkeyClients ClientProvider
 	// Interval is how often live state is sampled. Zero means
 	// DefaultRolePollInterval.
 	Interval time.Duration
@@ -63,7 +64,7 @@ type RolePoller struct {
 
 	// scrapeFunc, when set, overrides how the poller reads live cluster state.
 	// Tests inject a fake (envtest has no running Valkey server); production
-	// leaves it nil and dials through scrapeClusterState. This is also the seam
+	// leaves it nil and dials through ValkeyClients. This is also the seam
 	// where pooled clients replace per-tick connections.
 	scrapeFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState
 
@@ -90,6 +91,9 @@ func (p *RolePoller) NeedLeaderElection() bool {
 // Start runs the poll loop until the context is cancelled. It satisfies
 // manager.Runnable.
 func (p *RolePoller) Start(ctx context.Context) error {
+	if p.ValkeyClients == nil && p.scrapeFunc == nil {
+		return errors.New("role poller has no ClientProvider")
+	}
 	interval := p.Interval
 	if interval <= 0 {
 		interval = DefaultRolePollInterval
@@ -261,19 +265,19 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 }
 
 // scrape reads live cluster state, through scrapeFunc when a test has injected
-// one. Fetching the operator password is what can fail here; without it every
-// connection would be rejected, so the pass is skipped rather than dialled.
+// one. Without the operator password every connection would be rejected, so
+// the pass is skipped rather than dialled.
 func (p *RolePoller) scrape(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState {
 	if p.scrapeFunc != nil {
 		return p.scrapeFunc(ctx, cluster, addresses)
 	}
-	password, err := fetchSystemUserPassword(ctx, operatorUser, p.Client, cluster.Name, cluster.Namespace)
+	dial, err := p.ValkeyClients.ForCluster(ctx, cluster)
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("skipping role poll, operator password unavailable",
 			"cluster", cluster.Name, "namespace", cluster.Namespace, "err", err)
 		return nil
 	}
-	return scrapeClusterState(ctx, p.APIReader, cluster, addresses, operatorUser, password)
+	return valkey.GetClusterState(ctx, addresses, DefaultPort, dial)
 }
 
 // emit pushes a reconcile trigger for the node, dropping it if the channel is

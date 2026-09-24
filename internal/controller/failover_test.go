@@ -96,6 +96,30 @@ func TestFindFailoverShard(t *testing.T) {
 		assert.Nil(t, replicas)
 	})
 
+	t.Run("primary whose only replica a peer reports as fail? returns nil", func(t *testing.T) {
+		// The replica's own scrape is clean: link up, no failure flag on its
+		// own entry. The primary's CLUSTER NODES is what marks it fail?.
+		primary := &valkey.NodeState{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"},
+			ClusterInfo: map[string]string{"cluster_size": "1"}}
+		primary.SetClusterNodesForTesting("node-1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
+			"node-2 10.0.0.2:6379@16379 slave,fail? node-1 0 0 1 connected\n")
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-1",
+					Nodes: []*valkey.NodeState{
+						primary,
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+					},
+				},
+			},
+		}
+		shard, replicas := findFailoverShard(state, "10.0.0.1")
+		assert.Nil(t, shard)
+		assert.Nil(t, replicas)
+	})
+
 	t.Run("unknown address returns nil", func(t *testing.T) {
 		state := &valkey.ClusterState{
 			Shards: []*valkey.ShardState{

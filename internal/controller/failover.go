@@ -66,7 +66,7 @@ func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.Shar
 	if primary == nil || primary.Address != address {
 		return nil, nil
 	}
-	replicas := shard.GetSyncedReplicas()
+	replicas := shard.GetSyncedReplicas(state)
 	if len(replicas) == 0 {
 		return nil, nil
 	}

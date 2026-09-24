@@ -17,8 +17,12 @@ limitations under the License.
 package valkey
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
+
+	vclient "github.com/valkey-io/valkey-go"
 )
 
 func TestParseSlotsRange(t *testing.T) {
@@ -1055,5 +1059,39 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 	}
 	if !seen["r1"] || !seen["r2"] {
 		t.Errorf("expected r1 and r2, got %v", seen)
+	}
+}
+
+func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
+	var dialled []string
+	dial := func(_ context.Context, address string) (vclient.Client, func(), error) {
+		dialled = append(dialled, address)
+		return nil, func() {}, errors.New("connection refused")
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dial)
+
+	if want := []string{"10.0.0.1:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
+		t.Fatalf("dialled %v, want %v", dialled, want)
+	}
+	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestCloseClientsReleasesEveryNode(t *testing.T) {
+	released := 0
+	release := func() { released++ }
+	state := &ClusterState{
+		PendingNodes: []*NodeState{{release: release}, {}},
+		Shards: []*ShardState{
+			{Nodes: []*NodeState{{release: release}, {release: release}}},
+		},
+	}
+
+	state.CloseClients()
+
+	if released != 3 {
+		t.Fatalf("released %d clients, want 3", released)
 	}
 }

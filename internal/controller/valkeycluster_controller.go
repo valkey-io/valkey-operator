@@ -90,8 +90,8 @@ type ValkeyClusterReconciler struct {
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
-//     primary cannot be identified has its roll skipped; the remaining shards and
-//     the phases below still run.
+//     primary cannot be identified has its roll skipped; other shards still roll,
+//     and once none is mid-roll the phases below run to repair it.
 //   - Build the Valkey cluster state by connecting to each node and scraping
 //     CLUSTER INFO / CLUSTER NODES.
 //   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum

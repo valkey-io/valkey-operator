@@ -28,12 +28,15 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// DialFunc connects to the Valkey node at address (host:port). The caller calls
-// release when done with the client and never calls Close on it.
+// DialFunc connects to the Valkey node at address (host:port). On error the
+// client is nil and release is a no-op. The caller calls release once when done
+// with the client and never calls Close on it.
 type DialFunc func(ctx context.Context, address string) (client vclient.Client, release func(), err error)
 
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
+	// Client is for commands only. CloseClients releases it; never call Close
+	// on it directly.
 	Client vclient.Client
 	// release hands Client back to whoever dialled it.
 	release     func()
@@ -191,6 +194,7 @@ func (s *ClusterState) CloseClients() {
 func (n *NodeState) releaseClient() {
 	if n.release != nil {
 		n.release()
+		n.release = nil
 	}
 }
 

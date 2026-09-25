@@ -152,7 +152,6 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
 
 	if err := c.LoadACL(ctx); err != nil {
 		return false, err

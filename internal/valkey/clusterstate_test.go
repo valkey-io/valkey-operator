@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	vclient "github.com/valkey-io/valkey-go"
+	vmock "github.com/valkey-io/valkey-go/mock"
+	"go.uber.org/mock/gomock"
 )
 
 func TestParseSlotsRange(t *testing.T) {
@@ -1064,9 +1066,9 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 
 func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
 	var dialled []string
-	dial := func(_ context.Context, address string) (vclient.Client, func(), error) {
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
 		dialled = append(dialled, address)
-		return nil, func() {}, errors.New("connection refused")
+		return nil, errors.New("connection refused")
 	}
 
 	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dial)
@@ -1079,20 +1081,23 @@ func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
 	}
 }
 
-func TestCloseClientsReleasesEveryNode(t *testing.T) {
-	released := 0
-	release := func() { released++ }
-	state := &ClusterState{
-		PendingNodes: []*NodeState{{release: release}, {}},
-		Shards: []*ShardState{
-			{Nodes: []*NodeState{{release: release}, {release: release}}},
-		},
+// A pooled client can be stale: Get returns it without redialling, and the
+// server has gone away since it was last used. getNodeState must not turn
+// that into a ghost node with empty Id/Flags/ShardId.
+func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	stale := vmock.NewClient(ctrl)
+	stale.EXPECT().
+		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
+
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return stale, nil
 	}
 
-	state.CloseClients()
-	state.CloseClients()
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
 
-	if released != 3 {
-		t.Fatalf("released %d clients, want 3 (each once)", released)
+	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
 	}
 }

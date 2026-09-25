@@ -54,7 +54,7 @@ It exists because a failover between two healthy pods moves nothing in Kubernete
 - A Valkey instance that fails to answer is backed off exponentially (up to a minute) rather than dialled every tick.
 - The Pod watch and the 30s backstop are both retained: the watch is faster for pod recreation, and the backstop is what makes a wedged poller a latency regression rather than an availability bug.
 
-Each tick opens one connection per node through the `ClientProvider` in `internal/controller/clients.go`. That is the cost that sets the interval. Pooled clients will replace those per-tick connections behind the same provider, without changing the poller.
+Each tick gets one client per node from the `ClientProvider` in `internal/controller/clients.go`, which takes it from the pool in `internal/valkey/pool.go`. The pool keeps each client open across ticks and reconciles, so a tick normally opens no connections.
 
 ## Key packages
 

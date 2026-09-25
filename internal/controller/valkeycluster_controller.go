@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -62,9 +63,12 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
-	// ValkeyClients dials Valkey nodes. Nil falls back to a provider built from
-	// Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. Nil falls back to a
+	// provider and pool built on first use from Client and APIReader.
 	ValkeyClients ClientProvider
+
+	fallbackOnce    sync.Once
+	fallbackClients ClientProvider
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -206,7 +210,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	state := valkey.GetClusterState(ctx, nodeAddresses(nodes), DefaultPort, dial)
-	defer state.CloseClients()
 
 	rollSkipped := false
 	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); errors.Is(err, errShardRollSkipped) {

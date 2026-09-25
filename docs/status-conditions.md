@@ -376,6 +376,7 @@ These events are emitted during cluster maintenance operations.
 |---|---|---|
 | `StaleNodeForgotten` | Normal | Stale node is forgotten from the cluster |
 | `NodeForgetFailed` | Warning | Forgetting a node fails |
+| `SupersededPodDeleted` | Normal | A pod that was not ready and left on a revision its StatefulSet had already superseded was deleted, so the corrected pod template could take effect |
 
 ### Status events
 

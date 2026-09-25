@@ -38,6 +38,44 @@ Run a specific e2e test by label:
 TEST_LABELS="<label>" make test-e2e
 ```
 
+## Keeping the "_operator" ACL in sync
+
+The operator connects to Valkey as a system user called `_operator`, whose ACL is
+hand-maintained in `internal/controller/users.go`. If reconciliation code starts
+issuing a new command, that ACL has to grant it too, or the operator locks itself
+out at runtime.
+
+Rather than trust that ACL to be kept up to date by hand, `hack/aclscan/scan`
+statically discovers every Valkey command the operator's reconciliation code
+(`cmd/`, `internal/`) actually issues, by scanning its source for valkey-go
+client calls — both the builder pattern (`client.B().ClusterInfo()...Build()`)
+and raw `Arbitrary(...)` calls. Builder method names are resolved to command
+tokens by parsing valkey-go's own generated command builders on disk, so the
+mapping tracks whichever valkey-go version the operator is built against
+instead of being a second hand-maintained list.
+
+To see the current set of commands the operator issues:
+
+```sh
+go run ./hack/aclscan
+```
+
+The e2e suite (`test/e2e/valkeycluster_test.go`, "validating the _operator ACL
+covers every command the operator runs") uses the same package to check this
+list against a live cluster: for every discovered command it runs
+`ACL DRYRUN _operator <command>` and fails if any of them come back denied.
+That test only runs as part of `make test-e2e`, so a missing ACL grant won't
+be caught by `make test` alone — when you add a new valkey-go client call to
+the operator's reconciliation code, update the `_operator` ACL in
+`internal/controller/users.go` accordingly and run `make test-e2e` (or at
+least `go run ./hack/aclscan` plus a manual `ACL DRYRUN`) to confirm.
+
+Because it works by parsing Go source rather than executing it, `aclscan` can't
+resolve a command whose tokens aren't literal at the call site (e.g. an entirely
+dynamic `Arbitrary(cmdVar)`); it errors out in that case rather than silently
+skipping the call, so an unscannable call site gets noticed instead of quietly
+falling out of ACL coverage.
+
 ## Prerequisites
 
 - Go v1.25.0+.

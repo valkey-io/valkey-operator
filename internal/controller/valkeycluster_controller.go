@@ -1786,12 +1786,21 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 	deleted := false
 	for i := range allNodes.Items {
 		node := &allNodes.Items[i]
-		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
-		if err != nil {
-			continue
-		}
-		nodeIndex, err := strconv.Atoi(node.Labels[LabelNodeIndex])
-		if err != nil {
+		shardIndex, shardErr := strconv.Atoi(node.Labels[LabelShardIndex])
+		nodeIndex, nodeErr := strconv.Atoi(node.Labels[LabelNodeIndex])
+		if shardErr != nil || nodeErr != nil || shardIndex < 0 || nodeIndex < 0 {
+			// The node carries this cluster's label but its topology labels
+			// are missing or unparseable, so it can never become a valid
+			// member (names and slot assignment derive from these labels).
+			// The cluster controller still lists it on every reconcile while
+			// the scale-in path counts it as extra, wedging the cluster in
+			// Reconciling forever. Reap it like any other excess node, and
+			// name it in an event so the wedge is diagnosable (#403).
+			if pruned, err := r.deleteInvalidTopologyNode(ctx, cluster, node); err != nil {
+				return false, err
+			} else if pruned {
+				deleted = true
+			}
 			continue
 		}
 		if shardIndex >= int(cluster.Spec.Shards) || nodeIndex >= nodesPerShard {
@@ -1807,6 +1816,21 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 		}
 	}
 	return deleted, nil
+}
+
+// deleteInvalidTopologyNode reaps a ValkeyNode whose shard-index/node-index
+// labels are missing or unparseable. Returns true when it deleted the node.
+func (r *ValkeyClusterReconciler) deleteInvalidTopologyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	log := logf.FromContext(ctx)
+	if err := r.Delete(ctx, node); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete ValkeyNode %s with invalid topology labels: %w", node.Name, err)
+		}
+		return false, nil
+	}
+	log.Info("deleted ValkeyNode with invalid topology labels", "name", node.Name, "shard-index", node.Labels[LabelShardIndex], "node-index", node.Labels[LabelNodeIndex])
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ValkeyNodeDeleted", "ScaleIn", "Deleted ValkeyNode %s with invalid topology labels (shard-index %q, node-index %q)", node.Name, node.Labels[LabelShardIndex], node.Labels[LabelNodeIndex])
+	return true, nil
 }
 
 // shardIndexFromState determines the shard index for a given Valkey Cluster

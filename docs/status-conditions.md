@@ -19,7 +19,7 @@ These top-level fields in `.status` provide a high-level, human-readable summary
 
 - **`shards`**: The number of shards currently detected in the Valkey cluster.
 
-- **`readyShards`**: The number of shards that are fully healthy, meaning they have a primary and the desired number of replicas.
+- **`readyShards`**: The number of shards that are fully healthy, meaning they have a primary and the desired number of replicas. When Valkey cluster state is not available (for example during `UpdatingNodes`), this counts shards that have at least one Ready Pod.
 
 ---
 
@@ -105,12 +105,13 @@ Indicates whether all nodes have joined the cluster and meet the desired shard/r
 | Status | Meaning |
 |---|---|
 | `True` | All shards and replicas are present and joined. |
-| `False` | Pending nodes, missing shards, or missing replicas. |
+| `False` | Pending nodes, missing shards, missing replicas, or a shard has no Ready Pod. |
 
 Typical reasons:
 - `ClusterFormed` – Cluster is formed
 - `MissingShards` – waiting for shards
 - `MissingReplicas` – waiting for replicas
+- `UpdatingNodes` – a shard has no Ready Pod during a ValkeyNode roll
 
 #### `SlotsAssigned`
 Indicates whether all **16384** hash slots are assigned to primaries.
@@ -118,11 +119,12 @@ Indicates whether all **16384** hash slots are assigned to primaries.
 | Status | Meaning |
 |---|---|
 | `True` | All slots are assigned. |
-| `False` (or absent) | Some slots remain unassigned. |
+| `False` (or absent) | Some slots remain unassigned, or a shard has no Ready Pod. |
 
 Common reasons:
 - `AllSlotsAssigned` – all 16384 slots are assigned
 - `SlotsUnassigned` – waiting for slots to be assigned
+- `UpdatingNodes` – a shard has no Ready Pod; slot ownership is not trusted for this generation
 
 #### `ConfigurationWarning`
 Indicates the operator accepted a spec value it considers risky, rather than rejecting or overriding it.
@@ -722,6 +724,8 @@ default     valkeycluster-sample   Ready          ClusterHealthy   3            
 
 - **Reconciling (UpdatingNodes)**
   - `Reason=UpdatingNodes` indicates a rolling update of ValkeyNode CRs is in progress (one node at a time, replicas before primaries).
+  - If a shard has no Ready Pod, `readyShards` is less than `spec.shards`.
+  - `ClusterFormed` and `SlotsAssigned` are then False on the current generation.
 
 - **Ready (ClusterHealthy)**
   - Once `READYSHARDS` reaches the desired shard count and the cluster is healthy, the summary switches to `Ready / ClusterHealthy`.

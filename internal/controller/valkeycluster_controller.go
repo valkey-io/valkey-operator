@@ -218,6 +218,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
+		r.refreshTopologyStatusFromPods(ctx, cluster)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -508,6 +509,69 @@ func podSchedulingIssueForPod(pod *corev1.Pod) *podSchedulingIssue {
 		}
 	}
 	return nil
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// countShardsWithReadyPod counts shards that have at least one Ready Pod.
+// Node-index is ignored: after failover the live primary may not be index 0.
+func countShardsWithReadyPod(pods []corev1.Pod, desiredShards int32) int32 {
+	if desiredShards <= 0 {
+		return 0
+	}
+	ready := make([]bool, desiredShards)
+	for i := range pods {
+		pod := &pods[i]
+		if !isPodReady(pod) {
+			continue
+		}
+		si, err := strconv.Atoi(pod.Labels[LabelShardIndex])
+		if err != nil || si < 0 || si >= int(desiredShards) {
+			continue
+		}
+		ready[si] = true
+	}
+	var n int32
+	for _, ok := range ready {
+		if ok {
+			n++
+		}
+	}
+	return n
+}
+
+// refreshTopologyStatusFromPods sets readyShards from shards that have a Ready Pod.
+// A shard with no Ready Pod sets ClusterFormed and SlotsAssigned False.
+func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) {
+	log := logf.FromContext(ctx)
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		log.Error(err, "failed to list Valkey pods for topology status")
+		return
+	}
+	ready := countShardsWithReadyPod(pods.Items, cluster.Spec.Shards)
+	cluster.Status.ReadyShards = ready
+	if ready < cluster.Spec.Shards {
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
+		return
+	}
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed); c != nil && c.Status == metav1.ConditionTrue {
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, c.Reason, c.Message, metav1.ConditionTrue)
+	}
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned); c != nil && c.Status == metav1.ConditionTrue {
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, c.Reason, c.Message, metav1.ConditionTrue)
+	}
 }
 
 func headlessServiceName(clusterName string) string {
@@ -1466,10 +1530,13 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	patchBase := current.DeepCopy()
 	patch := client.MergeFrom(patchBase)
 
-	// Update shard counts
+	// Update shard counts. When Valkey state is nil, keep the in-memory
+	// readyShards value so callers can set it from Pods.
 	if state != nil {
 		current.Status.ReadyShards = r.countReadyShards(state, cluster)
 		current.Status.Shards = int32(len(state.Shards))
+	} else {
+		current.Status.ReadyShards = cluster.Status.ReadyShards
 	}
 
 	// Apply conditions from the in-memory cluster object

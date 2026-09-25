@@ -429,6 +429,23 @@ config:
 
 For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
 
+#### Network policies
+
+The operator does not create NetworkPolicies. In a namespace that denies traffic by default, the node pods of a cluster need these flows:
+
+| Flow | Port | Peer |
+|---|---|---|
+| Node to node: replication and the cluster bus | 6379 and 16379 TCP | pods of the same cluster |
+| Operator to node | 6379 TCP | the operator pod, in its own namespace |
+| Application to node | 6379 TCP | your clients |
+| Prometheus to exporter | 9121 TCP | your scraper, unless `exporter.enabled` is false |
+
+[`config/samples/v1_networkpolicy-cluster-sample.yaml`](../config/samples/v1_networkpolicy-cluster-sample.yaml) is a complete policy for the `cluster-sample` cluster: the first two flows are written out, the last two are marked `REPLACE` because only you know where the clients and the scraper run. Node pods carry `valkey.io/cluster: <name>` and `app.kubernetes.io/component: valkey-node`, which is what the peer selectors use.
+
+Ports do not change with TLS: the TLS listener takes over 6379 and the bus stays on 16379. The operator dials every node by pod IP, so its rule is a pod selector on the operator namespace, not the client Service. The node pods need no DNS egress, even with `preferredEndpointType: Hostname`: the cluster bus and replication dial pod IPs, and the announced names are for clients. Cluster clients follow `MOVED` redirects straight to the node pods, so the client rule applies even when they connect through the Service, and with `Hostname` announce their own namespace must let them resolve the names.
+
+The operator pod needs a policy of its own when its namespace denies egress: to the node pods on 6379 in every namespace it watches, and to the API server on its endpoint port (6443 on kubeadm and k3s, 443 on most managed distributions; `kubectl get endpoints kubernetes` shows it). It does not need DNS: it reaches the API server by the ClusterIP from its environment and the nodes by pod IP, and reconciles a cluster to Ready with DNS egress denied. Whether a policy can restrict traffic to the API server at all depends on the CNI. The Helm chart renders such a policy with `networkPolicy.enabled`, DNS included. The kustomize install has only the metrics ingress policy in `config/network-policy`, disabled by default, so write the egress rules yourself; the chart's `netpolicy.yaml` is a working reference.
+
 ### Users
 
 ```yaml

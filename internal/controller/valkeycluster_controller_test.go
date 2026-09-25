@@ -1230,44 +1230,96 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		setPodIP(node11, "10.0.1.2")
 
 		By("building a topology where shard 0 owns no slots and shard 1 is healthy")
-		// Shard 0 is present in the topology (its pod IPs appear) but owns no
-		// slots, so findShardPrimary cannot name a primary for it. Shard 1 has a
-		// slot-bearing primary at node index 0.
 		state := &valkey.ClusterState{
 			Shards: []*valkey.ShardState{
 				{
 					Id:        "shard-0",
-					PrimaryId: "id-00",
+					PrimaryId: "node-0",
 					Slots:     nil,
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.0.1", Id: "id-00", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "id-01", Flags: []string{"slave"}},
+						{Address: "10.0.0.1", Id: "node-0", Flags: []string{"master"}},
+						{Address: "10.0.0.2", Id: "node-1", Flags: []string{"slave"}},
 					},
 				},
 				{
 					Id:        "shard-1",
-					PrimaryId: "id-10",
+					PrimaryId: "node-2",
 					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.1.1", Id: "id-10", Flags: []string{"master"}},
-						{Address: "10.0.1.2", Id: "id-11", Flags: []string{"slave"}},
+						{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}},
+						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
 					},
 				},
 			},
 		}
 
-		By("reconciling with no roll pending, so the skip is the only outcome")
-		// reconcileValkeyNodes returns as soon as it updates one node, so the
-		// skip is reported only once no node needs rolling. With the spec
-		// unchanged, shard 1 is a no-op and shard 0's skip reaches the caller.
-		requeue, err := reconcileNodesWithState(state)
+		By("changing the image so shard 1 has a roll pending")
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
 
-		// The skip is reported as a sentinel, not as a plain requeue: Reconcile
-		// needs to continue to the phases that make shard 0's primary
-		// identifiable again. Returning requeue here would abort it, and shard 0
-		// would stay unidentifiable forever.
+		// Recorded before reconciling, to detect writes to shard 0 afterwards.
+		shard0Nodes := []string{node00, node01}
+		shard0RVsBefore := map[string]string{}
+		for _, name := range shard0Nodes {
+			shard0RVsBefore[name] = getResourceVersion(name)
+		}
+
+		By("rolling a shard 1 node while shard 0 is skipped")
+		// Shard 0 is visited first, so updating a shard 1 node at all proves the
+		// loop continued past it rather than returning at the skip.
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+		Expect(getImage(node11)).To(Equal(newImage))
+
+		By("verifying no shard 0 node was written")
+		for _, name := range shard0Nodes {
+			Expect(getResourceVersion(name)).To(Equal(shard0RVsBefore[name]),
+				"%s must not be written while its shard's primary is unidentifiable", name)
+		}
+	})
+
+	It("reports a skipped shard roll as errShardRollSkipped, not a requeue", func() {
+		By("creating all nodes, marking them ready and publishing pod IPs")
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+
+		By("building a topology where shard 0 owns no slots and shard 1 is healthy")
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "node-0",
+					Slots:     nil,
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "node-0", Flags: []string{"master"}},
+						{Address: "10.0.0.2", Id: "node-1", Flags: []string{"slave"}},
+					},
+				},
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-2",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}},
+						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
+					},
+				},
+			},
+		}
+
+		By("reconciling with the spec unchanged, so no node needs rolling")
+		// The skip is reported as errShardRollSkipped rather than a plain
+		// requeue: Reconcile needs to continue to the steps that make shard 0's
+		// primary identifiable again. Returning requeue here would abort it, and
+		// shard 0 would stay unidentifiable forever. A pending roll returns
+		// requeue first, so this is only observable when nothing rolls.
+		requeue, err := reconcileNodesWithState(state)
 		Expect(stderrors.Is(err, errShardRollSkipped)).To(BeTrue(),
-			"expected errShardRollSkipped, got %v", err)
+			"expected errShardRollSkipped, got %v (requeue=%v)", err, requeue)
 		Expect(requeue).To(BeFalse())
 	})
 })

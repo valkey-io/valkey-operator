@@ -218,10 +218,11 @@ spec:
 			By("stopping the primaries from handing off on SIGTERM")
 			// The operator sets shutdown-on-sigterm failover, so a terminating
 			// primary hands the shard to its replica. "now" skips that wait, in
-			// case the force-delete below does not outrun it.
+			// case the force-delete below does not outrun it. "nosave" suppresses
+			// any final RDB.
 			for _, shard := range lostShards {
 				_, err := utils.ValkeyCLI(podFor(clusterName, shard, 0), cliOpts,
-					"CONFIG", "SET", "shutdown-on-sigterm", "now")
+					"CONFIG", "SET", "shutdown-on-sigterm", `"nosave now"`)
 				Expect(err).NotTo(HaveOccurred())
 			}
 

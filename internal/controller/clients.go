@@ -81,7 +81,10 @@ type ClientProvider interface {
 	// TLS config that cannot be built fails each dial instead.
 	ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error)
 
-	// ForNode connects to the node's pod.
+	// ForNode connects to the node's pod. It returns an error when the node
+	// has no pod IP, the TLS config cannot be built, the operator password
+	// cannot be read for a reason other than the secret not existing, or the
+	// dial fails. On error the client is nil and release is a no-op.
 	ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, func(), error)
 }
 

@@ -191,8 +191,8 @@ func TestForCluster(t *testing.T) {
 	mTLS := tlsOn.DeepCopy()
 	mTLS.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
 
-	provider := func(c client.Client, got *[]vclient.ClientOption) *nodeClientProvider {
-		return &nodeClientProvider{client: c, apiReader: c, newClient: recordNewClient(got, &stubClient{})}
+	provider := func(c client.Client, got *[]vclient.ClientOption) *unpooledProvider {
+		return &unpooledProvider{client: c, apiReader: c, newClient: recordNewClient(got, &stubClient{})}
 	}
 
 	t.Run("TLS off dials with operator credentials", func(t *testing.T) {

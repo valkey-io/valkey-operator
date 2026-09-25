@@ -143,8 +143,9 @@ func effectiveWorkloadType(t valkeyiov1alpha1.WorkloadType) valkeyiov1alpha1.Wor
 // desired template (see setDesiredWorkloadRevision), and liveTemplateHash is
 // the same hash of the live StatefulSet/Deployment template (empty when the
 // workload does not exist). Changes to Spec that render the same template
-// therefore never fail over; an empty liveTemplateHash means the update
-// creates a workload rather than rolling one. Config never enters the decision
+// therefore never fail over. An empty liveTemplateHash with a running pod
+// means the workload was orphan-deleted; the pod's template is unknown, so any
+// revision change counts as a roll. Config never enters the decision
 // directly: live-settable keys are applied via CONFIG SET (see applyLiveConfig)
 // and the roll-relevant subset reaches the template as a derived annotation
 // (see buildPodTemplateAnnotations), so it is captured by the hashes.
@@ -157,5 +158,10 @@ func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode
 	if effectiveWorkloadType(current.Spec.WorkloadType) != effectiveWorkloadType(desired.Spec.WorkloadType) {
 		return true
 	}
-	return liveTemplateHash != "" && liveTemplateHash != desired.Spec.WorkloadRevision
+	if liveTemplateHash == "" {
+		// No workload but a running pod: it was orphan-deleted, and recreating
+		// it with a new revision can replace the pod.
+		return current.Spec.WorkloadRevision != desired.Spec.WorkloadRevision
+	}
+	return liveTemplateHash != desired.Spec.WorkloadRevision
 }

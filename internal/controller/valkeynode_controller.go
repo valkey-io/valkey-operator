@@ -474,17 +474,31 @@ func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valk
 		return r.clearWorkloadRollPending(ctx, node)
 	}
 
-	// serviceName is immutable. Orphan-delete and recreate with the live pod
-	// template so WorkloadRevision still gates any real template roll.
+	desiredHash := podTemplateRollHash(desired.Spec.Template)
+
+	// serviceName is immutable, so changing it means an orphan delete and a
+	// recreate that adopts the pod. When the template also rolls, wait for
+	// WorkloadRevision first: once the old STS is gone, refuseDesiredSTSCreate
+	// blocks an unauthorised create and the STS stays missing, so the cluster
+	// controller cannot see the pending roll to fail over before it.
 	if sts.Spec.ServiceName != desired.Spec.ServiceName {
+		if podTemplateWouldRoll(sts.Spec.Template, desired.Spec.Template) {
+			allowed, err := r.gateRollingWorkloadUpdate(ctx, node, desiredHash)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				log.V(1).Info("deferring StatefulSet serviceName change until Spec.WorkloadRevision matches",
+					"name", sts.Name, "desiredHash", desiredHash, "specRevision", node.Spec.WorkloadRevision)
+				return nil
+			}
+		}
 		recreated, err := r.orphanAndRecreateStatefulSet(ctx, node, sts, desired)
 		if err != nil {
 			return err
 		}
 		sts = recreated
 	}
-
-	desiredHash := podTemplateRollHash(desired.Spec.Template)
 	// Heal live drift whenever templates differ; do not skip on a stale
 	// last-applied annotation (that can hide real STS edits).
 	if !podTemplateWouldRoll(sts.Spec.Template, desired.Spec.Template) {
@@ -938,8 +952,9 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 // The check uses two gates for StatefulSets:
 //  1. status.observedGeneration >= metadata.generation — the STS controller has
 //     processed the latest spec (and computed the new updateRevision).
-//  2. status.currentRevision == status.updateRevision — all pods are on the
-//     new revision (the rolling update has completed).
+//  2. status.currentRevision == status.updateRevision and every replica is
+//     updated and ready — all pods are on the new revision (the rolling
+//     update has completed, including after an orphan recreate).
 func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
 	// Use APIReader (direct API server read) when available so we always see the
 	// latest metadata.generation, bypassing the informer cache. Without this, the
@@ -962,8 +977,17 @@ func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *va
 		if sts.Status.ObservedGeneration < sts.Generation {
 			return false, nil
 		}
-		// Gate 2: rolling update not yet complete.
-		return sts.Status.CurrentRevision == sts.Status.UpdateRevision && sts.Status.ReadyReplicas >= 1, nil
+		// Gate 2: rolling update not yet complete. A new StatefulSet starts with
+		// currentRevision == updateRevision, so after an orphan recreate the
+		// revisions match while the adopted pod still runs the old template;
+		// UpdatedReplicas counts only pods on updateRevision.
+		replicas := int32(1)
+		if sts.Spec.Replicas != nil {
+			replicas = *sts.Spec.Replicas
+		}
+		return sts.Status.CurrentRevision == sts.Status.UpdateRevision &&
+			sts.Status.UpdatedReplicas >= replicas &&
+			sts.Status.ReadyReplicas >= replicas, nil
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		dep := &appsv1.Deployment{}
 		if err := reader.Get(ctx, client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}, dep); err != nil {

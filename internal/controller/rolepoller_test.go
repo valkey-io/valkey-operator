@@ -463,6 +463,7 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 		sts.Status.ObservedGeneration = sts.Generation
 		sts.Status.Replicas = 1
 		sts.Status.ReadyReplicas = 1
+		sts.Status.UpdatedReplicas = 1
 		sts.Status.CurrentRevision = "rev-1"
 		sts.Status.UpdateRevision = "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())

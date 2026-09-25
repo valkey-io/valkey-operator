@@ -174,10 +174,16 @@ func TestNeedsProactiveFailoverForRoll(t *testing.T) {
 		assert.False(t, needsProactiveFailoverForRoll(current, desired, "rev-a"))
 	})
 
-	t.Run("unknown live template does not need failover", func(t *testing.T) {
-		// No live workload means the coming update creates rather than rolls.
+	t.Run("missing workload with a running pod needs failover on a revision change", func(t *testing.T) {
+		// The workload was orphan-deleted and the pod kept running; its
+		// template is unknown, so a new revision may replace it.
 		current, desired := base()
 		desired.Spec.WorkloadRevision = "rev-b"
+		assert.True(t, needsProactiveFailoverForRoll(current, desired, ""))
+	})
+
+	t.Run("missing workload with an unchanged revision does not need failover", func(t *testing.T) {
+		current, desired := base()
 		assert.False(t, needsProactiveFailoverForRoll(current, desired, ""))
 	})
 

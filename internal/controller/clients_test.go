@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // stubClient satisfies vclient.Client for tests that never issue commands.
@@ -53,77 +54,17 @@ type stubClient struct {
 func (s *stubClient) Close() { s.closed++ }
 
 // recordNewClient returns a newClient func that records each option and
-// answers with the next error from errs, or stub once errs runs out.
-func recordNewClient(got *[]vclient.ClientOption, stub *stubClient, errs ...error) func(vclient.ClientOption) (vclient.Client, error) {
+// answers with a new stubClient.
+func recordNewClient(got *[]vclient.ClientOption) func(vclient.ClientOption) (vclient.Client, error) {
 	return func(opt vclient.ClientOption) (vclient.Client, error) {
 		*got = append(*got, opt)
-		if len(errs) > 0 {
-			err := errs[0]
-			errs = errs[1:]
-			return nil, err
-		}
-		return stub, nil
+		return &stubClient{}, nil
 	}
 }
 
-func TestDialValkey(t *testing.T) {
-	ctx := context.Background()
-	cfg := connConfig{username: operatorUser, password: "pw"}
-	wrongpass := errors.New("WRONGPASS invalid username-password pair or user is disabled.")
-
-	t.Run("builds a single-node option with the tuned buffers", func(t *testing.T) {
-		var got []vclient.ClientOption
-		stub := &stubClient{}
-		c, release, err := dialValkey(ctx, recordNewClient(&got, stub), "10.0.0.1:6379", cfg)
-		require.NoError(t, err)
-		require.Len(t, got, 1)
-		assert.Equal(t, []string{"10.0.0.1:6379"}, got[0].InitAddress)
-		assert.True(t, got[0].ForceSingleClient)
-		assert.Equal(t, operatorUser, got[0].Username)
-		assert.Equal(t, "pw", got[0].Password)
-		assert.Nil(t, got[0].TLSConfig)
-		assert.Equal(t, -1, got[0].PipelineMultiplex)
-		assert.Equal(t, 16*1024, got[0].ReadBufferEachConn)
-		assert.Equal(t, 8*1024, got[0].WriteBufferEachConn)
-		assert.Equal(t, 4, got[0].RingScaleEachConn)
-		assert.Same(t, stub, c)
-
-		release()
-		assert.Equal(t, 1, stub.closed)
-	})
-
-	t.Run("retries once as the default user on WRONGPASS", func(t *testing.T) {
-		var got []vclient.ClientOption
-		stub := &stubClient{}
-		c, _, err := dialValkey(ctx, recordNewClient(&got, stub, wrongpass), "10.0.0.1:6379", cfg)
-		require.NoError(t, err)
-		require.Len(t, got, 2)
-		assert.Empty(t, got[1].Username)
-		assert.Empty(t, got[1].Password)
-		assert.Same(t, stub, c)
-	})
-
-	t.Run("returns the retry's error when the fallback also fails", func(t *testing.T) {
-		var got []vclient.ClientOption
-		noauth := errors.New("NOAUTH Authentication required.")
-		c, release, err := dialValkey(ctx, recordNewClient(&got, &stubClient{}, wrongpass, noauth), "10.0.0.1:6379", cfg)
-		require.ErrorIs(t, err, noauth)
-		assert.Len(t, got, 2)
-		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
-	})
-
-	t.Run("returns other errors without retrying", func(t *testing.T) {
-		var got []vclient.ClientOption
-		refused := errors.New("dial tcp 10.0.0.1:6379: connect: connection refused")
-		c, release, err := dialValkey(ctx, recordNewClient(&got, &stubClient{}, refused), "10.0.0.1:6379", cfg)
-		require.ErrorIs(t, err, refused)
-		assert.Len(t, got, 1)
-		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
-	})
+// newTestProvider returns a provider whose pool records each option it dials.
+func newTestProvider(c client.Client, got *[]vclient.ClientOption) ClientProvider {
+	return NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, recordNewClient(got)))
 }
 
 func providerTestClient(t *testing.T, objs ...client.Object) client.WithWatch {
@@ -192,36 +133,35 @@ func TestForCluster(t *testing.T) {
 	mTLS := tlsOn.DeepCopy()
 	mTLS.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
 
-	provider := func(c client.Client, got *[]vclient.ClientOption) *unpooledProvider {
-		return &unpooledProvider{client: c, apiReader: c, newClient: recordNewClient(got, &stubClient{})}
-	}
-
 	t.Run("TLS off dials with operator credentials", func(t *testing.T) {
 		var got []vclient.ClientOption
-		p := provider(providerTestClient(t, operatorPasswordSecret()), &got)
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret()), &got)
 		dial, err := p.ForCluster(ctx, newCluster(nil))
 		require.NoError(t, err)
 
-		_, release, err := dial(ctx, "10.0.0.1:6379")
+		_, err = dial(ctx, "10.0.0.1:6379")
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		assert.Equal(t, []string{"10.0.0.1:6379"}, got[0].InitAddress)
+		assert.True(t, got[0].ForceSingleClient)
 		assert.Equal(t, operatorUser, got[0].Username)
 		assert.Equal(t, "pw", got[0].Password)
 		assert.Nil(t, got[0].TLSConfig)
+		assert.Equal(t, -1, got[0].PipelineMultiplex)
+		assert.Equal(t, 16*1024, got[0].ReadBufferEachConn)
+		assert.Equal(t, 8*1024, got[0].WriteBufferEachConn)
+		assert.Equal(t, 4, got[0].RingScaleEachConn)
 	})
 
 	t.Run("TLS on sets the CA and server name", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
 		cluster := newCluster(tlsOn)
-		dial, err := provider(c, &got).ForCluster(ctx, cluster)
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		dial, err := p.ForCluster(ctx, cluster)
 		require.NoError(t, err)
 
-		_, release, err := dial(ctx, "10.0.0.1:6379")
+		_, err = dial(ctx, "10.0.0.1:6379")
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
 		assert.NotNil(t, got[0].TLSConfig.RootCAs)
@@ -231,13 +171,12 @@ func TestForCluster(t *testing.T) {
 
 	t.Run("mTLS presents the client certificate", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
-		dial, err := provider(c, &got).ForCluster(ctx, newCluster(mTLS))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		dial, err := p.ForCluster(ctx, newCluster(mTLS))
 		require.NoError(t, err)
 
-		_, release, err := dial(ctx, "10.0.0.1:6379")
+		_, err = dial(ctx, "10.0.0.1:6379")
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
 		assert.Len(t, got[0].TLSConfig.Certificates, 1)
@@ -245,28 +184,41 @@ func TestForCluster(t *testing.T) {
 
 	t.Run("missing TLS secret fails every dial without dialling", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret())
-		dial, err := provider(c, &got).ForCluster(ctx, newCluster(tlsOn))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret()), &got)
+		dial, err := p.ForCluster(ctx, newCluster(tlsOn))
 		require.NoError(t, err, "a missing TLS secret must not stop the cluster reconcile")
 		require.NotNil(t, dial)
 
 		for _, address := range []string{"10.0.0.1:6379", "10.0.0.2:6379"} {
-			client, release, err := dial(ctx, address)
+			c, err := dial(ctx, address)
 			require.ErrorContains(t, err, "TLS config")
-			assert.Nil(t, client)
-			require.NotNil(t, release)
-			release()
+			assert.Nil(t, c)
 		}
 		assert.Empty(t, got)
 	})
 
 	t.Run("missing operator password secret is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
-		dial, err := provider(providerTestClient(t), &got).ForCluster(ctx, newCluster(nil))
+		dial, err := newTestProvider(providerTestClient(t), &got).ForCluster(ctx, newCluster(nil))
 		require.Error(t, err)
 		assert.True(t, apierrors.IsNotFound(err))
 		assert.Nil(t, dial)
 		assert.Empty(t, got)
+	})
+
+	t.Run("reuses the client across scrapes", func(t *testing.T) {
+		var got []vclient.ClientOption
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		clients := make([]vclient.Client, 0, 2)
+		for range 2 {
+			dial, err := p.ForCluster(ctx, newCluster(tlsOn))
+			require.NoError(t, err)
+			c, err := dial(ctx, "10.0.0.1:6379")
+			require.NoError(t, err)
+			clients = append(clients, c)
+		}
+		assert.Same(t, clients[0], clients[1])
+		assert.Len(t, got, 1)
 	})
 }
 
@@ -289,26 +241,19 @@ func TestForNode(t *testing.T) {
 	mTLS := tlsOn.DeepCopy()
 	mTLS.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
 
-	provider := func(c client.Client, got *[]vclient.ClientOption) *unpooledProvider {
-		return &unpooledProvider{client: c, apiReader: c, newClient: recordNewClient(got, &stubClient{})}
-	}
-
 	t.Run("no pod IP is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c, release, err := provider(providerTestClient(t), &got).ForNode(ctx, newNode("", inCluster, nil))
+		c, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("", inCluster, nil))
 		require.ErrorContains(t, err, "no pod IP")
 		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
 		assert.Empty(t, got)
 	})
 
 	t.Run("cluster node dials its pod with operator credentials", func(t *testing.T) {
 		var got []vclient.ClientOption
-		p := provider(providerTestClient(t, operatorPasswordSecret()), &got)
-		_, release, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret()), &got)
+		_, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		assert.Equal(t, []string{"10.0.0.5:6379"}, got[0].InitAddress)
 		assert.Equal(t, operatorUser, got[0].Username)
@@ -318,9 +263,8 @@ func TestForNode(t *testing.T) {
 
 	t.Run("node outside a cluster dials as the default user", func(t *testing.T) {
 		var got []vclient.ClientOption
-		_, release, err := provider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", nil, nil))
+		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", nil, nil))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Username)
 		assert.Empty(t, got[0].Password)
@@ -328,9 +272,8 @@ func TestForNode(t *testing.T) {
 
 	t.Run("missing password secret dials as the default user", func(t *testing.T) {
 		var got []vclient.ClientOption
-		_, release, err := provider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Username)
 		assert.Empty(t, got[0].Password)
@@ -340,9 +283,8 @@ func TestForNode(t *testing.T) {
 		var got []vclient.ClientOption
 		secret := operatorPasswordSecret()
 		secret.Data = map[string][]byte{"_exporter": []byte("other")}
-		_, release, err := provider(providerTestClient(t, secret), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		_, err := newTestProvider(providerTestClient(t, secret), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Username)
 		assert.Empty(t, got[0].Password)
@@ -358,19 +300,17 @@ func TestForNode(t *testing.T) {
 				return timeout
 			},
 		}).Build()
-		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		vc, err := newTestProvider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
 		require.ErrorIs(t, err, timeout)
-		require.NotNil(t, release)
-		release()
+		assert.Nil(t, vc)
 		assert.Empty(t, got)
 	})
 
 	t.Run("TLS on sets the CA and server name", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
-		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		_, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
 		assert.NotNil(t, got[0].TLSConfig.RootCAs)
@@ -380,10 +320,9 @@ func TestForNode(t *testing.T) {
 
 	t.Run("mTLS presents the client certificate", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
-		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, mTLS))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		_, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, mTLS))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
 		assert.Len(t, got[0].TLSConfig.Certificates, 1)
@@ -397,9 +336,8 @@ func TestForNode(t *testing.T) {
 		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
 		noServerName := tlsOn.DeepCopy()
 		noServerName.ServerName = ""
-		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, noServerName))
+		_, err := newTestProvider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, noServerName))
 		require.NoError(t, err)
-		defer release()
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
 		assert.Equal(t, "valkey-vc.ns.svc.cluster.local", got[0].TLSConfig.ServerName)
@@ -407,11 +345,144 @@ func TestForNode(t *testing.T) {
 
 	t.Run("missing TLS secret is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
-		c := providerTestClient(t, operatorPasswordSecret())
-		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret()), &got)
+		c, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
 		require.ErrorContains(t, err, "TLS config")
-		require.NotNil(t, release)
-		release()
+		assert.Nil(t, c)
 		assert.Empty(t, got)
 	})
+
+	t.Run("reuses the client across calls", func(t *testing.T) {
+		var got []vclient.ClientOption
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+		first, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
+		require.NoError(t, err)
+		second, err := p.ForNode(ctx, newNode("10.0.0.5", inCluster, tlsOn))
+		require.NoError(t, err)
+		assert.Same(t, first, second)
+		assert.Len(t, got, 1)
+	})
+
+	t.Run("moves to operator credentials once the password secret exists", func(t *testing.T) {
+		var got []vclient.ClientOption
+		c := providerTestClient(t)
+		p := newTestProvider(c, &got)
+		node := newNode("10.0.0.5", inCluster, nil)
+		before, err := p.ForNode(ctx, node)
+		require.NoError(t, err)
+
+		require.NoError(t, c.Create(ctx, operatorPasswordSecret()))
+		after, err := p.ForNode(ctx, node)
+		require.NoError(t, err)
+
+		assert.NotSame(t, before, after)
+		require.Len(t, got, 2)
+		assert.Equal(t, operatorUser, got[1].Username)
+		assert.Equal(t, 1, before.(*stubClient).closed)
+	})
+}
+
+func TestForNodeRebuildsOnTLSChange(t *testing.T) {
+	ctx := context.Background()
+	for name, change := range map[string]func(t *testing.T, c client.Client, spec *valkeyiov1alpha1.NodeTLSSpec){
+		"secret updated": func(t *testing.T, c client.Client, _ *valkeyiov1alpha1.NodeTLSSpec) {
+			secret := &corev1.Secret{}
+			require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "vc-tls"}, secret))
+			secret.Labels = map[string]string{"renewed": "true"}
+			require.NoError(t, c.Update(ctx, secret))
+		},
+		"server name changed": func(_ *testing.T, _ client.Client, spec *valkeyiov1alpha1.NodeTLSSpec) {
+			spec.ServerName = "other.ns.svc"
+		},
+		"client certificate required": func(_ *testing.T, _ client.Client, spec *valkeyiov1alpha1.NodeTLSSpec) {
+			spec.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got []vclient.ClientOption
+			c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
+			p := newTestProvider(c, &got)
+			node := &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{TLS: &valkeyiov1alpha1.NodeTLSSpec{
+					ServerName: "vc.ns.svc",
+					Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+						Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "vc-tls"},
+					},
+				}},
+				Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.5"},
+			}
+			before, err := p.ForNode(ctx, node)
+			require.NoError(t, err)
+
+			change(t, c, node.Spec.TLS)
+			after, err := p.ForNode(ctx, node)
+			require.NoError(t, err)
+
+			assert.NotSame(t, before, after)
+			assert.Len(t, got, 2)
+			assert.Equal(t, 1, before.(*stubClient).closed)
+		})
+	}
+}
+
+func TestProviderSharesClientsAcrossPaths(t *testing.T) {
+	ctx := context.Background()
+	tlsOn := &valkeyiov1alpha1.TLSSpec{
+		Certificates: valkeyiov1alpha1.TLSCertificates{
+			Server: valkeyiov1alpha1.CertificateSource{SecretName: "vc-tls"},
+		},
+	}
+	for name, tc := range map[string]struct {
+		tlsSpec *valkeyiov1alpha1.TLSSpec
+		// noServerName leaves spec.tls.serverName empty on the node, as on a
+		// ValkeyNode created by v0.6.0.
+		noServerName bool
+	}{
+		"TLS off":             {},
+		"TLS on":              {tlsSpec: tlsOn},
+		"TLS on, v0.6.0 node": {tlsSpec: tlsOn, noServerName: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got []vclient.ClientOption
+			p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "vc", Namespace: "ns"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Networking: &valkeyiov1alpha1.NetworkingSpec{TLS: tc.tlsSpec},
+				},
+			}
+			// The cluster controller builds each ValkeyNode's TLS the same way.
+			node := &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{TLS: nodeTLSFromCluster(cluster)},
+				Status:     valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.5"},
+			}
+			if tc.noServerName {
+				node.Spec.TLS.ServerName = ""
+			}
+
+			dial, err := p.ForCluster(ctx, cluster)
+			require.NoError(t, err)
+			fromScrape, err := dial(ctx, "10.0.0.5:6379")
+			require.NoError(t, err)
+			fromNode, err := p.ForNode(ctx, node)
+			require.NoError(t, err)
+
+			assert.Same(t, fromScrape, fromNode)
+			assert.Len(t, got, 1)
+		})
+	}
+}
+
+func TestValkeyClientsFallbackIsBuiltOnce(t *testing.T) {
+	c := providerTestClient(t)
+
+	cluster := &ValkeyClusterReconciler{Client: c, APIReader: c}
+	assert.Same(t, cluster.valkeyClients(), cluster.valkeyClients())
+	node := &ValkeyNodeReconciler{Client: c, APIReader: c}
+	assert.Same(t, node.valkeyClients(), node.valkeyClients())
+
+	set := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
+	assert.Same(t, set, (&ValkeyNodeReconciler{ValkeyClients: set}).valkeyClients())
 }

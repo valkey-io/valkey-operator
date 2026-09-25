@@ -238,15 +238,19 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 }
 
 // GetSyncedReplicas returns replica nodes that are connected and have their
-// replication link up (master_link_status:up). Nodes with fail/pfail flags
-// are excluded.
-func (s *ShardState) GetSyncedReplicas() []*NodeState {
+// replication link up (master_link_status:up). A replica that a majority of
+// the other live nodes report as failing ("fail" or "fail?") is excluded.
+// That view has to come from the peers, since a node's own CLUSTER NODES
+// entry never carries a failure flag, and it has to be a majority, since a
+// node cut off from the bus flags every peer in its own table and would
+// otherwise leave no failover target anywhere.
+func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	var replicas []*NodeState
 	for _, node := range s.Nodes {
 		if node.Id == s.PrimaryId {
 			continue
 		}
-		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+		if state.IsNodeFailedByMajority(node.Id) {
 			continue
 		}
 		if node.Info["master_link_status"] != "up" {
@@ -255,6 +259,14 @@ func (s *ShardState) GetSyncedReplicas() []*NodeState {
 		replicas = append(replicas, node)
 	}
 	return replicas
+}
+
+// SetClusterNodesForTesting replaces the node's peer table with one parsed
+// from raw CLUSTER NODES output. The scrape fills the table for live nodes;
+// tests in other packages use this to build a node with a particular view of
+// its peers, and nothing else should.
+func (n *NodeState) SetClusterNodesForTesting(raw string) {
+	n.nodes = ParseClusterNodes(raw)
 }
 
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
@@ -326,6 +338,21 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// clusterSize returns cluster_size from CLUSTER INFO: cluster->size in Valkey,
+// every primary that owns slots, reachable or not. Takes the largest value any
+// scraped node reports, in case gossip has not fully propagated.
+func (s *ClusterState) clusterSize() int {
+	var size int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if n, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && n > size {
+				size = n
+			}
+		}
+	}
+	return size
+}
+
 // HasFailoverQuorum returns true if a majority of slot-owning primaries are
 // reachable. Valkey requires a majority of primaries to vote in a failover
 // election; if quorum is unreachable, no automatic failover can succeed.
@@ -335,22 +362,64 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	if len(s.Shards) == 0 {
 		return false
 	}
-	var livePrimaries, clusterSize int
+	var livePrimaries int
 	for _, shard := range s.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
 			livePrimaries++
 		}
-		for _, node := range shard.Nodes {
-			// Take the max across nodes in case gossip hasn't fully propagated.
-			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
-				clusterSize = size
-			}
-		}
 	}
+	clusterSize := s.clusterSize()
 	if clusterSize == 0 {
 		return false
 	}
 	return livePrimaries > (clusterSize / 2)
+}
+
+// IsNodeFailedByMajority reports whether nodeId is down by the evidence the
+// peers hold, weighing the two flags the way Valkey does. A confirmed "fail"
+// is authoritative from any viewer: Valkey only sets it once a majority of
+// primaries reported the node unreachable, and then broadcasts it, so one
+// table carrying it already stands for a cluster-wide decision. A "fail?" is
+// one node's own opinion, and a node cut off from the cluster bus marks every
+// peer that way in its own table, so it counts only with the quorum Valkey
+// itself requires before promoting it: reports from at least size/2+1 voting
+// primaries, where size is cluster_size from CLUSTER INFO, every primary that
+// owns slots. That is cluster->size in Valkey and the denominator
+// HasFailoverQuorum already uses, so a primary the scrape never reached, or
+// one that has no entry for nodeId yet, still counts as a voter that has not
+// reported. A replica's suspicion never reaches that vote. IsNodeFailed keeps
+// the any-viewer rule for both flags on the takeover path, where one report
+// is the trigger.
+func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
+	var reports int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Id == nodeId {
+				continue // its own entry never carries a failure flag
+			}
+			for _, entry := range node.nodes {
+				if entry.Id != nodeId {
+					continue
+				}
+				if entry.HasFlag("fail") {
+					return true
+				}
+				if node.isVotingPrimary() && entry.HasFlag("fail?") {
+					reports++
+				}
+				break
+			}
+		}
+	}
+	size := s.clusterSize()
+	return size > 0 && reports >= size/2+1
+}
+
+// isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns
+// slots, which is the only kind of node whose failure reports Valkey counts.
+func (n *NodeState) isVotingPrimary() bool {
+	myself := n.Myself()
+	return n.IsPrimary() && myself != nil && myself.HasSlotAssignment()
 }
 
 // IsNodeFailed returns true if any live node reports the given node ID as

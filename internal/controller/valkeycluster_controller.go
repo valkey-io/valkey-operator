@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -62,9 +63,12 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
-	// ValkeyClients dials Valkey nodes. Nil falls back to a provider built from
-	// Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. Nil falls back to a
+	// provider and pool built on first use from Client and APIReader.
 	ValkeyClients ClientProvider
+
+	fallbackOnce    sync.Once
+	fallbackClients ClientProvider
 
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
@@ -221,7 +225,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	state := r.scrapeClusterState(ctx, nodes, dial)
-	defer state.CloseClients()
 
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says

@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	vclient "github.com/valkey-io/valkey-go"
@@ -74,13 +75,11 @@ type valkeyConfigClient interface {
 	// rather than an error, so a user that has not been loaded yet reads as out
 	// of sync.
 	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
-	Close()
 }
 
 // realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
 type realValkeyConfigClient struct {
-	client  vclient.Client
-	release func()
+	client vclient.Client
 }
 
 func (rc *realValkeyConfigClient) SetConfig(ctx context.Context, params map[string]string) error {
@@ -131,15 +130,13 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	return normalizeHashes(hashes), nil
 }
 
-func (rc *realValkeyConfigClient) Close() { rc.release() }
-
-// realConfigClient opens a real Valkey connection to the node's pod.
+// realConfigClient returns the pooled client for the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		return nil, err
 	}
-	return &realValkeyConfigClient{client: c, release: release}, nil
+	return &realValkeyConfigClient{client: c}, nil
 }
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -148,12 +145,15 @@ type ValkeyNodeReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
-	// ValkeyClients dials the node's pod. Nil falls back to a provider built from
-	// Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. Nil falls back to a
+	// provider and pool built on first use from Client and APIReader.
 	ValkeyClients ClientProvider
-	// newConfigClient opens a Valkey client to a node's pod for live config
-	// application. SetupWithManager defaults it to realConfigClient; tests
-	// override it with a fake.
+
+	fallbackOnce    sync.Once
+	fallbackClients ClientProvider
+	// newConfigClient returns the pooled client for a node's pod, for live
+	// config application. SetupWithManager defaults it to realConfigClient;
+	// tests override it with a fake.
 	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
 	// RoleEvents carries reconcile triggers from the RolePoller, which detects
 	// role changes that produce no Kubernetes event (a failover between two
@@ -1070,11 +1070,10 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		return "", err
 	}
-	defer release()
 	return c.Do(ctx, c.B().Info().Build()).ToString()
 }
 
@@ -1177,12 +1176,11 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.valkeyClients().ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""
 	}
-	defer release()
 
 	info, err := c.Do(ctx, c.B().Info().Build()).ToString()
 	if err != nil {
@@ -1215,7 +1213,6 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
 
 	if err := c.SetConfig(ctx, params); err != nil {
 		return false, err

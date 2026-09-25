@@ -101,7 +101,7 @@ body:
     attributes:
       label: Kubernetes version
       description: Output of `kubectl version` (server version is what matters).
-      placeholder: e.g. v1.31.2
+      placeholder: e.g. v1.32.11
     validations:
       required: true
 

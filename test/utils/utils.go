@@ -297,17 +297,30 @@ type ValkeyCLIOptions struct {
 }
 
 // valkeyCLIPrefix builds the shell prologue and valkey-cli invocation shared by
-// the helpers below.
+// the helpers below. A password is read from $1 rather than interpolated, so
+// shell metacharacters in it reach valkey-cli intact; callers pass it via
+// valkeyCLIArgs.
 func valkeyCLIPrefix(opts ValkeyCLIOptions) (prologue, cli string) {
 	prologue = "unset VALKEYCLI_AUTH REDISCLI_AUTH; "
 	if opts.Password != "" {
-		prologue = fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", opts.Password)
+		prologue = `export VALKEYCLI_AUTH="$1"; `
 	}
-	cli = "valkey-cli -c -h 127.0.0.1"
+	cli = "valkey-cli -e -c -h 127.0.0.1"
 	if opts.ConnectTimeoutSeconds > 0 {
-		cli = fmt.Sprintf("valkey-cli -t %d -c -h 127.0.0.1", opts.ConnectTimeoutSeconds)
+		cli = fmt.Sprintf("valkey-cli -e -t %d -c -h 127.0.0.1", opts.ConnectTimeoutSeconds)
 	}
 	return prologue, cli
+}
+
+// valkeyCLIArgs returns the kubectl arguments running script in pod's server
+// container, appending the password as $1 when one is set.
+func valkeyCLIArgs(pod, script string, opts ValkeyCLIOptions) []string {
+	args := []string{"exec", pod, "-c", "server", "--", "sh", "-c", script}
+	if opts.Password != "" {
+		// "sh" fills $0, so the password lands in $1.
+		args = append(args, "sh", opts.Password)
+	}
+	return args
 }
 
 // WriteValkeyKeys writes count keys named <prefix>:<n> with value val:<n>
@@ -319,7 +332,7 @@ func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error
 	script := fmt.Sprintf(
 		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s | grep -c '^OK$'",
 		prologue, count, prefix, cli)
-	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	out, err := Run(exec.Command("kubectl", valkeyCLIArgs(pod, script, opts)...))
 	if err != nil {
 		return fmt.Errorf("writing %d keys to %s: %w (output: %s)", count, pod, err, out)
 	}
@@ -335,9 +348,10 @@ func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int,
 	prologue, cli := valkeyCLIPrefix(opts)
 	// Generate commands, execute them and verify replies.
 	script := fmt.Sprintf(
-		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s | awk -v v=val: '$0 == v NR {ok++} END{print ok+0}'",
+		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s"+
+			" | awk -v v=val: '/^val:/{n++; if ($0 == v n) ok++} END{print ok+0}'",
 		prologue, count, prefix, cli)
-	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	out, err := Run(exec.Command("kubectl", valkeyCLIArgs(pod, script, opts)...))
 	if err != nil {
 		return 0, fmt.Errorf("reading %d keys from %s: %w (output: %s)", count, pod, err, out)
 	}
@@ -348,26 +362,13 @@ func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int,
 	return found, nil
 }
 
-// ValkeyCLI runs a valkey-cli command in pod's server container. valkey-cli
-// exits 0 and prints the reply even when the server returns an error, so an
-// error reply is reported here rather than being left to a confusing downstream
-// assertion.
+// ValkeyCLI runs a valkey-cli command in pod's server container. The -e flag
+// makes valkey-cli exit non-zero on any error reply, which Run turns into an
+// error rather than leaving it to a confusing downstream assertion.
 func ValkeyCLI(pod string, opts ValkeyCLIOptions, args ...string) (string, error) {
 	prologue, cli := valkeyCLIPrefix(opts)
 	script := fmt.Sprintf("%s%s %s", prologue, cli, strings.Join(args, " "))
-	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
-	if err != nil {
-		return out, err
-	}
-	for _, line := range GetNonEmptyLines(out) {
-		line = strings.TrimSpace(line)
-		for _, p := range []string{"ERR ", "WRONGPASS", "NOPERM", "NOAUTH", "CLUSTERDOWN", "MASTERDOWN"} {
-			if strings.HasPrefix(line, p) {
-				return out, fmt.Errorf("valkey-cli %s replied: %s", strings.Join(args, " "), line)
-			}
-		}
-	}
-	return out, nil
+	return Run(exec.Command("kubectl", valkeyCLIArgs(pod, script, opts)...))
 }
 
 // GetEvents fetches and categorizes Kubernetes events for a given resource.

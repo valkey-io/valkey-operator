@@ -124,6 +124,14 @@ type ValkeyNodeSpec struct {
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 
+	// ServiceAccountName is the name of the Kubernetes ServiceAccount used by
+	// the ValkeyNode pod.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
 	// TerminationGracePeriodSeconds is the pod termination grace period, set by
 	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
 	// can complete before SIGKILL.

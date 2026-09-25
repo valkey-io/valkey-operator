@@ -64,8 +64,7 @@ type RolePoller struct {
 
 	// scrapeFunc, when set, overrides how the poller reads live cluster state.
 	// Tests inject a fake (envtest has no running Valkey server); production
-	// leaves it nil and dials through ValkeyClients. This is also the seam
-	// where pooled clients replace per-tick connections.
+	// leaves it nil and dials through ValkeyClients.
 	scrapeFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState
 
 	// backoff tracks consecutive scrape failures per node. Entries are pruned

@@ -76,16 +76,19 @@ func dialValkey(ctx context.Context, newClient func(vclient.ClientOption) (vclie
 type ClientProvider interface {
 	// ForCluster resolves the cluster's TLS config and operator credentials
 	// once and returns a DialFunc that connects to any of its nodes with them.
+	// It returns an error only when the operator password cannot be read. A
+	// TLS config that cannot be built fails each dial instead.
 	ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error)
 }
 
-// NewClientProvider returns a ClientProvider that dials a new client per call.
-// c reads the operator password secret, apiReader the TLS secret.
+// NewClientProvider returns a ClientProvider that dials a new client per call
+// and closes it on release. c reads the operator password secret, apiReader
+// the TLS secret.
 func NewClientProvider(c client.Client, apiReader client.Reader) ClientProvider {
-	return &nodeClientProvider{client: c, apiReader: apiReader, newClient: vclient.NewClient}
+	return &unpooledProvider{client: c, apiReader: apiReader, newClient: vclient.NewClient}
 }
 
-type nodeClientProvider struct {
+type unpooledProvider struct {
 	client    client.Client
 	apiReader client.Reader
 	// newClient is vclient.NewClient; tests replace it.
@@ -93,14 +96,14 @@ type nodeClientProvider struct {
 }
 
 // tlsConfig returns nil when spec names no server certificate secret.
-func (p *nodeClientProvider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, error) {
+func (p *unpooledProvider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, error) {
 	if spec == nil || spec.Certificates.Server.SecretName == "" {
 		return nil, nil
 	}
 	return getTLSConfig(ctx, p.apiReader, spec.Certificates.Server.SecretName, spec.ServerName, namespace, spec.RequiresClientCertificate())
 }
 
-func (p *nodeClientProvider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
+func (p *unpooledProvider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
 	password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, cluster.Name, cluster.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("operator password: %w", err)

@@ -542,7 +542,7 @@ func (r *ValkeyNodeReconciler) orphanAndRecreateStatefulSet(
 ) (*appsv1.StatefulSet, error) {
 	log := logf.FromContext(ctx)
 	from, to := live.Spec.ServiceName, desired.Spec.ServiceName
-	log.Info("StatefulSet serviceName changed; orphan-recreating STS with live template",
+	log.Info("StatefulSet serviceName changed; orphan-recreating STS",
 		"name", live.Name, "from", from, "to", to)
 	recreated := statefulSetAfterServiceNameChange(desired, live)
 	if err := controllerutil.SetControllerReference(node, recreated, r.Scheme); err != nil {
@@ -582,7 +582,7 @@ func (r *ValkeyNodeReconciler) orphanAndRecreateStatefulSet(
 		}
 	}
 	r.Recorder.Eventf(node, nil, corev1.EventTypeNormal, "StatefulSetServiceNameChange", "EnsureStatefulSet",
-		"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q; pod template left unchanged until WorkloadRevision allows a roll",
+		"Recreated StatefulSet %s (orphan) to change serviceName from %q to %q",
 		live.Name, from, to)
 	return recreated, nil
 }

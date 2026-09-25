@@ -174,7 +174,7 @@ func TestNeedsProactiveFailoverForRoll(t *testing.T) {
 		assert.False(t, needsProactiveFailoverForRoll(current, desired, "rev-a"))
 	})
 
-	t.Run("missing workload with a running pod needs failover on a revision change", func(t *testing.T) {
+	t.Run("missing workload with a recorded pod IP needs failover on a revision change", func(t *testing.T) {
 		// The workload was orphan-deleted and the pod kept running; its
 		// template is unknown, so a new revision may replace it.
 		current, desired := base()

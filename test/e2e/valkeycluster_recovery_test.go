@@ -78,6 +78,15 @@ var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), f
 		_, _ = utils.Run(cmd)
 	}
 
+	// collectOnFailure gathers operator logs and the events of the namespace
+	// holding the cluster's pods.
+	collectOnFailure := func() {
+		if CurrentSpecReport().Failed() {
+			utils.CollectDebugInfo("default")
+			utils.CollectDebugInfo(namespace)
+		}
+	}
+
 	// Scaling replicas down while a shard's primary sits above the new node-index
 	// bound puts the primary on a node the desired topology no longer includes, so
 	// completing the scale-down means removing the node currently serving the
@@ -88,6 +97,7 @@ var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), f
 		const seedKeys = 500
 
 		AfterEach(func() {
+			collectOnFailure()
 			deleteCluster(clusterName)
 		})
 
@@ -165,6 +175,7 @@ spec:
 		lostShards := []int{0, 1}
 
 		AfterEach(func() {
+			collectOnFailure()
 			deleteCluster(clusterName)
 		})
 

@@ -1091,8 +1091,9 @@ func TestCloseClientsReleasesEveryNode(t *testing.T) {
 	}
 
 	state.CloseClients()
+	state.CloseClients()
 
 	if released != 3 {
-		t.Fatalf("released %d clients, want 3", released)
+		t.Fatalf("released %d clients, want 3 (each once)", released)
 	}
 }

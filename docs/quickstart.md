@@ -4,8 +4,8 @@ Deploy a Valkey Cluster on Kubernetes in under 5 minutes.
 
 ## Prerequisites
 
-- Kubernetes cluster v1.32+
-- kubectl v1.32+
+- Kubernetes cluster v1.31+
+- kubectl v1.31+
 - Helm 3
 
 ## 1. Install the operator

@@ -1991,7 +1991,7 @@ spec:
                         x-kubernetes-validations:
                         - message: must be a valid DNS-1123 subdomain (lowercase alphanumerics,
                             '-' and '.', starting and ending with an alphanumeric)
-                          rule: '!format.dns1123Subdomain().validate(self).hasValue()'
+                          rule: self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')
                     required:
                     - certificates
                     type: object

@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -518,3 +520,8 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 		}, 10*time.Second, 200*time.Millisecond).Should(Equal(RolePrimary))
 	})
 })
+
+func TestRolePollerStartRequiresValkeyClients(t *testing.T) {
+	err := (&RolePoller{}).Start(context.Background())
+	require.ErrorContains(t, err, "ClientProvider")
+}

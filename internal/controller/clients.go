@@ -140,7 +140,12 @@ func (p *unpooledProvider) ForNode(ctx context.Context, node *valkeyiov1alpha1.V
 	if node.Status.PodIP == "" {
 		return nil, func() {}, fmt.Errorf("node %s has no pod IP", node.Name)
 	}
-	tlsCfg, err := p.tlsConfig(ctx, node.Namespace, node.Spec.TLS)
+	tlsSpec := node.Spec.TLS
+	if tlsSpec != nil {
+		tlsSpec = tlsSpec.DeepCopy()
+		tlsSpec.ServerName = nodeTLSServerName(node)
+	}
+	tlsCfg, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("TLS config: %w", err)
 	}

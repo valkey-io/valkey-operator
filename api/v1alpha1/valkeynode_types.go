@@ -162,7 +162,9 @@ type NodeTLSSpec struct {
 	// ServerName is the hostname used for TLS verification when connecting
 	// to the pod IP. For cluster-owned nodes this is
 	// spec.networking.tls.serverName, or
-	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset.
+	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset. When this
+	// field is empty on a node with the valkey.io/cluster label, the node
+	// controller verifies against that default name.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253

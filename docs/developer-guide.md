@@ -80,8 +80,8 @@ falling out of ACL coverage.
 
 - Go v1.25.0+.
 - Docker or Podman.
-- kubectl v1.31+.
-- Access to a Kubernetes v1.31+ cluster.
+- kubectl v1.32+.
+- Access to a Kubernetes v1.32+ cluster.
 
 ## Build and deploy from source
 

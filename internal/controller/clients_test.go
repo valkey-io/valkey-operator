@@ -389,6 +389,22 @@ func TestForNode(t *testing.T) {
 		assert.Len(t, got[0].TLSConfig.Certificates, 1)
 	})
 
+	// A ValkeyNode created by v0.6.0 has no spec.tls.serverName until the
+	// cluster controller updates it. Verifying against the pod IP would fail a
+	// certificate with DNS SANs only.
+	t.Run("cluster node without a server name verifies against the cluster default", func(t *testing.T) {
+		var got []vclient.ClientOption
+		c := providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t))
+		noServerName := tlsOn.DeepCopy()
+		noServerName.ServerName = ""
+		_, release, err := provider(c, &got).ForNode(ctx, newNode("10.0.0.5", inCluster, noServerName))
+		require.NoError(t, err)
+		defer release()
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].TLSConfig)
+		assert.Equal(t, "valkey-vc.ns.svc.cluster.local", got[0].TLSConfig.ServerName)
+	})
+
 	t.Run("missing TLS secret is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
 		c := providerTestClient(t, operatorPasswordSecret())

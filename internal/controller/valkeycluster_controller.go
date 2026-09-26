@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"reflect"
@@ -26,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	vclient "github.com/valkey-io/valkey-go"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1044,17 +1044,20 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // scrapeClusterState connects to the given addresses and builds a live topology
 // snapshot.
 func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
-	var tlsConfig *tls.Config
+	cfg := connConfig{username: username, password: password}
 	if tlsSpec := nodeTLSFromCluster(cluster); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate())
+		tlsCfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate())
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
 				"secretName", tlsSpec.Certificates.Server.SecretName)
 		} else {
-			tlsConfig = cfg
+			cfg.tls = tlsCfg
 		}
 	}
-	return valkey.GetClusterState(ctx, addresses, DefaultPort, username, password, tlsConfig)
+	dial := func(ctx context.Context, address string) (vclient.Client, func(), error) {
+		return dialValkey(ctx, vclient.NewClient, address, cfg)
+	}
+	return valkey.GetClusterState(ctx, addresses, DefaultPort, dial)
 }
 
 // healStaleAddressPeers re-introduces live cluster members to nodes whose

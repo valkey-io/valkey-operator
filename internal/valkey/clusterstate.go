@@ -591,10 +591,12 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		client.B().ClusterNodes().Build(),
 	)
 
-	// A pooled client can be stale: the server went away since the last use,
-	// but Get returned it without redialling. All five commands share one
-	// wire, so a transport-level failure on the first result means the whole
-	// round trip failed, not just one command.
+	// The round trip can fail without a dial error: a pooled client may point
+	// at a server that went away since its last use, or the caller's context
+	// may have expired, as when an earlier node used up the role poller's pass
+	// budget. All five commands share one wire, so a transport-level failure
+	// on the first result means the whole round trip failed, not just one
+	// command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
 		return nil

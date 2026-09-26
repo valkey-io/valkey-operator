@@ -54,7 +54,7 @@ const (
 type RolePoller struct {
 	// Client is cache-backed, so the per-tick List calls cost nothing.
 	Client client.Client
-	// ValkeyClients dials the nodes each pass scrapes.
+	// ValkeyClients returns the pooled client for each node a pass scrapes.
 	ValkeyClients ClientProvider
 	// Interval is how often live state is sampled. Zero means
 	// DefaultRolePollInterval.
@@ -226,7 +226,6 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	if state == nil {
 		return
 	}
-	defer state.CloseClients()
 
 	for _, node := range candidates {
 		key := client.ObjectKeyFromObject(node)

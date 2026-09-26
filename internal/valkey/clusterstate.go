@@ -28,18 +28,16 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// DialFunc connects to the Valkey node at address (host:port). On error the
-// client is nil and release is a no-op. The caller calls release once when done
-// with the client and never calls Close on it.
-type DialFunc func(ctx context.Context, address string) (client vclient.Client, release func(), err error)
+// DialFunc returns a client for the Valkey node at address (host:port). The
+// client belongs to whoever supplies the DialFunc; callers never call Close on
+// it.
+type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
 
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
-	// Client is for commands only. CloseClients releases it; never call Close
-	// on it directly.
-	Client vclient.Client
-	// release hands Client back to whoever dialled it.
-	release     func()
+	// Client is for commands only. It belongs to whoever supplies the
+	// DialFunc; never call Close on it.
+	Client      vclient.Client
 	Address     string
 	Port        int
 	Id          string
@@ -177,25 +175,6 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 		}
 	}
 	return &state
-}
-
-// CloseClients releases every node's client.
-func (s *ClusterState) CloseClients() {
-	for _, node := range s.PendingNodes {
-		node.releaseClient()
-	}
-	for _, shard := range s.Shards {
-		for _, node := range shard.Nodes {
-			node.releaseClient()
-		}
-	}
-}
-
-func (n *NodeState) releaseClient() {
-	if n.release != nil {
-		n.release()
-		n.release = nil
-	}
 }
 
 // GetUnassignedSlots returns all unassigned slots
@@ -591,16 +570,16 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 
 // Connect to a single Valkey node and scrapes its current state.
 func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
-	log := logf.FromContext(ctx)
+	hostPort := fmt.Sprintf("%s:%d", address, port)
+	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
-	client, release, err := dial(ctx, fmt.Sprintf("%s:%d", address, port))
+	client, err := dial(ctx, hostPort)
 	if err != nil {
 		log.Error(err, "failed to create Valkey client")
 		return nil
 	}
 
 	node := NodeState{Client: client,
-		release: release,
 		Address: address,
 		Port:    port}
 
@@ -611,6 +590,17 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		client.B().ClusterInfo().Build(),
 		client.B().ClusterNodes().Build(),
 	)
+
+	// The round trip can fail without a dial error: a pooled client may point
+	// at a server that went away since its last use, or the caller's context
+	// may have expired, as when an earlier node used up the role poller's pass
+	// budget. All five commands share one wire, so a transport-level failure
+	// on the first result means the whole round trip failed, not just one
+	// command.
+	if len(results) > 0 && results[0].NonValkeyError() != nil {
+		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
+		return nil
+	}
 
 	if len(results) == 5 {
 		id, err := results[0].ToString()

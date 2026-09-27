@@ -81,7 +81,13 @@ const (
 
 const (
 	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
-	tlsVolumeName = "tls-certs"
+	tlsVolumeName     = "tls-certs"
+	scriptsVolumeName = "scripts"
+	backupVolumeName  = "backup"
+
+	// envValkeyTLSArgs carries the valkey-cli flags for a TLS cluster to the
+	// probes, the backup dump and the restore guard.
+	envValkeyTLSArgs = "VALKEY_TLS_ARGS"
 	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
 	tlsCertMountPath = "/tls"
 	dataVolumeName   = "data"

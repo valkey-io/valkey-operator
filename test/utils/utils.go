@@ -440,9 +440,10 @@ func CollectDebugInfo(namespace string) {
 // CollectValkeyDebugInfo writes each of the cluster's Valkey servers' own view of
 // the cluster and its recent log. CollectDebugInfo covers what the operator
 // recorded; this covers what the servers themselves report, which is where
-// failure flags and election attempts show up.
+// failure flags and election attempts show up. The pods are looked up in the
+// namespace the kubectl context selects, matching how the specs create them.
 func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
-	podList, err := Run(exec.Command("kubectl", "get", "pods", "-n", "default",
+	podList, err := Run(exec.Command("kubectl", "get", "pods",
 		"-l", "valkey.io/cluster="+clusterName,
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
 	if err != nil {
@@ -455,7 +456,7 @@ func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 		out, err := ValkeyCLI(pod, opts, "CLUSTER", "NODES")
 		_, _ = fmt.Fprintf(GinkgoWriter, "CLUSTER NODES from %s (err=%v):\n%s\n", pod, err, out)
 
-		logs, err := Run(exec.Command("kubectl", "logs", pod, "-n", "default", "-c", "server", "--tail=100"))
+		logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--tail=100"))
 		if err != nil {
 			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get server log for %s: %s\n", pod, err)
 			continue

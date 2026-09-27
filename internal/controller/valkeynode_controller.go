@@ -311,12 +311,28 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// shouldSkipConditionUpdate reports whether a condition update would only
+// change the message. Failure messages can differ on every retry (a
+// net.OpError carries the connection's local port), and writing each one
+// requeues the node without any backoff (#460). The message is still visible
+// in logs and events.
+func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason string, observedGeneration int64) bool {
+	existing := meta.FindStatusCondition(conditions, conditionType)
+	return existing != nil &&
+		existing.Status == status &&
+		existing.Reason == reason &&
+		existing.ObservedGeneration == observedGeneration
+}
+
 func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
 	patchBase := current.DeepCopy()
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, current.Generation) {
+		return nil
+	}
 	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
 		Status:             status,
@@ -340,6 +356,9 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
 	patchBase := current.DeepCopy()
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, current.Generation) {
+		return nil
+	}
 	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
 		Status:             status,

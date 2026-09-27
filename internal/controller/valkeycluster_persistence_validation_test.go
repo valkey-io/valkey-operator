@@ -46,9 +46,9 @@ func persistenceCluster(name string, workloadType valkeyiov1alpha1.WorkloadType,
 	}
 }
 
-// persistence returns a PersistenceSpec of the given size. An empty
+// persistenceSpec returns a PersistenceSpec of the given size. An empty
 // storageClassName leaves the field unset.
-func persistence(size, storageClassName string) *valkeyiov1alpha1.PersistenceSpec {
+func persistenceSpec(size, storageClassName string) *valkeyiov1alpha1.PersistenceSpec {
 	p := &valkeyiov1alpha1.PersistenceSpec{Size: resource.MustParse(size)}
 	if storageClassName != "" {
 		p.StorageClassName = &storageClassName
@@ -99,15 +99,15 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		const message = "persistence requires workloadType StatefulSet"
 
 		It("rejects persistence with workloadType Deployment", func() {
-			expectInvalid(create(persistenceCluster("persist-wl-deployment", valkeyiov1alpha1.WorkloadTypeDeployment, persistence("1Gi", ""))), message)
+			expectInvalid(create(persistenceCluster("persist-wl-deployment", valkeyiov1alpha1.WorkloadTypeDeployment, persistenceSpec("1Gi", ""))), message)
 		})
 
 		It("accepts persistence with workloadType StatefulSet", func() {
-			Expect(create(persistenceCluster("persist-wl-statefulset", valkeyiov1alpha1.WorkloadTypeStatefulSet, persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-wl-statefulset", valkeyiov1alpha1.WorkloadTypeStatefulSet, persistenceSpec("1Gi", "")))).To(Succeed())
 		})
 
 		It("accepts persistence with workloadType omitted (defaults to StatefulSet)", func() {
-			Expect(create(persistenceCluster("persist-wl-default", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-wl-default", "", persistenceSpec("1Gi", "")))).To(Succeed())
 		})
 
 		It("accepts workloadType Deployment without persistence", func() {
@@ -117,14 +117,14 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 
 	Context("persistence cannot be removed once set", func() {
 		It("rejects removing persistence", func() {
-			Expect(create(persistenceCluster("persist-remove", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-remove", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			expectInvalid(update("persist-remove", func(c *valkeyiov1alpha1.ValkeyCluster) {
 				c.Spec.Persistence = nil
 			}), "persistence cannot be removed once set")
 		})
 
 		It("accepts an unrelated update while persistence is kept", func() {
-			Expect(create(persistenceCluster("persist-keep", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-keep", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			Expect(update("persist-keep", bumpReplicas)).To(Succeed())
 		})
 	})
@@ -133,7 +133,7 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		It("rejects adding persistence to a cluster created without it", func() {
 			Expect(create(persistenceCluster("persist-add", "", nil))).To(Succeed())
 			expectInvalid(update("persist-add", func(c *valkeyiov1alpha1.ValkeyCluster) {
-				c.Spec.Persistence = persistence("1Gi", "")
+				c.Spec.Persistence = persistenceSpec("1Gi", "")
 			}), "persistence cannot be added after creation")
 		})
 
@@ -145,7 +145,7 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		// Transition rules are not evaluated on create, so admission of the
 		// create alone says nothing about this rule; the update does.
 		It("accepts updating a cluster created with persistence", func() {
-			Expect(create(persistenceCluster("persist-present", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-present", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			Expect(update("persist-present", bumpReplicas)).To(Succeed())
 		})
 	})
@@ -154,21 +154,21 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		const message = "persistence.size may only be expanded"
 
 		It("rejects shrinking 2Gi to 1Gi", func() {
-			Expect(create(persistenceCluster("persist-size-shrink", "", persistence("2Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-size-shrink", "", persistenceSpec("2Gi", "")))).To(Succeed())
 			expectInvalid(update("persist-size-shrink", func(c *valkeyiov1alpha1.ValkeyCluster) {
 				c.Spec.Persistence.Size = resource.MustParse("1Gi")
 			}), message)
 		})
 
 		It("accepts expanding 1Gi to 2Gi", func() {
-			Expect(create(persistenceCluster("persist-size-expand", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-size-expand", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			Expect(update("persist-size-expand", func(c *valkeyiov1alpha1.ValkeyCluster) {
 				c.Spec.Persistence.Size = resource.MustParse("2Gi")
 			})).To(Succeed())
 		})
 
 		It("accepts keeping 1Gi", func() {
-			Expect(create(persistenceCluster("persist-size-same", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-size-same", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			Expect(update("persist-size-same", bumpReplicas)).To(Succeed())
 		})
 
@@ -177,7 +177,7 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		// "1024Mi" sorts before "1Gi", so this catches a rule that compares
 		// strings instead of quantities.
 		It("accepts 1Gi to 1024Mi (same size, different notation)", func() {
-			cluster := persistenceCluster("persist-size-notation", "", persistence("1Gi", ""))
+			cluster := persistenceCluster("persist-size-notation", "", persistenceSpec("1Gi", ""))
 			Expect(create(cluster)).To(Succeed())
 			Expect(k8sClient.Patch(ctx, cluster, client.RawPatch(types.MergePatchType,
 				[]byte(`{"spec":{"persistence":{"size":"1024Mi"}}}`)))).To(Succeed())
@@ -206,27 +206,27 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 		}
 
 		It("rejects changing fast to slow", func() {
-			Expect(create(persistenceCluster("persist-sc-change", "", persistence("1Gi", "fast")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-sc-change", "", persistenceSpec("1Gi", "fast")))).To(Succeed())
 			expectInvalid(update("persist-sc-change", setStorageClass("slow")), message)
 		})
 
 		It("rejects setting it when it was unset", func() {
-			Expect(create(persistenceCluster("persist-sc-set", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-sc-set", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			expectInvalid(update("persist-sc-set", setStorageClass("fast")), message)
 		})
 
 		It("rejects unsetting it when it was set", func() {
-			Expect(create(persistenceCluster("persist-sc-unset", "", persistence("1Gi", "fast")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-sc-unset", "", persistenceSpec("1Gi", "fast")))).To(Succeed())
 			expectInvalid(update("persist-sc-unset", setStorageClass("")), message)
 		})
 
 		It("accepts leaving it unset", func() {
-			Expect(create(persistenceCluster("persist-sc-none", "", persistence("1Gi", "")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-sc-none", "", persistenceSpec("1Gi", "")))).To(Succeed())
 			Expect(update("persist-sc-none", bumpReplicas)).To(Succeed())
 		})
 
 		It("accepts keeping fast", func() {
-			Expect(create(persistenceCluster("persist-sc-same", "", persistence("1Gi", "fast")))).To(Succeed())
+			Expect(create(persistenceCluster("persist-sc-same", "", persistenceSpec("1Gi", "fast")))).To(Succeed())
 			Expect(update("persist-sc-same", bumpReplicas)).To(Succeed())
 		})
 	})

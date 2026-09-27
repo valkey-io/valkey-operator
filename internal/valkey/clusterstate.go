@@ -755,3 +755,46 @@ func SubtractSlotsRange(base, remove SlotsRange) []SlotsRange {
 	}
 	return result
 }
+
+// AssignGapsToNeighbours maps every unassigned slot range to the node that
+// owns the closest slot below it, or above it for a gap before the first
+// owned slot. A primary that loaded a snapshot on startup claims only the
+// slots it has keys for, so the layout has holes wherever a slot was empty;
+// handing each hole to its lower neighbour makes the layout contiguous
+// without moving any key. owned maps node ID to the ranges it holds; the
+// result maps node ID to the ranges it should add. Nil when nothing is owned.
+func AssignGapsToNeighbours(unassigned []SlotsRange, owned map[string][]SlotsRange) map[string][]SlotsRange {
+	type ownedRange struct {
+		SlotsRange
+		id string
+	}
+	var all []ownedRange
+	for id, ranges := range owned {
+		for _, r := range ranges {
+			all = append(all, ownedRange{SlotsRange: r, id: id})
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	slices.SortFunc(all, func(a, b ownedRange) int { return a.Start - b.Start })
+
+	plan := make(map[string][]SlotsRange)
+	for _, gap := range unassigned {
+		owner := ""
+		for _, r := range all {
+			if r.End < gap.Start {
+				owner = r.id // keep going: the last one below the gap is the closest
+				continue
+			}
+			if owner == "" && r.Start > gap.End {
+				owner = r.id // nothing below the gap, take the first range above it
+			}
+			break
+		}
+		if owner != "" {
+			plan[owner] = append(plan[owner], gap)
+		}
+	}
+	return plan
+}

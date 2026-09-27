@@ -149,6 +149,50 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 - Live volume expansion
 - Automated volume expansion
 
+### Backup and restore
+
+`spec.backup` schedules a snapshot of the cluster to an S3-compatible bucket, and `spec.restoreFrom` seeds a new cluster from one. Both are a first version; read to the end of this section before relying on them.
+
+```yaml
+backup:
+  schedule: "0 2 * * *"      # cron, in the CronJob format
+  source: Replica            # Replica (default) | Primary
+  retention: 7               # snapshots to keep under the prefix; 0 keeps all
+  storage:
+    s3:
+      bucket: valkey-backups
+      endpoint: https://s3.eu-central-1.amazonaws.com
+      region: eu-central-1   # optional
+      prefix: shop           # optional; defaults to the cluster name
+      credentialsSecret: s3-credentials   # keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+  image: rclone/rclone:1.75  # optional; any image with rclone and a POSIX shell
+  suspend: false
+```
+
+The operator renders one CronJob per cluster, `valkey-<name>-backup`, and removes it when the field is cleared. Each run is one pod. An init container on the cluster's own image asks the headless Service for `CLUSTER NODES`, orders the primaries by their first slot, and streams one RDB per shard with `valkey-cli --rdb`: from a replica of the shard with `source: Replica`, so the primary does not fork for the snapshot, or from the primary when the shard has no live replica or `source: Primary`. A second container uploads the set with rclone to `<bucket>/<prefix>/<snapshot>/` as `shard-<i>.rdb` files plus a `manifest.json` that records each shard's slot ranges and the source node, and then prunes the oldest snapshots beyond `retention`. A run refuses to start unless `cluster_state` is `ok` and all 16384 slots are served.
+
+The shards are read one after another, so a snapshot is not one cluster-wide point in time. Each RDB is consistent on its own; a multi-key invariant written across shards while the run is in progress can land in one shard's file and not in the other's.
+
+The run reads as the `_operator` and `_replication` system users, whose passwords the operator keeps in `internal-<name>-system-passwords`, so it needs no ACL of its own. With TLS it mounts the server certificate Secret for the CA. The pod carries `app.kubernetes.io/component: valkey-backup`; a NetworkPolicy on the node pods has to let it in on 6379.
+
+```yaml
+restoreFrom:
+  storage:
+    s3:                      # same shape as backup.storage.s3
+      bucket: valkey-backups
+      endpoint: https://s3.eu-central-1.amazonaws.com
+      credentialsSecret: s3-credentials
+  path: shop/2026-09-27T02-00-00Z   # <prefix>/<snapshot>
+```
+
+A restore is a creation-time seed. The first node of each shard runs two init containers before the server starts. A fetch, on the backup image, stages `shard-<i>.rdb` for its shard index under the data dir, unless the data dir already holds state, and refuses a snapshot whose shard count differs from `spec.shards`, leaving the pod in `Init:Error` with the reason in its log. An install, on the cluster's image, asks a cluster member behind the headless Service for `CLUSTER NODES` and puts the file in place only when nobody serves any of the shard's slots yet: when a member does, the shard has data and this pod is restarting into a running cluster, so it rejoins instead. When the Service has no address at all, the cluster is being created and the file goes in. Listed members that do not answer, or an authentication or TLS error, stop the pod rather than guess, and the next attempt asks again. The file lands as `dump.rdb`, or, when `appendonly` is `yes`, as the base file of a fresh multi-part AOF that is built aside and moved into place in one rename.
+
+On startup the server loads the file and, as Valkey does for keys in slots nobody owns, claims exactly the slots it has keys for. The operator then introduces the restored primaries to each other, without raising their config epochs, hands every slot nobody claimed to the primary owning the slot below it, and attaches the replicas, which sync from their primaries. The slot layout therefore matches the original wherever a slot held a key and may differ across empty ranges.
+
+The install step is what makes it safe to leave `restoreFrom` in place: a pod that restarts into a running cluster finds its slots served and rejoins without loading the snapshot again. On a cluster without persistence, a restart of every pod at once starts from empty and loads the snapshot again.
+
+Limits of this version: RDB only, a matching shard count, a cluster that is new, and object storage that rclone can reach as `provider: Other` with path-style access. TLS is wired the way the probes are, with the server certificate as the client certificate when `tls-auth-clients` requires one, but was not part of the verification.
+
 ### Pod disruption budget
 
 ```yaml

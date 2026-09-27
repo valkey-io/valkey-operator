@@ -21,7 +21,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +31,7 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -77,6 +80,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconciliation loop. On each invocation it drives the
 // cluster one step closer to the desired state described by the ValkeyCluster
@@ -143,6 +147,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.reconcilePodDisruptionBudget(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodDisruptionBudgetError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileBackup(ctx, cluster); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonBackupError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
@@ -310,6 +320,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// By this point all currently known primaries have slots and appear in state.Shards.
 	// CLUSTER REPLICATE for different replicas targets different primaries,
 	// so they can all be issued in one pass.
+	if filled, err := r.fillSlotGapsAfterRestore(ctx, cluster, state); err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	} else if filled > 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Assigning slots left unowned by the restore", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	if len(state.PendingNodes) > 0 {
 		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, nodes)
 		if err != nil {
@@ -1019,6 +1040,13 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 	clusterDomain := cluster.GetClusterDomain()
 
+	// Only the first node of a shard loads the snapshot; its replicas sync
+	// from it once the cluster has formed.
+	var restore *valkeyiov1alpha1.NodeRestoreSpec
+	if cluster.Spec.RestoreFrom != nil && nodeIndex == 0 {
+		restore = &valkeyiov1alpha1.NodeRestoreSpec{RestoreSpec: *cluster.Spec.RestoreFrom, Shards: cluster.Spec.Shards}
+	}
+
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      valkeyNodeName(cluster.Name, shardIndex, nodeIndex),
@@ -1047,6 +1075,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,
+			RestoreFrom:                   restore,
 		},
 	}
 }
@@ -1180,6 +1209,17 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 			isolated = append(isolated, node)
 		}
 	}
+	// A primary that loaded a snapshot on startup claimed the slots it has
+	// keys for, so it scrapes as a shard primary rather than a pending node,
+	// yet it still knows nobody. Introduce those too, or the restored shards
+	// never meet. A single-node cluster has nobody to meet.
+	if cluster.Spec.RestoreFrom != nil && (cluster.Spec.Shards != 1 || cluster.Spec.Replicas != 0) {
+		for _, shard := range state.Shards {
+			if p := shard.GetPrimaryNode(); p != nil && p.IsIsolated() {
+				isolated = append(isolated, p)
+			}
+		}
+	}
 	if len(isolated) == 0 {
 		return 0, nil
 	}
@@ -1193,8 +1233,15 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	// epoch 0; setting a higher epoch ensures they enter the cluster with
 	// authority above any dead nodes they replace, preventing gossip from
 	// overriding their future slot claims.
+	// A node that already owns slots (one that loaded a snapshot) keeps its
+	// epoch: raising it would let its claims beat a running primary's if it
+	// ever met one, and among fresh restored primaries Valkey resolves the
+	// equal epochs itself.
 	currentEpoch := meetTarget.CurrentEpoch()
 	for i, node := range isolated {
+		if myself := node.Myself(); myself != nil && myself.HasSlotAssignment() {
+			continue
+		}
 		epoch := currentEpoch + int64(i) + 1
 		if err := node.Client.Do(ctx, node.Client.B().ClusterSetConfigEpoch().ConfigEpoch(epoch).Build()).Error(); err != nil {
 			log.V(1).Info("CLUSTER SETCONFIGEPOCH skipped", "node", node.Address, "err", err)
@@ -1208,6 +1255,9 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 
 	met := 0
 	for _, node := range isolated {
+		if node == meetTarget {
+			continue
+		}
 		// Bidirectional MEET: the isolated node MEETs the target, AND the
 		// target MEETs the isolated node. Bidirectional MEET avoids the
 		// fragmentation problem where one-way MEET + slow gossip creates
@@ -1326,6 +1376,49 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		}
 
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "PrimaryCreated", "CreatePrimary", "Created primary %v with slots %s", node.Address, valkey.FormatSlotsRanges(nodeRanges))
+		assigned++
+	}
+	return assigned, nil
+}
+
+// fillSlotGapsAfterRestore assigns the slots nobody owns to the primaries
+// next to them once every shard of a restored cluster has a primary and no
+// node is pending. A primary that loaded a snapshot claimed only the slots it
+// had keys for, so the empty slots between them are left over; giving each
+// gap to its lower neighbour completes the layout without moving a key.
+func (r *ValkeyClusterReconciler) fillSlotGapsAfterRestore(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (int, error) {
+	if cluster.Spec.RestoreFrom == nil || len(state.PendingNodes) > 0 || len(state.Shards) < int(cluster.Spec.Shards) {
+		return 0, nil
+	}
+	gaps := state.GetUnassignedSlots()
+	if len(gaps) == 0 {
+		return 0, nil
+	}
+	log := logf.FromContext(ctx)
+	owned := make(map[string][]valkey.SlotsRange, len(state.Shards))
+	primaries := make(map[string]*valkey.NodeState, len(state.Shards))
+	for _, shard := range state.Shards {
+		p := shard.GetPrimaryNode()
+		if p == nil {
+			return 0, nil // every shard needs a primary to hand a gap to
+		}
+		owned[p.Id] = shard.Slots
+		primaries[p.Id] = p
+	}
+	plan := valkey.AssignGapsToNeighbours(gaps, owned)
+	assigned := 0
+	for _, id := range slices.Sorted(maps.Keys(plan)) {
+		node, ranges := primaries[id], plan[id]
+		cmd := node.Client.B().ClusterAddslotsrange().StartSlotEndSlot()
+		for _, sr := range ranges {
+			cmd = cmd.StartSlotEndSlot(int64(sr.Start), int64(sr.End))
+		}
+		log.Info("assign slots left unowned by the snapshot load to their neighbour", "node", node.Address, "ranges", ranges)
+		if err := node.Client.Do(ctx, cmd.Build()).Error(); err != nil {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotAssignmentFailed", "AssignSlots", "Failed to assign slots %s to %v: %v", valkey.FormatSlotsRanges(ranges), node.Address, err)
+			return assigned, err
+		}
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotGapsFilled", "AssignSlots", "Assigned slots %s left unowned by the restore to %v", valkey.FormatSlotsRanges(ranges), node.Address)
 		assigned++
 	}
 	return assigned, nil
@@ -1865,6 +1958,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&batchv1.CronJob{}).
 		Named("valkeycluster").
 		Complete(r)
 }

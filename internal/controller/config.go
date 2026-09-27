@@ -319,6 +319,15 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
+	// The restore init containers read their scripts from this ConfigMap
+	// too, on clusters created with spec.restoreFrom.
+	var restore map[string]string
+	if cluster.Spec.RestoreFrom != nil {
+		if restore, err = restoreScripts(); err != nil {
+			return err
+		}
+	}
+
 	// Get the new server config
 	newServerConfig := buildServerConfig(cluster)
 
@@ -355,6 +364,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			livenessScriptKey:  string(liveness),
 			configFileKey:      newServerConfig,
 		}
+		maps.Copy(serverConfigMap.Data, restore)
 
 		// Register ownership of the configMap
 		if err := controllerutil.SetControllerReference(cluster, serverConfigMap, r.Scheme); err != nil {
@@ -389,9 +399,19 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// is true and would otherwise short-circuit the && below.
 	updatedConfig := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
 
+	// Restore scripts on a cluster whose ConfigMap predates them, or whose
+	// operator shipped a different version of them.
+	updatedRestore := false
+	for name, script := range restore {
+		if serverConfigMap.Data[name] != script {
+			serverConfigMap.Data[name] = script
+			updatedRestore = true
+		}
+	}
+
 	// If the generated config contents hash (from above) matches the hash of the current
 	// config contents, and we did not update the scripts contents, exit early
-	if !updatedScripts && !updatedConfig {
+	if !updatedScripts && !updatedConfig && !updatedRestore {
 		log.V(1).Info("server config unchanged")
 		return nil
 	}

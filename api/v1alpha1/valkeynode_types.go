@@ -160,6 +160,24 @@ type ValkeyNodeSpec struct {
 	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// RestoreFrom makes the node load its shard's RDB from a snapshot before
+	// the server starts, when the data dir is empty and no formed cluster is
+	// reachable. The cluster controller sets it on the first node of each
+	// shard of a cluster created with spec.restoreFrom.
+	// +optional
+	RestoreFrom *NodeRestoreSpec `json:"restoreFrom,omitempty"`
+}
+
+// NodeRestoreSpec is RestoreSpec plus what a node needs to check the snapshot
+// against the cluster it belongs to.
+type NodeRestoreSpec struct {
+	RestoreSpec `json:",inline"`
+
+	// Shards is the number of shards the snapshot has to describe, the
+	// cluster's spec.shards. A snapshot with a different count is refused.
+	// +kubebuilder:validation:Minimum=1
+	Shards int32 `json:"shards"`
 }
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the

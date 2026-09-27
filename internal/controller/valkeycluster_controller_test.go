@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -42,6 +43,115 @@ import (
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {
+	Context("When the ValkeyCluster schedules backups", func() {
+		const resourceName = "backup-cluster"
+		ctx := context.Background()
+		key := types.NamespacedName{Name: resourceName, Namespace: "default"}
+		ownedKey := types.NamespacedName{Name: "valkey-" + resourceName + "-backup", Namespace: "default"}
+
+		It("creates the CronJob and its script ConfigMap, and removes both when spec.backup is cleared", func() {
+			resource := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+					Backup: &valkeyiov1alpha1.BackupSpec{
+						Schedule:  "0 2 * * *",
+						Retention: 7,
+						Storage: valkeyiov1alpha1.BackupStorage{S3: &valkeyiov1alpha1.S3Storage{
+							Bucket: "valkey-backups", Endpoint: "http://s3.s3.svc:9000", CredentialsSecret: "s3-credentials",
+						}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			defer func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
+			}()
+			reconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			cj := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, ownedKey, cj)).To(Succeed())
+			Expect(cj.Spec.Schedule).To(Equal("0 2 * * *"))
+			Expect(cj.OwnerReferences).To(HaveLen(1), "the CronJob is garbage collected with the cluster")
+			Expect(cj.Spec.JobTemplate.Spec.Template.Spec.InitContainers[0].Env).To(ContainElement(corev1.EnvVar{Name: "VALKEY_HOST", Value: "valkey-" + resourceName}))
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, ownedKey, cm)).To(Succeed())
+			Expect(cm.Data).To(HaveKey("backup-dump.sh"))
+			Expect(cm.Data).To(HaveKey("backup-upload.sh"))
+
+			By("clearing spec.backup")
+			Expect(k8sClient.Get(ctx, key, resource)).To(Succeed())
+			resource.Spec.Backup = nil
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, ownedKey, &batchv1.CronJob{}))).To(BeTrue(), "the CronJob goes with the field")
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, ownedKey, &corev1.ConfigMap{}))).To(BeTrue(), "so does its ConfigMap")
+		})
+	})
+
+	Context("When the ValkeyCluster restores from a snapshot", func() {
+		const resourceName = "restore-cluster"
+		ctx := context.Background()
+		key := types.NamespacedName{Name: resourceName, Namespace: "default"}
+
+		It("ships the restore scripts in the server ConfigMap and marks each shard's first node", func() {
+			resource := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+					RestoreFrom: &valkeyiov1alpha1.RestoreSpec{
+						Storage: valkeyiov1alpha1.BackupStorage{S3: &valkeyiov1alpha1.S3Storage{
+							Bucket: "valkey-backups", Endpoint: "http://s3.s3.svc:9000", CredentialsSecret: "s3-credentials",
+						}},
+						Path: "src/2026-09-27T02-00-00Z",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			defer func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
+			}()
+			reconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The node pods mount the cluster's server ConfigMap at /scripts,
+			// so that is where the init containers find their scripts.
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}, cm)).To(Succeed())
+			Expect(cm.Data).To(HaveKey("restore-fetch.sh"))
+			Expect(cm.Data).To(HaveKey("restore-install.sh"))
+
+			nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+			Expect(k8sClient.List(ctx, nodes, client.InNamespace("default"), client.MatchingLabels{LabelCluster: resourceName})).To(Succeed())
+			Expect(nodes.Items).To(HaveLen(6))
+			for _, node := range nodes.Items {
+				if node.Labels[LabelNodeIndex] == "0" {
+					Expect(node.Spec.RestoreFrom).NotTo(BeNil(), node.Name+" is a shard's first node and loads the snapshot")
+					Expect(node.Spec.RestoreFrom.Shards).To(Equal(int32(3)))
+					Expect(node.Spec.RestoreFrom.Path).To(Equal("src/2026-09-27T02-00-00Z"))
+				} else {
+					Expect(node.Spec.RestoreFrom).To(BeNil(), node.Name+" is a replica and syncs from its primary")
+				}
+			}
+		})
+	})
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 

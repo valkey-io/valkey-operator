@@ -1536,3 +1536,85 @@ func TestApplyProbeAPIDefaults(t *testing.T) {
 	assert.Equal(t, int32(2), custom.SuccessThreshold)
 	assert.Equal(t, int32(9), custom.FailureThreshold)
 }
+
+func restoreTestNode() *valkeyv1.ValkeyNode {
+	node := newTestValkeyNode("valkey-shop-1-0", "prod")
+	node.Labels = map[string]string{LabelCluster: "shop", LabelShardIndex: "1", LabelNodeIndex: "0"}
+	node.Spec.RestoreFrom = &valkeyv1.NodeRestoreSpec{
+		RestoreSpec: valkeyv1.RestoreSpec{
+			Storage: valkeyv1.BackupStorage{S3: &valkeyv1.S3Storage{
+				Bucket:            "valkey-backups",
+				Endpoint:          "http://s3.s3.svc:9000",
+				CredentialsSecret: "s3-creds",
+			}},
+			Path: "shop/2026-09-27T02-00-00Z",
+		},
+		Shards: 3,
+	}
+	return node
+}
+
+func TestBuildValkeyNodePodTemplateSpec_RestoreInitContainers(t *testing.T) {
+	node := restoreTestNode()
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.InitContainers, 2, "a restore is a fetch on the backup image followed by an install on the server image")
+	fetch, install := pts.Spec.InitContainers[0], pts.Spec.InitContainers[1]
+
+	assert.Equal(t, "restore-fetch", fetch.Name)
+	assert.Equal(t, DefaultBackupImage, fetch.Image)
+	assert.Equal(t, "valkey-backups", envValue(fetch.Env, "RESTORE_BUCKET"))
+	assert.Equal(t, "shop/2026-09-27T02-00-00Z", envValue(fetch.Env, "RESTORE_PATH"))
+	assert.Equal(t, "1", envValue(fetch.Env, "RESTORE_SHARD_INDEX"), "the shard index comes from the node label")
+	assert.Equal(t, "3", envValue(fetch.Env, "RESTORE_EXPECTED_SHARDS"))
+	assert.Equal(t, "s3-creds/AWS_SECRET_ACCESS_KEY", envSecretKey(fetch.Env, "RCLONE_CONFIG_S3_SECRET_ACCESS_KEY"))
+	assert.Equal(t, "dump.rdb", envValue(fetch.Env, "RESTORE_DBFILENAME"), "the fetch checks the data dir for existing state")
+
+	assert.Equal(t, "restore-install", install.Name)
+	assert.Equal(t, node.Spec.Image, install.Image)
+	assert.Equal(t, "valkey-shop", envValue(install.Env, "VALKEY_HOST"), "the install asks the headless Service whether the shard's slots are served")
+	assert.Equal(t, "1", envValue(install.Env, "RESTORE_SHARD_INDEX"))
+	assert.Equal(t, "no", envValue(install.Env, "RESTORE_APPENDONLY"))
+	assert.Equal(t, "internal-shop-system-passwords/_operator", envSecretKey(install.Env, "VALKEYCLI_AUTH"))
+	for _, c := range pts.Spec.InitContainers {
+		assert.Contains(t, c.VolumeMounts, corev1.VolumeMount{Name: dataVolumeName, MountPath: dataMountPath})
+	}
+
+	// The layout the server expects follows spec.config.
+	node.Spec.Config = map[string]string{"appendonly": "yes", "appenddirname": "aof", "dbfilename": "shop.rdb"}
+	pts, err = buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	install = pts.Spec.InitContainers[1]
+	assert.Equal(t, "yes", envValue(install.Env, "RESTORE_APPENDONLY"))
+	assert.Equal(t, "aof", envValue(install.Env, "RESTORE_APPENDDIRNAME"))
+	assert.Equal(t, "shop.rdb", envValue(install.Env, "RESTORE_DBFILENAME"))
+
+	// With TLS the install, which talks to Valkey, gets the certificate; the fetch does not.
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{Certificates: valkeyv1.NodeTLSCertificates{Server: valkeyv1.NodeCertificateRef{SecretName: "shop-tls"}}}
+	pts, err = buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	fetch, install = pts.Spec.InitContainers[0], pts.Spec.InitContainers[1]
+	assert.Equal(t, "--tls --cacert /tls/ca.crt", envValue(install.Env, "VALKEY_TLS_ARGS"))
+	assert.Contains(t, install.VolumeMounts, corev1.VolumeMount{Name: tlsVolumeName, MountPath: tlsCertMountPath, ReadOnly: true})
+	for _, m := range fetch.VolumeMounts {
+		assert.NotEqual(t, tlsVolumeName, m.Name)
+	}
+}
+
+func TestBuildValkeyNodePodTemplateSpec_NoRestoreIsNoop(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	assert.Empty(t, pts.Spec.InitContainers, "a node without restoreFrom keeps its template unchanged")
+}
+
+func TestBuildValkeyNodeConfigMap_RestoreScripts(t *testing.T) {
+	plain, err := buildValkeyNodeConfigMap(newTestValkeyNode("mynode", "test-ns"))
+	require.NoError(t, err)
+	assert.NotContains(t, plain.Data, "restore-fetch.sh", "the scripts are only shipped to nodes that restore")
+
+	cm, err := buildValkeyNodeConfigMap(restoreTestNode())
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data["restore-fetch.sh"], "manifest.json")
+	assert.Contains(t, cm.Data["restore-install.sh"], "CLUSTER NODES")
+}

@@ -1,0 +1,26 @@
+# A cluster that snapshots every shard to an S3-compatible bucket each night
+# and keeps a week of snapshots. The Secret holds the bucket credentials.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-credentials
+stringData:
+  AWS_ACCESS_KEY_ID: replace-me
+  AWS_SECRET_ACCESS_KEY: replace-me
+---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-sample-backup
+spec:
+  shards: 3
+  replicas: 1
+  backup:
+    schedule: "0 2 * * *"
+    source: Replica
+    retention: 7
+    storage:
+      s3:
+        bucket: valkey-backups
+        endpoint: http://minio.minio.svc:9000
+        credentialsSecret: s3-credentials

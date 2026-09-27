@@ -542,3 +542,95 @@ func TestHasNodeWithPodIP(t *testing.T) {
 		})
 	}
 }
+
+// TestFindMeetTarget verifies that a MEET seed is a live, slot-owning primary
+// and never a primary reported failed — seeding against a dying node strands
+// everything MEETed to it in a separate partition once it disappears.
+func TestFindMeetTarget(t *testing.T) {
+	// primary builds a slot-owning primary whose own CLUSTER NODES view marks
+	// it myself,master with a slot range (so GetSlots is non-empty).
+	primary := func(id, addr string) *valkey.NodeState {
+		n := &valkey.NodeState{Id: id, Address: addr, Flags: []string{"myself", "master"}}
+		n.SetClusterNodesForTesting(id + " " + addr + ":6379@16379 myself,master - 0 0 1 connected 0-16383\n")
+		return n
+	}
+
+	t.Run("skips a failed primary and picks the live slot-owning one", func(t *testing.T) {
+		dying := primary("aaadying", "10.0.0.1")
+		live := primary("bbblive", "10.0.0.2")
+		// A peer reports the dying primary as fail, so IsNodeFailed is true.
+		peer := &valkey.NodeState{Id: "peer", Address: "10.0.0.9", Flags: []string{"myself", "master"}}
+		peer.SetClusterNodesForTesting(
+			"peer 10.0.0.9:6379@16379 myself,master - 0 0 1 connected\n" +
+				"aaadying 10.0.0.1:6379@16379 master,fail - 0 0 1 connected 0-8191\n")
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+			{Id: "s1", PrimaryId: "aaadying", Nodes: []*valkey.NodeState{dying, peer}},
+			{Id: "s2", PrimaryId: "bbblive", Nodes: []*valkey.NodeState{live}},
+		}}
+		got := findMeetTarget(state, nil)
+		if got == nil || got.Id != "bbblive" {
+			t.Fatalf("expected live primary bbblive, got %v", got)
+		}
+	})
+
+	t.Run("deterministic: lowest id among eligible live primaries", func(t *testing.T) {
+		p2 := primary("22222222", "10.0.0.2")
+		p1 := primary("11111111", "10.0.0.1")
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+			{Id: "s1", PrimaryId: "22222222", Nodes: []*valkey.NodeState{p2}},
+			{Id: "s2", PrimaryId: "11111111", Nodes: []*valkey.NodeState{p1}},
+		}}
+		got := findMeetTarget(state, nil)
+		if got == nil || got.Id != "11111111" {
+			t.Fatalf("expected lowest-id primary 11111111, got %v", got)
+		}
+	})
+
+	t.Run("falls back to any primary when none owns slots", func(t *testing.T) {
+		// A freshly created cluster before ADDSLOTSRANGE: primaries exist but
+		// hold no slots, so no candidate qualifies as live and slot-owning.
+		slotless := func(id, addr string) *valkey.NodeState {
+			n := &valkey.NodeState{Id: id, Address: addr, Flags: []string{"myself", "master"}}
+			n.SetClusterNodesForTesting(id + " " + addr + ":6379@16379 myself,master - 0 0 1 connected\n")
+			return n
+		}
+		p := slotless("nnnnnnnn", "10.0.0.1")
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+			{Id: "s1", PrimaryId: "nnnnnnnn", Nodes: []*valkey.NodeState{p}},
+		}}
+		got := findMeetTarget(state, nil)
+		if got == nil || got.Id != "nnnnnnnn" {
+			t.Fatalf("expected the slotless primary nnnnnnnn, got %v", got)
+		}
+	})
+
+	t.Run("falls back to a non-isolated pending node", func(t *testing.T) {
+		// No shard reports a primary, but an earlier MEET batch left a pending
+		// node that already knows peers.
+		joined := &valkey.NodeState{
+			Id: "joined", Address: "10.0.0.5",
+			ClusterInfo: map[string]string{"cluster_known_nodes": "3"},
+		}
+		alone := &valkey.NodeState{
+			Id: "alone", Address: "10.0.0.6",
+			ClusterInfo: map[string]string{"cluster_known_nodes": "1"},
+		}
+		state := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{alone, joined}}
+		got := findMeetTarget(state, []*valkey.NodeState{alone})
+		if got == nil || got.Id != "joined" {
+			t.Fatalf("expected the non-isolated pending node joined, got %v", got)
+		}
+	})
+
+	t.Run("seeds from the first isolated node when every node is isolated", func(t *testing.T) {
+		// Cluster bootstrap: nothing has been MEETed yet, so the first isolated
+		// node becomes the seed every other node joins against.
+		first := &valkey.NodeState{Id: "first", Address: "10.0.0.1"}
+		second := &valkey.NodeState{Id: "second", Address: "10.0.0.2"}
+		state := &valkey.ClusterState{}
+		got := findMeetTarget(state, []*valkey.NodeState{first, second})
+		if got == nil || got.Id != "first" {
+			t.Fatalf("expected the first isolated node, got %v", got)
+		}
+	})
+}

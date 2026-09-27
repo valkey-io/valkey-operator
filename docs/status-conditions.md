@@ -366,7 +366,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 
 | Event Type | Type | Description |
 |---|---|---|
-| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER` after quorum loss |
+| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
 
 ### Maintenance events
 

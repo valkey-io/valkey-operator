@@ -58,7 +58,7 @@ Common reasons when `Ready=False`:
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
-- `RollDeferred` – the roll of a shard's primary is on hold because rolling it now would take the shard's only writer down: the shard has no synced replica to fail over to, or the proactive failover to one did not complete; the message names the shard, the node and which of the two it is. In the first case the roll resumes once a replica is synced, in the second the `ProactiveFailover*` events say what went wrong
+- `RollDeferred` – the roll of a shard's primary is on hold because rolling it now would take the shard's only writer down: the shard has no synced replica to fail over to, or the proactive failover to one did not complete; the message names the shard, the node and which of the two it is. In the first case the roll resumes once a replica is synced, in the second the `FailoverFailed` or `FailoverTimeout` event says what went wrong
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods

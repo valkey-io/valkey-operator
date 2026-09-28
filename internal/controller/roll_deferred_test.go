@@ -92,5 +92,23 @@ func TestMarkRollDeferred(t *testing.T) {
 		t.Fatal("expected an event for the deferred roll")
 	}
 
+	// The reconcile retries every two seconds while the wait lasts; the same
+	// deferral is not a new event each time, a changed cause is.
+	r.markRollDeferred(cluster, deferred)
+	select {
+	case ev := <-recorder.Events:
+		t.Fatalf("expected no event for an unchanged deferral, got %q", ev)
+	default:
+	}
+	r.markRollDeferred(cluster, &rollDeferredError{shardIndex: 2, node: "valkey-c-2-0", cause: "the proactive failover to a synced replica did not complete (timeout)"})
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "did not complete (timeout)")
+	default:
+		t.Fatal("expected an event when the cause changes")
+	}
+	progressing = meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing)
+	assert.Contains(t, progressing.Message, "did not complete (timeout)", "the condition follows the latest cause")
+
 	assert.Equal(t, "roll of shard 2 primary valkey-c-2-0 deferred: the shard has no synced replica to fail over to", deferred.Error())
 }

@@ -222,8 +222,20 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	} else if errors.As(err, &deferred) {
 		// A primary's roll is on hold until its shard has a synced replica to
 		// fail over to. reconcileValkeyNodes already worked on bringing one
-		// back; say so in the status and try again shortly.
+		// back; say so in the status and try again shortly. An unschedulable
+		// pod is still reported, as on a normal roll: it may well be the
+		// replica the shard is waiting for. It takes Ready and Degraded, the
+		// deferral stays on Progressing.
 		r.markRollDeferred(cluster, deferred)
+		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		} else if handled {
+			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRollDeferred, deferred.Message(), metav1.ConditionTrue)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return result, nil
+		}
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	} else if err != nil {

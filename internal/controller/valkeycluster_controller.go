@@ -1364,6 +1364,7 @@ type rollDeferredError struct {
 	cause      string
 }
 
+// Error names the shard, the node and the cause, in the error message style.
 func (e *rollDeferredError) Error() string {
 	return fmt.Sprintf("roll of shard %d primary %s deferred: %s", e.shardIndex, e.node, e.cause)
 }
@@ -1375,12 +1376,20 @@ func (e *rollDeferredError) Message() string {
 
 // markRollDeferred puts a held roll on the cluster status and records it, so
 // a cluster waiting for a synced replica is distinguishable from one that is
-// rolling normally.
+// rolling normally. The reconcile retries every couple of seconds while the
+// wait lasts, so the event is recorded once per deferral, when the condition
+// first says so or its message changes, and not on every retry.
 func (r *ValkeyClusterReconciler) markRollDeferred(cluster *valkeyiov1alpha1.ValkeyCluster, deferred *rollDeferredError) {
 	msg := deferred.Message()
+	already := false
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing); c != nil {
+		already = c.Status == metav1.ConditionTrue && c.Reason == valkeyiov1alpha1.ReasonRollDeferred && c.Message == msg
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonRollDeferred, msg, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRollDeferred, msg, metav1.ConditionTrue)
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "RollDeferred", "RollValkeyNode", "%s", msg)
+	if !already {
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "RollDeferred", "RollValkeyNode", "%s", msg)
+	}
 }
 
 // errShardRollSkipped reports that at least one shard's roll was skipped because

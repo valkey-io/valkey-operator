@@ -58,6 +58,7 @@ Common reasons when `Ready=False`:
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
+- `RollDeferred` – the roll of a shard's primary is on hold because the shard has no synced replica to fail over to; the message names the shard, the node and the cause, and the roll resumes once a replica is synced
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
@@ -78,6 +79,7 @@ Common reasons:
 - `Reconciling` – general reconciliation in progress
 - `AddingNodes` – adding nodes to the cluster
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
+- `RollDeferred` – a primary's roll is waiting for a synced replica in its shard (see `Ready`)
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 

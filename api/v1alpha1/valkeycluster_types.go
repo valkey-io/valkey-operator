@@ -734,6 +734,11 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonRollDeferred: the roll of a shard's primary is on hold because the
+	// shard has no synced replica to fail over to, so rolling it now would take
+	// the shard's only writer down. The message names the shard, the node and
+	// the cause. The roll resumes once a replica is synced.
+	ReasonRollDeferred = "RollDeferred"
 )
 
 // +kubebuilder:object:root=true

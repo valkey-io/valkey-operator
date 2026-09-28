@@ -49,7 +49,6 @@ func legacyRollConfigRender(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 		"cluster-config-file":             "/data/nodes.conf",
 		"cluster-enabled":                 "yes",
 		"protected-mode":                  "no",
-		"cluster-node-timeout":            "2000",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
 		"shutdown-on-sigterm":             "failover",

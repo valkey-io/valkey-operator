@@ -445,3 +445,116 @@ func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local"))
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local."))
 }
+
+func TestNodeTLSServerName(t *testing.T) {
+	tests := []struct {
+		name          string
+		labels        map[string]string
+		serverName    string
+		clusterDomain string
+		want          string
+	}{
+		{
+			name:       "spec serverName wins",
+			labels:     map[string]string{LabelCluster: "foo"},
+			serverName: "custom.example",
+			want:       "custom.example",
+		},
+		{
+			// A node created by v0.6.0 has neither field set.
+			name:   "cluster node without serverName or clusterDomain",
+			labels: map[string]string{LabelCluster: "foo"},
+			want:   "valkey-foo.valkey.svc.cluster.local",
+		},
+		{
+			name:          "cluster node with clusterDomain",
+			labels:        map[string]string{LabelCluster: "foo"},
+			clusterDomain: "corp.local",
+			want:          "valkey-foo.valkey.svc.corp.local",
+		},
+		{
+			name: "standalone node",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &valkeyv1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo-0-0", Namespace: "valkey", Labels: tt.labels},
+				Spec: valkeyv1.ValkeyNodeSpec{
+					ClusterDomain: tt.clusterDomain,
+					TLS:           &valkeyv1.NodeTLSSpec{ServerName: tt.serverName},
+				},
+			}
+			assert.Equal(t, tt.want, nodeTLSServerName(node))
+		})
+	}
+}
+
+func nodeWithPodIP(name, podIP string) valkeyv1.ValkeyNode {
+	return valkeyv1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Status:     valkeyv1.ValkeyNodeStatus{PodIP: podIP},
+	}
+}
+
+// TestHasNodeWithPodIP covers the address match forgetStaleNodes uses to decide
+// whether a failing CLUSTER NODES entry still belongs to a known ValkeyNode.
+// A `noaddr` entry has no host, and a ValkeyNode whose pod has no IP yet has
+// none either; matching those two against each other would skip CLUSTER FORGET
+// for an unrelated node.
+func TestHasNodeWithPodIP(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []valkeyv1.ValkeyNode
+		podIP string
+		want  bool
+	}{
+		{
+			name:  "empty host does not match a node without a pod IP",
+			nodes: []valkeyv1.ValkeyNode{nodeWithPodIP("node-0-0", "")},
+			podIP: "",
+			want:  false,
+		},
+		{
+			name:  "matching IP",
+			nodes: []valkeyv1.ValkeyNode{nodeWithPodIP("node-0-0", "10.0.0.1")},
+			podIP: "10.0.0.1",
+			want:  true,
+		},
+		{
+			name:  "non-matching IP",
+			nodes: []valkeyv1.ValkeyNode{nodeWithPodIP("node-0-0", "10.0.0.1")},
+			podIP: "10.0.0.2",
+			want:  false,
+		},
+		{
+			name:  "empty host does not match a node that has a pod IP",
+			nodes: []valkeyv1.ValkeyNode{nodeWithPodIP("node-0-0", "10.0.0.1")},
+			podIP: "",
+			want:  false,
+		},
+		{
+			name: "matches one node among several",
+			nodes: []valkeyv1.ValkeyNode{
+				nodeWithPodIP("node-0-0", ""),
+				nodeWithPodIP("node-0-1", "10.0.0.1"),
+				nodeWithPodIP("node-1-0", "10.0.0.2"),
+			},
+			podIP: "10.0.0.2",
+			want:  true,
+		},
+		{
+			name:  "no nodes",
+			nodes: nil,
+			podIP: "10.0.0.1",
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasNodeWithPodIP(tt.nodes, tt.podIP))
+		})
+	}
+}

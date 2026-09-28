@@ -1073,6 +1073,41 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			Expect(rolled).To(BeFalse())
 		})
 
+		It("returns false when a recreated StatefulSet still runs the adopted pod", func() {
+			// A new StatefulSet starts with currentRevision == updateRevision, so
+			// only UpdatedReplicas shows the adopted pod is on an older revision.
+			r := makeReconciler()
+			replicas := int32(1)
+			stsNameAdopt := types.NamespacedName{Name: "valkey-" + nodeName + "-adopt", Namespace: ns}
+			nodeAdopt := makeNode(nodeName+"-adopt", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsNameAdopt.Name, Namespace: stsNameAdopt.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeAdopt.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeAdopt.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			Expect(k8sClient.Get(ctx, stsNameAdopt, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 0
+			sts.Status.CurrentRevision = "rev-new"
+			sts.Status.UpdateRevision = "rev-new"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeAdopt)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
 		It("returns true when fully rolled out", func() {
 			r := makeReconciler()
 			replicas := int32(1)
@@ -1096,6 +1131,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.ObservedGeneration = sts.Generation
 			sts.Status.Replicas = 1
 			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 1
 			sts.Status.CurrentRevision = "rev-1"
 			sts.Status.UpdateRevision = "rev-1"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
@@ -1255,6 +1291,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		sts.Status.ObservedGeneration = sts.Generation
 		sts.Status.Replicas = 1
 		sts.Status.ReadyReplicas = 1
+		sts.Status.UpdatedReplicas = 1
 		sts.Status.CurrentRevision = "rev-1"
 		sts.Status.UpdateRevision = "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())

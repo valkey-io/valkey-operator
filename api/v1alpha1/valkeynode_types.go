@@ -170,7 +170,9 @@ type NodeTLSSpec struct {
 	// ServerName is the hostname used for TLS verification when connecting
 	// to the pod IP. For cluster-owned nodes this is
 	// spec.networking.tls.serverName, or
-	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset.
+	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset. When this
+	// field is empty on a node with the valkey.io/cluster label, the node
+	// controller verifies against that default name.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
@@ -180,6 +182,34 @@ type NodeTLSSpec struct {
 	// Certificates holds the certificate slots mounted into the node pod.
 	// +kubebuilder:validation:Required
 	Certificates NodeTLSCertificates `json:"certificates"`
+
+	// ClientAuth is the resolved client certificate authentication settings
+	// rendered into `tls-auth-clients` and `tls-auth-clients-user`. For
+	// cluster-owned nodes the ValkeyCluster controller copies
+	// spec.networking.tls.clientAuth here.
+	// +optional
+	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// ClientAuthMode returns the effective client-auth mode for t.
+func (t *NodeTLSSpec) ClientAuthMode() TLSAuthClients {
+	if t == nil {
+		return TLSAuthClientsOptional
+	}
+	return t.ClientAuth.EffectiveMode()
+}
+
+// ClientAuthCertificateUser returns the effective certificate-to-user mapping for t.
+func (t *NodeTLSSpec) ClientAuthCertificateUser() TLSAuthClientsUser {
+	if t == nil {
+		return TLSAuthClientsUserDisabled
+	}
+	return t.ClientAuth.EffectiveCertificateUser()
+}
+
+// RequiresClientCertificate reports whether TLS clients must present a certificate.
+func (t *NodeTLSSpec) RequiresClientCertificate() bool {
+	return t.ClientAuthMode() == TLSAuthClientsRequired
 }
 
 // NodeTLSCertificates groups the certificate slots for a ValkeyNode.

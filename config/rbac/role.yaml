@@ -25,6 +25,7 @@ rules:
   - pods
   - serviceaccounts
   verbs:
+  - delete
   - get
   - list
   - watch

@@ -31,15 +31,31 @@ import (
 
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
-	Client       vclient.Client
-	Address      string
-	Port         int
-	Id           string
-	Flags        []string
-	ShardId      string
-	Info         map[string]string
-	ClusterInfo  map[string]string
-	ClusterNodes string
+	Client      vclient.Client
+	Address     string
+	Port        int
+	Id          string
+	Flags       []string
+	ShardId     string
+	Info        map[string]string
+	ClusterInfo map[string]string
+
+	// nodes is this node's peer table, parsed once from CLUSTER NODES by the
+	// scrape.
+	nodes []ClusterNode
+}
+
+// KnowsNode reports whether this node's peer table holds an entry for the given
+// node ID, i.e. whether gossip has introduced that member yet. An ID that only
+// appears as another entry's primary, or as a migration marker peer, does not
+// count.
+func (n *NodeState) KnowsNode(id string) bool {
+	for _, entry := range n.nodes {
+		if entry.Id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplicationOffset returns this node's processed replication offset from
@@ -121,8 +137,11 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 		// Attempt to connect to the Valkey node and extract information.
 		node := getNodeState(ctx, address, port, username, password, tlsCfg)
 		if node != nil {
-			// Check if node is pending to be added.
-			if node.IsPrimary() && len(node.GetSlots()) == 0 {
+			// Check if node is pending to be added. A primary carrying only a
+			// migration marker is mid-reshard and already part of the slot map,
+			// so any slot assignment counts here, not just owned ranges.
+			myself := node.Myself()
+			if node.IsPrimary() && (myself == nil || !myself.HasSlotAssignment()) {
 				// Node not part of any shard yet.
 				state.PendingNodes = append(state.PendingNodes, node)
 				continue
@@ -144,8 +163,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 			// Add node and update shard information.
 			shard.Nodes = append(shard.Nodes, node)
 			if node.IsPrimary() {
-				ranges, _ := parseSlotsRanges(node.GetSlots())
-				shard.Slots = ranges
+				shard.Slots = node.GetSlots()
 				shard.PrimaryId = node.Id
 			}
 		}
@@ -220,15 +238,19 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 }
 
 // GetSyncedReplicas returns replica nodes that are connected and have their
-// replication link up (master_link_status:up). Nodes with fail/pfail flags
-// are excluded.
-func (s *ShardState) GetSyncedReplicas() []*NodeState {
+// replication link up (master_link_status:up). A replica that a majority of
+// the other live nodes report as failing ("fail" or "fail?") is excluded.
+// That view has to come from the peers, since a node's own CLUSTER NODES
+// entry never carries a failure flag, and it has to be a majority, since a
+// node cut off from the bus flags every peer in its own table and would
+// otherwise leave no failover target anywhere.
+func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	var replicas []*NodeState
 	for _, node := range s.Nodes {
 		if node.Id == s.PrimaryId {
 			continue
 		}
-		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+		if state.IsNodeFailedByMajority(node.Id) {
 			continue
 		}
 		if node.Info["master_link_status"] != "up" {
@@ -239,24 +261,30 @@ func (s *ShardState) GetSyncedReplicas() []*NodeState {
 	return replicas
 }
 
-// GetSlots returns slots assigned to myself, same format as in CLUSTER NODES.
-func (n *NodeState) GetSlots() []string {
-	// Parse CLUSTER NODES output.
-	// <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv> <config-epoch> <link-state> <slot> <slot> ... <slot>
-	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
-			continue
-		}
-		flags := strings.Split(fields[2], ",")
-		if slices.Contains(flags, "myself") {
-			if slices.Contains(flags, "master") {
-				// Get slots starting at field 8
-				return fields[8:]
-			}
-		}
+// SetClusterNodesForTesting replaces the node's peer table with one parsed
+// from raw CLUSTER NODES output. The scrape fills the table for live nodes;
+// tests in other packages use this to build a node with a particular view of
+// its peers, and nothing else should.
+func (n *NodeState) SetClusterNodesForTesting(raw string) {
+	n.nodes = ParseClusterNodes(raw)
+}
+
+// Myself returns this node's own entry from its last CLUSTER NODES scrape, or
+// nil when the output held no "myself" line.
+func (n *NodeState) Myself() *ClusterNode {
+	return FindMyself(n.nodes)
+}
+
+// GetSlots returns the slot ranges this node owns, in CLUSTER NODES order.
+// Owned ranges only: in-flight migration markers are held separately on
+// ClusterNode and are not assignable slots. Returns nil for a replica or when
+// the output held no "myself" line.
+func (n *NodeState) GetSlots() []SlotsRange {
+	myself := n.Myself()
+	if myself == nil || !myself.IsPrimary() {
+		return nil
 	}
-	return nil
+	return myself.Slots
 }
 
 // IsPrimary return true if this is a primary node.
@@ -310,6 +338,21 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// clusterSize returns cluster_size from CLUSTER INFO: cluster->size in Valkey,
+// every primary that owns slots, reachable or not. Takes the largest value any
+// scraped node reports, in case gossip has not fully propagated.
+func (s *ClusterState) clusterSize() int {
+	var size int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if n, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && n > size {
+				size = n
+			}
+		}
+	}
+	return size
+}
+
 // HasFailoverQuorum returns true if a majority of slot-owning primaries are
 // reachable. Valkey requires a majority of primaries to vote in a failover
 // election; if quorum is unreachable, no automatic failover can succeed.
@@ -319,22 +362,64 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	if len(s.Shards) == 0 {
 		return false
 	}
-	var livePrimaries, clusterSize int
+	var livePrimaries int
 	for _, shard := range s.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
 			livePrimaries++
 		}
-		for _, node := range shard.Nodes {
-			// Take the max across nodes in case gossip hasn't fully propagated.
-			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
-				clusterSize = size
-			}
-		}
 	}
+	clusterSize := s.clusterSize()
 	if clusterSize == 0 {
 		return false
 	}
 	return livePrimaries > (clusterSize / 2)
+}
+
+// IsNodeFailedByMajority reports whether nodeId is down by the evidence the
+// peers hold, weighing the two flags the way Valkey does. A confirmed "fail"
+// is authoritative from any viewer: Valkey only sets it once a majority of
+// primaries reported the node unreachable, and then broadcasts it, so one
+// table carrying it already stands for a cluster-wide decision. A "fail?" is
+// one node's own opinion, and a node cut off from the cluster bus marks every
+// peer that way in its own table, so it counts only with the quorum Valkey
+// itself requires before promoting it: reports from at least size/2+1 voting
+// primaries, where size is cluster_size from CLUSTER INFO, every primary that
+// owns slots. That is cluster->size in Valkey and the denominator
+// HasFailoverQuorum already uses, so a primary the scrape never reached, or
+// one that has no entry for nodeId yet, still counts as a voter that has not
+// reported. A replica's suspicion never reaches that vote. IsNodeFailed keeps
+// the any-viewer rule for both flags on the takeover path, where one report
+// is the trigger.
+func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
+	var reports int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Id == nodeId {
+				continue // its own entry never carries a failure flag
+			}
+			for _, entry := range node.nodes {
+				if entry.Id != nodeId {
+					continue
+				}
+				if entry.HasFlag("fail") {
+					return true
+				}
+				if node.isVotingPrimary() && entry.HasFlag("fail?") {
+					reports++
+				}
+				break
+			}
+		}
+	}
+	size := s.clusterSize()
+	return size > 0 && reports >= size/2+1
+}
+
+// isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns
+// slots, which is the only kind of node whose failure reports Valkey counts.
+func (n *NodeState) isVotingPrimary() bool {
+	myself := n.Myself()
+	return n.IsPrimary() && myself != nil && myself.HasSlotAssignment()
 }
 
 // IsNodeFailed returns true if any live node reports the given node ID as
@@ -343,13 +428,8 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 func (s *ClusterState) IsNodeFailed(nodeId string) bool {
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
-			for line := range strings.SplitSeq(node.ClusterNodes, "\n") {
-				fields := strings.Fields(line)
-				if len(fields) < 8 || fields[0] != nodeId {
-					continue
-				}
-				flags := strings.Split(fields[2], ",")
-				if slices.Contains(flags, "fail") || slices.Contains(flags, "fail?") {
+			for _, entry := range node.nodes {
+				if entry.Id == nodeId && entry.IsFailing() {
 					return true
 				}
 			}
@@ -373,17 +453,11 @@ func (s *ClusterState) BestReplicaOf(primaryId string) *NodeState {
 }
 
 // PrimaryIdFromSelf returns the primary node ID that this node reports as its
-// own primary in CLUSTER NODES (fields[3] of the "myself" line). Returns "-"
-// for primaries and the primary's node ID for replicas.
+// own primary in CLUSTER NODES. Returns "-" for primaries, the primary's node
+// ID for replicas, and "" when the output held no "myself" line.
 func (n *NodeState) PrimaryIdFromSelf() string {
-	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
-			continue
-		}
-		if strings.Contains(fields[2], "myself") {
-			return fields[3]
-		}
+	if myself := n.Myself(); myself != nil {
+		return myself.PrimaryId
 	}
 	return ""
 }
@@ -410,10 +484,11 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 }
 
 // hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
-// endpoint field (<ip:port@cport[,hostname]>). IPv6 hosts appear bracketed
-// ([fd00::2]:6379@16379); net.SplitHostPort unbrackets them so the result
-// compares equal to the bare pod IP Kubernetes reports. Returns "" when the
-// field has no parsable host:port part.
+// endpoint field (<ip:port@cport[,hostname]>). Valkey writes the endpoint with a
+// bare IP, so an IPv6 host carries its own colons (fd00::2:6379@16379) and
+// net.SplitHostPort rejects it as ambiguous; the last-colon fallback below
+// handles that case. The result compares equal to the bare pod IP Kubernetes
+// reports. Returns "" when the field has no host part.
 func hostFromClusterNodesEndpoint(endpoint string) string {
 	// Drop the cluster-bus suffix and the optional ,hostname after it.
 	if i := strings.Index(endpoint, "@"); i != -1 {
@@ -422,8 +497,8 @@ func hostFromClusterNodesEndpoint(endpoint string) string {
 	if host, _, err := net.SplitHostPort(endpoint); err == nil {
 		return host
 	}
-	// Fallback for entries with no port (shouldn't occur in CLUSTER NODES,
-	// but keep the previous last-colon behavior rather than dropping them).
+	// Unbracketed IPv6 and entries with no port land here: cut at the last
+	// colon, which is the port separator, and drop brackets if present.
 	if i := strings.LastIndex(endpoint, ":"); i != -1 {
 		return strings.Trim(endpoint[:i], "[]")
 	}
@@ -456,35 +531,29 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 	}
 	var stale []StaleAddressPeer
 	for _, viewer := range all {
-		for line := range strings.SplitSeq(viewer.ClusterNodes, "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 8 {
-				continue
-			}
-			flags := strings.Split(fields[2], ",")
-			if slices.Contains(flags, "myself") {
+		for _, entry := range viewer.nodes {
+			if entry.IsMyself() {
 				continue
 			}
 			// fail? is included: promoting pfail to fail needs gossip
 			// between a majority of primaries, which is exactly what a
 			// cluster-wide address change breaks — entries can stay at
 			// fail? indefinitely.
-			noaddr := slices.Contains(flags, "noaddr")
-			if !slices.Contains(flags, "fail") && !slices.Contains(flags, "fail?") && !noaddr {
+			if !entry.IsFailing() && !entry.HasNoAddress() {
 				continue
 			}
-			peer, ok := live[fields[0]]
+			peer, ok := live[entry.Id]
 			if !ok {
 				continue
 			}
 			// A noaddr entry carries no endpoint at all (:0@0) — the ID is
 			// known but no address ever completed a handshake. A live node
 			// with that ID always needs re-introduction.
-			if noaddr {
+			if entry.HasNoAddress() {
 				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
 				continue
 			}
-			if address := hostFromClusterNodesEndpoint(fields[1]); address != "" && address != peer.Address {
+			if entry.Host != "" && entry.Host != peer.Address {
 				stale = append(stale, StaleAddressPeer{Viewer: viewer, Live: peer})
 			}
 		}
@@ -492,22 +561,18 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 	return stale
 }
 
-// GetFailingNodes returns all known nodes that are failing.
-func (n *NodeState) GetFailingNodes() []NodeState {
-	nodes := []NodeState{}
-	for line := range strings.SplitSeq(n.ClusterNodes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
+// GetFailingNodes returns the peer-table entries this node considers failing.
+//
+// Only "fail" and "noaddr" count here, deliberately not "fail?": the caller
+// forgets these nodes, and a pfail entry may still recover on its own.
+func (n *NodeState) GetFailingNodes() []ClusterNode {
+	var nodes []ClusterNode
+	for _, entry := range n.nodes {
+		if entry.IsMyself() {
 			continue
 		}
-		flags := strings.Split(fields[2], ",")
-		if !slices.Contains(flags, "myself") {
-			if slices.Contains(flags, "fail") || slices.Contains(flags, "noaddr") {
-				// Get IP address from <ip:port@cport[,hostname]>
-				if idx := strings.LastIndex(fields[1], ":"); idx != -1 {
-					nodes = append(nodes, NodeState{Address: fields[1][:idx], Id: fields[0]})
-				}
-			}
+		if entry.HasFlag("fail") || entry.HasNoAddress() {
+			nodes = append(nodes, entry)
 		}
 	}
 	return nodes
@@ -593,21 +658,13 @@ func getNodeState(ctx context.Context, address string, port int, username string
 			log.Error(err, "command failed: CLUSTER NODES")
 		}
 		// Remove the encoding string included in a verbatim string.
-		node.ClusterNodes = strings.TrimPrefix(cnodes, "txt:")
+		node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
 	} else {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
 	}
 
-	// Extract flags
-	for line := range strings.SplitSeq(node.ClusterNodes, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 8 {
-			continue
-		}
-		flags := strings.Split(fields[2], ",")
-		if slices.Contains(flags, "myself") {
-			node.Flags = flags
-		}
+	if myself := node.Myself(); myself != nil {
+		node.Flags = myself.Flags
 	}
 	return &node
 }
@@ -634,8 +691,9 @@ func parseSlotsRanges(s []string) ([]SlotsRange, error) {
 	for _, part := range s {
 		// During active slot migration, CLUSTER NODES appends entries like
 		// "[5461->-abc123]" (migrating) or "[5461-<-abc123]" (importing) to the
-		// slot fields. GetSlots() returns fields[8:] verbatim, so these entries
-		// can appear here. Skip them — they aren't assignable slot ranges.
+		// slot fields. parseClusterNodesLine splits well-formed markers off
+		// before calling this, so a "[" field here is a malformed marker. Skip
+		// it rather than fail the whole line.
 		if strings.HasPrefix(part, "[") {
 			continue
 		}

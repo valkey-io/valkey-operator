@@ -99,7 +99,7 @@ serviceAccountName: valkey-sa
 `serviceAccountName` sets the Kubernetes ServiceAccount used by each ValkeyNode
 pod. If unset, the pod uses the namespace's default ServiceAccount.
 
-The referenced ServiceAccount **must already exist in the same namespace** as the ValkeyCluster, The operator only assigns the name to each pod template; it does not create, modify, or validate RBAC for that ServiceAccount. If the name does not exist, pod creation fails at admission.
+The referenced ServiceAccount **must already exist in the same namespace** as the ValkeyCluster. The operator assigns the name to each pod template; it does not create the ServiceAccount or configure its RBAC. If the ServiceAccount does not exist, pod admission rejects each pod and the cluster cannot become ready. The operator reports a `ConfigurationWarning` with reason `ServiceAccountNotFound`; if an API error prevents the existence check, it reports `ServiceAccountLookupFailed`. The check is advisory, and Kubernetes admission remains authoritative. Changing this field updates every ValkeyNode pod template and rolls all pods.
 
 ### Metrics
 

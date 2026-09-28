@@ -172,6 +172,24 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 	})
 
+	Context("When the ServiceAccount lookup fails", func() {
+		It("reports an advisory ServiceAccountLookupFailed warning", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "sa-lookup-failed", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1, Replicas: 0, ServiceAccountName: "valkey-sa",
+				},
+			}
+			r := &ValkeyClusterReconciler{APIReader: errorReader{err: stderrors.New("connection refused")}}
+
+			warnings := r.serviceAccountConfigWarnings(ctx, cluster)
+
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0].reason).To(Equal(valkeyiov1alpha1.ReasonServiceAccountLookupFailed))
+			Expect(warnings[0].message).To(ContainSubstring(`could not verify ServiceAccount "valkey-sa" exists`))
+		})
+	})
+
 	Context("When the ValkeyCluster is being deleted", func() {
 		const resourceName = "deleting-resource"
 
@@ -228,6 +246,22 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 	})
 })
+
+// errorReader implements client.Reader and returns the configured error from
+// each API read, allowing tests to exercise transient lookup failures.
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return r.err
+}
+
+func (r errorReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return r.err
+}
+
+var _ client.Reader = errorReader{}
 
 var _ = Describe("ValkeyCluster config hash propagation", func() {
 	ctx := context.Background()

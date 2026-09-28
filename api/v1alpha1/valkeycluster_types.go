@@ -730,6 +730,7 @@ const (
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

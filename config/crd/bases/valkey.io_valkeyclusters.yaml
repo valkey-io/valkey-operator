@@ -3322,6 +3322,13 @@ spec:
                                 type: string
                             type: object
                         type: object
+                      topologyKey:
+                        description: |-
+                          TopologyKey is the node label used by node.spread (shard anti-affinity
+                          and primaries/pods topology spread). When omitted, kubernetes.io/hostname.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
                     type: object
                   nodeSelector:
                     additionalProperties:
@@ -3655,6 +3662,13 @@ spec:
                                 type: string
                             type: object
                         type: object
+                      topologyKey:
+                        description: |-
+                          TopologyKey is the node label used by zone.spread and zone.pinning.
+                          When omitted, topology.kubernetes.io/zone.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
                     type: object
                 type: object
               shards:

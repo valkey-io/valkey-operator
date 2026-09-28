@@ -264,13 +264,26 @@ scheduling:
         mode: Disabled
 ```
 
-`scheduling.node.spread` groups three independent spread dimensions, each keyed on `kubernetes.io/hostname`, so you get shard- and primary-aware placement without hand-writing label selectors:
+`scheduling.node.spread` groups three independent spread dimensions, each keyed on `node.topologyKey` (default `kubernetes.io/hostname`), so you get shard- and primary-aware placement without hand-writing label selectors:
 
 | Field | Rendered as | Effect |
 |---|---|---|
 | `shard` | Pod anti-affinity | Keeps pods belonging to the same shard, for example a primary and its replica, off the same node. |
 | `primaries` | Topology spread constraint on each shard's node-index-0 pod | Spreads the pod that holds each shard's primary (at creation) across nodes. |
 | `pods` | Topology spread constraint on every cluster pod | Spreads all of the cluster's pods across nodes, regardless of shard. |
+
+`node.topologyKey` is optional. Omitted, every `node.spread` dimension uses `kubernetes.io/hostname`. Set it when the host label on your nodes is not that default:
+
+```yaml
+scheduling:
+  node:
+    topologyKey: topology.example.io/hostname
+    spread:
+      shard:
+        mode: Required
+```
+
+`zone.topologyKey` is the same override for `zone.spread` and `zone.pinning` (default `topology.kubernetes.io/zone`).
 
 Each field takes a `mode`:
 

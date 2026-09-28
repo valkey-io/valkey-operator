@@ -168,7 +168,7 @@ type NodeTLSSpec struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots mounted into the node pod.

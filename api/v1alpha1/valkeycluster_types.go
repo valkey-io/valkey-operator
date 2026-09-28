@@ -734,10 +734,12 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
-	// ReasonRollDeferred: the roll of a shard's primary is on hold because the
-	// shard has no synced replica to fail over to, so rolling it now would take
-	// the shard's only writer down. The message names the shard, the node and
-	// the cause. The roll resumes once a replica is synced.
+	// ReasonRollDeferred: the roll of a shard's primary is on hold, because
+	// rolling it now would take the shard's only writer down: the shard has
+	// no synced replica to fail over to, or the proactive failover to one did
+	// not complete. The message names the shard, the node and which of the
+	// two it is. In the first case the roll resumes once a replica is synced;
+	// in the second the failover events say what went wrong.
 	ReasonRollDeferred = "RollDeferred"
 )
 

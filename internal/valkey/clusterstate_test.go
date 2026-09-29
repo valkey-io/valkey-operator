@@ -810,6 +810,7 @@ func TestNodeState_Myself(t *testing.T) {
 	myself := node.Myself()
 	if myself == nil {
 		t.Fatal("expected a myself entry")
+		return
 	}
 	if myself.Id != "abc123" {
 		t.Errorf("expected abc123, got %q", myself.Id)

@@ -573,6 +573,10 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		})
 	}
 
+	if node.Spec.ServiceAccountName != "" {
+		podSpec.ServiceAccountName = node.Spec.ServiceAccountName
+	}
+
 	// Back /data with a PVC when persistence is set; otherwise an emptyDir so
 	// the cluster works on readOnlyRootFilesystem.
 	dataVolume := corev1.Volume{Name: dataVolumeName}

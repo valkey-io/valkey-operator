@@ -76,6 +76,10 @@ func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.Shar
 // proactiveFailover issues CLUSTER FAILOVER to the best synced replica in shard,
 // then polls until the replica reports role:master or the timeout is reached.
 // shard must be non-nil; replicas must be non-empty.
+// proactiveFailoverFn is what the roll calls; tests swap it for a stub, the
+// way nodeInfoFunc stands in for INFO in the node controller.
+var proactiveFailoverFn = proactiveFailover
+
 func proactiveFailover(ctx context.Context, recorder events.EventRecorder, cluster *valkeyiov1alpha1.ValkeyCluster, shard *valkey.ShardState, replicas []*valkey.NodeState) error {
 	log := logf.FromContext(ctx)
 	primaryAddress := shard.GetPrimaryNode().Address

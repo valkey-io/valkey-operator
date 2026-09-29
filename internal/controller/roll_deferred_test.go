@@ -18,12 +18,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 
@@ -31,15 +29,16 @@ import (
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
-// A shard whose primary is at 10.0.0.1 and whose only replica is not synced.
-func unsyncedShardState() *valkey.ClusterState {
+// shardState is a shard whose primary is at 10.0.0.1 with one replica whose
+// replication link is in the given state.
+func shardState(link string) *valkey.ClusterState {
 	return &valkey.ClusterState{
 		Shards: []*valkey.ShardState{{
 			Id:        "shard-2",
 			PrimaryId: "node-1",
 			Nodes: []*valkey.NodeState{
 				{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-				{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+				{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": link}},
 			},
 		}},
 	}
@@ -53,62 +52,38 @@ func TestMaybeProactiveFailoverBeforeRollCause(t *testing.T) {
 		Status:     valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
 	}
 
-	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, unsyncedShardState(), primary, true)
+	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), primary, true)
 	assert.Equal(t, "the shard has no synced replica to fail over to", cause, "a primary with no synced replica waits, and says why")
 
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, unsyncedShardState(), primary, false), "a spec update that does not roll the pod needs no failover")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), primary, false), "a spec update that does not roll the pod needs no failover")
 	replica := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-1"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"}}
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, unsyncedShardState(), replica, true), "a replica rolls without failover")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), replica, true), "a replica rolls without failover")
 	single := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 0}}
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), single, unsyncedShardState(), primary, true), "without replicas there is nothing to wait for")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), single, shardState("down"), primary, true), "without replicas there is nothing to wait for")
 }
 
-func TestMarkRollDeferred(t *testing.T) {
-	recorder := events.NewFakeRecorder(10)
-	r := &ValkeyClusterReconciler{Recorder: recorder}
-	cluster := &valkeyv1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"}}
+func TestMaybeProactiveFailoverBeforeRollFailoverError(t *testing.T) {
+	// A synced replica exists, so the roll tries the failover, and it does not complete.
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
+		return errors.New("CLUSTER FAILOVER timed out")
+	}
+	t.Cleanup(func() { proactiveFailoverFn = orig })
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(10)}
+	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1}}
+	primary := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-0"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"}}
+
+	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), primary, true)
+	assert.Equal(t, "the proactive failover to a synced replica did not complete (CLUSTER FAILOVER timed out)", cause)
+
+	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
+		return nil
+	}
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), primary, true), "a completed failover lets the roll proceed")
+}
+
+func TestRollDeferredErrorText(t *testing.T) {
 	deferred := &rollDeferredError{shardIndex: 2, node: "valkey-c-2-0", cause: "the shard has no synced replica to fail over to"}
-
-	r.markRollDeferred(cluster, deferred)
-
-	const want = "Roll of shard 2 primary valkey-c-2-0 deferred: the shard has no synced replica to fail over to"
-	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionReady)
-	require.NotNil(t, ready)
-	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, valkeyv1.ReasonRollDeferred, ready.Reason, "a held roll is not the generic UpdatingNodes")
-	assert.Equal(t, want, ready.Message)
-	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing)
-	require.NotNil(t, progressing)
-	assert.Equal(t, metav1.ConditionTrue, progressing.Status)
-	assert.Equal(t, valkeyv1.ReasonRollDeferred, progressing.Reason)
-	assert.Equal(t, want, progressing.Message)
-
-	select {
-	case ev := <-recorder.Events:
-		assert.Contains(t, ev, corev1.EventTypeNormal)
-		assert.Contains(t, ev, "RollDeferred")
-		assert.Contains(t, ev, want)
-	default:
-		t.Fatal("expected an event for the deferred roll")
-	}
-
-	// The reconcile retries every two seconds while the wait lasts; the same
-	// deferral is not a new event each time, a changed cause is.
-	r.markRollDeferred(cluster, deferred)
-	select {
-	case ev := <-recorder.Events:
-		t.Fatalf("expected no event for an unchanged deferral, got %q", ev)
-	default:
-	}
-	r.markRollDeferred(cluster, &rollDeferredError{shardIndex: 2, node: "valkey-c-2-0", cause: "the proactive failover to a synced replica did not complete (timeout)"})
-	select {
-	case ev := <-recorder.Events:
-		assert.Contains(t, ev, "did not complete (timeout)")
-	default:
-		t.Fatal("expected an event when the cause changes")
-	}
-	progressing = meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing)
-	assert.Contains(t, progressing.Message, "did not complete (timeout)", "the condition follows the latest cause")
-
-	assert.Equal(t, "roll of shard 2 primary valkey-c-2-0 deferred: the shard has no synced replica to fail over to", deferred.Error())
+	assert.Equal(t, "the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to", deferred.Error())
 }

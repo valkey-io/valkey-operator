@@ -58,7 +58,7 @@ Common reasons when `Ready=False`:
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
-- `RollDeferred` – the roll of a shard's primary is on hold because rolling it now would take the shard's only writer down: the shard has no synced replica to fail over to, or the proactive failover to one did not complete; the message names the shard, the node and which of the two it is. In the first case the roll resumes once a replica is synced, in the second the `FailoverFailed` or `FailoverTimeout` event says what went wrong
+  - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
@@ -79,7 +79,6 @@ Common reasons:
 - `Reconciling` – general reconciliation in progress
 - `AddingNodes` – adding nodes to the cluster
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
-- `RollDeferred` – a primary's roll is on hold, waiting for a synced replica or after a failed proactive failover (see `Ready`)
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 

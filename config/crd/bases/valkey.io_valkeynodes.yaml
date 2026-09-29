@@ -2816,6 +2816,12 @@ spec:
                   type: string
                 description: NodeSelector defines the node selection constraints.
                 type: object
+              nodeService:
+                description: |-
+                  NodeService is set by the ValkeyCluster controller from
+                  spec.networking.nodeService. When set, this node has one ClusterIP
+                  Service. Empty means no Service.
+                type: object
               persistence:
                 description: Persistence defines durable storage for the ValkeyNode.
                 properties:

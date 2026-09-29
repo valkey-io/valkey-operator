@@ -931,7 +931,7 @@ func (r *ValkeyClusterReconciler) serviceAccountConfigWarnings(ctx context.Conte
 			message: fmt.Sprintf("ServiceAccount %q does not exist; Pods will fail to create until it is created", sa),
 		}}
 	default:
-		logf.FromContext(ctx).Error(err, "could not verify ServiceAccount", "serviceAccount", sa)
+		logf.FromContext(ctx).V(1).Info("could not verify ServiceAccount", "serviceAccount", sa, "err", err)
 		return []configWarning{{
 			reason:  valkeyiov1alpha1.ReasonServiceAccountLookupFailed,
 			message: fmt.Sprintf("could not verify ServiceAccount %q exists: %v", sa, err),

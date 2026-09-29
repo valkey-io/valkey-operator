@@ -233,6 +233,7 @@ func TestFindMyself(t *testing.T) {
 		myself := FindMyself(ParseClusterNodes(raw))
 		if myself == nil {
 			t.Fatal("expected a myself entry")
+			return
 		}
 		if myself.Id != "abc123" {
 			t.Errorf("expected abc123, got %q", myself.Id)

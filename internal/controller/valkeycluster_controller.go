@@ -72,6 +72,7 @@ type ValkeyClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -171,6 +172,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			message: msg,
 		})
 	}
+	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
 
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
 	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
@@ -913,6 +915,30 @@ func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alph
 	}
 }
 
+// serviceAccountConfigWarnings checks whether the explicitly requested ServiceAccount exists.
+func (r *ValkeyClusterReconciler) serviceAccountConfigWarnings(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	sa := cluster.Spec.ServiceAccountName
+	if sa == "" {
+		return nil
+	}
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: sa}, &corev1.ServiceAccount{})
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsNotFound(err):
+		return []configWarning{{
+			reason:  valkeyiov1alpha1.ReasonServiceAccountNotFound,
+			message: fmt.Sprintf("ServiceAccount %q does not exist; Pods will fail to create until it is created", sa),
+		}}
+	default:
+		logf.FromContext(ctx).V(1).Info("could not verify ServiceAccount", "serviceAccount", sa, "err", err)
+		return []configWarning{{
+			reason:  valkeyiov1alpha1.ReasonServiceAccountLookupFailed,
+			message: fmt.Sprintf("could not verify ServiceAccount %q exists: %v", sa, err),
+		}}
+	}
+}
+
 // buildClusterValkeyNode constructs the ValkeyNode CR for a given (shard, node) position.
 func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex int, nodeIndex int) *valkeyiov1alpha1.ValkeyNode {
 	// Start with recommended k8s labels; instance is the cluster name and component is "valkey-node".
@@ -1017,6 +1043,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TLS:                           nodeTLSFromCluster(cluster),
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
+			ServiceAccountName:            cluster.Spec.ServiceAccountName,
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,

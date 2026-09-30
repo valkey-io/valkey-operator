@@ -744,6 +744,14 @@ const (
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+// Every ValkeyNode gets a StatefulSet named valkey-<name>-<shard>-<node>, and
+// Kubernetes stamps each of its pods with a controller-revision-hash label of
+// the StatefulSet name plus an 11-character suffix. Label values are limited
+// to 63 characters, so a StatefulSet name longer than 52 never gets a pod. The
+// rule counts the digits of the highest shard index (shards - 1) and node
+// index (replicas), so it also rejects a scale-out that would push an index
+// into more digits.
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

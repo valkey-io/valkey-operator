@@ -66,9 +66,10 @@ type ValkeyClusterReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 
-	// When each orphaned primary was first seen FAIL, for the takeover grace period.
+	// Per cluster, when each orphaned primary was first seen FAIL, for the
+	// takeover grace period.
 	orphanMu          sync.Mutex
-	orphanFailedSince map[string]time.Time
+	orphanFailedSince map[client.ObjectKey]map[string]time.Time
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -127,6 +128,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			deleteClusterMetrics(req.Name, req.Namespace)
+			r.orphanMu.Lock()
+			delete(r.orphanFailedSince, req.NamespacedName)
+			r.orphanMu.Unlock()
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -1432,16 +1436,24 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // it first gives the primary orphanTakeoverGrace to come back with its data.
 // Returns (result, true) if a promotion was made and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
+	key := client.ObjectKeyFromObject(cluster)
+	r.orphanMu.Lock()
+	defer r.orphanMu.Unlock()
 	if state.HasFailoverQuorum() {
+		// Start a fresh grace period the next time quorum is lost.
+		delete(r.orphanFailedSince, key)
 		return ctrl.Result{}, false
+	}
+	if r.orphanFailedSince == nil {
+		r.orphanFailedSince = map[client.ObjectKey]map[string]time.Time{}
+	}
+	failedSince := r.orphanFailedSince[key]
+	if failedSince == nil {
+		failedSince = map[string]time.Time{}
+		r.orphanFailedSince[key] = failedSince
 	}
 	persistent := cluster.Spec.Persistence != nil
 	grace := orphanTakeoverGrace()
-	r.orphanMu.Lock()
-	defer r.orphanMu.Unlock()
-	if r.orphanFailedSince == nil {
-		r.orphanFailedSince = map[string]time.Time{}
-	}
 	log := logf.FromContext(ctx)
 	var promoted, attempted int
 	deadPrimaries := make(map[string]bool)
@@ -1455,14 +1467,14 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 				continue
 			}
 			if !state.IsNodeFailed(primaryId) {
-				delete(r.orphanFailedSince, primaryId)
+				delete(failedSince, primaryId)
 				continue
 			}
 			if persistent {
 				// Wait for the grace period in case the primary restarts with its data.
-				first, ok := r.orphanFailedSince[primaryId]
+				first, ok := failedSince[primaryId]
 				if !ok {
-					r.orphanFailedSince[primaryId] = time.Now()
+					failedSince[primaryId] = time.Now()
 					continue
 				}
 				if time.Since(first) < grace {
@@ -1493,7 +1505,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
 		} else {
 			promoted++
-			delete(r.orphanFailedSince, primaryId)
+			delete(failedSince, primaryId)
 		}
 	}
 	if promoted > 0 || attempted > 0 {

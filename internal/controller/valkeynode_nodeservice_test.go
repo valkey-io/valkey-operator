@@ -53,7 +53,7 @@ var _ = Describe("per-node Services", func() {
 	})
 
 	It("creates a ClusterIP Service owned by the ValkeyNode", func() {
-		node := newServiceNode("sample-0-1", true)
+		node := newServiceNode("sample-0-1")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -92,7 +92,7 @@ var _ = Describe("per-node Services", func() {
 	})
 
 	It("does not update the Service on a second reconcile", func() {
-		node := newServiceNode("noop-0-0", true)
+		node := newServiceNode("noop-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -110,7 +110,7 @@ var _ = Describe("per-node Services", func() {
 	})
 
 	It("deletes the Service when NodeService is cleared", func() {
-		node := newServiceNode("clear-0-0", true)
+		node := newServiceNode("clear-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -127,7 +127,7 @@ var _ = Describe("per-node Services", func() {
 	})
 
 	It("does not delete a Service it does not own", func() {
-		node := newServiceNode("foreign-0-0", false)
+		node := newBareNode("foreign-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -153,7 +153,7 @@ var _ = Describe("per-node Services", func() {
 	})
 
 	It("does not adopt a Service it does not own", func() {
-		node := newServiceNode("adopt-0-0", true)
+		node := newServiceNode("adopt-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -180,8 +180,73 @@ var _ = Describe("per-node Services", func() {
 		Expect(got.Spec.Selector).To(Equal(map[string]string{"app": "mine"}))
 	})
 
+	It("ignores a long name when NodeService is unset", func() {
+		node := newBareNode(strings.Repeat("b", 57))
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+
+		Expect(r.ensureNodeService(ctx, node)).To(Succeed())
+		err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      valkeyNodeResourceName(node),
+			Namespace: node.Namespace,
+		}, &corev1.Service{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("rejects a per-node Service that would use another cluster's headless name", func() {
+		node := newServiceNode("other")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+
+		other := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+		}
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, other) }()
+
+		err := r.ensureNodeService(ctx, stored)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(headlessServiceName(other.Name)))
+		getErr := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      valkeyNodeResourceName(stored),
+			Namespace: stored.Namespace,
+		}, &corev1.Service{})
+		Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
+	})
+
+	It("rejects a headless Service that would use a per-node Service name", func() {
+		node := newServiceNode("clash")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+		cr := &ValkeyClusterReconciler{
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
+		}
+		err := cr.upsertService(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(headlessServiceName(cluster.Name)))
+		getErr := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      headlessServiceName(cluster.Name),
+			Namespace: cluster.Namespace,
+		}, &corev1.Service{})
+		Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
+	})
+
 	It("rejects a Service name longer than 63 characters", func() {
-		node := newServiceNode(strings.Repeat("a", 57), true)
+		node := newServiceNode(strings.Repeat("a", 57))
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 
@@ -225,8 +290,14 @@ func TestValidateClusterNodeServiceNames(t *testing.T) {
 	}
 }
 
-func newServiceNode(name string, enabled bool) *valkeyiov1alpha1.ValkeyNode {
-	node := &valkeyiov1alpha1.ValkeyNode{
+func newServiceNode(name string) *valkeyiov1alpha1.ValkeyNode {
+	node := newBareNode(name)
+	node.Spec.NodeService = &valkeyiov1alpha1.NodeServiceSpec{}
+	return node
+}
+
+func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
+	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
@@ -237,8 +308,4 @@ func newServiceNode(name string, enabled bool) *valkeyiov1alpha1.ValkeyNode {
 			},
 		},
 	}
-	if enabled {
-		node.Spec.NodeService = &valkeyiov1alpha1.NodeServiceSpec{}
-	}
-	return node
 }

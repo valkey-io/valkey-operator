@@ -126,6 +126,60 @@ var _ = Describe("per-node Services", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
+	It("does not delete a Service it does not own", func() {
+		node := newServiceNode("foreign-0-0", false)
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+
+		foreign := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      valkeyNodeResourceName(stored),
+				Namespace: stored.Namespace,
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "mine"},
+				Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort, TargetPort: intstr.FromInt32(DefaultPort)}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
+		Expect(got.OwnerReferences).To(BeEmpty())
+	})
+
+	It("does not adopt a Service it does not own", func() {
+		node := newServiceNode("adopt-0-0", true)
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+
+		foreign := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      valkeyNodeResourceName(stored),
+				Namespace: stored.Namespace,
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "mine"},
+				Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort, TargetPort: intstr.FromInt32(DefaultPort)}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+		err := r.ensureNodeService(ctx, stored)
+		Expect(err).To(HaveOccurred())
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
+		Expect(got.OwnerReferences).To(BeEmpty())
+		Expect(got.Spec.Selector).To(Equal(map[string]string{"app": "mine"}))
+	})
+
 	It("rejects a Service name longer than 63 characters", func() {
 		node := newServiceNode(strings.Repeat("a", 57), true)
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())

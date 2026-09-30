@@ -80,6 +80,9 @@ func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valk
 		},
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		if svc.UID != "" && !metav1.IsControlledBy(svc, node) {
+			return fmt.Errorf("Service %s/%s exists and is not owned by ValkeyNode %s", svc.Namespace, svc.Name, node.Name)
+		}
 		svc.Labels = valkeyNodeLabels(node)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		svc.Spec.Selector = valkeyNodeLabels(node)
@@ -111,6 +114,10 @@ func (r *ValkeyNodeReconciler) deleteNodeService(ctx context.Context, node *valk
 	}
 	if err != nil {
 		return err
+	}
+	// A user Service may already use this name. Delete only the one we own.
+	if !metav1.IsControlledBy(svc, node) {
+		return nil
 	}
 	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
 		return err

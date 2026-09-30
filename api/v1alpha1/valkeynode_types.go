@@ -332,9 +332,6 @@ const (
 // +kubebuilder:printcolumn:name="Pod",type="string",JSONPath=".status.podName",description="Pod name"
 // +kubebuilder:printcolumn:name="IP",type="string",JSONPath=".status.podIP",description="Pod IP",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
-// The StatefulSet is named valkey-<name>; see the ValkeyCluster rule for why
-// that name must stay within 52 characters.
-// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 45",message="metadata.name is too long: the StatefulSet name valkey-<name> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 type ValkeyNode struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`

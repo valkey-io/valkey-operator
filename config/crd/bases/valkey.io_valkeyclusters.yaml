@@ -37,13 +37,15 @@ spec:
       openAPIV3Schema:
         description: |-
           ValkeyCluster is the Schema for the valkeyclusters API
-          Every ValkeyNode gets a StatefulSet named valkey-<name>-<shard>-<node>, and
-          Kubernetes stamps each of its pods with a controller-revision-hash label of
-          the StatefulSet name plus an 11-character suffix. Label values are limited
-          to 63 characters, so a StatefulSet name longer than 52 never gets a pod. The
-          rule counts the digits of the highest shard index (shards - 1) and node
-          index (replicas), so it also rejects a scale-out that would push an index
-          into more digits.
+          Every ValkeyNode gets a workload named valkey-<name>-<shard>-<node>. With
+          workloadType StatefulSet, Kubernetes stamps each pod with a
+          controller-revision-hash label of the StatefulSet name plus an 11-character
+          suffix, and label values stop at 63 characters, so a StatefulSet name longer
+          than 52 never gets a pod. The rule counts the digits of the highest shard
+          index (shards - 1) and node index (replicas), so a scale-out that pushes an
+          index into more digits is rejected too. A Deployment carries no such label;
+          there the headless Service valkey-<name>, a DNS label of at most 63
+          characters, is the limit.
         properties:
           apiVersion:
             description: |-
@@ -4075,8 +4077,13 @@ spec:
         - message: 'metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node>
             must stay within 52 characters, because Kubernetes appends an 11-character
             controller-revision-hash to it in a pod label limited to 63 characters'
-          rule: 'size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
+          rule: '(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
+            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
             ? self.spec.replicas : 0)) <= 43'
+        - message: 'metadata.name is too long: the headless Service name valkey-<name>
+            must stay within 63 characters'
+          rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
+            || size(self.metadata.name) <= 56'
     served: true
     storage: true
     subresources:

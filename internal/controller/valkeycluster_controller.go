@@ -1744,6 +1744,11 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			return false, err
 		}
 		if move == nil {
+			if len(shard.Slots) > 0 {
+				// No in-spec shard to take the slots yet; keep the shard.
+				log.Info("excess shard owns slots but has no drain destination; waiting", "shardId", shard.Id)
+				return true, nil
+			}
 			continue
 		}
 
@@ -1808,6 +1813,8 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (bool, error) {
 	log := logf.FromContext(ctx)
 	owners := slotOwningPrimaryAddresses(state)
+	// Slots no scraped primary owns may belong to a node we could not reach.
+	unaccounted := len(state.GetUnassignedSlots()) > 0
 	allNodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, allNodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		return false, err
@@ -1826,7 +1833,7 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 		}
 		if shardIndex >= int(cluster.Spec.Shards) || nodeIndex >= nodesPerShard {
 			// Deleting a primary that still owns slots loses their keys.
-			if owners[node.Status.PodIP] {
+			if owners[node.Status.PodIP] || (unaccounted && !state.HasAddress(node.Status.PodIP)) {
 				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Excess ValkeyNode %s still owns slots; waiting for drain", node.Name)
 				continue
 			}

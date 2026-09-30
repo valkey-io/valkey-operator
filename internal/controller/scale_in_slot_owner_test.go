@@ -75,17 +75,36 @@ func TestExcessShardOwnsSlots(t *testing.T) {
 	assert.False(t, excessShardOwnsSlots(state, nodes, 3))
 }
 
-func TestDeleteExcessValkeyNodesKeepsSlotOwners(t *testing.T) {
+// scaleInReconciler returns a reconciler for a 2-shard cluster "c" whose
+// fake API holds the given ValkeyNodes.
+func scaleInReconciler(t *testing.T, objs ...client.Object) (*ValkeyClusterReconciler, *valkeyiov1alpha1.ValkeyCluster, *events.FakeRecorder) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
-	inSpec, owner, drained := primaryNode(0), primaryNode(3), primaryNode(2)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inSpec, owner, drained).Build()
 	recorder := events.NewFakeRecorder(8)
-	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+	r := &ValkeyClusterReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
 		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 2},
 	}
+	return r, cluster, recorder
+}
+
+func nodeExists(t *testing.T, c client.Client, n *valkeyiov1alpha1.ValkeyNode) bool {
+	err := c.Get(context.Background(), client.ObjectKeyFromObject(n), &valkeyiov1alpha1.ValkeyNode{})
+	if apierrors.IsNotFound(err) {
+		return false
+	}
+	require.NoError(t, err)
+	return true
+}
+
+func TestDeleteExcessValkeyNodesKeepsSlotOwners(t *testing.T) {
+	inSpec, owner, drained := primaryNode(0), primaryNode(3), primaryNode(2)
+	r, cluster, recorder := scaleInReconciler(t, inSpec, owner, drained)
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 		primaryShard(3, valkey.SlotsRange{Start: 8192, End: 16383}),
@@ -95,17 +114,46 @@ func TestDeleteExcessValkeyNodesKeepsSlotOwners(t *testing.T) {
 	deleted, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state)
 	require.NoError(t, err)
 	assert.True(t, deleted)
-
-	exists := func(n *valkeyiov1alpha1.ValkeyNode) bool {
-		return !apierrors.IsNotFound(c.Get(context.Background(), client.ObjectKeyFromObject(n), &valkeyiov1alpha1.ValkeyNode{}))
-	}
-	assert.True(t, exists(inSpec))
-	assert.True(t, exists(owner), "excess node that owns slots must be kept")
-	assert.False(t, exists(drained))
+	assert.True(t, nodeExists(t, r.Client, inSpec))
+	assert.True(t, nodeExists(t, r.Client, owner), "excess node that owns slots must be kept")
+	assert.False(t, nodeExists(t, r.Client, drained))
 	close(recorder.Events)
 	var got []string
 	for e := range recorder.Events {
 		got = append(got, e)
 	}
 	assert.Contains(t, got, "Warning ScaleInBlocked Excess ValkeyNode c-3-0 still owns slots; waiting for drain")
+}
+
+// A primary the scrape missed may still own the slots nobody else claims.
+func TestDeleteExcessValkeyNodesKeepsUnobservedNodes(t *testing.T) {
+	unobserved := primaryNode(3)
+	r, cluster, _ := scaleInReconciler(t, primaryNode(0), unobserved)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+	}}
+
+	_, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state)
+	require.NoError(t, err)
+	assert.True(t, nodeExists(t, r.Client, unobserved))
+
+	state.Shards[0].Slots = []valkey.SlotsRange{{Start: 0, End: 16383}}
+	_, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state)
+	require.NoError(t, err)
+	assert.False(t, nodeExists(t, r.Client, unobserved), "deleted once every slot is accounted for")
+}
+
+// With no in-spec shard in the scrape there is nowhere to drain to.
+func TestDrainExcessShardsWithoutDestinationKeepsShard(t *testing.T) {
+	owner := primaryNode(3)
+	r, cluster, _ := scaleInReconciler(t, owner)
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{*owner}}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		primaryShard(3, valkey.SlotsRange{Start: 0, End: 16383}),
+	}}
+
+	requeue, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, requeue)
+	assert.True(t, nodeExists(t, r.Client, owner))
 }

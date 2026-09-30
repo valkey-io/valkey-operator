@@ -63,14 +63,21 @@ func validateClusterNodeServiceNames(cluster *valkeyiov1alpha1.ValkeyCluster) er
 
 // ensureNodeService creates or deletes this node's ClusterIP Service.
 // The ValkeyNode owns the Service, so scale-in removes it with the node.
-// A nil spec.NodeService deletes the Service.
+// A nil spec.NodeService deletes the Service this node owns.
+// The 63 character limit applies only when the field is set.
 func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	name := valkeyNodeResourceName(node)
+	if node.Spec.NodeService == nil {
+		if len(name) > validation.DNS1123LabelMaxLength {
+			return nil
+		}
+		return r.deleteNodeService(ctx, node, name)
+	}
 	if len(name) > validation.DNS1123LabelMaxLength {
 		return fmt.Errorf("per-node Service name %q is %d characters; the limit is %d", name, len(name), validation.DNS1123LabelMaxLength)
 	}
-	if node.Spec.NodeService == nil {
-		return r.deleteNodeService(ctx, node, name)
+	if err := r.nodeServiceNameCollides(ctx, node, name); err != nil {
+		return err
 	}
 
 	svc := &corev1.Service{
@@ -104,6 +111,21 @@ func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valk
 		r.Recorder.Eventf(node, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created per-node Service %s", svc.Name)
 	}
 	return nil
+}
+
+// nodeServiceNameCollides reports a headless Service that already uses this name.
+// The headless name is valkey-<cluster>. This node's Service name is the same
+// string when the node's name equals that cluster's name.
+func (r *ValkeyNodeReconciler) nodeServiceNameCollides(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, name string) error {
+	other := &valkeyiov1alpha1.ValkeyCluster{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: node.Name}, other)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("per-node Service name %q is the headless Service of ValkeyCluster %s", name, other.Name)
 }
 
 func (r *ValkeyNodeReconciler) deleteNodeService(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, name string) error {

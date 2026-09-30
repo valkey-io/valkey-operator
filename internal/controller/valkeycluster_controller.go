@@ -555,6 +555,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			Namespace: cluster.Namespace,
 		},
 	}
+	if err := r.headlessNameCollides(ctx, cluster); err != nil {
+		return err
+	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		svc.Labels = labels(cluster)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
@@ -582,6 +585,24 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
 	}
 	return nil
+}
+
+// headlessNameCollides reports a per-node Service that already uses this name.
+// That Service is valkey-<node name>. The headless name is the same string
+// when a ValkeyNode is named exactly this cluster's name and has nodeService set.
+func (r *ValkeyClusterReconciler) headlessNameCollides(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	node := &valkeyiov1alpha1.ValkeyNode{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, node)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if node.Spec.NodeService == nil {
+		return nil
+	}
+	return fmt.Errorf("headless Service name %q is the per-node Service for ValkeyNode %s", headlessServiceName(cluster.Name), node.Name)
 }
 
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.

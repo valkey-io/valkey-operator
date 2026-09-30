@@ -21,6 +21,10 @@
 - [Users](#users)
 - [Workload type](#workload-type)
 
+### Name length
+
+`metadata.name` is limited so that every StatefulSet derived from it, `valkey-<name>-<shard>-<node>`, stays within 52 characters. Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, and label values are limited to 63 characters, so a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters. Each extra digit in the highest shard index (`shards - 1`) or node index (`replicas`) takes one character away. The rule is enforced at admission, both on create and on a scale-out that would push an index into more digits.
+
 ### Config
 
 ```yaml

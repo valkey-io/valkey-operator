@@ -79,7 +79,8 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 }
 
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
-	node := newTestValkeyNode("mynode", "test-ns")
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
 	require.NoError(t, err)
@@ -104,12 +105,16 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
 
-	// Env
-	require.Len(t, c.Env, 2)
+	// Env: the announce address, the replication password for --primaryauth,
+	// then the operator credentials the health-check scripts use.
+	require.Len(t, c.Env, 4)
 	assert.Equal(t, "POD_IP", c.Env[0].Name)
 	assert.Equal(t, "status.podIP", c.Env[0].ValueFrom.FieldRef.FieldPath)
 	assert.Equal(t, "PRIMARY_AUTH", c.Env[1].Name)
-	assert.Equal(t, getSystemPasswordSecretName(node.Labels[LabelCluster]), c.Env[1].ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, getSystemPasswordSecretName("mycluster"), c.Env[1].ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, replicationUser, c.Env[1].ValueFrom.SecretKeyRef.Key)
+	assert.Equal(t, "VALKEY_USER", c.Env[2].Name)
+	assert.Equal(t, "VALKEYCLI_AUTH", c.Env[3].Name)
 
 	// Ports
 	require.Len(t, c.Ports, 2)
@@ -165,6 +170,28 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
 }
 
+// A standalone ValkeyNode has no ValkeyCluster, so there is no primary to
+// authenticate to and no system-passwords Secret to read the password from.
+// Wiring PRIMARY_AUTH anyway used to point the pod at a Secret named
+// "internal--system-passwords" and leave it in CreateContainerConfigError.
+func TestBuildValkeyNodePodTemplateSpecStandalone(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	require.Empty(t, node.Labels[LabelCluster])
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	require.Len(t, pts.Spec.Containers, 1)
+	c := pts.Spec.Containers[0]
+
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)"}, c.Command)
+	require.Len(t, c.Env, 1)
+	assert.Equal(t, "POD_IP", c.Env[0].Name)
+	for _, e := range c.Env {
+		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			t.Fatalf("standalone node must not reference a Secret, got %q", e.ValueFrom.SecretKeyRef.Name)
+		}
+	}
+}
 func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 

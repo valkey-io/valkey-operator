@@ -245,32 +245,35 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	}
 
 	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+	command := append([]string{"valkey-server", "/config/valkey.conf"}, announceArgs...)
+	env := announceEnv
+	// Only a cluster-owned node replicates, and it authenticates to its primary
+	// as the replication user, whose password the ValkeyCluster controller keeps
+	// in the cluster's system-passwords Secret. A standalone ValkeyNode has no
+	// cluster label, no primary and no such Secret, so wiring PRIMARY_AUTH would
+	// only leave its pod in CreateContainerConfigError.
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		command = append(command, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
+		env = append(env, corev1.EnvVar{
+			Name: "PRIMARY_AUTH",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: getSystemPasswordSecretName(clusterName),
+					},
+					Key: replicationUser,
+				},
+			},
+		})
+	}
 
 	containers := []corev1.Container{
 		{
 			Name:      "server",
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: append([]string{
-				"valkey-server",
-				"/config/valkey.conf",
-			}, append(announceArgs, []string{
-				"--primaryuser",
-				replicationUser,
-				"--primaryauth",
-				"$(PRIMARY_AUTH)",
-			}...)...),
-			Env: append(announceEnv, corev1.EnvVar{
-				Name: "PRIMARY_AUTH",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: getSystemPasswordSecretName(node.Labels[LabelCluster]),
-						},
-						Key: replicationUser,
-					},
-				},
-			}),
+			Command:   command,
+			Env:       env,
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "client",

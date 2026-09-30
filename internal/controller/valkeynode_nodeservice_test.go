@@ -193,7 +193,7 @@ var _ = Describe("per-node Services", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
-	It("rejects a per-node Service that would use another cluster's headless name", func() {
+	It("creates a per-node Service when another cluster only shares the name", func() {
 		node := newServiceNode("other")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
@@ -207,17 +207,14 @@ var _ = Describe("per-node Services", func() {
 		Expect(k8sClient.Create(ctx, other)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, other) }()
 
-		err := r.ensureNodeService(ctx, stored)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(headlessServiceName(other.Name)))
-		getErr := k8sClient.Get(ctx, types.NamespacedName{
+		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      valkeyNodeResourceName(stored),
 			Namespace: stored.Namespace,
-		}, &corev1.Service{})
-		Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
+		}, &corev1.Service{})).To(Succeed())
 	})
 
-	It("rejects a headless Service that would use a per-node Service name", func() {
+	It("creates the headless Service when the node has not created one yet", func() {
 		node := newServiceNode("clash")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
@@ -235,14 +232,45 @@ var _ = Describe("per-node Services", func() {
 			Scheme:    k8sClient.Scheme(),
 			Recorder:  fakeRecorder,
 		}
-		err := cr.upsertService(ctx, cluster)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(headlessServiceName(cluster.Name)))
-		getErr := k8sClient.Get(ctx, types.NamespacedName{
+		Expect(cr.upsertService(ctx, cluster)).To(Succeed())
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      headlessServiceName(cluster.Name),
 			Namespace: cluster.Namespace,
-		}, &corev1.Service{})
-		Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
+		}, got)).To(Succeed())
+		Expect(got.OwnerReferences[0].Name).To(Equal(cluster.Name))
+	})
+
+	It("does not replace a per-node Service with a headless Service", func() {
+		node := newServiceNode("taken")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
+
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+		cr := &ValkeyClusterReconciler{
+			Client:    k8sClient,
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  fakeRecorder,
+		}
+		err := cr.upsertService(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      valkeyNodeResourceName(stored),
+			Namespace: stored.Namespace,
+		}, got)).To(Succeed())
+		Expect(got.OwnerReferences[0].Name).To(Equal(stored.Name))
+		Expect(got.Spec.ClusterIP).NotTo(Equal(corev1.ClusterIPNone))
 	})
 
 	It("rejects a Service name longer than 63 characters", func() {

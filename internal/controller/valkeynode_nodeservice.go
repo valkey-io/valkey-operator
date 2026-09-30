@@ -85,7 +85,7 @@ func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valk
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		if svc.UID != "" && !metav1.IsControlledBy(svc, node) {
-			return fmt.Errorf("Service %s/%s exists and is not owned by ValkeyNode %s", svc.Namespace, svc.Name, node.Name)
+			return fmt.Errorf("service %s/%s exists and is not owned by ValkeyNode %s", svc.Namespace, svc.Name, node.Name)
 		}
 		svc.Labels = valkeyNodeLabels(node)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP

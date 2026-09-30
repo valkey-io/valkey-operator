@@ -559,7 +559,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		// Do not take a Service a ValkeyNode already owns. A free name is
 		// still created. The other cluster object existing is not enough.
 		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
-			return fmt.Errorf("Service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
+			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
 		}
 		svc.Labels = labels(cluster)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP

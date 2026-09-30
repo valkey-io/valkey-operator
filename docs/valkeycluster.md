@@ -23,7 +23,7 @@
 
 ### Name length
 
-`metadata.name` is limited so that every StatefulSet derived from it, `valkey-<name>-<shard>-<node>`, stays within 52 characters. Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, and label values are limited to 63 characters, so a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters. Each extra digit in the highest shard index (`shards - 1`) or node index (`replicas`) takes one character away. The rule is enforced at admission, both on create and on a scale-out that would push an index into more digits.
+`metadata.name` is limited by the names the operator derives from it. With `workloadType: StatefulSet` (the default) every ValkeyNode gets a StatefulSet named `valkey-<name>-<shard>-<node>`, and that name must stay within 52 characters: Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, label values are limited to 63 characters, and a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters. Each extra digit in the highest shard index (`shards - 1`) or node index (`replicas`) takes one character away, so a scale-out that pushes an index into more digits is rejected as well. With `workloadType: Deployment` there is no such label, and the limit is the headless Service `valkey-<name>`, a DNS label of at most 63 characters, so the name may have up to 56 characters. Both rules are enforced at admission.
 
 ### Config
 

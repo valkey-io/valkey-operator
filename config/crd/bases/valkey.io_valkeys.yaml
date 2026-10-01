@@ -26,7 +26,6 @@ spec:
     - description: ValkeyNode currently serving as primary
       jsonPath: .status.primary
       name: Primary
-      priority: 1
       type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
@@ -39,18 +38,16 @@ spec:
           Valkey is the Schema for the valkeys API.
 
           The name is bounded because child resource names are derived from it.
-          Every one of them is a DNS label capped at 63 characters.
+          Every derived name is held to a 63 character DNS label.
+          That is stricter than some child types need: Secret names allow 253.
+          One rule for every child keeps the limit simple.
+          It also leaves room for derived names used as labels or volume names.
 
-          The binding child is the Secret "internal-<name>-system-passwords".
+          The longest derived name is the Secret "internal-<name>-system-passwords".
           Its 26 fixed characters leave 37 for the name.
-          No other derived name is tighter, so this is the only limit stated.
 
           The limit is in place from the start.
           Tightening it later would reject objects that already exist.
-
-          A trailing "-<number>" is reserved.
-          ValkeyNode names are derived as "<name>-<index>".
-          An instance "cache-1" would otherwise collide with node 1 of "cache".
         properties:
           apiVersion:
             description: |-
@@ -1896,69 +1893,6 @@ spec:
                         type: object
                     type: object
                 type: object
-              failover:
-                description: |-
-                  Failover declares how primary failover is performed for this instance.
-                  Only mode None is accepted today.
-                properties:
-                  mode:
-                    default: None
-                    description: |-
-                      Mode selects the failover engine.
-                      Values may be added in future versions.
-                      Clients must tolerate values they do not recognise.
-                    enum:
-                    - None
-                    - Sentinel
-                    type: string
-                  sentinel:
-                    description: |-
-                      Sentinel configures Sentinel-mode failover.
-                      Only valid when mode is Sentinel.
-                      This block does not by itself cause monitoring.
-                      A ValkeySentinel must also select this object.
-                    properties:
-                      config:
-                        additionalProperties:
-                          type: string
-                        description: |-
-                          Config is per-master Sentinel tuning.
-                          Forwarded as SENTINEL SET <monitorName> <key> <value>.
-                          Values are not validated by the operator.
-                          Operator-owned keys are skipped with a ConfigurationWarning.
-                        type: object
-                      monitorName:
-                        description: |-
-                          MonitorName is the Sentinel master-name for this instance.
-                          Defaults to metadata.name, resolved by Valkey.MonitorName().
-                          There is no kubebuilder default.
-                          A materialized default is indistinguishable from a user-set value.
-                          It stays settable so an adopted deployment keeps its existing name.
-                        maxLength: 37
-                        minLength: 1
-                        type: string
-                      quorum:
-                        description: |-
-                          Quorum is the number of Sentinels that must agree the primary is down.
-                          Passed to SENTINEL MONITOR.
-                          Defaults to (selecting sentinel's replicas / 2) + 1.
-                          The default is computed at registration time.
-                          It depends on the size of the ValkeySentinel that selects this instance.
-                          Set it explicitly to pin it.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                    type: object
-                    x-kubernetes-validations:
-                    - message: monitorName cannot be added or removed after the sentinel
-                        block is created
-                      rule: has(self.monitorName) == has(oldSelf.monitorName)
-                    - message: monitorName is immutable
-                      rule: '!has(self.monitorName) || self.monitorName == oldSelf.monitorName'
-                type: object
-                x-kubernetes-validations:
-                - message: failover.sentinel is only valid when failover.mode is Sentinel
-                  rule: '!has(self.sentinel) || self.mode == ''Sentinel'''
               image:
                 description: Image overrides the default Valkey image.
                 type: string
@@ -3841,10 +3775,6 @@ spec:
             - message: 'spec.replicas must be 0: replication is not implemented yet,
                 only standalone Valkey is supported'
               rule: '!has(self.replicas) || self.replicas == 0'
-            - message: 'spec.failover.mode must be None: Sentinel-managed failover
-                is not implemented yet'
-              rule: '!has(self.failover) || !has(self.failover.mode) || self.failover.mode
-                == ''None'''
             - message: persistence requires workloadType StatefulSet
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
             - message: persistence cannot be removed once set
@@ -3979,9 +3909,6 @@ spec:
         - message: metadata.name must be at most 37 characters, because child resource
             names are derived from it
           rule: self.metadata.name.size() <= 37
-        - message: 'metadata.name must not end with ''-<number>'': that suffix is
-            reserved for derived ValkeyNode names'
-          rule: '!self.metadata.name.matches(''-[0-9]+$'')'
     served: true
     storage: true
     subresources:

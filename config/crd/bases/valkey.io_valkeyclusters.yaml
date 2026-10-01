@@ -1943,6 +1943,43 @@ spec:
                         required:
                         - server
                         type: object
+                      clientAuth:
+                        description: |-
+                          ClientAuth configures client certificate authentication. When omitted,
+                          mode defaults to `Optional` and certificateUser defaults to `Disabled`.
+                        properties:
+                          certificateUser:
+                            default: Disabled
+                            description: |-
+                              CertificateUser configures how Valkey maps an authenticated client
+                              certificate to an ACL user. Set to `CN` to use the certificate's Common Name
+                              (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
+                              certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
+                              Defaults to `Disabled`, which leaves the directive unset.
+                            enum:
+                            - CN
+                            - URI
+                            - Disabled
+                            type: string
+                          mode:
+                            default: Optional
+                            description: |-
+                              Mode controls whether clients must authenticate with a TLS certificate.
+                              `Required` enforces mTLS, `Optional` allows both authenticated and
+                              unauthenticated clients, and `Disabled` turns client certificate processing
+                              off entirely.
+                              Defaults to `Optional`.
+                            enum:
+                            - Required
+                            - Optional
+                            - Disabled
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: 'certificateUser has no effect when mode=Disabled:
+                            Valkey ignores client certificates in that mode'
+                          rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
+                            has(self.certificateUser) && self.certificateUser != ''Disabled'')'
                       serverName:
                         description: |-
                           ServerName is the hostname used for TLS verification when the operator
@@ -1954,7 +1991,7 @@ spec:
                         x-kubernetes-validations:
                         - message: must be a valid DNS-1123 subdomain (lowercase alphanumerics,
                             '-' and '.', starting and ending with an alphanumeric)
-                          rule: '!format.dns1123Subdomain().validate(self).hasValue()'
+                          rule: self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')
                     required:
                     - certificates
                     type: object
@@ -3620,6 +3657,14 @@ spec:
                         type: object
                     type: object
                 type: object
+              serviceAccountName:
+                description: |-
+                  ServiceAccountName specifies the name of the ServiceAccount to use for
+                  ValkeyCluster pods. If unset, the namespace's default ServiceAccount is used.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
               shards:
                 description: The number of shards groups. Each shard group contains
                   one primary and N replicas.

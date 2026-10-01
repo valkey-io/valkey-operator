@@ -39,6 +39,19 @@ maxmemory         # There are no safeguards, ensure you do not exceed your conta
 maxmemory-policy
 ```
 
+#### Failover tuning
+
+`cluster-node-timeout` controls how long a node may be unreachable before the cluster marks it failed and starts a failover. The operator does not set it, so the Valkey default of 15 seconds applies. Set it in `spec.config` to tune failover for your network.
+
+```yaml
+config:
+  cluster-node-timeout: "5000"
+```
+
+Lower values fail over faster but make the cluster more sensitive to network blips and to latency spikes on a busy primary. Values under 1 second are rarely a good idea outside a low-latency single-zone network. There is no validation on it by operator as it would require the type to be config aware instead of plain string. Changing it rolls the pods.
+
+Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
+
 #### Version-gated config
 
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
@@ -76,6 +89,17 @@ containers:
 ```
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
+
+### Service account
+
+```yaml
+serviceAccountName: valkey-sa
+```
+
+`serviceAccountName` sets the Kubernetes ServiceAccount used by each ValkeyNode
+pod. If unset, the pod uses the namespace's default ServiceAccount.
+
+The referenced ServiceAccount **must already exist in the same namespace** as the ValkeyCluster. The operator assigns the name to each pod template; it does not create the ServiceAccount or configure its RBAC. If the ServiceAccount does not exist, pod admission rejects each pod and the cluster cannot become ready. The operator reports a `ConfigurationWarning` with reason `ServiceAccountNotFound`; if an API error prevents the existence check, it reports `ServiceAccountLookupFailed`. The check is advisory, and Kubernetes admission remains authoritative. Changing this field updates every ValkeyNode pod template and rolls all pods.
 
 ### Metrics
 
@@ -371,6 +395,9 @@ networking:
     certificates:
       server:
         secretName: valkey-tls
+    clientAuth:
+      mode: Optional             # Optional (default) | Required | Disabled
+      certificateUser: Disabled  # Disabled (default) | CN | URI
 ```
 
 #### Discovery (in-cluster announce)
@@ -384,7 +411,7 @@ networking:
 
 Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service.
 
-Changing `serviceName` on an existing StatefulSet is immutable. The operator deletes the StatefulSet with **orphan** cascade and recreates it with the new `serviceName` while **keeping the live pod template**. Existing pods are adopted, not deleted by that step. Per-pod DNS names under the headless Service (and the pod `subdomain` the STS controller sets) become reliable after a later pod replace (for example a WorkloadRevision-staged roll), not after the STS-only recreate alone.
+`serviceName` is immutable, so changing it means the operator deletes the StatefulSet with **orphan** cascade and recreates it with the new `serviceName`. The existing pod is adopted, not deleted by that step. If the pod template is unchanged, the recreate keeps the live template and runs straight away. If the template also changes, the operator waits until the cluster authorises that node's roll (`WorkloadRevision`), then recreates the StatefulSet and applies the new template together, so the migration follows the one-node-at-a-time roll order and its proactive failover. Per-pod DNS names under the headless Service (and the pod `subdomain` the STS controller sets) apply only to pods created after the recreate.
 
 `networking.clusterDomain` must match the kubelet cluster domain (`--cluster-domain`). The field is a DNS subdomain (a trailing dot on input is trimmed). Hostname announce uses an FQDN **without** a trailing dot, so it is a valid TLS SNI name (RFC 6066) and matches typical cert SANs and the default TLS `serverName`. The per-pod announce name has at least five dots, so under the pod default `ndots:5` resolvers try it as absolute first (one query); only short custom cluster domains fall back to the search list, which is accepted over breaking SNI.
 
@@ -402,7 +429,7 @@ Changing `serviceName` on an existing StatefulSet is immutable. The operator del
 
 `certificates` is a set of named slots. `server` is the only one today; the trust-source override, the outbound peer identity and the control-plane identity land as sibling slots in later phases of [#360](https://github.com/valkey-io/valkey-operator/issues/360).
 
-`serverName` is the hostname the operator verifies when it dials a node by pod IP. When unset, it uses `valkey-<name>.<namespace>.svc.<clusterDomain>` (default `cluster.local`). The cluster writes that resolved name onto each `ValkeyNode`; the node client and the metrics exporter (`REDIS_EXPORTER_TLS_SERVER_NAME`) use it as-is. The exporter still dials `localhost`. This does not change what nodes announce in `CLUSTER SLOTS`.
+`serverName` is the hostname the operator verifies when it dials a node by pod IP. When unset, it uses `valkey-<name>.<namespace>.svc.<clusterDomain>` (default `cluster.local`). The cluster writes that resolved name onto each `ValkeyNode`; the node client and the metrics exporter (`REDIS_EXPORTER_TLS_SERVER_NAME`) use it as-is. A `ValkeyNode` the cluster has not updated yet, such as one created by v0.6.0, has no `serverName`; the node client falls back to the same default for it. The exporter still dials `localhost`. This does not change what nodes announce in `CLUSTER SLOTS`.
 
 Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of certificates (for example certificates auto-renewed from cert-manager) without a restart. It requires Valkey `9.1.0` or newer; on unsupported or indeterminate images the directive is ignored and a `ConfigurationWarning` condition is emitted. See [Version-gated config](#version-gated-config) for rollout ordering when upgrading the image.
 
@@ -410,6 +437,8 @@ Set `tls-auto-reload-interval` in `spec.config` to have automatic reload of cert
 config:
   tls-auto-reload-interval: "3600"
 ```
+
+For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
 
 ### Users
 

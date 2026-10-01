@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -104,4 +105,106 @@ func TestOrphanAndRecreateStatefulSetAlreadyExistsThenAbsent(t *testing.T) {
 	assert.Equal(t, desired.Spec.ServiceName, stored.Spec.ServiceName)
 	assert.Equal(t, live.Spec.Template.Annotations, stored.Spec.Template.Annotations)
 	assert.NotEqual(t, desired.Spec.Template.Annotations, stored.Spec.Template.Annotations)
+}
+
+func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
+	const legacyServiceName = "valkey-c-0-0"
+
+	setup := func(t *testing.T, clusterOwned, templateChanged, authorised bool) (*ValkeyNodeReconciler, client.Client, *valkeyiov1alpha1.ValkeyNode, *appsv1.StatefulSet) {
+		t.Helper()
+		scheme := runtime.NewScheme()
+		require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+		require.NoError(t, appsv1.AddToScheme(scheme))
+		require.NoError(t, corev1.AddToScheme(scheme))
+
+		node := newTestValkeyNode("c-0-0", "ns")
+		node.UID = "node-uid"
+		node.Labels = map[string]string{LabelCluster: "c"}
+		if clusterOwned {
+			ctrl := true
+			node.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "valkey.io/v1alpha1",
+				Kind:       "ValkeyCluster",
+				Name:       "c",
+				UID:        "cluster-uid",
+				Controller: &ctrl,
+			}}
+		}
+
+		desired, err := buildValkeyNodeStatefulSet(node)
+		require.NoError(t, err)
+		desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node)
+		require.NotEqual(t, legacyServiceName, desired.Spec.ServiceName)
+
+		node.Spec.WorkloadRevision = "stale"
+		if authorised {
+			node.Spec.WorkloadRevision = podTemplateRollHash(desired.Spec.Template)
+		}
+
+		live := desired.DeepCopy()
+		live.Spec.ServiceName = legacyServiceName
+		if templateChanged {
+			live.Spec.Template.Annotations = map[string]string{configHashKey: "old"}
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(node, live).
+			WithStatusSubresource(&valkeyiov1alpha1.ValkeyNode{}).
+			Build()
+		r := &ValkeyNodeReconciler{
+			Client:    c,
+			APIReader: c,
+			Scheme:    scheme,
+			Recorder:  events.NewFakeRecorder(16),
+		}
+		return r, c, node, desired
+	}
+
+	stored := func(t *testing.T, c client.Client, desired *appsv1.StatefulSet) *appsv1.StatefulSet {
+		t.Helper()
+		sts := &appsv1.StatefulSet{}
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(desired), sts))
+		return sts
+	}
+
+	t.Run("unauthorised template roll leaves the legacy StatefulSet in place", func(t *testing.T) {
+		r, c, node, desired := setup(t, true, true, false)
+		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
+
+		sts := stored(t, c, desired)
+		assert.Equal(t, legacyServiceName, sts.Spec.ServiceName)
+		assert.Equal(t, map[string]string{configHashKey: "old"}, sts.Spec.Template.Annotations)
+
+		got := &valkeyiov1alpha1.ValkeyNode{}
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(node), got))
+		assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending))
+	})
+
+	t.Run("authorised template roll recreates and applies the desired template", func(t *testing.T) {
+		r, c, node, desired := setup(t, true, true, true)
+		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
+
+		sts := stored(t, c, desired)
+		assert.Equal(t, desired.Spec.ServiceName, sts.Spec.ServiceName)
+		assert.Equal(t, desired.Spec.Template.Annotations, sts.Spec.Template.Annotations)
+	})
+
+	t.Run("no template roll recreates with the live template", func(t *testing.T) {
+		r, c, node, desired := setup(t, true, false, false)
+		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
+
+		sts := stored(t, c, desired)
+		assert.Equal(t, desired.Spec.ServiceName, sts.Spec.ServiceName)
+		assert.Equal(t, desired.Spec.Template.Annotations, sts.Spec.Template.Annotations)
+	})
+
+	t.Run("standalone node recreates and applies the desired template", func(t *testing.T) {
+		r, c, node, desired := setup(t, false, true, false)
+		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
+
+		sts := stored(t, c, desired)
+		assert.Equal(t, desired.Spec.ServiceName, sts.Spec.ServiceName)
+		assert.Equal(t, desired.Spec.Template.Annotations, sts.Spec.Template.Annotations)
+	})
 }

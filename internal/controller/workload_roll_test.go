@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -109,4 +110,110 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 	h3, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, h1, h3)
+}
+
+func TestPodSupersededAndStuck(t *testing.T) {
+	owner := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-node", UID: "sts-uid"},
+	}
+	sts := func(updateRevision string) *appsv1.StatefulSet {
+		out := owner.DeepCopy()
+		out.Status.UpdateRevision = updateRevision
+		return out
+	}
+	pod := func(revision string, ready bool) *corev1.Pod {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		controller := true
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "valkey-node-0",
+				Labels: map[string]string{appsv1.StatefulSetRevisionLabel: revision},
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind:       "StatefulSet",
+					Name:       owner.Name,
+					UID:        owner.UID,
+					Controller: &controller,
+				}},
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
+			},
+		}
+	}
+
+	t.Run("a StatefulSet status that has not caught up to the spec", func(t *testing.T) {
+		// The controller mutates pods before it writes status, and it writes
+		// ObservedGeneration and UpdateRevision together. A status one
+		// generation behind therefore names the previous revision, and the pod
+		// on the new one is the replacement it just created, not a stuck pod.
+		stale := sts("old")
+		stale.Generation = 2
+		stale.Status.ObservedGeneration = 1
+		assert.False(t, podSupersededAndStuck(pod("new", false), stale))
+	})
+
+	t.Run("not ready on a superseded revision is stuck", func(t *testing.T) {
+		// The StatefulSet holds the revision that replaces this pod, and
+		// OrderedReady keeps it from acting while the pod is not ready.
+		assert.True(t, podSupersededAndStuck(pod("old", false), sts("new")))
+	})
+
+	t.Run("not ready on the current revision is left alone", func(t *testing.T) {
+		// Deleting this one recreates the same pod and the same crash, so a
+		// configuration error would become an endless restart loop.
+		assert.False(t, podSupersededAndStuck(pod("new", false), sts("new")))
+	})
+
+	t.Run("ready on a superseded revision is left to the StatefulSet", func(t *testing.T) {
+		// An ordinary rolling update: the StatefulSet controller is able to
+		// replace a ready pod on its own.
+		assert.False(t, podSupersededAndStuck(pod("old", true), sts("new")))
+	})
+
+	t.Run("a pod already terminating is left alone", func(t *testing.T) {
+		terminating := pod("old", false)
+		now := metav1.Now()
+		terminating.DeletionTimestamp = &now
+		assert.False(t, podSupersededAndStuck(terminating, sts("new")))
+	})
+
+	t.Run("no revision observed yet", func(t *testing.T) {
+		// Nothing has superseded the pod, so there is nothing to unblock.
+		assert.False(t, podSupersededAndStuck(pod("old", false), sts("")))
+	})
+
+	t.Run("a pod the StatefulSet has not stamped yet", func(t *testing.T) {
+		// Without a revision on the pod there is nothing to call superseded,
+		// so it must not be read as different from the StatefulSet's.
+		noRevision := pod("", false)
+		delete(noRevision.Labels, appsv1.StatefulSetRevisionLabel)
+		assert.False(t, podSupersededAndStuck(noRevision, sts("new")))
+	})
+
+	t.Run("a pod this StatefulSet does not control", func(t *testing.T) {
+		// getPod selects on labels alone, so a pod that merely carries them
+		// must never be deleted by this controller.
+		foreign := pod("old", false)
+		foreign.OwnerReferences = nil
+		assert.False(t, podSupersededAndStuck(foreign, sts("new")))
+
+		otherOwner := pod("old", false)
+		otherOwner.OwnerReferences[0].UID = "someone-else"
+		assert.False(t, podSupersededAndStuck(otherOwner, sts("new")))
+	})
+
+	t.Run("missing pod or statefulset", func(t *testing.T) {
+		assert.False(t, podSupersededAndStuck(nil, sts("new")))
+		assert.False(t, podSupersededAndStuck(pod("old", false), nil))
+	})
+}
+
+func TestSyncInProgress(t *testing.T) {
+	assert.True(t, syncInProgress("# Persistence\r\nloading:1\r\nasync_loading:0\r\n"))
+	assert.True(t, syncInProgress("# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:1\r\n"))
+	assert.False(t, syncInProgress("# Persistence\r\nloading:0\r\n# Replication\r\nmaster_sync_in_progress:0\r\n"))
+	assert.False(t, syncInProgress(""))
 }

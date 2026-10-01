@@ -166,11 +166,14 @@ func TestClusterState_FindShardForAddress(t *testing.T) {
 }
 
 func TestShardState_GetSyncedReplicas(t *testing.T) {
+	// The one primary owning slots reports cluster_size 1, so its own
+	// report is the whole quorum.
 	primary := &NodeState{
-		Id:      "primary-id",
-		Address: "10.0.0.1",
-		Flags:   []string{"myself", "master"},
-		Info:    map[string]string{"role": "master"},
+		Id:          "primary-id",
+		Address:     "10.0.0.1",
+		Flags:       []string{"myself", "master"},
+		Info:        map[string]string{"role": "master"},
+		ClusterInfo: map[string]string{"cluster_size": "1"},
 	}
 	syncedReplica := &NodeState{
 		Id:      "replica-1-id",
@@ -184,27 +187,29 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 		Flags:   []string{"slave"},
 		Info:    map[string]string{"role": "slave", "master_link_status": "down"},
 	}
-	failingReplica := &NodeState{
+	// A replica whose own scrape looks healthy: its link is up and its own
+	// CLUSTER NODES entry, like every node's own entry, carries no failure
+	// flag. Only the primary's view of the cluster says it is failing.
+	partitionedReplica := &NodeState{
 		Id:      "replica-3-id",
 		Address: "10.0.0.4",
-		Flags:   []string{"slave", "fail"},
+		Flags:   []string{"slave"},
 		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
-	pfailReplica := &NodeState{
-		Id:      "replica-4-id",
-		Address: "10.0.0.5",
-		Flags:   []string{"slave", "pfail"},
-		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
-	}
+	primary.nodes = ParseClusterNodes("primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
+		"replica-1-id 10.0.0.2:6379@16379 slave primary-id 0 0 1 connected\n" +
+		"replica-2-id 10.0.0.3:6379@16379 slave primary-id 0 0 1 connected\n" +
+		"replica-3-id 10.0.0.4:6379@16379 slave,fail? primary-id 0 0 1 connected\n")
 
 	shard := &ShardState{
 		Id:        "shard-0",
 		PrimaryId: "primary-id",
 		Slots:     []SlotsRange{{0, 5461}},
-		Nodes:     []*NodeState{primary, syncedReplica, unsyncedReplica, failingReplica, pfailReplica},
+		Nodes:     []*NodeState{primary, syncedReplica, unsyncedReplica, partitionedReplica},
 	}
+	state := &ClusterState{Shards: []*ShardState{shard}}
 
-	replicas := shard.GetSyncedReplicas()
+	replicas := shard.GetSyncedReplicas(state)
 	if len(replicas) != 1 {
 		t.Fatalf("expected 1 synced replica, got %d", len(replicas))
 	}
@@ -227,7 +232,7 @@ func TestShardState_GetSyncedReplicas_Empty(t *testing.T) {
 		Nodes:     []*NodeState{primary},
 	}
 
-	replicas := shard.GetSyncedReplicas()
+	replicas := shard.GetSyncedReplicas(&ClusterState{Shards: []*ShardState{shard}})
 	if len(replicas) != 0 {
 		t.Fatalf("expected 0 synced replicas, got %d", len(replicas))
 	}
@@ -400,7 +405,7 @@ func TestClusterState_IsNodeFailed(t *testing.T) {
 		Shards: []*ShardState{
 			{
 				Nodes: []*NodeState{
-					{ClusterNodes: "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\ndead1 10.0.0.99:6379@16379 master,fail - 0 0 2 connected 5462-10922\npfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n"},
+					{nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\ndead1 10.0.0.99:6379@16379 master,fail - 0 0 2 connected 5462-10922\npfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n")},
 				},
 			},
 		},
@@ -437,10 +442,10 @@ func TestClusterState_BestReplicaOf(t *testing.T) {
 			{
 				PrimaryId: "primary1",
 				Nodes: []*NodeState{
-					{Id: "primary1", Flags: []string{"master"}, ClusterNodes: "primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n"},
-					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, ClusterNodes: "r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n"},
-					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, ClusterNodes: "r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n"},
-					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, ClusterNodes: "r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n"},
+					{Id: "primary1", Flags: []string{"master"}, nodes: ParseClusterNodes("primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n")},
+					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
 				},
 			},
 		},
@@ -509,7 +514,7 @@ func TestClusterState_FindStaleAddressPeers(t *testing.T) {
 	// Node table template: viewer knows itself at its new address and its
 	// peers at whatever address the persisted nodes.conf recorded.
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("full restart: all peers stale", func(t *testing.T) {
@@ -660,7 +665,7 @@ func TestHostFromClusterNodesEndpoint(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_IPv6(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("failing IPv6 peer at its current address is not stale", func(t *testing.T) {
@@ -720,7 +725,7 @@ func TestHostFromClusterNodesEndpoint_UnbracketedIPv6(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_UnbracketedIPv6(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("failing unbracketed IPv6 peer at its current address is not stale", func(t *testing.T) {
@@ -761,7 +766,7 @@ func TestClusterState_FindStaleAddressPeers_UnbracketedIPv6(t *testing.T) {
 
 func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
 	node := func(id, address, clusterNodes string) *NodeState {
-		return &NodeState{Id: id, Address: address, ClusterNodes: clusterNodes}
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
 	}
 
 	t.Run("noaddr entry with a live node is stale despite empty endpoint", func(t *testing.T) {
@@ -796,4 +801,260 @@ func TestClusterState_FindStaleAddressPeers_Noaddr(t *testing.T) {
 			t.Fatalf("expected no stale pairs, got %d", len(stale))
 		}
 	})
+}
+
+func TestNodeState_Myself(t *testing.T) {
+	node := &NodeState{
+		nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"),
+	}
+	myself := node.Myself()
+	if myself == nil {
+		t.Fatal("expected a myself entry")
+		return
+	}
+	if myself.Id != "abc123" {
+		t.Errorf("expected abc123, got %q", myself.Id)
+	}
+
+	empty := &NodeState{}
+	if empty.Myself() != nil {
+		t.Error("expected nil for empty CLUSTER NODES output")
+	}
+}
+
+func TestNodeState_GetSlots(t *testing.T) {
+	t.Run("primary returns owned ranges only", func(t *testing.T) {
+		node := &NodeState{
+			nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n"),
+		}
+		if want := []SlotsRange{{0, 5460}}; !reflect.DeepEqual(node.GetSlots(), want) {
+			t.Errorf("expected %v, got %v", want, node.GetSlots())
+		}
+	})
+
+	t.Run("replica returns nil", func(t *testing.T) {
+		node := &NodeState{
+			nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,slave def456 0 0 1 connected\n"),
+		}
+		if slots := node.GetSlots(); slots != nil {
+			t.Errorf("expected nil, got %v", slots)
+		}
+	})
+
+	t.Run("no myself line returns nil", func(t *testing.T) {
+		node := &NodeState{
+			nodes: ParseClusterNodes("def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-16383\n"),
+		}
+		if slots := node.GetSlots(); slots != nil {
+			t.Errorf("expected nil, got %v", slots)
+		}
+	})
+}
+
+// IsNodeFailed reports a failure when any single viewer sees one, even while
+// another viewer still considers the same member healthy.
+func TestClusterState_IsNodeFailed_ViewersDisagree(t *testing.T) {
+	// Viewer aaa still has bbb at its old address and marks it failed; bbb
+	// reports itself alive at the new address.
+	viewerA := &NodeState{Id: "aaa", Address: "10.0.0.1",
+		nodes: ParseClusterNodes("aaa 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n")}
+	viewerB := &NodeState{Id: "bbb", Address: "10.0.0.2",
+		nodes: ParseClusterNodes("bbb 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
+			"aaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n")}
+
+	state := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{viewerA, viewerB}}}}
+
+	if !state.IsNodeFailed("bbb") {
+		t.Error("expected bbb failed: viewer aaa reports it so")
+	}
+	if state.IsNodeFailed("aaa") {
+		t.Error("expected aaa healthy: no viewer reports it failed")
+	}
+}
+
+func TestNodeState_KnowsNode(t *testing.T) {
+	node := &NodeState{}
+	node.nodes = ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
+		"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
+
+	if !node.KnowsNode("def456") {
+		t.Error("expected the peer entry to be known")
+	}
+	if !node.KnowsNode("abc123") {
+		t.Error("expected the myself entry to be known")
+	}
+	if node.KnowsNode("ghi789") {
+		t.Error("expected an unknown id to be reported absent")
+	}
+
+	// An ID is only known when it names an entry. Appearing as another entry's
+	// primary or as a migration marker peer is not the same thing, which a
+	// substring search over the raw output could not distinguish.
+	referencing := &NodeState{}
+	referencing.nodes = ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461->-ghi789]\n" +
+		"def456 10.0.0.2:6379@16379 slave ghi789 0 0 1 connected\n")
+	if referencing.KnowsNode("ghi789") {
+		t.Error("ghi789 has no entry; it is only referenced by others")
+	}
+}
+
+func TestNodeState_GetFailingNodes(t *testing.T) {
+	// fail and noaddr are reported; fail? is not, because the caller forgets
+	// these nodes and a pfail entry may still recover.
+	node := &NodeState{
+		nodes: ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460\n" +
+			"dead1 10.0.0.99:6379@16379 master,fail - 0 0 2 disconnected 5461-10922\n" +
+			"pfail1 10.0.0.98:6379@16379 master,fail? - 0 0 3 connected 10923-16383\n" +
+			"gone1 :0@0 master,noaddr - 0 0 4 disconnected\n"),
+	}
+
+	failing := node.GetFailingNodes()
+	if len(failing) != 2 {
+		t.Fatalf("expected 2 failing nodes, got %d: %v", len(failing), failing)
+	}
+	if failing[0].Id != "dead1" || failing[0].Host != "10.0.0.99" {
+		t.Errorf("unexpected first entry %+v", failing[0])
+	}
+	// A noaddr entry is still reported so the caller can act on the ID.
+	if failing[1].Id != "gone1" || failing[1].Host != "" {
+		t.Errorf("unexpected second entry %+v", failing[1])
+	}
+}
+
+// Valkey writes the endpoint as "%s:%i@%i" with a bare IP, so an IPv6 address is
+// unbracketed and its own colons run into the port. The extracted address must
+// still compare equal to the bare pod IP Kubernetes reports.
+func TestNodeState_GetFailingNodes_IPv6(t *testing.T) {
+	node := &NodeState{
+		nodes: ParseClusterNodes("aaa fd00::1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+			"bbb fd00::2:6379@16379 master,fail - 0 0 2 disconnected 8192-16383\n"),
+	}
+
+	failing := node.GetFailingNodes()
+	if len(failing) != 1 {
+		t.Fatalf("expected 1 failing node, got %d", len(failing))
+	}
+	if failing[0].Host != "fd00::2" {
+		t.Errorf("expected fd00::2, got %q", failing[0].Host)
+	}
+}
+
+func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
+	// Four nodes. Views of "target" are injected per viewer.
+	// Viewers a, b and c are voting primaries (own slots) unless built as
+	// replicas below. Each viewer's table carries its own myself line plus
+	// its view of "target", and each reports cluster_size 3: three primaries
+	// own slots, so the quorum is two reports.
+	size := func(n string) map[string]string { return map[string]string{"cluster_size": n} }
+	primary := func(id, view string) *NodeState {
+		return &NodeState{Id: id, Flags: []string{"myself", "master"}, ClusterInfo: size("3"),
+			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n" + view)}
+	}
+	replica := func(id, view string) *NodeState {
+		return &NodeState{Id: id, Flags: []string{"myself", "slave"}, ClusterInfo: size("3"),
+			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n" + view)}
+	}
+	target := &NodeState{Id: "target", Flags: []string{"myself", "slave"},
+		nodes: ParseClusterNodes("target 10.0.0.9:6379@16379 myself,slave p1 0 0 1 connected\n")}
+	build := func(a, b, c string) *ClusterState {
+		return &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			target, primary("a", a), primary("b", b), primary("c", c),
+		}}}}
+	}
+	healthy := "target 10.0.0.9:6379@16379 slave p1 0 0 1 connected\n"
+	failing := "target 10.0.0.9:6379@16379 slave,fail? p1 0 0 1 connected\n"
+	confirmed := "target 10.0.0.9:6379@16379 slave,fail p1 0 0 1 connected\n"
+
+	t.Run("replica suspicion does not count, however many replicas", func(t *testing.T) {
+		// Two replicas and one primary know the target; only the replicas
+		// suspect it. Valkey would never promote that to fail, so neither
+		// does the operator.
+		st := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			target, replica("r1", failing), replica("r2", failing), primary("a", healthy),
+		}}}}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false when only replicas suspect the node")
+		}
+	})
+
+	t.Run("a confirmed fail from one viewer is authoritative", func(t *testing.T) {
+		// Valkey sets fail only after a majority of primaries agreed and
+		// broadcasts it, so a single table carrying it is not one opinion.
+		if !build(confirmed, healthy, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected true for a confirmed fail")
+		}
+	})
+	t.Run("a primary that has not learned the node is still a voter", func(t *testing.T) {
+		// Only a knows the target and suspects it; b and c own slots but
+		// have no entry yet. The quorum is still 2 of 3, so one report is
+		// not enough. Counting only the primaries that know the node would
+		// have made this a one-of-one majority.
+		if build(failing, "", "").IsNodeFailedByMajority("target") {
+			t.Error("expected false: one report out of three voting primaries")
+		}
+	})
+	t.Run("primaries the scrape did not reach still count", func(t *testing.T) {
+		// cluster_size says five primaries own slots. The scrape reached
+		// three, and two of those suspect the target. Valkey needs three
+		// reports out of five, so two is not a majority, even though it
+		// would be a majority of the primaries the operator can see.
+		st := build(failing, failing, healthy)
+		for _, n := range st.Shards[0].Nodes {
+			if n.Id != "target" {
+				n.ClusterInfo = size("5")
+			}
+		}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: two reports out of five voting primaries")
+		}
+	})
+	t.Run("one of three viewers is not a majority", func(t *testing.T) {
+		if build(failing, healthy, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected false for a single report")
+		}
+	})
+	t.Run("two of three viewers is", func(t *testing.T) {
+		if !build(failing, failing, healthy).IsNodeFailedByMajority("target") {
+			t.Error("expected true for a majority")
+		}
+	})
+	t.Run("own entry is not a viewer", func(t *testing.T) {
+		// Nobody else knows the target: no viewers, so not failed.
+		if build("", "", "").IsNodeFailedByMajority("target") {
+			t.Error("expected false with no viewers")
+		}
+	})
+	t.Run("any single report still satisfies IsNodeFailed", func(t *testing.T) {
+		if !build(failing, healthy, healthy).IsNodeFailed("target") {
+			t.Error("expected the any-viewer rule to report true")
+		}
+	})
+}
+
+// A node cut off from the cluster bus marks every peer fail? in its own
+// table. That one opinion must not empty the failover target list.
+func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *testing.T) {
+	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"},
+		ClusterInfo: map[string]string{"cluster_size": "1"}}
+	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	primary.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
+	r1.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 myself,slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
+	// r2 is cut off and sees everyone as fail?.
+	r2.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave,fail? p 0 0 1 connected\nr2 10.0.0.3:6379@16379 myself,slave p 0 0 1 connected\n")
+
+	shard := &ShardState{Id: "s", PrimaryId: "p", Nodes: []*NodeState{primary, r1, r2}}
+	state := &ClusterState{Shards: []*ShardState{shard}}
+	got := shard.GetSyncedReplicas(state)
+	if len(got) != 2 {
+		t.Fatalf("expected both replicas to stay synced, got %d", len(got))
+	}
+	seen := map[string]bool{}
+	for _, n := range got {
+		seen[n.Id] = true
+	}
+	if !seen["r1"] || !seen["r2"] {
+		t.Errorf("expected r1 and r2, got %v", seen)
+	}
 }

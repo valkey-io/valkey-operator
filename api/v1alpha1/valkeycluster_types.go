@@ -390,6 +390,14 @@ type ValkeyClusterSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ServiceAccountName specifies the name of the ServiceAccount to use for
+	// ValkeyCluster pods. If unset, the namespace's default ServiceAccount is used.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
@@ -440,6 +448,80 @@ type DiscoverySpec struct {
 	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
 }
 
+// TLSAuthClients controls how Valkey treats incoming client TLS certificates.
+// API enum values are mapped to Valkey `tls-auth-clients` directive values.
+// +kubebuilder:validation:Enum=Required;Optional;Disabled
+type TLSAuthClients string
+
+const (
+	// TLSAuthClientsOptional accepts both authenticated and unauthenticated clients.
+	// Maps to `tls-auth-clients optional`.
+	TLSAuthClientsOptional TLSAuthClients = "Optional"
+	// TLSAuthClientsRequired enforces mTLS - clients must present a certificate
+	// signed by the configured CA. Maps to `tls-auth-clients yes`.
+	TLSAuthClientsRequired TLSAuthClients = "Required"
+	// TLSAuthClientsDisabled disables client certificate processing entirely.
+	// Maps to `tls-auth-clients no`.
+	TLSAuthClientsDisabled TLSAuthClients = "Disabled"
+)
+
+// TLSAuthClientsUser controls how Valkey maps an authenticated client
+// certificate to an ACL user. It mirrors the Valkey `tls-auth-clients-user` directive.
+// +kubebuilder:validation:Enum=CN;URI;Disabled
+type TLSAuthClientsUser string
+
+const (
+	// TLSAuthClientsUserCN maps the certificate's Common Name (CN) to an
+	// ACL username. Pair with `clientAuth.mode: Required` to enforce mTLS.
+	// Requires Valkey >= 9.0.
+	TLSAuthClientsUserCN TLSAuthClientsUser = "CN"
+	// TLSAuthClientsUserURI maps the first URI from the certificate's
+	// Subject Alternative Name (SAN) that matches a Valkey ACL username.
+	// Requires Valkey >= 9.1.
+	TLSAuthClientsUserURI TLSAuthClientsUser = "URI"
+	// TLSAuthClientsUserDisabled disables certificate-to-user mapping (default).
+	TLSAuthClientsUserDisabled TLSAuthClientsUser = "Disabled"
+)
+
+// TLSClientAuthSpec configures client certificate authentication for incoming
+// TLS connections.
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+type TLSClientAuthSpec struct {
+	// Mode controls whether clients must authenticate with a TLS certificate.
+	// `Required` enforces mTLS, `Optional` allows both authenticated and
+	// unauthenticated clients, and `Disabled` turns client certificate processing
+	// off entirely.
+	// Defaults to `Optional`.
+	// +kubebuilder:default=Optional
+	// +optional
+	Mode TLSAuthClients `json:"mode,omitempty"`
+
+	// CertificateUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Set to `CN` to use the certificate's Common Name
+	// (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
+	// certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
+	// Defaults to `Disabled`, which leaves the directive unset.
+	// +kubebuilder:default=Disabled
+	// +optional
+	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+}
+
+// EffectiveMode returns mode, defaulting to Optional when unset.
+func (s *TLSClientAuthSpec) EffectiveMode() TLSAuthClients {
+	if s == nil || s.Mode == "" {
+		return TLSAuthClientsOptional
+	}
+	return s.Mode
+}
+
+// EffectiveCertificateUser returns certificateUser, defaulting to Disabled when unset.
+func (s *TLSClientAuthSpec) EffectiveCertificateUser() TLSAuthClientsUser {
+	if s == nil || s.CertificateUser == "" {
+		return TLSAuthClientsUserDisabled
+	}
+	return s.CertificateUser
+}
+
 // TLSSpec defines the TLS configuration for ValkeyCluster.
 type TLSSpec struct {
 	// ServerName is the hostname used for TLS verification when the operator
@@ -448,12 +530,33 @@ type TLSSpec struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots used by the cluster.
 	// +kubebuilder:validation:Required
 	Certificates TLSCertificates `json:"certificates"`
+
+	// ClientAuth configures client certificate authentication. When omitted,
+	// mode defaults to `Optional` and certificateUser defaults to `Disabled`.
+	// +optional
+	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// ClientAuthMode returns the effective client-auth mode for t.
+func (t *TLSSpec) ClientAuthMode() TLSAuthClients {
+	if t == nil {
+		return TLSAuthClientsOptional
+	}
+	return t.ClientAuth.EffectiveMode()
+}
+
+// ClientAuthCertificateUser returns the effective certificate-to-user mapping for t.
+func (t *TLSSpec) ClientAuthCertificateUser() TLSAuthClientsUser {
+	if t == nil {
+		return TLSAuthClientsUserDisabled
+	}
+	return t.ClientAuth.EffectiveCertificateUser()
 }
 
 // TLSCertificates groups the certificate slots for a ValkeyCluster. Today
@@ -626,6 +729,8 @@ const (
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
+	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

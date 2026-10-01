@@ -1131,26 +1131,6 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 	return healed
 }
 
-// findMeetTarget picks the best node to MEET all isolated nodes against.
-// Priority: (1) a shard primary, it owns slots and is an established cluster
-// member even if cluster_known_nodes is 1 (e.g. a single-node cluster being
-// scaled up); (2) a non-isolated pending node from a previous MEET batch;
-// (3) the first isolated node as a bootstrap seed when every single node is
-// isolated (fresh bootstrap, first reconcile).
-func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
-	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil {
-			return p
-		}
-	}
-	for _, node := range state.PendingNodes {
-		if !node.IsIsolated() {
-			return node
-		}
-	}
-	return isolated[0]
-}
-
 // meetIsolatedNodes issues CLUSTER MEET for every isolated pending node
 // (cluster_known_nodes <= 1). Phase 2 (assignSlotsToPendingPrimaries)
 // refuses to assign slots to isolated nodes, so every node is guaranteed
@@ -1406,11 +1386,22 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 
 	log.V(1).Info("add a new replica", "primary IP", primaryIP, "primary Id", primaryNodeId, "replica address", node.Address, "shardIndex", shardIndex)
 	if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primaryNodeId).Build()).Error(); err != nil {
-		// "Unknown node" means gossip hasn't propagated the primary's ID to
-		// this replica yet. This is transient and will resolve on the next
-		// reconcile once gossip catches up — treat it as retriable.
+		// "Unknown node" means this node's table does not know the primary's
+		// ID. For a fresh replica that is transient (gossip propagates it), but
+		// a node that returned after its pod was replaced can hold the old
+		// topology forever without learning the new primary, and it is not
+		// isolated (cluster_known_nodes > 1) so meetIsolatedNodes skips it.
+		// MEET it to the primary directly, then retry on the next reconcile.
 		if strings.Contains(err.Error(), "Unknown node") {
-			log.V(1).Info("replica does not yet know primary (gossip pending); will retry", "replica", node.Address, "primaryId", primaryNodeId)
+			log.V(1).Info("replica does not know primary; issuing MEET",
+				"replica", node.Address, "primaryId", primaryNodeId, "primaryIP", primaryIP)
+			if primary := state.FindNodeById(primaryNodeId); primary != nil {
+				if meetErr := node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(primary.Address).Port(int64(primary.Port)).Build()).Error(); meetErr != nil {
+					log.V(1).Info("CLUSTER MEET to primary failed; will retry", "replica", node.Address, "primaryIP", primary.Address, "err", meetErr)
+				}
+			} else {
+				log.V(1).Info("primary not in cluster state; cannot MEET, will retry", "replica", node.Address, "primaryId", primaryNodeId)
+			}
 			return fmt.Errorf("shard %d: %w", shardIndex, errPrimaryNotReady)
 		}
 		log.Error(err, "command failed: CLUSTER REPLICATE", "nodeId", primaryNodeId)
@@ -1421,16 +1412,28 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	return nil
 }
 
-// promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
-// primary is dead and failover quorum is unreachable. With persistence enabled
-// the pod will return with the same node ID, so TAKEOVER is skipped.
-// Returns (result, true) if a promotion was made and reconcile should requeue.
+// promoteOrphanedReplicas recovers shards whose primary is dead. It prefers
+// Valkey's own coordinated failover, which is epoch-safe and cannot fragment
+// slots, and forces a CLUSTER FAILOVER TAKEOVER only when native failover
+// cannot proceed.
+//
+// Native failover needs a majority of primaries to vote:
+//   - With failover quorum, a dead shard's replica is promoted by the cluster;
+//     the operator only requeues and waits.
+//   - Without quorum (a majority of primaries dead at once), no election can
+//     complete, so the operator forces a TAKEOVER for one dead primary per
+//     reconcile. That restores a voting primary and brings quorum closer; once
+//     it returns, the remaining shards recover via native failover. Promoting
+//     the minimum keeps recovery on the epoch-coordinated path.
+//
+// With persistence enabled the pod returns with the same node ID, so recovery
+// is left entirely to Valkey.
+// Returns (result, true) if it acted and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+	if cluster.Spec.Persistence != nil {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	var promoted, attempted int
 	deadPrimaries := make(map[string]bool)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
@@ -1442,36 +1445,43 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 				continue
 			}
 			if !state.IsNodeFailed(primaryId) {
-				continue
+				continue // no viewer reports 'fail' (or 'fail?')
 			}
-			// Note: we don't check if the pod still exists in k8s here.
-			// Without persistence, even if the primary is merely partitioned
-			// (not gone), the TAKEOVER'd replica will own the slots at a
-			// higher epoch. A returning primary will see the higher epoch
-			// and demote itself; no split-brain.
 			deadPrimaries[primaryId] = true
 		}
 	}
+	if len(deadPrimaries) == 0 {
+		return ctrl.Result{}, false
+	}
+
+	// Quorum holds: let the cluster's own election promote the replicas.
+	if state.HasFailoverQuorum() {
+		log.V(1).Info("dead primaries present but failover quorum holds; leaving to native failover",
+			"count", len(deadPrimaries))
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+
+	// No quorum: force a takeover for one dead primary, then requeue to let the
+	// restored quorum drive native failover for the rest.
+	//
+	// This does not check whether the dead primary's pod still exists. Without
+	// persistence, even a merely partitioned (not gone) primary is safe to take
+	// over: the promoted replica owns the slots at a higher epoch, so a
+	// returning primary sees the higher epoch and demotes itself. No split-brain.
 	for primaryId := range deadPrimaries {
 		replica := state.BestReplicaOf(primaryId)
 		if replica == nil {
 			continue
 		}
-		attempted++
 		log.Info("promoting orphaned replica via TAKEOVER", "node", replica.Address, "deadPrimary", primaryId)
 		if err := replica.Client.Do(ctx, replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
 		} else {
-			promoted++
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted orphaned replica via TAKEOVER for dead primary %s", primaryId)
 		}
+		break // one takeover per reconcile; requeue and re-evaluate
 	}
-	if promoted > 0 || attempted > 0 {
-		if promoted > 0 {
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
-		}
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-	}
-	return ctrl.Result{}, false
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

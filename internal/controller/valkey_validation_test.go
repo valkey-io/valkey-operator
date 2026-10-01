@@ -128,6 +128,18 @@ var _ = Describe("Valkey CEL validation", func() {
 			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
 		})
+
+		DescribeTable("rejects a replication-topology key",
+			func(name, key string) {
+				valkey := configValkey(name, map[string]string{key: "host 6379"})
+				err := k8sClient.Create(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("the operator owns replication topology"))
+			},
+			Entry("replicaof", "cfg-replicaof", "replicaof"),
+			Entry("slaveof alias", "cfg-slaveof", "slaveof"),
+			Entry("mixed case", "cfg-replicaof-case", "ReplicaOf"),
+		)
 	})
 
 	DescribeTable("admits names regardless of suffix",

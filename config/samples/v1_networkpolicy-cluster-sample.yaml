@@ -1,0 +1,85 @@
+# NetworkPolicy for the node pods of the ValkeyCluster named cluster-sample
+# (see v1alpha1_valkeycluster.yaml), for a namespace that denies traffic by
+# default. The operator does not create policies itself; this file lists the
+# flows a cluster needs so you do not have to derive them from the source.
+#
+# Ports are fixed in the operator and do not change with TLS: 6379 for
+# clients, replication and the operator (the TLS listener uses the same port),
+# 16379 for the cluster bus, 9121 for the metrics exporter sidecar.
+#
+# Three rules are derived from what the operator owns and work as they are.
+# The two marked REPLACE depend on where your clients and your Prometheus
+# run, which the operator cannot know.
+#
+# The node pods need no DNS, even with preferredEndpointType: Hostname. The
+# announced names are for clients; the cluster bus and replication dial pod
+# IPs. It is the clients that must be allowed to resolve them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cluster-sample-nodes
+spec:
+  podSelector:
+    matchLabels:
+      valkey.io/cluster: cluster-sample
+      app.kubernetes.io/component: valkey-node
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Nodes of the same cluster: replication and the cluster bus.
+    - from:
+        - podSelector:
+            matchLabels:
+              valkey.io/cluster: cluster-sample
+              app.kubernetes.io/component: valkey-node
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379
+    # The operator, which dials every node by pod IP on the client port.
+    # valkey-operator-system is the namespace of the kustomize install; for a
+    # Helm install use the release namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: valkey-operator-system
+          podSelector:
+            matchLabels:
+              control-plane: controller-manager
+              app.kubernetes.io/name: valkey-operator
+      ports:
+        - protocol: TCP
+          port: 6379
+    # REPLACE: your application clients. Cluster clients follow MOVED
+    # redirects straight to the node pods, so they need this rule even when
+    # they connect through the Service.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: my-app
+      ports:
+        - protocol: TCP
+          port: 6379
+    # REPLACE: your Prometheus, for the metrics exporter sidecar. Drop this
+    # rule when spec.exporter.enabled is false.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9121
+  egress:
+    # Nodes of the same cluster: replication and the cluster bus.
+    - to:
+        - podSelector:
+            matchLabels:
+              valkey.io/cluster: cluster-sample
+              app.kubernetes.io/component: valkey-node
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379

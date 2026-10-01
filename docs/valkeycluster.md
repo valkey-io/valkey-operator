@@ -137,6 +137,8 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
 
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica, so the operator does it with `CLUSTER FAILOVER TAKEOVER`. With persistence it waits 60 seconds first, in case the primary restarts with its data, and never takes over a primary that is still loading. Set `VALKEY_OPERATOR_ORPHAN_TAKEOVER_GRACE` on the operator (e.g. `2m`) to change the wait.
+
 #### Constraints
 
 - Only supported with `workloadType: StatefulSet`

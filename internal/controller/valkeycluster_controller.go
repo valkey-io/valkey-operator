@@ -21,9 +21,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -63,6 +65,11 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
+
+	// Per cluster, when each orphaned primary was first seen FAIL, for the
+	// takeover grace period.
+	orphanMu          sync.Mutex
+	orphanFailedSince map[client.ObjectKey]map[string]time.Time
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -121,6 +128,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			deleteClusterMetrics(req.Name, req.Namespace)
+			r.orphanMu.Lock()
+			delete(r.orphanFailedSince, req.NamespacedName)
+			r.orphanMu.Unlock()
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -1423,12 +1433,27 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 
 // promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
 // primary is dead and failover quorum is unreachable. With persistence enabled
-// the pod will return with the same node ID, so TAKEOVER is skipped.
+// it first gives the primary orphanTakeoverGrace to come back with its data.
 // Returns (result, true) if a promotion was made and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+	key := client.ObjectKeyFromObject(cluster)
+	r.orphanMu.Lock()
+	defer r.orphanMu.Unlock()
+	if state.HasFailoverQuorum() {
+		// Start a fresh grace period the next time quorum is lost.
+		delete(r.orphanFailedSince, key)
 		return ctrl.Result{}, false
 	}
+	if r.orphanFailedSince == nil {
+		r.orphanFailedSince = map[client.ObjectKey]map[string]time.Time{}
+	}
+	failedSince := r.orphanFailedSince[key]
+	if failedSince == nil {
+		failedSince = map[string]time.Time{}
+		r.orphanFailedSince[key] = failedSince
+	}
+	persistent := cluster.Spec.Persistence != nil
+	grace := orphanTakeoverGrace()
 	log := logf.FromContext(ctx)
 	var promoted, attempted int
 	deadPrimaries := make(map[string]bool)
@@ -1442,7 +1467,19 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 				continue
 			}
 			if !state.IsNodeFailed(primaryId) {
+				delete(failedSince, primaryId)
 				continue
+			}
+			if persistent {
+				// Wait for the grace period in case the primary restarts with its data.
+				first, ok := failedSince[primaryId]
+				if !ok {
+					failedSince[primaryId] = time.Now()
+					continue
+				}
+				if time.Since(first) < grace {
+					continue
+				}
 			}
 			// Note: we don't check if the pod still exists in k8s here.
 			// Without persistence, even if the primary is merely partitioned
@@ -1451,6 +1488,11 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			// and demote itself; no split-brain.
 			deadPrimaries[primaryId] = true
 		}
+	}
+	// A primary that is loading its data refuses cluster-bus connections, so it looks FAIL.
+	if persistent && len(deadPrimaries) > 0 && anyNodeLoading(state) {
+		log.Info("orphaned primaries found but a node is loading its dataset; deferring TAKEOVER")
+		return ctrl.Result{}, false
 	}
 	for primaryId := range deadPrimaries {
 		replica := state.BestReplicaOf(primaryId)
@@ -1463,6 +1505,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
 		} else {
 			promoted++
+			delete(failedSince, primaryId)
 		}
 	}
 	if promoted > 0 || attempted > 0 {
@@ -1472,6 +1515,25 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
 	return ctrl.Result{}, false
+}
+
+// anyNodeLoading reports whether any scraped node is loading a dataset.
+func anyNodeLoading(state *valkey.ClusterState) bool {
+	for _, n := range state.AllNodes() {
+		if n.Info["loading"] == "1" {
+			return true
+		}
+	}
+	return false
+}
+
+// orphanTakeoverGrace returns VALKEY_OPERATOR_ORPHAN_TAKEOVER_GRACE, or 60s
+// when it is unset or invalid.
+func orphanTakeoverGrace() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("VALKEY_OPERATOR_ORPHAN_TAKEOVER_GRACE")); err == nil && d > 0 {
+		return d
+	}
+	return 60 * time.Second
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

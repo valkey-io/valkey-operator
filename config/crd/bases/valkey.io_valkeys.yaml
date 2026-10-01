@@ -3266,80 +3266,18 @@ spec:
                             x-kubernetes-list-type: atomic
                         type: object
                     type: object
-                  node:
-                    description: |-
-                      Node groups scheduling constraints on the node axis
-                      (topologyKey kubernetes.io/hostname). When unset, every node spread is
-                      Disabled and no scheduling primitives are emitted.
-                    properties:
-                      spread:
-                        description: Spread distributes the cluster's pods across
-                          nodes.
-                        properties:
-                          pods:
-                            description: |-
-                              Pods balances all of the cluster's pods across nodes, rendered as a
-                              topology spread constraint. Defaults to Disabled when unset. Enabling this
-                              alongside an explicit primaries spread of the same strength is rejected
-                              (only one topology spread constraint per strength is permitted per node).
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                          primaries:
-                            description: |-
-                              Primaries balances each shard's node-index-0 pod across nodes, rendered as
-                              a topology spread constraint.
-                              Defaults to Disabled when unset.
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                          shard:
-                            description: |-
-                              Shard keeps pods of the same shard on distinct nodes, rendered as pod
-                              anti-affinity. Defaults to Disabled when unset.
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                        type: object
-                    type: object
                   nodeSelector:
                     additionalProperties:
                       type: string
-                    description: NodeSelector to apply to the pods
+                    description: NodeSelector to apply to the pods.
                     type: object
                   priorityClassName:
                     description: |-
                       PriorityClassName is the name of an existing PriorityClass applied to
-                      every pod in the cluster, protecting them from eviction under resource
-                      pressure. Pod priority is a scheduling concern (preemption, scheduling-queue
-                      order), so it lives alongside the other placement fields.
+                      every pod, protecting them from eviction under resource pressure.
                     type: string
                   tolerations:
-                    description: Tolerations to apply to the pods
+                    description: Tolerations to apply to the pods.
                     items:
                       description: |-
                         The pod this Toleration is attached to tolerates any taint that matches
@@ -3379,7 +3317,7 @@ spec:
                       type: object
                     type: array
                   topologySpreadConstraints:
-                    description: TopologySpreadConstraints to apply to the pods
+                    description: TopologySpreadConstraints to apply to the pods.
                     items:
                       description: TopologySpreadConstraint specifies how to spread
                         matching pods among the given topology.
@@ -3552,113 +3490,6 @@ spec:
                       - whenUnsatisfiable
                       type: object
                     type: array
-                  zone:
-                    description: |-
-                      Zone groups scheduling constraints on the zone axis
-                      (topologyKey topology.kubernetes.io/zone). When unset, every zone spread is
-                      Disabled and no scheduling primitives are emitted.
-                    properties:
-                      pinning:
-                        description: |-
-                          Pinning assigns every pod a deterministic zone by round-robin over an
-                          ordered zone list. Mutually exclusive with any non-Disabled Spread field
-                          on this axis: pinning already fixes each pod's zone, so a zone spread
-                          constraint can only contradict it. Unset means no pinning.
-                        properties:
-                          zones:
-                            description: |-
-                              Zones is the ordered round-robin sequence. A pod's zone is
-                              zones[(shardIndex + nodeIndex) % len(zones)], so each shard's pods walk
-                              the list from a different starting point, and while there are at least
-                              as many zones as shards, primaries land in distinct zones as a side
-                              effect. When replicas+1 exceeds the zone count, some members of a shard
-                              necessarily share a zone.
-
-                              Adding shards or replicas never moves an existing pod, because a pod's
-                              indices never change. Changing this list would move nearly all of them,
-                              so it is immutable while set: remove pinning, reconcile, then re-add it
-                              with the new sequence. On a cluster with persistence, note that zonal
-                              volumes cannot follow a pod to a new zone.
-
-                              The list is ordered, so it is atomic rather than a set: a set list is
-                              unordered under server-side apply, which would scramble the assignment.
-                              Uniqueness is enforced by CEL for the same reason.
-
-                              Each entry must be a valid Kubernetes label value, because it is rendered
-                              as the value of a topology.kubernetes.io/zone nodeSelector entry. Without
-                              that constraint an entry such as "eu-west-1a!" is accepted here and then
-                              rejected when the StatefulSet is created, surfacing on the ValkeyNode
-                              rather than on the ValkeyCluster the user edited.
-                            items:
-                              maxLength: 63
-                              minLength: 1
-                              pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
-                              type: string
-                            maxItems: 32
-                            minItems: 1
-                            type: array
-                            x-kubernetes-list-type: atomic
-                        required:
-                        - zones
-                        type: object
-                        x-kubernetes-validations:
-                        - message: 'zone.pinning.zones entries must be unique: a repeated
-                            zone silently biases the round-robin'
-                          rule: self.zones.all(z, self.zones.exists_one(y, y == z))
-                      spread:
-                        description: Spread distributes the cluster's pods across
-                          zones.
-                        properties:
-                          pods:
-                            description: |-
-                              Pods balances all of the cluster's pods across zones, rendered as a
-                              topology spread constraint. Defaults to Disabled when unset. Enabling this
-                              alongside an explicit shard or primaries spread of the same strength is
-                              rejected (only one topology spread constraint per strength is permitted per
-                              zone).
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                          primaries:
-                            description: |-
-                              Primaries balances each shard's node-index-0 pod across zones, rendered as
-                              a topology spread constraint. Defaults to Disabled when unset.
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                          shard:
-                            description: |-
-                              Shard balances the pods of each shard across zones, rendered as a topology
-                              spread constraint. Defaults to Disabled when unset.
-                            properties:
-                              mode:
-                                description: |-
-                                  Mode selects the strength of the constraint. When unset, the dimension's
-                                  documented default applies.
-                                enum:
-                                - Disabled
-                                - Preferred
-                                - Required
-                                type: string
-                            type: object
-                        type: object
-                    type: object
                 type: object
               terminationGracePeriodSeconds:
                 description: TerminationGracePeriodSeconds is the pod termination

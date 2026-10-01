@@ -744,6 +744,17 @@ const (
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+// Every ValkeyNode gets a workload named valkey-<name>-<shard>-<node>. With
+// workloadType StatefulSet, Kubernetes stamps each pod with a
+// controller-revision-hash label of the StatefulSet name plus an 11-character
+// suffix, and label values stop at 63 characters, so a StatefulSet name longer
+// than 52 never gets a pod. The rule counts the digits of the highest shard
+// index (shards - 1) and node index (replicas), so a scale-out that pushes an
+// index into more digits is rejected too. A Deployment carries no such label;
+// there the headless Service valkey-<name>, a DNS label of at most 63
+// characters, is the limit.
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

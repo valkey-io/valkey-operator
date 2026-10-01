@@ -266,6 +266,35 @@ type ZonePinning struct {
 	Zones []string `json:"zones"`
 }
 
+// ReservedConfigKeys are the valkey.conf directives the operator sets itself.
+// A user value for one of these in spec.config is refused rather than silently dropped.
+//
+// The list has to match the keys the operator's base config emits, with TLS both on and off.
+// TestReservedConfigKeysMatchBaseConfig enforces that.
+// It also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
+// Adding a key therefore means editing both, and the tests say so when you miss one.
+//
+// Lowercase entries only, because the CEL rule lowercases before comparing.
+var ReservedConfigKeys = []string{
+	"aclfile",
+	"cluster-allow-replica-migration",
+	"cluster-config-file",
+	"cluster-enabled",
+	"cluster-node-timeout",
+	"cluster-replica-validity-factor",
+	"dir",
+	"port",
+	"protected-mode",
+	"shutdown-on-sigterm",
+	"tls-auth-clients",
+	"tls-ca-cert-file",
+	"tls-cert-file",
+	"tls-cluster",
+	"tls-key-file",
+	"tls-port",
+	"tls-replication",
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
@@ -362,7 +391,23 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
 
-	// Additional Valkey configuration parameters
+	// Additional Valkey configuration parameters.
+	//
+	// Keys the operator owns are rejected.
+	// Appended operator directives silently overrode user settings due to Valkey's last-value precedence, causing silent config drift.
+	// The operator only emits those when TLS is configured, so with TLS off a user value took effect and could move or close the port the operator connects to.
+	//
+	// The rejected set is ReservedConfigKeys.
+	// Cluster directives the operator does not set, such as cluster-require-full-coverage or cluster-migration-barrier, stay available.
+	//
+	// Keys are lowercased before comparison, because Valkey treats configuration keys case-insensitively.
+	//
+	// MaxProperties exists because the rule below cannot be admitted without it.
+	// The API server costs a CEL rule against the largest map the schema allows.
+	// It is set high deliberately, because raising a bound later is backwards compatible while lowering one locks out anyone already above it.
+	// Valkey has roughly 200 directives in total, so 1000 cannot realistically be reached.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-config-file','cluster-enabled','cluster-node-timeout','cluster-replica-validity-factor','dir','port','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys (aclfile, cluster-allow-replica-migration, cluster-config-file, cluster-enabled, cluster-node-timeout, cluster-replica-validity-factor, dir, port, protected-mode, shutdown-on-sigterm, tls-auth-clients, tls-ca-cert-file, tls-cert-file, tls-cluster, tls-key-file, tls-port, tls-replication): the operator sets these itself and a user value would be ignored or would break its connection to the nodes"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

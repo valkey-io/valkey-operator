@@ -60,8 +60,33 @@ spec:
               config:
                 additionalProperties:
                   type: string
-                description: Additional Valkey configuration parameters
+                description: |-
+                  Additional Valkey configuration parameters.
+
+                  Keys the operator owns are rejected.
+                  Appended operator directives silently overrode user settings due to Valkey's last-value precedence, causing silent config drift.
+                  The operator only emits those when TLS is configured, so with TLS off a user value took effect and could move or close the port the operator connects to.
+
+                  The rejected set is ReservedConfigKeys.
+                  Cluster directives the operator does not set, such as cluster-require-full-coverage or cluster-migration-barrier, stay available.
+
+                  Keys are lowercased before comparison, because Valkey treats configuration keys case-insensitively.
+
+                  MaxProperties exists because the rule below cannot be admitted without it.
+                  The API server costs a CEL rule against the largest map the schema allows.
+                  It is set high deliberately, because raising a bound later is backwards compatible while lowering one locks out anyone already above it.
+                  Valkey has roughly 200 directives in total, so 1000 cannot realistically be reached.
+                maxProperties: 1000
                 type: object
+                x-kubernetes-validations:
+                - message: 'spec.config must not set operator-owned keys (aclfile,
+                    cluster-allow-replica-migration, cluster-config-file, cluster-enabled,
+                    cluster-node-timeout, cluster-replica-validity-factor, dir, port,
+                    protected-mode, shutdown-on-sigterm, tls-auth-clients, tls-ca-cert-file,
+                    tls-cert-file, tls-cluster, tls-key-file, tls-port, tls-replication):
+                    the operator sets these itself and a user value would be ignored
+                    or would break its connection to the nodes'
+                  rule: self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-config-file','cluster-enabled','cluster-node-timeout','cluster-replica-validity-factor','dir','port','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))
               containers:
                 description: Additional containers or overrides for existing containers,
                   applied using strategic merge patch

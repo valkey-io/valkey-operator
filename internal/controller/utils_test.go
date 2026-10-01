@@ -421,6 +421,22 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 	assert.Nil(t, bare.Spec.PodSecurityContext)
 }
 
+func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{ServiceAccountName: "custom-sa"},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "custom-sa", node.Spec.ServiceAccountName, "serviceAccountName should propagate cluster -> node")
+
+	// Absent on the cluster -> absent on the node.
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Equal(t, "", bare.Spec.ServiceAccountName)
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 func TestTLSServerName(t *testing.T) {

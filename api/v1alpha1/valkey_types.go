@@ -326,11 +326,13 @@ type ValkeyStatus struct {
 // Valkey is the Schema for the valkeys API.
 //
 // The name is bounded because child resource names are derived from it.
-// Every one of them is a DNS label capped at 63 characters.
+// Every derived name is held to a 63 character DNS label.
+// That is stricter than some child types need: Secret names allow 253.
+// One rule for every child keeps the limit simple.
+// It also leaves room for derived names used as labels or volume names.
 //
-// The binding child is the Secret "internal-<name>-system-passwords".
+// The longest derived name is the Secret "internal-<name>-system-passwords".
 // Its 26 fixed characters leave 37 for the name.
-// No other derived name is tighter, so this is the only limit stated.
 //
 // The limit is in place from the start.
 // Tightening it later would reject objects that already exist.

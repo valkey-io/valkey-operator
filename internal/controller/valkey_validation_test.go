@@ -147,8 +147,7 @@ var _ = Describe("Valkey CEL validation", func() {
 
 	It("rejects a name too long for derived child names", func() {
 		// 38 characters, one over the limit.
-		// The system password Secret is the longest derived name.
-		// The limit keeps it inside the 63 character DNS label cap.
+		// See the Valkey type comment for how the limit is derived.
 		err := k8sClient.Create(ctx, valkeyFor(strings.Repeat("a", 38), 0))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("at most 37 characters"))

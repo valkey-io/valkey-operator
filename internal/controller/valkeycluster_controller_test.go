@@ -42,6 +42,127 @@ import (
 )
 
 var _ = Describe("ValkeyCluster Controller", func() {
+	Context("When a primary's roll is held for a synced replica", func() {
+		const resourceName = "held-roll"
+		ctx := context.Background()
+		key := types.NamespacedName{Name: resourceName, Namespace: "default"}
+
+		It("names the waiting shard in the UpdatingNodes message and writes the status at most once per reconcile", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() {
+				nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+				_ = k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: resourceName})
+				for i := range nodeList.Items {
+					_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+				}
+				_ = k8sClient.Delete(ctx, cluster)
+			})
+
+			// Every status write on the cluster is counted, whichever verb it uses.
+			writes := 0
+			counting := countingStatusClient{Client: k8sClient, writes: &writes}
+			// envtest has no Valkey to dial. The scrape first sees nothing, and
+			// then shard 2 with a primary at 10.0.0.1 whose only replica is not synced.
+			scraped := &valkey.ClusterState{}
+			reconciler := &ValkeyClusterReconciler{
+				Client:    counting,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(200),
+				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyCluster, *valkeyiov1alpha1.ValkeyNodeList, string, string) *valkey.ClusterState {
+					return scraped
+				},
+			}
+			reconcileOnce := func() {
+				GinkgoHelper()
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			condition := func(condType string) *metav1.Condition {
+				GinkgoHelper()
+				updated := &valkeyiov1alpha1.ValkeyCluster{}
+				Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+				return testutils.FindCondition(updated.Status.Conditions, condType)
+			}
+			primaryName := valkeyNodeName(resourceName, 2, 0)
+
+			By("creating the nodes, then marking them ready with shard 2's primary at 10.0.0.1")
+			reconcileOnce()
+			nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+			Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: resourceName})).To(Succeed())
+			Expect(nodeList.Items).To(HaveLen(6))
+			for i := range nodeList.Items {
+				node := &nodeList.Items[i]
+				node.Status.Ready = true
+				node.Status.ObservedGeneration = node.Generation
+				if node.Name == primaryName {
+					node.Status.PodIP = "10.0.0.1"
+				}
+				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			}
+			// The primary needs a roll that changes its pod: an older workload revision.
+			primary := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: primaryName, Namespace: "default"}, primary)).To(Succeed())
+			primary.Spec.WorkloadRevision = "stale"
+			Expect(k8sClient.Update(ctx, primary)).To(Succeed())
+			scraped = &valkey.ClusterState{Shards: []*valkey.ShardState{{
+				Id:        "shard-2",
+				PrimaryId: "p",
+				Slots:     []valkey.SlotsRange{{Start: 10923, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "p", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "r", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+				},
+			}}}
+
+			By("reporting a Pending pod first, with one status write and none on the retry")
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-pending", Namespace: "default", Labels: map[string]string{LabelCluster: resourceName}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: DefaultImage}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable, Message: "0/1 nodes are available",
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+			writes = 0
+			reconcileOnce()
+			Expect(writes).To(BeNumerically("<=", 1), "the pod check is the only status write on a held roll")
+			degraded := condition(valkeyiov1alpha1.ConditionDegraded)
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
+			Expect(condition(valkeyiov1alpha1.ConditionProgressing).Reason).To(Equal(valkeyiov1alpha1.ReasonReconciling))
+			writes = 0
+			reconcileOnce()
+			Expect(writes).To(Equal(0), "an unchanged status is not written again")
+
+			By("naming the waiting shard once the pod is gone")
+			Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+			writes = 0
+			reconcileOnce()
+			Expect(writes).To(BeNumerically("<=", 1))
+			want := "Updating ValkeyNodes: the roll of shard 2 primary " + primaryName + " is waiting, the shard has no synced replica to fail over to"
+			progressing := condition(valkeyiov1alpha1.ConditionProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Status).To(Equal(metav1.ConditionTrue))
+			Expect(progressing.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes), "a held roll is still a roll in progress")
+			Expect(progressing.Message).To(Equal(want))
+			ready := condition(valkeyiov1alpha1.ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Message).To(Equal(want))
+			Expect(condition(valkeyiov1alpha1.ConditionDegraded)).To(BeNil(), "the pod problem went away with the pod")
+			writes = 0
+			reconcileOnce()
+			Expect(writes).To(Equal(0), "the same held roll is not written again")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: primaryName, Namespace: "default"}, primary)).To(Succeed())
+			Expect(primary.Spec.WorkloadRevision).To(Equal("stale"), "the primary was not rolled while it waited")
+		})
+	})
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -1601,3 +1722,33 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		Expect(node.Spec.PriorityClassName).To(BeEmpty())
 	})
 })
+
+// countingStatusClient counts status writes on ValkeyClusters, so a test can
+// assert how many a reconcile issues.
+type countingStatusClient struct {
+	client.Client
+	writes *int
+}
+
+func (c countingStatusClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{SubResourceWriter: c.Client.Status(), writes: c.writes}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+	writes *int
+}
+
+func (w countingStatusWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	if _, isCluster := obj.(*valkeyiov1alpha1.ValkeyCluster); isCluster {
+		*w.writes++
+	}
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
+func (w countingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if _, isCluster := obj.(*valkeyiov1alpha1.ValkeyCluster); isCluster {
+		*w.writes++
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}

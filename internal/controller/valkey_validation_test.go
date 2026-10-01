@@ -130,24 +130,17 @@ var _ = Describe("Valkey CEL validation", func() {
 		})
 	})
 
-	DescribeTable("rejects names that collide with derived ValkeyNode names",
-		func(name string) {
-			err := k8sClient.Create(ctx, valkeyFor(name, 0))
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("reserved for derived ValkeyNode names"))
-		},
-		Entry("per-node suffix", "val-0"),
-		Entry("multi-digit per-node suffix", "val-12"),
-	)
-
-	DescribeTable("admits names whose suffix is not a derived one",
+	DescribeTable("admits names regardless of suffix",
 		func(name string) {
 			valkey := valkeyFor(name, 0)
 			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
 		},
-		// These were reserved while the design still had role Services.
-		// Those Services were dropped, so the names are legal again.
+		// The trailing "-<number>" rule was dropped so ValkeyCell can name
+		// its shards "cache-0", "cache-1". Node-name collisions are detected
+		// controller-side instead.
+		Entry("per-node suffix", "val-0"),
+		Entry("multi-digit per-node suffix", "val-12"),
 		Entry("former primary Service suffix", "val-primary"),
 		Entry("former replicas Service suffix", "val-replicas"),
 	)

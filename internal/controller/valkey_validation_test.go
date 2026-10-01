@@ -290,61 +290,6 @@ var _ = Describe("Valkey CEL validation", func() {
 		})
 	})
 
-	Describe("spec.failover", func() {
-		It("defaults mode to None when the block is omitted", func() {
-			valkey := valkeyFor("fo-default", 0)
-			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
-			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
-			})
-			Expect(valkey.FailoverMode()).To(Equal(valkeyiov1alpha1.FailoverModeNone))
-		})
-
-		It("admits mode None set explicitly", func() {
-			valkey := valkeyFor("fo-none", 0)
-			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
-				Mode: valkeyiov1alpha1.FailoverModeNone,
-			}
-			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
-		})
-
-		It("rejects mode Sentinel until it is implemented", func() {
-			valkey := valkeyFor("fo-sentinel", 0)
-			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
-				Mode: valkeyiov1alpha1.FailoverModeSentinel,
-			}
-			err := k8sClient.Create(ctx, valkey)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("must be None"))
-		})
-
-		It("rejects an unknown mode", func() {
-			valkey := valkeyFor("fo-bogus", 0)
-			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
-				Mode: valkeyiov1alpha1.FailoverMode("Operator"),
-			}
-			err := k8sClient.Create(ctx, valkey)
-			Expect(err).To(HaveOccurred())
-		})
-
-		// The two monitorName transition rules are not covered, and cannot be.
-		// They need a sentinel block, which needs mode Sentinel.
-		// The spec-level rule above rejects that mode.
-		// Add those cases with the change that admits it.
-
-		It("rejects a sentinel block under mode None", func() {
-			valkey := valkeyFor("fo-orphan-block", 0)
-			valkey.Spec.Failover = &valkeyiov1alpha1.FailoverSpec{
-				Mode:     valkeyiov1alpha1.FailoverModeNone,
-				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{},
-			}
-			err := k8sClient.Create(ctx, valkey)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("only valid when failover.mode is Sentinel"))
-		})
-	})
-
 	It("holds workloadType immutable", func() {
 		valkey := valkeyFor("val-immutable", 0)
 		valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeStatefulSet

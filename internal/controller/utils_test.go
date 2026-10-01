@@ -404,7 +404,7 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 	fsGroup := int64(56849)
 	psc := &corev1.PodSecurityContext{
 		FSGroup:      &fsGroup,
-		RunAsNonRoot: boolPtr(true),
+		RunAsNonRoot: new(true),
 	}
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
@@ -436,8 +436,6 @@ func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
 	}, 0, 0)
 	assert.Equal(t, "", bare.Spec.ServiceAccountName)
 }
-
-func boolPtr(b bool) *bool { return &b }
 
 func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "custom.example", tlsServerName("custom.example", "foo", "valkey", ""))

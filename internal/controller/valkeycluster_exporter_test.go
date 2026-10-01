@@ -140,13 +140,13 @@ var _ = Describe("exporter enabled defaulting", func() {
 
 	It("keeps the exporter enabled when only securityContext is set", func() {
 		stored := storeCluster("exp-secctx", valkeyiov1alpha1.ExporterSpec{
-			SecurityContext: &corev1.SecurityContext{RunAsNonRoot: boolPtr(true)},
+			SecurityContext: &corev1.SecurityContext{RunAsNonRoot: new(true)},
 		})
 		expectExporterOn(stored)
 	})
 
 	It("honours an explicit enabled: false", func() {
-		stored := storeCluster("exp-disabled", valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)})
+		stored := storeCluster("exp-disabled", valkeyiov1alpha1.ExporterSpec{Enabled: new(false)})
 		Expect(stored.Spec.ExporterEnabled()).To(BeFalse())
 
 		node := buildClusterValkeyNode(stored, 0, 0)
@@ -163,7 +163,7 @@ var _ = Describe("exporter enabled defaulting", func() {
 	// encoding difference renders the same template, so it must not fail
 	// over on operator upgrade.
 	It("predicts no roll for nodes stored by an older operator", func() {
-		stored := storeCluster("exp-upgrade", valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)})
+		stored := storeCluster("exp-upgrade", valkeyiov1alpha1.ExporterSpec{Enabled: new(false)})
 
 		old := buildClusterValkeyNode(stored, 0, 0)
 		old.Spec.Exporter.Enabled = nil // the shape an old operator stored
@@ -180,7 +180,7 @@ var _ = Describe("exporter enabled defaulting", func() {
 	// Enabled is a *bool so that an explicit false is serialised rather than
 	// dropped by omitempty and defaulted straight back to true.
 	It("keeps enabled: false across an update", func() {
-		stored := storeCluster("exp-disabled-update", valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)})
+		stored := storeCluster("exp-disabled-update", valkeyiov1alpha1.ExporterSpec{Enabled: new(false)})
 
 		stored.Spec.Exporter.Image = "oliver006/redis_exporter:v1.80.0"
 		Expect(k8sClient.Update(ctx, stored)).To(Succeed())

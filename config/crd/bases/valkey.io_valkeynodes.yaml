@@ -3151,6 +3151,75 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              restoreFrom:
+                description: |-
+                  RestoreFrom makes the node load its shard's RDB from a snapshot before
+                  the server starts, when the data dir is empty and no formed cluster is
+                  reachable. The cluster controller sets it on the first node of each
+                  shard of a cluster created with spec.restoreFrom.
+                properties:
+                  image:
+                    description: |-
+                      Image runs the download. It needs rclone and a POSIX shell. Defaults to
+                      the rclone image the operator was built against.
+                    type: string
+                  path:
+                    description: |-
+                      Path is the snapshot to load, as its key prefix inside the bucket: the
+                      backup prefix followed by the snapshot name, for example
+                      my-cluster/2026-09-27T02-00-00Z.
+                    minLength: 1
+                    type: string
+                  shards:
+                    description: |-
+                      Shards is the number of shards the snapshot has to describe, the
+                      cluster's spec.shards. A snapshot with a different count is refused.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  storage:
+                    description: Storage is the object store holding the snapshot.
+                    properties:
+                      s3:
+                        description: S3 is an S3-compatible bucket.
+                        properties:
+                          bucket:
+                            description: Bucket is the bucket name.
+                            minLength: 1
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              CredentialsSecret names a Secret in the cluster namespace with the keys
+                              AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                            minLength: 1
+                            type: string
+                          endpoint:
+                            description: |-
+                              Endpoint is the S3 API URL, for example
+                              https://s3.eu-central-1.amazonaws.com or http://minio.minio.svc:9000.
+                            minLength: 1
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix is the key prefix inside the bucket. Defaults to the cluster
+                              name, so one bucket can hold the snapshots of several clusters.
+                            type: string
+                          region:
+                            description: Region, when the endpoint needs one.
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecret
+                        - endpoint
+                        type: object
+                    required:
+                    - s3
+                    type: object
+                required:
+                - path
+                - shards
+                - storage
+                type: object
               serverConfigMapName:
                 description: |-
                   ServerConfigMapName specifies the name of the ConfigMap that contains the

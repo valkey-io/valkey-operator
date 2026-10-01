@@ -558,3 +558,27 @@ func TestHasNodeWithPodIP(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildClusterValkeyNodeRestoreFrom(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop", Namespace: "prod"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards:   3,
+			Replicas: 1,
+			RestoreFrom: &valkeyv1.RestoreSpec{
+				Storage: valkeyv1.BackupStorage{S3: &valkeyv1.S3Storage{Bucket: "b", Endpoint: "http://s3", CredentialsSecret: "c"}},
+				Path:    "shop/2026-09-27T02-00-00Z",
+			},
+		},
+	}
+	primary := buildClusterValkeyNode(cluster, 2, 0)
+	if assert.NotNil(t, primary.Spec.RestoreFrom, "the first node of a shard loads the snapshot") {
+		assert.Equal(t, "shop/2026-09-27T02-00-00Z", primary.Spec.RestoreFrom.Path)
+		assert.Equal(t, int32(3), primary.Spec.RestoreFrom.Shards, "the node checks the snapshot against the cluster's shard count")
+	}
+	replica := buildClusterValkeyNode(cluster, 2, 1)
+	assert.Nil(t, replica.Spec.RestoreFrom, "replicas sync from their primary instead")
+
+	cluster.Spec.RestoreFrom = nil
+	assert.Nil(t, buildClusterValkeyNode(cluster, 2, 0).Spec.RestoreFrom)
+}

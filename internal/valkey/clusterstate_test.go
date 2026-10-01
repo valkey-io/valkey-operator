@@ -1058,3 +1058,38 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 		t.Errorf("expected r1 and r2, got %v", seen)
 	}
 }
+
+func TestAssignGapsToNeighbours(t *testing.T) {
+	owned := map[string][]SlotsRange{
+		"a": {{Start: 10, End: 20}},
+		"b": {{Start: 40, End: 50}, {Start: 60, End: 70}},
+		"c": {{Start: 90, End: 100}},
+	}
+	got := AssignGapsToNeighbours([]SlotsRange{
+		{Start: 0, End: 9},     // before the first owned slot: goes up, to a
+		{Start: 21, End: 39},   // between a and b: goes down, to a
+		{Start: 51, End: 59},   // between b's own ranges: b
+		{Start: 71, End: 89},   // between b and c: b
+		{Start: 101, End: 120}, // after the last owned slot: c
+	}, owned)
+	want := map[string][]SlotsRange{
+		"a": {{Start: 0, End: 9}, {Start: 21, End: 39}},
+		"b": {{Start: 51, End: 59}, {Start: 71, End: 89}},
+		"c": {{Start: 101, End: 120}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d owners in the plan, got %d: %v", len(want), len(got), got)
+	}
+	for id, ranges := range want {
+		if FormatSlotsRanges(got[id]) != FormatSlotsRanges(ranges) {
+			t.Errorf("%s: expected %s, got %s", id, FormatSlotsRanges(ranges), FormatSlotsRanges(got[id]))
+		}
+	}
+
+	if plan := AssignGapsToNeighbours([]SlotsRange{{Start: 0, End: 100}}, nil); plan != nil {
+		t.Errorf("expected no plan without owners, got %v", plan)
+	}
+	if plan := AssignGapsToNeighbours(nil, owned); len(plan) != 0 {
+		t.Errorf("expected an empty plan without gaps, got %v", plan)
+	}
+}

@@ -30,6 +30,7 @@ import (
 
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -213,6 +214,9 @@ func main() {
 			// Pod is not explicitly watched but is cached due to r.List calls
 			// in the ValkeyNode controller.
 			&corev1.Pod{}: {Label: managedBySelector},
+			// The backup CronJob per cluster is labelled like every other
+			// managed object.
+			&batchv1.CronJob{}: {Label: managedBySelector},
 		},
 	}
 	if len(watchNamespaces) > 0 {

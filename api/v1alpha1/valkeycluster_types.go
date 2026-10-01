@@ -398,6 +398,22 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// Backup schedules a snapshot of every shard to object storage. Each run
+	// takes one RDB per shard with valkey-cli --rdb, from a replica by
+	// default, and uploads the set with a manifest that records the slot
+	// layout. The per-shard RDBs are not one cluster-wide point in time.
+	// +optional
+	Backup *BackupSpec `json:"backup,omitempty"`
+
+	// RestoreFrom seeds a new cluster from a snapshot taken by spec.backup.
+	// The first node of each shard loads the RDB of the same shard index
+	// before the server starts, so the snapshot has to describe the same
+	// number of shards. It only acts on a node that has no data and sees no
+	// formed cluster, so a pod restarting into a running cluster keeps its
+	// data.
+	// +optional
+	RestoreFrom *RestoreSpec `json:"restoreFrom,omitempty"`
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
@@ -717,6 +733,7 @@ const (
 	ReasonAllSlotsAssigned              = "AllSlotsAssigned"
 	ReasonSlotsUnassigned               = "SlotsUnassigned"
 	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
+	ReasonBackupError                   = "BackupError"
 	ReasonPrimaryLost                   = "PrimaryLost"
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"
@@ -775,4 +792,99 @@ func init() {
 		s.AddKnownTypes(SchemeGroupVersion, &ValkeyCluster{}, &ValkeyClusterList{})
 		return nil
 	})
+}
+
+// BackupSource is the node a shard's snapshot is read from.
+// +kubebuilder:validation:Enum=Replica;Primary
+type BackupSource string
+
+const (
+	// BackupSourceReplica reads each shard's RDB from one of its replicas, so
+	// the primary does not fork for the snapshot. A shard without a live
+	// replica falls back to its primary.
+	BackupSourceReplica BackupSource = "Replica"
+	// BackupSourcePrimary reads each shard's RDB from its primary.
+	BackupSourcePrimary BackupSource = "Primary"
+)
+
+// BackupSpec schedules snapshots of the cluster to object storage.
+type BackupSpec struct {
+	// Schedule is when to take a snapshot, in cron format, for example
+	// "0 2 * * *".
+	// +kubebuilder:validation:MinLength=1
+	Schedule string `json:"schedule"`
+
+	// Source selects the node each shard's RDB is read from. Replica is the
+	// default; Primary is for clusters without replicas.
+	// +kubebuilder:default=Replica
+	// +optional
+	Source BackupSource `json:"source,omitempty"`
+
+	// Retention is how many snapshots to keep under the prefix. Older ones
+	// are deleted after a successful upload. Zero keeps every snapshot.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Retention int32 `json:"retention,omitempty"`
+
+	// Storage is the object store the snapshots go to.
+	Storage BackupStorage `json:"storage"`
+
+	// Image runs the upload. It needs rclone and a POSIX shell. Defaults to
+	// the rclone image the operator was built against.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Suspend pauses the schedule without removing the CronJob.
+	// +optional
+	Suspend *bool `json:"suspend,omitempty"`
+}
+
+// BackupStorage names an object store. S3-compatible storage is the only kind
+// today.
+type BackupStorage struct {
+	// S3 is an S3-compatible bucket.
+	S3 *S3Storage `json:"s3"`
+}
+
+// S3Storage is a bucket on an S3-compatible service.
+type S3Storage struct {
+	// Bucket is the bucket name.
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+
+	// Endpoint is the S3 API URL, for example
+	// https://s3.eu-central-1.amazonaws.com or http://minio.minio.svc:9000.
+	// +kubebuilder:validation:MinLength=1
+	Endpoint string `json:"endpoint"`
+
+	// Region, when the endpoint needs one.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Prefix is the key prefix inside the bucket. Defaults to the cluster
+	// name, so one bucket can hold the snapshots of several clusters.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// CredentialsSecret names a Secret in the cluster namespace with the keys
+	// AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+	// +kubebuilder:validation:MinLength=1
+	CredentialsSecret string `json:"credentialsSecret"`
+}
+
+// RestoreSpec points at one snapshot to seed a new cluster from.
+type RestoreSpec struct {
+	// Storage is the object store holding the snapshot.
+	Storage BackupStorage `json:"storage"`
+
+	// Path is the snapshot to load, as its key prefix inside the bucket: the
+	// backup prefix followed by the snapshot name, for example
+	// my-cluster/2026-09-27T02-00-00Z.
+	// +kubebuilder:validation:MinLength=1
+	Path string `json:"path"`
+
+	// Image runs the download. It needs rclone and a POSIX shell. Defaults to
+	// the rclone image the operator was built against.
+	// +optional
+	Image string `json:"image,omitempty"`
 }

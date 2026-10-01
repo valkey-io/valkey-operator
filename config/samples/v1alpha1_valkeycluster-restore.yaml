@@ -1,0 +1,17 @@
+# A new cluster seeded from a snapshot taken by cluster-sample-backup. The
+# snapshot has to have the same number of shards; replace the path with a
+# snapshot name from the bucket, <prefix>/<snapshot>.
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-sample-restore
+spec:
+  shards: 3
+  replicas: 1
+  restoreFrom:
+    storage:
+      s3:
+        bucket: valkey-backups
+        endpoint: http://minio.minio.svc:9000
+        credentialsSecret: s3-credentials
+    path: cluster-sample-backup/2026-09-27T02-00-00Z

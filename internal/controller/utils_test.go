@@ -421,11 +421,72 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 	assert.Nil(t, bare.Spec.PodSecurityContext)
 }
 
+func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{ServiceAccountName: "custom-sa"},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "custom-sa", node.Spec.ServiceAccountName, "serviceAccountName should propagate cluster -> node")
+
+	// Absent on the cluster -> absent on the node.
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Equal(t, "", bare.Spec.ServiceAccountName)
+}
+
 func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "custom.example", tlsServerName("custom.example", "foo", "valkey", ""))
 	assert.Equal(t, "valkey-foo.valkey.svc.cluster.local", tlsServerName("", "foo", "valkey", ""))
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local"))
 	assert.Equal(t, "valkey-foo.valkey.svc.corp.local", tlsServerName("", "foo", "valkey", "corp.local."))
+}
+
+func TestNodeTLSServerName(t *testing.T) {
+	tests := []struct {
+		name          string
+		labels        map[string]string
+		serverName    string
+		clusterDomain string
+		want          string
+	}{
+		{
+			name:       "spec serverName wins",
+			labels:     map[string]string{LabelCluster: "foo"},
+			serverName: "custom.example",
+			want:       "custom.example",
+		},
+		{
+			// A node created by v0.6.0 has neither field set.
+			name:   "cluster node without serverName or clusterDomain",
+			labels: map[string]string{LabelCluster: "foo"},
+			want:   "valkey-foo.valkey.svc.cluster.local",
+		},
+		{
+			name:          "cluster node with clusterDomain",
+			labels:        map[string]string{LabelCluster: "foo"},
+			clusterDomain: "corp.local",
+			want:          "valkey-foo.valkey.svc.corp.local",
+		},
+		{
+			name: "standalone node",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &valkeyv1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo-0-0", Namespace: "valkey", Labels: tt.labels},
+				Spec: valkeyv1.ValkeyNodeSpec{
+					ClusterDomain: tt.clusterDomain,
+					TLS:           &valkeyv1.NodeTLSSpec{ServerName: tt.serverName},
+				},
+			}
+			assert.Equal(t, tt.want, nodeTLSServerName(node))
+		})
+	}
 }
 
 func nodeWithPodIP(name, podIP string) valkeyv1.ValkeyNode {

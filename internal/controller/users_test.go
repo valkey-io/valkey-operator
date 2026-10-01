@@ -181,3 +181,21 @@ func TestValidateSystemUserPasswordSecret_UnknownUserAndMissingRequiredUser(t *t
 		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
 	}
 }
+
+func TestExporterUserAllowsCommandLogMetrics(t *testing.T) {
+	rules := strings.Fields(systemUsersAcls[exporterUser])
+	index := func(rule string) int {
+		for i, r := range rules {
+			if r == rule {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// redis_exporter probes COMMANDLOG support with COMMAND INFO, then reads COMMANDLOG LEN.
+	assert.Greater(t, index("+commandlog|len"), -1)
+	// ACL rules apply left to right, so the grant must follow the blanket -command.
+	assert.Greater(t, index("+command|info"), index("-command"))
+	assert.Greater(t, index("-command"), -1)
+}

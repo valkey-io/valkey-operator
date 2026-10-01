@@ -1433,6 +1433,22 @@ func TestBuildValkeyNodePodTemplateSpec_PodSecurityContext_NilIsNoop(t *testing.
 		"omitting PodSecurityContext must produce the empty SecurityContext the API server defaults to")
 }
 
+func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_Passthrough(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.ServiceAccountName = "my-sa"
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	assert.Equal(t, "my-sa", pts.Spec.ServiceAccountName, "ServiceAccountName should be set on pod spec")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_EmptyIsNoop(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	assert.Empty(t, pts.Spec.ServiceAccountName, "omitting ServiceAccountName must leave the field unset so existing templates stay unchanged")
+}
+
 // TestDefaultImagePullPolicy pins the mirror of the API server's defaulting
 // rule branch by branch — a silent divergence on any of these makes that
 // container churn on every reconcile (#315). Rule: the effective tag is the

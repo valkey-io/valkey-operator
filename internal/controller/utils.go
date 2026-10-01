@@ -347,6 +347,22 @@ func tlsServerName(override, clusterName, namespace, clusterDomain string) strin
 	return strings.TrimSuffix(headlessServiceFQDN(clusterName, namespace, clusterDomain), ".")
 }
 
+// nodeTLSServerName is the hostname the operator pins when dialing a node's pod
+// IP. A cluster-owned node falls back to the cluster default while
+// spec.tls.serverName is empty: nodes created before that field existed carry
+// it only once the cluster controller next updates them.
+func nodeTLSServerName(node *valkeyv1.ValkeyNode) string {
+	override := ""
+	if node.Spec.TLS != nil {
+		override = node.Spec.TLS.ServerName
+	}
+	clusterName, ok := node.Labels[LabelCluster]
+	if !ok {
+		return override
+	}
+	return tlsServerName(override, clusterName, node.Namespace, node.Spec.ClusterDomain)
+}
+
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
 	secret := &corev1.Secret{}

@@ -3,7 +3,7 @@ IMG                  ?= controller:latest
 VERSION              ?= $(if $(findstring :,$(IMG)),$(lastword $(subst :, ,$(IMG))),latest)
 CONTAINER_IMAGE_NAME ?= $(IMG)
 
-export GOTOOLCHAIN ?= go1.25.0+auto
+export GOTOOLCHAIN ?= go$(shell cat .go-version)+auto
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -246,7 +246,7 @@ $(ENVTEST): $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
+$(GOLANGCI_LINT): $(LOCALBIN) Makefile .go-version .golangci.yml .custom-gcl.yml
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 	@test -f .custom-gcl.yml && { \
 		echo "Building custom golangci-lint with plugins..." && \

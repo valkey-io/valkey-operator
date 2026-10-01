@@ -1930,35 +1930,19 @@ spec:
                   clusterDomain:
                     default: cluster.local
                     description: |-
-                      ClusterDomain is the DNS suffix kubelet publishes Service DNS under
-                      (kubelet --cluster-domain). Used when building Hostname announce FQDNs
-                      and the default TLS ServerName. Must match the cluster. Default cluster.local.
+                      ClusterDomain is the DNS suffix kubelet publishes Service DNS under (kubelet --cluster-domain).
+                      Used when building announce FQDNs and the default TLS ServerName.
+                      Must match the cluster. Default cluster.local.
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$
                     type: string
-                  discovery:
-                    description: Discovery configures in-cluster endpoint announcement
-                      after CLUSTER SLOTS.
-                    properties:
-                      preferredEndpointType:
-                        default: IP
-                        description: |-
-                          PreferredEndpointType selects IP (default) or Hostname announcement.
-                          Hostname uses per-pod DNS under the cluster headless Service
-                          (<pod>.<headless>.<namespace>.svc.<clusterDomain>) and requires
-                          workloadType StatefulSet (or the default).
-                        enum:
-                        - IP
-                        - Hostname
-                        type: string
-                    type: object
                   tls:
-                    description: TLS configuration for the cluster.
+                    description: TLS configuration for the instance.
                     properties:
                       certificates:
                         description: Certificates holds the certificate slots used
-                          by the cluster.
+                          by the instance.
                         properties:
                           server:
                             description: |-
@@ -1982,9 +1966,8 @@ spec:
                         type: object
                       serverName:
                         description: |-
-                          ServerName is the hostname used for TLS verification when the operator
-                          connects to a node by pod IP. When unset, the operator uses
-                          valkey-<name>.<namespace>.svc.<clusterDomain> (default cluster.local).
+                          ServerName is the hostname used for TLS verification when the operator connects to a pod by IP.
+                          When unset, the operator uses valkey-<name>.<namespace>.svc.<clusterDomain> (default cluster.local).
                         maxLength: 253
                         minLength: 1
                         type: string
@@ -2346,9 +2329,9 @@ spec:
                 properties:
                   affinity:
                     description: |-
-                      Affinity to apply to the pods. Kubernetes ANDs nodeAffinity with
-                      NodeSelector rather than one overriding the other: a node must satisfy
-                      both for the pod to be scheduled there.
+                      Affinity to apply to the pods.
+                      Kubernetes ANDs nodeAffinity with NodeSelector rather than one overriding the other.
+                      A node must satisfy both for the pod to be scheduled there.
                     properties:
                       nodeAffinity:
                         description: Describes node affinity scheduling rules for
@@ -3273,8 +3256,8 @@ spec:
                     type: object
                   priorityClassName:
                     description: |-
-                      PriorityClassName is the name of an existing PriorityClass applied to
-                      every pod, protecting them from eviction under resource pressure.
+                      PriorityClassName is the name of an existing PriorityClass applied to every pod.
+                      It protects them from eviction under resource pressure.
                     type: string
                   tolerations:
                     description: Tolerations to apply to the pods.

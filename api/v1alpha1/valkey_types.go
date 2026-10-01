@@ -60,12 +60,39 @@ var ValkeyStates = []ValkeyState{
 	ValkeyStateFailed,
 }
 
+// ValkeyNetworkingSpec groups how clients and peers reach a Valkey.
+type ValkeyNetworkingSpec struct {
+	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under (kubelet --cluster-domain).
+	// Used when building announce FQDNs and the default TLS ServerName.
+	// Must match the cluster. Default cluster.local.
+	// +kubebuilder:default="cluster.local"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.?$`
+	// +optional
+	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// TLS configuration for the instance.
+	// +optional
+	TLS *ValkeyTLSSpec `json:"tls,omitempty"`
+}
+
+// ValkeyTLSSpec defines the TLS configuration for a Valkey.
+type ValkeyTLSSpec struct {
+	// ServerName is the hostname used for TLS verification when the operator connects to a pod by IP.
+	// When unset, the operator uses valkey-<name>.<namespace>.svc.<clusterDomain> (default cluster.local).
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	ServerName string `json:"serverName,omitempty"`
+
+	// Certificates holds the certificate slots used by the instance.
+	// +kubebuilder:validation:Required
+	Certificates TLSCertificates `json:"certificates"`
+}
+
 // ValkeySchedulingSpec groups pod placement for a Valkey's pods.
-//
-// It is a copy of SchedulingSpec's basic fields, not a reference to it.
-// The cluster type also carries Node and Zone spread, which assume shards.
-// A standalone Valkey has none, so only the flat placement fields are kept.
-// The two kinds can then grow independently.
 type ValkeySchedulingSpec struct {
 	// Tolerations to apply to the pods.
 	// +optional
@@ -75,9 +102,9 @@ type ValkeySchedulingSpec struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// Affinity to apply to the pods. Kubernetes ANDs nodeAffinity with
-	// NodeSelector rather than one overriding the other: a node must satisfy
-	// both for the pod to be scheduled there.
+	// Affinity to apply to the pods.
+	// Kubernetes ANDs nodeAffinity with NodeSelector rather than one overriding the other.
+	// A node must satisfy both for the pod to be scheduled there.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
@@ -85,20 +112,13 @@ type ValkeySchedulingSpec struct {
 	// +optional
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
-	// PriorityClassName is the name of an existing PriorityClass applied to
-	// every pod, protecting them from eviction under resource pressure.
+	// PriorityClassName is the name of an existing PriorityClass applied to every pod.
+	// It protects them from eviction under resource pressure.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
 // ValkeyPodDisruptionBudgetConfig manages the budget over a Valkey's pods.
-//
-// This is a separate type from the ValkeyCluster config of the same shape.
-// The two kinds can then grow different fields independently.
-//
-// It also drops two things from that type.
-// The Cluster mode value, which describes nothing outside a cluster.
-// The legacy UnmarshalJSON, which only serves pre-existing stored objects.
 type ValkeyPodDisruptionBudgetConfig struct {
 	// Mode selects how the operator manages the budget.
 	// Managed renders maxUnavailable 1 over this instance's pods.
@@ -203,7 +223,7 @@ type ValkeySpec struct {
 
 	// Networking groups how clients and peers reach the instance.
 	// +optional
-	Networking *NetworkingSpec `json:"networking,omitempty"`
+	Networking *ValkeyNetworkingSpec `json:"networking,omitempty"`
 
 	// PodDisruptionBudget configures the budget over this instance's pods.
 	// No budget is created while spec.replicas is 0, whatever the mode.

@@ -89,11 +89,18 @@ spec:
                   The base config still emits cluster-config-file for every node.
                   That keeps the node state file on the writable /data volume.
                   See buildManagedConfig.
+
+                  replicaof and its alias slaveof are rejected too.
+                  The operator owns replication topology.
+                  A user-set directive would fight the operator's own wiring.
                 type: object
                 x-kubernetes-validations:
                 - message: 'spec.config must not contain cluster- keys: a Valkey runs
                     standalone, so cluster mode directives are not supported'
                   rule: self.all(key, !key.lowerAscii().startsWith('cluster-'))
+                - message: 'spec.config must not contain replicaof or slaveof: the
+                    operator owns replication topology'
+                  rule: self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))
               containers:
                 description: |-
                   Containers holds additional containers, or overrides for the default ones.

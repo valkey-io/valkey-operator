@@ -162,6 +162,11 @@ type ValkeySpec struct {
 	// That keeps the node state file on the writable /data volume.
 	// See buildManagedConfig.
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-'))",message="spec.config must not contain cluster- keys: a Valkey runs standalone, so cluster mode directives are not supported"
+	//
+	// replicaof and its alias slaveof are rejected too.
+	// The operator owns replication topology.
+	// A user-set directive would fight the operator's own wiring.
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))",message="spec.config must not contain replicaof or slaveof: the operator owns replication topology"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

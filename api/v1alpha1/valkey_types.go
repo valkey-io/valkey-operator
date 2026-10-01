@@ -342,7 +342,7 @@ type ValkeyStatus struct {
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.matches('-[0-9]+$')",message="metadata.name must not end with '-<number>': that suffix is reserved for derived ValkeyNode names"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the instance"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
-// +kubebuilder:printcolumn:name="Primary",type="string",JSONPath=".status.primary",description="ValkeyNode currently serving as primary",priority=1
+// +kubebuilder:printcolumn:name="Primary",type="string",JSONPath=".status.primary",description="ValkeyNode currently serving as primary"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 type Valkey struct {
 	metav1.TypeMeta `json:",inline"`

@@ -60,6 +60,37 @@ var ValkeyStates = []ValkeyState{
 	ValkeyStateFailed,
 }
 
+// ValkeySchedulingSpec groups pod placement for a Valkey's pods.
+//
+// It is a copy of SchedulingSpec's basic fields, not a reference to it.
+// The cluster type also carries Node and Zone spread, which assume shards.
+// A standalone Valkey has none, so only the flat placement fields are kept.
+// The two kinds can then grow independently.
+type ValkeySchedulingSpec struct {
+	// Tolerations to apply to the pods.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// NodeSelector to apply to the pods.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Affinity to apply to the pods. Kubernetes ANDs nodeAffinity with
+	// NodeSelector rather than one overriding the other: a node must satisfy
+	// both for the pod to be scheduled there.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// TopologySpreadConstraints to apply to the pods.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// PriorityClassName is the name of an existing PriorityClass applied to
+	// every pod, protecting them from eviction under resource pressure.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
 // ValkeyPodDisruptionBudgetConfig manages the budget over a Valkey's pods.
 //
 // This is a separate type from the ValkeyCluster config of the same shape.
@@ -117,7 +148,7 @@ type ValkeySpec struct {
 
 	// Scheduling groups pod placement configuration for the instance's pods.
 	// +optional
-	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
+	Scheduling *ValkeySchedulingSpec `json:"scheduling,omitempty"`
 
 	// Exporter configures the metrics exporter sidecar.
 	// +kubebuilder:default:={enabled:true}

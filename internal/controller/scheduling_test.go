@@ -55,13 +55,28 @@ func TestEffectiveNodeSpread_Overrides(t *testing.T) {
 	assert.Equal(t, valkeyiov1alpha1.SpreadPreferred, pods)
 }
 
+func TestEffectiveNodeTopologyKey(t *testing.T) {
+	assert.Equal(t, corev1.LabelHostname, effectiveNodeTopologyKey(nil))
+	assert.Equal(t, corev1.LabelHostname, effectiveNodeTopologyKey(&valkeyiov1alpha1.SchedulingSpec{}))
+	assert.Equal(t, "topology.example.io/hostname", effectiveNodeTopologyKey(&valkeyiov1alpha1.SchedulingSpec{
+		Node: &valkeyiov1alpha1.NodeScheduling{TopologyKey: "topology.example.io/hostname"},
+	}))
+}
+
+func TestEffectiveZoneTopologyKey(t *testing.T) {
+	assert.Equal(t, corev1.LabelTopologyZone, effectiveZoneTopologyKey(nil))
+	assert.Equal(t, "topology.example.io/zone", effectiveZoneTopologyKey(&valkeyiov1alpha1.SchedulingSpec{
+		Zone: &valkeyiov1alpha1.ZoneScheduling{TopologyKey: "topology.example.io/zone"},
+	}))
+}
+
 func TestWithNodeShardAntiAffinity(t *testing.T) {
 	t.Run("disabled returns base unchanged", func(t *testing.T) {
-		assert.Nil(t, withNodeShardAntiAffinity(nil, "c", 0, valkeyiov1alpha1.SpreadDisabled))
+		assert.Nil(t, withNodeShardAntiAffinity(nil, "c", 0, valkeyiov1alpha1.SpreadDisabled, corev1.LabelHostname))
 	})
 
 	t.Run("required adds hard anti-affinity term", func(t *testing.T) {
-		got := withNodeShardAntiAffinity(nil, "mycluster", 2, valkeyiov1alpha1.SpreadRequired)
+		got := withNodeShardAntiAffinity(nil, "mycluster", 2, valkeyiov1alpha1.SpreadRequired, corev1.LabelHostname)
 		require.NotNil(t, got.PodAntiAffinity)
 		require.Len(t, got.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
 		term := got.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
@@ -73,7 +88,7 @@ func TestWithNodeShardAntiAffinity(t *testing.T) {
 	})
 
 	t.Run("preferred adds weighted soft term", func(t *testing.T) {
-		got := withNodeShardAntiAffinity(nil, "mycluster", 0, valkeyiov1alpha1.SpreadPreferred)
+		got := withNodeShardAntiAffinity(nil, "mycluster", 0, valkeyiov1alpha1.SpreadPreferred, corev1.LabelHostname)
 		require.Len(t, got.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution, 1)
 		w := got.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0]
 		assert.Equal(t, int32(100), w.Weight)
@@ -82,15 +97,21 @@ func TestWithNodeShardAntiAffinity(t *testing.T) {
 
 	t.Run("preserves and does not mutate the user's affinity", func(t *testing.T) {
 		base := &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}}
-		got := withNodeShardAntiAffinity(base, "c", 0, valkeyiov1alpha1.SpreadRequired)
+		got := withNodeShardAntiAffinity(base, "c", 0, valkeyiov1alpha1.SpreadRequired, corev1.LabelHostname)
 		assert.NotNil(t, got.NodeAffinity, "existing NodeAffinity retained")
 		assert.Nil(t, base.PodAntiAffinity, "input must not be mutated")
+	})
+
+	t.Run("uses the given topologyKey", func(t *testing.T) {
+		got := withNodeShardAntiAffinity(nil, "mycluster", 1, valkeyiov1alpha1.SpreadRequired, "topology.example.io/hostname")
+		require.Len(t, got.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+		assert.Equal(t, "topology.example.io/hostname", got.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey)
 	})
 }
 
 func TestNodeSpreadTSCs(t *testing.T) {
 	t.Run("primaries Preferred on node-index 0: one ScheduleAnyway TSC", func(t *testing.T) {
-		got := nodeSpreadTSCs("mycluster", 0, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		got := nodeSpreadTSCs("mycluster", 0, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled, corev1.LabelHostname)
 		require.Len(t, got, 1)
 		assert.Equal(t, corev1.ScheduleAnyway, got[0].WhenUnsatisfiable)
 		assert.Equal(t, int32(1), got[0].MaxSkew)
@@ -99,22 +120,28 @@ func TestNodeSpreadTSCs(t *testing.T) {
 	})
 
 	t.Run("primaries suppressed on non-zero node index", func(t *testing.T) {
-		got := nodeSpreadTSCs("mycluster", 1, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		got := nodeSpreadTSCs("mycluster", 1, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled, corev1.LabelHostname)
 		assert.Empty(t, got)
 	})
 
 	t.Run("pods Required emits cluster-wide DoNotSchedule on every index", func(t *testing.T) {
-		got := nodeSpreadTSCs("mycluster", 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired)
+		got := nodeSpreadTSCs("mycluster", 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired, corev1.LabelHostname)
 		require.Len(t, got, 1)
 		assert.Equal(t, corev1.DoNotSchedule, got[0].WhenUnsatisfiable)
 		assert.Equal(t, map[string]string{LabelCluster: "mycluster"}, got[0].LabelSelector.MatchLabels)
 	})
 
 	t.Run("primaries + pods on node-index 0 emits both, primaries first", func(t *testing.T) {
-		got := nodeSpreadTSCs("mycluster", 0, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred)
+		got := nodeSpreadTSCs("mycluster", 0, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred, corev1.LabelHostname)
 		require.Len(t, got, 2)
 		assert.Equal(t, "0", got[0].LabelSelector.MatchLabels[LabelNodeIndex], "primaries first")
 		assert.NotContains(t, got[1].LabelSelector.MatchLabels, LabelNodeIndex, "pods second")
+	})
+
+	t.Run("uses the given topologyKey", func(t *testing.T) {
+		got := nodeSpreadTSCs("mycluster", 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired, "topology.example.io/hostname")
+		require.Len(t, got, 1)
+		assert.Equal(t, "topology.example.io/hostname", got[0].TopologyKey)
 	})
 }
 
@@ -149,11 +176,11 @@ func TestEffectiveZoneSpread_Overrides(t *testing.T) {
 
 func TestZoneSpreadTSCs(t *testing.T) {
 	t.Run("all Disabled renders nothing", func(t *testing.T) {
-		assert.Empty(t, zoneSpreadTSCs("c", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled))
+		assert.Empty(t, zoneSpreadTSCs("c", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, corev1.LabelTopologyZone))
 	})
 
 	t.Run("shard Required: zone TSC on all pods, shard-index selector", func(t *testing.T) {
-		got := zoneSpreadTSCs("mycluster", 2, 1, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled)
+		got := zoneSpreadTSCs("mycluster", 2, 1, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, corev1.LabelTopologyZone)
 		require.Len(t, got, 1)
 		assert.Equal(t, corev1.DoNotSchedule, got[0].WhenUnsatisfiable)
 		assert.Equal(t, int32(1), got[0].MaxSkew)
@@ -162,23 +189,23 @@ func TestZoneSpreadTSCs(t *testing.T) {
 	})
 
 	t.Run("primaries only emitted on node-index 0", func(t *testing.T) {
-		on0 := zoneSpreadTSCs("mycluster", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		on0 := zoneSpreadTSCs("mycluster", 0, 0, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled, corev1.LabelTopologyZone)
 		require.Len(t, on0, 1)
 		assert.Equal(t, corev1.ScheduleAnyway, on0[0].WhenUnsatisfiable)
 		assert.Equal(t, map[string]string{LabelCluster: "mycluster", LabelNodeIndex: "0"}, on0[0].LabelSelector.MatchLabels)
 
-		on1 := zoneSpreadTSCs("mycluster", 0, 1, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled)
+		on1 := zoneSpreadTSCs("mycluster", 0, 1, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadDisabled, corev1.LabelTopologyZone)
 		assert.Empty(t, on1, "primaries suppressed on non-zero node index")
 	})
 
 	t.Run("pods Required: cluster-wide zone TSC on every index", func(t *testing.T) {
-		got := zoneSpreadTSCs("mycluster", 1, 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired)
+		got := zoneSpreadTSCs("mycluster", 1, 3, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadDisabled, valkeyiov1alpha1.SpreadRequired, corev1.LabelTopologyZone)
 		require.Len(t, got, 1)
 		assert.Equal(t, map[string]string{LabelCluster: "mycluster"}, got[0].LabelSelector.MatchLabels)
 	})
 
 	t.Run("all three on node-index 0: shard, primaries, pods in order", func(t *testing.T) {
-		got := zoneSpreadTSCs("mycluster", 1, 0, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadPreferred)
+		got := zoneSpreadTSCs("mycluster", 1, 0, valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred, valkeyiov1alpha1.SpreadPreferred, corev1.LabelTopologyZone)
 		require.Len(t, got, 3)
 		assert.Equal(t, "1", got[0].LabelSelector.MatchLabels[LabelShardIndex], "shard first")
 		assert.Equal(t, "0", got[1].LabelSelector.MatchLabels[LabelNodeIndex], "primaries second")
@@ -234,12 +261,12 @@ func TestZoneForPod(t *testing.T) {
 
 func TestWithZonePin(t *testing.T) {
 	t.Run("nil base gains the zone key", func(t *testing.T) {
-		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az3"}, withZonePin(nil, "az3"))
+		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az3"}, withZonePin(nil, "az3", corev1.LabelTopologyZone))
 	})
 
 	t.Run("user entries are preserved and the input is not mutated", func(t *testing.T) {
 		nodeSelector := map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"}
-		got := withZonePin(nodeSelector, "az2")
+		got := withZonePin(nodeSelector, "az2", corev1.LabelTopologyZone)
 		assert.Equal(t, map[string]string{
 			"node.kubernetes.io/instance-type": "m6i.xlarge",
 			"topology.kubernetes.io/zone":      "az2",
@@ -249,16 +276,21 @@ func TestWithZonePin(t *testing.T) {
 	})
 
 	t.Run("empty zone returns the base unchanged, preserving nil", func(t *testing.T) {
-		assert.Nil(t, withZonePin(nil, ""), "nil must stay nil so unpinned clusters are not rolled")
+		assert.Nil(t, withZonePin(nil, "", corev1.LabelTopologyZone), "nil must stay nil so unpinned clusters are not rolled")
 		nodeSelector := map[string]string{"a": "b"}
-		assert.Equal(t, nodeSelector, withZonePin(nodeSelector, ""))
+		assert.Equal(t, nodeSelector, withZonePin(nodeSelector, "", corev1.LabelTopologyZone))
 	})
 
 	t.Run("curated zone wins when base already carries the key", func(t *testing.T) {
 		nodeSelector := map[string]string{"topology.kubernetes.io/zone": "user-supplied"}
-		got := withZonePin(nodeSelector, "az2")
+		got := withZonePin(nodeSelector, "az2", corev1.LabelTopologyZone)
 		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "az2"}, got)
 		assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "user-supplied"}, nodeSelector,
 			"the caller's map must not be mutated")
+	})
+
+	t.Run("uses the given topologyKey", func(t *testing.T) {
+		got := withZonePin(nil, "az1", "topology.example.io/zone")
+		assert.Equal(t, map[string]string{"topology.example.io/zone": "az1"}, got)
 	})
 }

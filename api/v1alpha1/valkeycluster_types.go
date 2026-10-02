@@ -186,6 +186,13 @@ type NodeSpread struct {
 // NodeScheduling groups scheduling constraints on the node axis
 // (topologyKey kubernetes.io/hostname).
 type NodeScheduling struct {
+	// TopologyKey is the node label used by node.spread (shard anti-affinity
+	// and primaries/pods topology spread). When omitted, kubernetes.io/hostname.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	TopologyKey string `json:"topologyKey,omitempty"`
+
 	// Spread distributes the cluster's pods across nodes.
 	// +optional
 	Spread NodeSpread `json:"spread,omitempty"`
@@ -218,6 +225,13 @@ type ZoneSpread struct {
 // ZoneScheduling groups scheduling constraints on the zone axis
 // (topologyKey topology.kubernetes.io/zone).
 type ZoneScheduling struct {
+	// TopologyKey is the node label used by zone.spread and zone.pinning.
+	// When omitted, topology.kubernetes.io/zone.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	TopologyKey string `json:"topologyKey,omitempty"`
+
 	// Spread distributes the cluster's pods across zones.
 	// +optional
 	Spread ZoneSpread `json:"spread,omitempty"`

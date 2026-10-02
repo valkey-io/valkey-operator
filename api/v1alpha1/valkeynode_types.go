@@ -160,6 +160,12 @@ type ValkeyNodeSpec struct {
 	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// NodeService is set by the ValkeyCluster controller from
+	// spec.networking.nodeService. When set, this node has one ClusterIP
+	// Service. Empty means no Service.
+	// +optional
+	NodeService *NodeServiceSpec `json:"nodeService,omitempty"`
 }
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the

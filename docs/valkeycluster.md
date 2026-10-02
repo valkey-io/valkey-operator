@@ -400,6 +400,16 @@ networking:
       certificateUser: Disabled  # Disabled (default) | CN | URI
 ```
 
+#### Per-node Services
+
+Set `networking.nodeService: {}` to create one ClusterIP Service per node. The cluster copies that onto each ValkeyNode, one node at a time. The ValkeyNode controller creates the Service and owns it. Omit `nodeService` and no Service is created. Removing it later clears the field on each node in turn, and that node deletes its Service. The ValkeyNodes stay.
+
+The Service name matches the node's StatefulSet: `valkey-<cluster>-<shard>-<node>`. It must be at most 63 characters. A longer name is rejected only when `nodeService` is set, so an existing cluster can keep running and can turn the feature on later. If that Service name is already taken, the per-node Service is not created and the existing Service is left as it is. A headless Service is still created when the name is free. The Service selects the one pod with that shard index and node index. The port is 6379.
+
+This does not change `CLUSTER SLOTS`. A client that follows redirects still uses the announced pod IP or hostname. The Service is a stable address for a client that dials that node directly.
+
+On scale-in the Service stays while that ValkeyNode exists. Kubernetes deletes the Service when the ValkeyNode is deleted.
+
 #### Discovery (in-cluster announce)
 
 `networking.discovery.preferredEndpointType` controls how nodes advertise themselves after `CLUSTER SLOTS`:

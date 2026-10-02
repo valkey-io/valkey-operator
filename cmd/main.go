@@ -29,6 +29,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
+	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -50,6 +51,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -249,7 +251,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkeyClients := controller.NewClientProvider(mgr.GetClient(), mgr.GetAPIReader())
+	valkeyPool := valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient)
+	if err := mgr.Add(valkeyPool); err != nil {
+		setupLog.Error(err, "Failed to add Valkey client pool")
+		os.Exit(1)
+	}
+	valkeyClients := controller.NewClientProvider(mgr.GetClient(), mgr.GetAPIReader(), valkeyPool)
 
 	if err := (&controller.ValkeyClusterReconciler{
 		Client:        mgr.GetClient(),
@@ -298,8 +305,13 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "Failed to run manager")
+	startErr := mgr.Start(ctrl.SetupSignalHandler()) // blocks until shutdown
+	// Reconciles and poller ticks have returned, unless the shutdown timeout
+	// expired or the lease was lost. Close before the exit below, which would
+	// skip a deferred call.
+	valkeyPool.Close()
+	if startErr != nil {
+		setupLog.Error(startErr, "Failed to run manager")
 		os.Exit(1)
 	}
 }

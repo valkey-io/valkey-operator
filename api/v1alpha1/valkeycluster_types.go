@@ -266,24 +266,29 @@ type ZonePinning struct {
 	Zones []string `json:"zones"`
 }
 
-// ReservedConfigKeys are the valkey.conf directives the operator sets itself.
+// ReservedConfigKeys are the directives the operator sets itself.
 // A user value for one of these in spec.config is refused rather than silently dropped.
 //
-// The list has to match the keys the operator's base config emits, with TLS both on and off.
-// TestReservedConfigKeysMatchBaseConfig enforces that.
-// It also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
+// Two sources count as operator-owned.
+// The base config the operator writes to valkey.conf, with TLS both on and off.
+// The flags the operator passes on the valkey-server command line, which override the file.
+// TestReservedConfigKeysMatchBaseConfig enforces the union of both.
+//
+// The list also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
 // Adding a key therefore means editing both, and the tests say so when you miss one.
 //
 // Lowercase entries only, because the CEL rule lowercases before comparing.
 var ReservedConfigKeys = []string{
 	"aclfile",
 	"cluster-allow-replica-migration",
+	"cluster-announce-ip",
 	"cluster-config-file",
 	"cluster-enabled",
-	"cluster-node-timeout",
 	"cluster-replica-validity-factor",
 	"dir",
 	"port",
+	"primaryauth",
+	"primaryuser",
 	"protected-mode",
 	"shutdown-on-sigterm",
 	"tls-auth-clients",
@@ -391,10 +396,11 @@ type ValkeyClusterSpec struct {
 	// Additional Valkey configuration parameters.
 	//
 	// Keys the operator owns are rejected.
-	// Appended operator directives silently overrode user settings due to Valkey's last-value precedence, causing silent config drift.
-	// The operator only emits those when TLS is configured, so with TLS off a user value took effect and could move or close the port the operator connects to.
+	// The operator sets them either in the base valkey.conf or as valkey-server flags.
+	// A user value would be silently overridden by Valkey's last-value precedence, or on the command line.
+	// Either way the user's intent is lost without a signal.
 	//
-	// The rejected set is ReservedConfigKeys.
+	// The rejected set is ReservedConfigKeys, documented in docs/valkeycluster.md.
 	// Cluster directives the operator does not set, such as cluster-require-full-coverage or cluster-migration-barrier, stay available.
 	//
 	// Keys are lowercased before comparison, because Valkey treats configuration keys case-insensitively.
@@ -404,7 +410,7 @@ type ValkeyClusterSpec struct {
 	// It is set high deliberately, because raising a bound later is backwards compatible while lowering one locks out anyone already above it.
 	// Valkey has roughly 200 directives in total, so 1000 cannot realistically be reached.
 	// +kubebuilder:validation:MaxProperties=1000
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-config-file','cluster-enabled','cluster-node-timeout','cluster-replica-validity-factor','dir','port','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys (aclfile, cluster-allow-replica-migration, cluster-config-file, cluster-enabled, cluster-node-timeout, cluster-replica-validity-factor, dir, port, protected-mode, shutdown-on-sigterm, tls-auth-clients, tls-ca-cert-file, tls-cert-file, tls-cluster, tls-key-file, tls-port, tls-replication): the operator sets these itself and a user value would be ignored or would break its connection to the nodes"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

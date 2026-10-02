@@ -28,7 +28,19 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
-// operatorOwnedKeys returns every directive the operator's base config emits, with TLS off and on.
+// podAppliedKeys are directives the operator passes as valkey-server flags
+// rather than writing to valkey.conf. See valkeyNodeContainers in
+// valkeynode_resources.go. A command-line flag overrides the file, so a user
+// value for one of these is overridden the same way a base-config key is.
+// They are not in getBaseConfig, so they must be listed here explicitly.
+var podAppliedKeys = []string{
+	"cluster-announce-ip",
+	"primaryauth",
+	"primaryuser",
+}
+
+// operatorOwnedKeys returns every directive the operator owns.
+// That is the union of the base config, with TLS off and on, and the pod-applied flags.
 // The TLS branch matters on its own.
 // Those keys are only emitted when TLS is configured, so with TLS off a user value takes effect instead of being discarded.
 // That is how a user could move or close the port the operator connects to.
@@ -43,6 +55,9 @@ func operatorOwnedKeys() []string {
 		for key := range getBaseConfig(tls) {
 			seen[key] = struct{}{}
 		}
+	}
+	for _, key := range podAppliedKeys {
+		seen[key] = struct{}{}
 	}
 	keys := make([]string, 0, len(seen))
 	for key := range seen {

@@ -36,3 +36,8 @@ jobs:
 
       - name: Running Tests
         run: make test
+
+      - name: Verify that chaos tests compiles
+        run: |
+          go test -tags=chaos -c ./test/chaos/ -o /dev/null
+          go -C test/chaos/client build -o /dev/null ./...

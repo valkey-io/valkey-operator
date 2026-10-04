@@ -396,7 +396,7 @@ spec:
 
 			By("patching the ValkeyNode spec to increment the generation")
 			patchCmd := exec.Command("kubectl", "patch", "valkeynode", nodeName,
-				"--type=merge", "-p", `{"spec":{"image":"valkey/valkey:9.0.0"}}`)
+				"--type=merge", "-p", `{"spec":{"image":"valkey/valkey:9.1.1"}}`)
 			_, err = utils.Run(patchCmd)
 			Expect(err).NotTo(HaveOccurred())
 

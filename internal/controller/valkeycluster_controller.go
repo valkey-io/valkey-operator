@@ -160,11 +160,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileUsersAcl(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, err.Error(), metav1.ConditionFalse)
+	// A user Secret the operator cannot read must not stop topology work. Once
+	// an aclfile exists, the failure is reported on Degraded and the reconcile
+	// carries on with the last good aclfile; see reportUsersACLUnresolved.
+	// Before the first aclfile exists there is nothing to fall back to, so the
+	// first reconcile still blocks (#500 replaces that with per-user handling).
+	aclErr := r.reconcileUsersAcl(ctx, cluster)
+	if aclErr != nil && !r.internalAclSecretExists(ctx, cluster) {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, aclErr.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, aclErr
 	}
+	r.reportUsersACLUnresolved(ctx, cluster, aclErr)
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
@@ -452,8 +459,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if rebalanced {
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
-		// that hadn't received slots yet during scale-out).
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		// that hadn't received slots yet during scale-out). A users ACL
+		// failure is not stale: only the ACL step clears it.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
@@ -478,7 +486,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// setting it again would hand SetStatusCondition an absent condition every
 	// reconcile, which resets LastTransitionTime and loses when the failure
 	// actually started.
-	if failed := nodesWithFailedACL(nodes); len(failed) > 0 {
+	//
+	// An aclfile the operator could not rebuild this pass is already on
+	// Degraded (reportUsersACLUnresolved) and stays there: the nodes run the
+	// last good aclfile, so they report ACLApplied, but the declared users are
+	// not all in effect.
+	if failed := nodesWithFailedACL(nodes); aclErr != nil {
+		// keep Degraded=UsersACLUnresolved
+	} else if len(failed) > 0 {
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
 			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
 	} else {
@@ -1747,7 +1762,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 		}
 		if drained {
-			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -1935,4 +1950,44 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 		}
 	}
 	return failed
+}
+
+// internalAclSecretExists reports whether the cluster already has an aclfile
+// in its internal ACL Secret, which is what the nodes keep running while a
+// rebuild fails.
+func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret)
+	return err == nil
+}
+
+// reportUsersACLUnresolved carries the result of the ACL step on the Degraded
+// condition. A nil aclErr clears the condition it set earlier, with a Normal
+// event on the transition. A non-nil aclErr sets Degraded=UsersACLUnresolved
+// and, when the failure first appears or changes, logs it and emits a Warning
+// event. The internal ACL Secret keeps its last good aclfile, which the
+// running nodes already use and new nodes mount too; the system users take
+// their passwords from the system-passwords Secret, so the operator still
+// reaches every node.
+func (r *ValkeyClusterReconciler) reportUsersACLUnresolved(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclErr error) {
+	// Copy the condition: SetStatusCondition updates the stored one in place.
+	var previous metav1.Condition
+	if found := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); found != nil {
+		previous = *found
+	}
+	wasUnresolved := previous.Status == metav1.ConditionTrue && previous.Reason == valkeyiov1alpha1.ReasonUsersACLUnresolved
+	if aclErr == nil {
+		if wasUnresolved {
+			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "UsersACLResolved", "ReconcileUsersACL", "Users ACL updated after %s", previous.Message)
+		}
+		return
+	}
+	message := aclErr.Error()
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, message, metav1.ConditionTrue)
+	if wasUnresolved && previous.Message == message {
+		return
+	}
+	logf.FromContext(ctx).Error(aclErr, "users ACL not updated, nodes keep the last applied aclfile")
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "UsersACLUnresolved", "ReconcileUsersACL", "Users ACL not updated, nodes keep the last applied aclfile: %v", aclErr)
 }

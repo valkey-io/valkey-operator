@@ -734,6 +734,11 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+
+	// ReasonUsersACLUnresolved marks Degraded while a user's password Secret
+	// cannot be read on a cluster that already has an aclfile. The nodes keep
+	// the last applied aclfile and topology work carries on.
+	ReasonUsersACLUnresolved = "UsersACLUnresolved"
 )
 
 // +kubebuilder:object:root=true

@@ -880,6 +880,11 @@ const (
 	// ReasonTrustBundleError is used with ConditionReady when the operator
 	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"
+
+	// ReasonUsersACLUnresolved marks Degraded while a user's password Secret
+	// cannot be read on a cluster that already has an aclfile. The nodes keep
+	// the last applied aclfile and topology work carries on.
+	ReasonUsersACLUnresolved = "UsersACLUnresolved"
 )
 
 // +kubebuilder:object:root=true

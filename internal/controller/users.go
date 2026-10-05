@@ -196,6 +196,10 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
 		if err != nil {
+			var unresolved *userSecretUnresolvedError
+			if errors.As(err, &unresolved) {
+				return err // already names the user
+			}
 			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
 
@@ -293,6 +297,23 @@ func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string 
 }
 
 // Fetches a Secret, and looks for referenced passwords
+// userSecretUnresolvedError reports a user whose password the operator cannot
+// read: the referenced Secret is missing, or it lacks a key listed in
+// passwordSecret.keys. The cluster controller keeps the last good aclfile and
+// reports the user on the Degraded condition; see reportUsersACLUnresolved.
+type userSecretUnresolvedError struct {
+	User   string
+	Secret string
+	Key    string
+}
+
+func (e *userSecretUnresolvedError) Error() string {
+	if e.Key == "" {
+		return fmt.Sprintf("user %s: Secret %s not found", e.User, e.Secret)
+	}
+	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
+}
+
 func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)
@@ -320,7 +341,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 		log.V(1).Info("Users secret not found", "userSecretName", userSecretName, "user", user.Name)
 
 		// The Secret was not found; And since NoPassword is false, then we cannot add this user
-		return []string{}, fmt.Errorf("no password or reference found")
+		return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName}
 	}
 
 	// Sort the password keys; default to username if no keys present
@@ -340,7 +361,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 		password, exists := userSecret.Data[key]
 		if !exists {
 			log.Error(nil, "missing password key in secret", "user", user.Name, "secret", userSecretName, "key", key)
-			return []string{}, fmt.Errorf("missing password key in secret")
+			return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName, Key: key}
 		}
 
 		// Test if the string in the Secret is a pre-hashed sha256 password

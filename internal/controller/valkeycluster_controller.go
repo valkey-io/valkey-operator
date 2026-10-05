@@ -1954,11 +1954,14 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 
 // internalAclSecretExists reports whether the cluster already has an aclfile
 // in its internal ACL Secret, which is what the nodes keep running while a
-// rebuild fails.
+// rebuild fails. A Secret whose aclfile entry is missing or empty is no
+// fallback: the nodes have nothing to keep.
 func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
 	secret := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret)
-	return err == nil
+	if err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
+		return false
+	}
+	return len(secret.Data[aclFilename]) > 0
 }
 
 // reportUsersACLUnresolved carries the result of the ACL step on the Degraded

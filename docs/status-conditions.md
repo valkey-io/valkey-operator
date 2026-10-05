@@ -51,7 +51,7 @@ Indicates whether the cluster is fully functional and serving traffic.
 Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
-- `UsersACLError` – a user's password Secret could not be read before the cluster had its first aclfile. Once an aclfile exists the same failure is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
+- `UsersACLError` – a user's password Secret could not be read and the cluster has no aclfile yet, so the reconcile stops until every user's Secret resolves. Once an aclfile exists the same failure is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
@@ -95,7 +95,7 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
-- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `passwordSecret.keys`, so the aclfile could not be rebuilt. The message names the user, the Secret and the key. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. Only the first reconcile of a new cluster still blocks on a missing Secret, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to
+- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `passwordSecret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to
 
 ---
 

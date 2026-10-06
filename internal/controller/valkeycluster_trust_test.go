@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -336,6 +337,67 @@ func TestReconcileTrustBundle(t *testing.T) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleConflict, cond.Reason)
 	})
 
+	// A cluster whose aclfile is at revision rev1, with one node that has
+	// confirmed it and one that has not.
+	aclAt := func(revision string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "internal-c-acl", Namespace: "ns"},
+			Data:       map[string][]byte{aclFilename: []byte("user " + aclRevisionUser + " off resetchannels -@all #" + revision + "\n")},
+		}
+	}
+	nodeAt := func(name, revision string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
+			Status:     valkeyiov1alpha1.ValkeyNodeStatus{LiveACLRevision: revision},
+		}
+	}
+
+	t.Run("holds new roots until every node confirms the current ACL", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		behind := nodeAt("c-0-1", "rev0")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA),
+			aclAt("rev1"), nodeAt("c-0-0", "rev1"), behind)
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err, "the first write is never held: nodes roll onto it with both mounts fresh")
+		first, _ := trustSecret(t, c)
+
+		added := selfSignedCAPEM(t)
+		require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), added...))))
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name, "nodes keep the current bundle")
+		held, _ := trustSecret(t, c)
+		assert.Equal(t, first.Data, held.Data, "the new root is not written yet")
+		cond := tlsConfigured(cluster)
+		require.NotNil(t, cond)
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, cond.Reason)
+		assert.Contains(t, cond.Message, "c-0-1")
+		assert.NotContains(t, cond.Message, "c-0-0")
+
+		behind.Status.LiveACLRevision = "rev1"
+		require.NoError(t, c.Update(ctx, behind)) // no status subresource is registered on the fake
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		widened, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, added)}, bundleDERs(t, widened.Data[tlsSecretKeyCA]))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("writes a bundle that only loses roots at once", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		extra := selfSignedCAPEM(t)
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), extra...)),
+			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		require.NoError(t, c.Update(ctx, caSecret("client-ca", clientCA)))
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]), "removing a root never waits")
+	})
+
 	t.Run("returns a transient read error instead of reporting a bad source", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		r, _, _ := newTrustReconciler(t)
@@ -420,6 +482,16 @@ func TestReconcileTrustBundleConfigMapSources(t *testing.T) {
 			assert.NotContains(t, cond.Message, "trust source invalid", "the sentinel prefix is not shown to users")
 		})
 	}
+}
+
+func TestAddedRoots(t *testing.T) {
+	a, b, c := selfSignedCAPEM(t), selfSignedCAPEM(t), selfSignedCAPEM(t)
+	join := func(ps ...[]byte) []byte { return bytes.Join(ps, nil) }
+	assert.Equal(t, 0, addedRoots(join(a, b), join(a, b)), "unchanged")
+	assert.Equal(t, 0, addedRoots(join(a, b), a), "only removed")
+	assert.Equal(t, 1, addedRoots(join(a, b), join(a, c)), "one replaced counts as one added")
+	assert.Equal(t, 2, addedRoots(nil, join(a, b)), "nothing before")
+	assert.Equal(t, 2, addedRoots([]byte("garbage"), join(a, b)), "an unreadable current bundle counts as empty")
 }
 
 func TestWithTrustBundle(t *testing.T) {

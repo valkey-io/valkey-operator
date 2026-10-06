@@ -267,7 +267,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
 	// longer part of the pod template (it does not enter Spec.WorkloadRevision),
 	// so a node waiting on a roll must still pick up ACL edits without one.
-	aclSynced, err := r.applyLiveACL(ctx, node)
+	aclSynced, aclRevision, err := r.applyLiveACL(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
@@ -292,6 +292,25 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"Desired ACL passwords are live"); condErr != nil {
 		log.Error(condErr, "failed to set ACLApplied condition")
 		return ctrl.Result{}, condErr
+	}
+	// Publish which ACL revision is live, so the cluster controller can hold
+	// new trust roots back until every node runs the ACL that governs them.
+	if err := r.setLiveACLRevision(ctx, node, aclRevision); err != nil {
+		log.Error(err, "failed to record the live ACL revision")
+		return ctrl.Result{}, err
+	}
+
+	// Reload the trust bundle live as well: a changed bundle never rolls the
+	// pod, and Valkey reads tls-ca-cert-file only when it starts or the TLS
+	// config is set. This runs only once the ACL is confirmed live (the
+	// not-synced case returned above). The ACL and the bundle are separate
+	// mounted Secrets that the kubelet updates independently, so reloading
+	// first could trust a new root while a stale ACL still lets its clients in
+	// as a permissive default.
+	if err := r.reloadTrustBundle(ctx, node); err != nil {
+		log.Error(err, "failed to reload the trust bundle")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "TrustBundleReloadFailed", "ReloadTrustBundle", "Failed to reload the trust bundle: %v", err)
+		return ctrl.Result{}, err
 	}
 
 	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
@@ -1239,6 +1258,28 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 		return ""
 	}
 	return parseClusterNodesRole(nodes)
+}
+
+// reloadTrustBundle has a node with a trust bundle re-read tls-ca-cert-file.
+// The cluster controller rewrites the bundle Secret when a clientAuth.ca
+// source changes (a SPIFFE trust domain rotates its roots about daily), and
+// the kubelet updates the mounted file in place, but the running server keeps
+// the roots it loaded until its TLS config is set again: tls-auto-reload-interval
+// was not observed to reload the CA. CONFIG SET of the unchanged path rebuilds
+// the TLS context with the current file, so running this on every reconcile
+// bounds how long a new root waits by the volume refresh plus the requeue.
+// The reload affects new connections only. Nodes without a trust bundle are
+// left alone.
+func (r *ValkeyNodeReconciler) reloadTrustBundle(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	if node.Spec.TLS == nil || node.Spec.TLS.Certificates.TrustBundle == nil {
+		return nil
+	}
+	c, err := r.newConfigClient(ctx, r, node)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.SetConfig(ctx, map[string]string{"tls-ca-cert-file": tlsCertMountPath + "/" + tlsSecretKeyCA})
 }
 
 // applyLiveConfig applies the live-settable subset of the node's desired config

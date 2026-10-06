@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -143,6 +144,59 @@ func reservedTrustBundleNameUse(cluster *valkeyiov1alpha1.ValkeyCluster, name st
 	return ""
 }
 
+// addedRoots counts the certificates in next that are not in current. A
+// current bundle that does not parse counts as holding nothing, so every root
+// in next is new.
+func addedRoots(current, next []byte) int {
+	have := map[string]struct{}{}
+	if blocks, err := decodePEMStrict(current); err == nil {
+		for _, b := range blocks {
+			have[string(b.Bytes)] = struct{}{}
+		}
+	}
+	blocks, err := decodePEMStrict(next)
+	if err != nil {
+		return 0
+	}
+	added := 0
+	for _, b := range blocks {
+		if _, ok := have[string(b.Bytes)]; !ok {
+			added++
+		}
+	}
+	return added
+}
+
+// nodesBehindLiveACL names the cluster's ValkeyNodes whose running server has
+// not been confirmed to hold the current revision of the operator-managed
+// aclfile, read through the APIReader so it reflects this reconcile's write.
+// It is empty when there is no managed aclfile yet.
+func (r *ValkeyClusterReconciler) nodesBehindLiveACL(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) ([]string, error) {
+	acl := &corev1.Secret{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: getInternalSecretName(cluster.Name)}, acl); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	revision := aclRevision(desiredUserPasswordHashes(string(acl.Data[aclFilename])))
+	if revision == "" {
+		return nil, nil
+	}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
+		return nil, err
+	}
+	var pending []string
+	for i := range nodes.Items {
+		if nodes.Items[i].Status.LiveACLRevision != revision {
+			pending = append(pending, nodes.Items[i].Name)
+		}
+	}
+	slices.Sort(pending)
+	return pending, nil
+}
+
 // writeTrustBundle creates the trust bundle Secret, or updates the existing
 // one read through the APIReader, so that it holds bundle and carries the
 // operator's labels. The caller has already refused a Secret this cluster
@@ -196,6 +250,10 @@ func (r *ValkeyClusterReconciler) refreshServerRootInFallback(ctx context.Contex
 	merged, err := mergeTrustBundle([]trustSource{server, {ref: "the last good bundle", pem: existing.Data[tlsSecretKeyCA]}})
 	if err != nil || bytes.Equal(merged, existing.Data[tlsSecretKeyCA]) {
 		return nil
+	}
+	// The renewed server root is a new root like any other: it waits for the ACL.
+	if pending, err := r.nodesBehindLiveACL(ctx, cluster); err != nil || len(pending) > 0 {
+		return err
 	}
 	existing.Data[tlsSecretKeyCA] = merged
 	if err := r.Update(ctx, existing); err != nil {
@@ -282,6 +340,27 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 			return "", err
 		}
 		return name, nil
+	}
+
+	// A bundle that gains a root waits until every node runs the current ACL.
+	// The ACL and the bundle are separate mounted Secrets, so a container that
+	// restarts after its bundle mount refreshed but before its ACL mount did
+	// would otherwise trust the new root under the old ACL, for example a
+	// permissive default removed in the same update. Only additions wait: a
+	// bundle that loses roots or stays the same is written at once.
+	if exists {
+		if added := addedRoots(existing.Data[tlsSecretKeyCA], bundle); added > 0 {
+			pending, err := r.nodesBehindLiveACL(ctx, cluster)
+			if err != nil {
+				return "", err
+			}
+			if len(pending) > 0 {
+				setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending,
+					fmt.Sprintf("holding %d new root(s) until node(s) %s confirm the current ACL is live", added, strings.Join(pending, ", ")),
+					metav1.ConditionFalse)
+				return name, nil
+			}
+		}
 	}
 
 	// Write based on that authoritative read rather than CreateOrUpdate, which

@@ -943,7 +943,7 @@ func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alph
 				SecretName: tlsSpec.Certificates.Server.SecretName,
 			},
 		},
-		ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+		ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
 			Mode:            tlsSpec.ClientAuthMode(),
 			CertificateUser: tlsSpec.ClientAuthCertificateUser(),
 		},

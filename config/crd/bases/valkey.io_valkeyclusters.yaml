@@ -1948,6 +1948,64 @@ spec:
                           ClientAuth configures client certificate authentication. When omitted,
                           mode defaults to `Optional` and certificateUser defaults to `Disabled`.
                         properties:
+                          ca:
+                            description: |-
+                              CA lists additional trust roots for verifying client certificates, for
+                              clients whose certificates are issued by a different CA than the server
+                              certificate. Each entry names a Secret or a ConfigMap, and the key in it
+                              holding the roots (default `ca.crt`) as PEM certificates or a SPIFFE
+                              trust bundle.
+
+                              The operator merges the server secret's `ca.crt` with the roots under
+                              each entry's key, in list order and without duplicates, into the
+                              operator-managed `<cluster>-tls-trust` Secret, and nodes verify clients
+                              and peers against that bundle. The server root always stays in the
+                              bundle, since peers present the server certificate on the cluster bus
+                              and replication links.
+
+                              The operator re-reads these sources on every reconcile, and nodes reload
+                              a changed bundle live, without a restart. SPIRE's
+                              bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
+                              or `bundle.crt`).
+                            items:
+                              description: |-
+                                TrustSource references CA certificates held in a Secret or a ConfigMap.
+                                Exactly one of secretName and configMapName must be set.
+                              properties:
+                                configMapName:
+                                  description: |-
+                                    ConfigMapName is the name of a ConfigMap holding the roots, as SPIRE and
+                                    trust-manager publish bundles.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                key:
+                                  default: ca.crt
+                                  description: |-
+                                    Key is the key holding the roots. Defaults to `ca.crt`. Its contents are
+                                    either PEM certificates or a SPIFFE trust bundle (a JWK Set, as SPIRE
+                                    publishes under `bundle.spiffe`); the operator tells them apart by their
+                                    content and, for a SPIFFE bundle, uses the `x5c` certificate of every
+                                    key whose `use` is `x509-svid`.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                secretName:
+                                  description: |-
+                                    SecretName is the name of a Secret holding the roots. The Secret type
+                                    does not matter.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of secretName and configMapName
+                                  must be set
+                                rule: has(self.secretName) != has(self.configMapName)
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: atomic
                           certificateUser:
                             default: Disabled
                             description: |-
@@ -1980,6 +2038,10 @@ spec:
                             Valkey ignores client certificates in that mode'
                           rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
                             has(self.certificateUser) && self.certificateUser != ''Disabled'')'
+                        - message: 'ca has no effect when mode=Disabled: Valkey ignores
+                            client certificates in that mode'
+                          rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
+                            has(self.ca) && size(self.ca) > 0)'
                       serverName:
                         description: |-
                           ServerName is the hostname used for TLS verification when the operator

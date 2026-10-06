@@ -3193,6 +3193,24 @@ spec:
                         required:
                         - secretName
                         type: object
+                      trustBundle:
+                        description: |-
+                          TrustBundle, when set, replaces the server secret's `ca.crt` as the
+                          trust root Valkey verifies clients and peers against
+                          (`tls-ca-cert-file`). It must therefore include the root the server
+                          certificate chains to. For cluster-owned nodes the ValkeyCluster
+                          controller sets it to the operator-managed `<cluster>-tls-trust` Secret
+                          when spec.networking.tls.clientAuth.ca is set. Probes and the metrics
+                          exporter keep verifying the server against the server secret's `ca.crt`.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                     required:
                     - server
                     type: object
@@ -3207,10 +3225,8 @@ spec:
                         default: Disabled
                         description: |-
                           CertificateUser configures how Valkey maps an authenticated client
-                          certificate to an ACL user. Set to `CN` to use the certificate's Common Name
-                          (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
-                          certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
-                          Defaults to `Disabled`, which leaves the directive unset.
+                          certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+                          `Disabled`, which leaves the directive unset.
                         enum:
                         - CN
                         - URI
@@ -3220,10 +3236,7 @@ spec:
                         default: Optional
                         description: |-
                           Mode controls whether clients must authenticate with a TLS certificate.
-                          `Required` enforces mTLS, `Optional` allows both authenticated and
-                          unauthenticated clients, and `Disabled` turns client certificate processing
-                          off entirely.
-                          Defaults to `Optional`.
+                          Maps to `tls-auth-clients`. Defaults to `Optional`.
                         enum:
                         - Required
                         - Optional
@@ -3576,6 +3589,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              liveACLRevision:
+                description: |-
+                  LiveACLRevision is the revision of the operator-managed aclfile that the
+                  running server was last confirmed to hold. The ValkeyCluster controller
+                  waits for every node to report the current revision before it adds new
+                  roots to a trust bundle, so a new root is never trusted under a stale ACL.
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the controller.

@@ -188,7 +188,43 @@ type NodeTLSSpec struct {
 	// cluster-owned nodes the ValkeyCluster controller copies
 	// spec.networking.tls.clientAuth here.
 	// +optional
-	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+	ClientAuth *NodeTLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// NodeTLSClientAuthSpec is the resolved client certificate authentication for
+// a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
+// controller merges spec.networking.tls.clientAuth.ca into a Secret and
+// references it from certificates.trustBundle.
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+type NodeTLSClientAuthSpec struct {
+	// Mode controls whether clients must authenticate with a TLS certificate.
+	// Maps to `tls-auth-clients`. Defaults to `Optional`.
+	// +kubebuilder:default=Optional
+	// +optional
+	Mode TLSAuthClients `json:"mode,omitempty"`
+
+	// CertificateUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+	// `Disabled`, which leaves the directive unset.
+	// +kubebuilder:default=Disabled
+	// +optional
+	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+}
+
+// EffectiveMode returns mode, defaulting to Optional when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveMode() TLSAuthClients {
+	if s == nil || s.Mode == "" {
+		return TLSAuthClientsOptional
+	}
+	return s.Mode
+}
+
+// EffectiveCertificateUser returns certificateUser, defaulting to Disabled when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveCertificateUser() TLSAuthClientsUser {
+	if s == nil || s.CertificateUser == "" {
+		return TLSAuthClientsUserDisabled
+	}
+	return s.CertificateUser
 }
 
 // ClientAuthMode returns the effective client-auth mode for t.
@@ -219,6 +255,26 @@ type NodeTLSCertificates struct {
 	// `tls.crt` and `tls.key`.
 	// +kubebuilder:validation:Required
 	Server NodeCertificateRef `json:"server"`
+
+	// TrustBundle, when set, replaces the server secret's `ca.crt` as the
+	// trust root Valkey verifies clients and peers against
+	// (`tls-ca-cert-file`). It must therefore include the root the server
+	// certificate chains to. For cluster-owned nodes the ValkeyCluster
+	// controller sets it to the operator-managed `<cluster>-tls-trust` Secret
+	// when spec.networking.tls.clientAuth.ca is set. Probes and the metrics
+	// exporter keep verifying the server against the server secret's `ca.crt`.
+	// +optional
+	TrustBundle *NodeTrustBundleRef `json:"trustBundle,omitempty"`
+}
+
+// NodeTrustBundleRef references a Secret holding PEM CA certificates under key
+// `ca.crt`.
+type NodeTrustBundleRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // NodeCertificateRef references a certificate and its private key held in a
@@ -263,6 +319,13 @@ type ValkeyNodeStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LiveACLRevision is the revision of the operator-managed aclfile that the
+	// running server was last confirmed to hold. The ValkeyCluster controller
+	// waits for every node to report the current revision before it adds new
+	// roots to a trust bundle, so a new root is never trusted under a stale ACL.
+	// +optional
+	LiveACLRevision string `json:"liveACLRevision,omitempty"`
 }
 
 const (

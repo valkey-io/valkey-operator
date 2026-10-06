@@ -486,6 +486,7 @@ const (
 // TLSClientAuthSpec configures client certificate authentication for incoming
 // TLS connections.
 // +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.ca) && size(self.ca) > 0)",message="ca has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
 type TLSClientAuthSpec struct {
 	// Mode controls whether clients must authenticate with a TLS certificate.
 	// `Required` enforces mTLS, `Optional` allows both authenticated and
@@ -504,6 +505,59 @@ type TLSClientAuthSpec struct {
 	// +kubebuilder:default=Disabled
 	// +optional
 	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+
+	// CA lists additional trust roots for verifying client certificates, for
+	// clients whose certificates are issued by a different CA than the server
+	// certificate. Each entry names a Secret or a ConfigMap, and the key in it
+	// holding the roots (default `ca.crt`) as PEM certificates or a SPIFFE
+	// trust bundle.
+	//
+	// The operator merges the server secret's `ca.crt` with the roots under
+	// each entry's key, in list order and without duplicates, into the
+	// operator-managed `<cluster>-tls-trust` Secret, and nodes verify clients
+	// and peers against that bundle. The server root always stays in the
+	// bundle, since peers present the server certificate on the cluster bus
+	// and replication links.
+	//
+	// The operator re-reads these sources on every reconcile, and nodes reload
+	// a changed bundle live, without a restart. SPIRE's
+	// bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
+	// or `bundle.crt`).
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	CA []TrustSource `json:"ca,omitempty"`
+}
+
+// TrustSource references CA certificates held in a Secret or a ConfigMap.
+// Exactly one of secretName and configMapName must be set.
+// +kubebuilder:validation:XValidation:rule="has(self.secretName) != has(self.configMapName)",message="exactly one of secretName and configMapName must be set"
+type TrustSource struct {
+	// SecretName is the name of a Secret holding the roots. The Secret type
+	// does not matter.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// ConfigMapName is the name of a ConfigMap holding the roots, as SPIRE and
+	// trust-manager publish bundles.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ConfigMapName string `json:"configMapName,omitempty"`
+
+	// Key is the key holding the roots. Defaults to `ca.crt`. Its contents are
+	// either PEM certificates or a SPIFFE trust bundle (a JWK Set, as SPIRE
+	// publishes under `bundle.spiffe`); the operator tells them apart by their
+	// content and, for a SPIFFE bundle, uses the `x5c` certificate of every
+	// key whose `use` is `x509-svid`.
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // EffectiveMode returns mode, defaulting to Optional when unset.
@@ -557,6 +611,14 @@ func (t *TLSSpec) ClientAuthCertificateUser() TLSAuthClientsUser {
 		return TLSAuthClientsUserDisabled
 	}
 	return t.ClientAuth.EffectiveCertificateUser()
+}
+
+// ClientAuthCA returns the additional client trust sources for t, or nil.
+func (t *TLSSpec) ClientAuthCA() []TrustSource {
+	if t == nil || t.ClientAuth == nil {
+		return nil
+	}
+	return t.ClientAuth.CA
 }
 
 // TLSCertificates groups the certificate slots for a ValkeyCluster. Today
@@ -697,6 +759,33 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionTLSConfigured reports whether the operator-managed TLS trust
+	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
+	// non-empty.
+	ConditionTLSConfigured = "TLSConfigured"
+)
+
+const (
+	// ReasonTrustBundleReady is used with ConditionTLSConfigured=True when
+	// <cluster>-tls-trust holds the server root and every clientAuth.ca root.
+	ReasonTrustBundleReady = "TrustBundleReady"
+	// ReasonTrustSourceNotFound is used with ConditionTLSConfigured=False when
+	// a source Secret or ConfigMap, or its configured key, does not exist. The
+	// trust Secret keeps its last good roots.
+	ReasonTrustSourceNotFound = "TrustSourceNotFound"
+	// ReasonTrustSourceInvalid is used with ConditionTLSConfigured=False when a
+	// source's key holds neither PEM certificates nor a SPIFFE bundle with an
+	// X.509 authority. The trust Secret keeps its last good roots.
+	ReasonTrustSourceInvalid = "TrustSourceInvalid"
+	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
+	// a Secret named <cluster>-tls-trust exists but this cluster does not
+	// control it, or when a spec field names that Secret as one of its own
+	// inputs. Nodes stay on the server root.
+	ReasonTrustBundleConflict = "TrustBundleConflict"
+	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
+	// new roots are held back until every node confirms the current ACL. The
+	// trust Secret keeps its current roots meanwhile.
+	ReasonTrustBundlePending = "TrustBundlePending"
 )
 
 const (
@@ -734,6 +823,9 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonTrustBundleError is used with ConditionReady when the operator
+	// cannot read a trust source or write <cluster>-tls-trust.
+	ReasonTrustBundleError = "TrustBundleError"
 )
 
 // +kubebuilder:object:root=true

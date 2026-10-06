@@ -65,7 +65,10 @@ func TestBuildNodeClientOptionServerNameFallback(t *testing.T) {
 	assert.Equal(t, "valkey-c.ns.svc.cluster.local", opt.TLSConfig.ServerName)
 }
 
-func selfSignedCAPEM(t *testing.T) []byte {
+func selfSignedCAPEM(t interface {
+	require.TestingT
+	Helper()
+}) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)

@@ -50,8 +50,9 @@ With `clientAuth.mode: Required` and `clientAuth.certificateUser: CN`, a client 
 |---|---|---|---|
 | `clientAuth.mode` | `Required`, `Optional`, `Disabled` | `Optional` | Whether clients must present a certificate signed by the configured CA. |
 | `clientAuth.certificateUser` | `CN`, `URI`, `Disabled` | `Disabled` | Which certificate field selects the ACL user. |
+| `clientAuth.ca` | list of `{secretName \| configMapName, key}`, at most 16 | none | Extra roots for verifying client certificates. See [Trusting a separate client CA](#trusting-a-separate-client-ca). |
 
-Setting `clientAuth.certificateUser` to `CN` or `URI` while `clientAuth.mode` is `Disabled` is rejected at admission time: Valkey ignores client certificates in that mode, so the mapping would silently do nothing.
+Setting `clientAuth.certificateUser` to `CN` or `URI`, or a non-empty `clientAuth.ca`, while `clientAuth.mode` is `Disabled` is rejected at admission time: Valkey ignores client certificates in that mode, so the setting would silently do nothing.
 
 ### `clientAuth.mode` values
 
@@ -82,7 +83,7 @@ The rest of the rendered TLS block (`tls-port`, `tls-cluster yes`, `tls-replicat
 
 ## Issuing certificates with cert-manager
 
-Both server and client certificates must be signed by the **same CA** so the server can validate the client. The recommended pattern uses a self-signed bootstrap Issuer to mint a CA Certificate, and a CA Issuer (referencing that CA Secret) to sign the server and client leaves:
+Without `clientAuth.ca`, server and client certificates must be signed by the **same CA** so the server can validate the client. To trust a client CA that does not sign the server certificate, see [Trusting a separate client CA](#trusting-a-separate-client-ca). The recommended single-CA pattern uses a self-signed bootstrap Issuer to mint a CA Certificate, and a CA Issuer (referencing that CA Secret) to sign the server and client leaves:
 
 ```yaml
 apiVersion: cert-manager.io/v1
@@ -124,6 +125,47 @@ spec:
   commonName: alice
   issuerRef: { name: valkey-ca-issuer, kind: Issuer, group: cert-manager.io }
 ```
+
+## Trusting a separate client CA
+
+By default, nodes verify client certificates against the server secret's `ca.crt`, so clients must hold certificates from the CA that signs the server certificate. `clientAuth.ca` adds roots from other CAs, for example when clients hold SPIFFE X.509-SVIDs issued by SPIRE and the server certificate comes from elsewhere:
+
+```yaml
+spec:
+  networking:
+    tls:
+      certificates:
+        server:
+          secretName: valkey-server-tls
+      clientAuth:
+        mode: Required
+        certificateUser: URI
+        ca:
+          - configMapName: spire-bundle  # as SPIRE publishes it
+            key: bundle.spiffe
+  users:
+    - name: spiffe://example.org/ns/default/sa/api
+      enabled: true
+      resetpass: true
+      permissions: "+@read ~app:*"
+```
+
+A client presenting an SVID for `spiffe://example.org/ns/default/sa/api` signed by a root in SPIRE's bundle is authenticated as that ACL user. SPIRE's bundle ConfigMap is not in the cluster's namespace by default: copy or distribute it there (for example with a Kyverno generate policy), since a source is read from the cluster's own namespace.
+
+Each entry names exactly one Secret (`secretName`) or ConfigMap (`configMapName`) in the cluster's namespace, and the `key` holding the roots, which defaults to `ca.crt`. The Secret type does not matter. The key may hold either:
+
+- **PEM certificates**, one or more, as cert-manager, trust-manager and SPIRE's `bundle.crt` provide; or
+- **a SPIFFE trust bundle**, the JWK Set SPIRE publishes under `bundle.spiffe`. The operator uses the `x5c` certificate of every key whose `use` is `x509-svid` and ignores the `jwt-svid` keys.
+
+The operator tells the two apart by their content, and the `TLSConfigured` condition message names the format each source was read as.
+
+The operator merges the server secret's `ca.crt`, followed by the roots under each entry's `key` in list order and with duplicates dropped, into a Secret named `<cluster>-tls-trust` that it owns. Nodes load that bundle as `tls-ca-cert-file`. The server root always stays first in the bundle, because peers present the server certificate to each other on the cluster bus and replication links and are verified against the same file. Probes and the metrics exporter keep verifying the server against the server secret's `ca.crt`.
+
+- **Rotation.** The operator re-reads the sources on every reconcile, at most 30 seconds apart on a healthy cluster, and rewrites `<cluster>-tls-trust` when they change. The kubelet then updates the mounted file, usually within a minute, and each node reloads it live (`CONFIG SET tls-ca-cert-file` with the unchanged path) on its next reconcile, at most 30 seconds later. No pod restarts, on any Valkey version; `tls-auto-reload-interval` is not needed for this, and was not observed to reload the CA. The reload applies to new connections; existing ones keep the trust they were established with. To rotate a root, add the new one to a source (or as a new entry), let clients move over, then remove the old one. SPIRE does this for you: it publishes a new root ahead of using it. A bundle that gains a root is written only once every node has confirmed it runs the current ACL (`status.liveACLRevision` on each ValkeyNode); until then the cluster reports `TLSConfigured=False` with reason `TrustBundlePending` and keeps the current bundle. This keeps a new root from ever being trusted under a stale ACL, even by a container that restarts mid-update. Removing a root is never held back.
+- **Missing or invalid sources.** If a source or its key is missing, or its contents are neither PEM certificates nor a SPIFFE bundle with an X.509 authority, `<cluster>-tls-trust` keeps its last good roots and the cluster reports `TLSConfigured=False` with reason `TrustSourceNotFound` or `TrustSourceInvalid`. A partial bundle is never written, since dropping a root would lock out every client it signed. If no bundle has been written yet, nodes keep verifying clients against the server secret's `ca.crt` alone.
+- **The name `<cluster>-tls-trust` is reserved.** It cannot be the server certificate Secret or a `clientAuth.ca` source. If a Secret of that name already exists and the cluster does not control it, the operator never adopts, writes or trusts it: the cluster reports `TrustBundleConflict` and nodes stay on the server root until it is removed.
+- **The `default` user is disabled.** Under `certificateUser: URI` or `CN`, a client whose certificate chains to a trusted root but names no ACL user is logged in as `default`, as is a client that presents no certificate under `mode: Optional`. Valkey's stock `default` is `on nopass +@all`, and `clientAuth.ca` widens who can reach it, for example to every SVID in a SPIFFE trust domain. So while `clientAuth.ca` is set and `spec.users` does not declare `default`, the operator writes `user default off resetkeys resetchannels -@all`, and such clients get `NOAUTH`. The `TLSConfigured` message says so. Removing `clientAuth.ca` does not re-enable `default`: the ACL change reaches every node at once, while nodes keep trusting the removed roots until they roll, so `default` stays disabled for as long as `<cluster>-tls-trust` exists, which is until the cluster is deleted. To keep or restore a `default` user, declare it in `spec.users`; any declared `default` is used exactly as written. See [#489](https://github.com/valkey-io/valkey-operator/issues/489) for `default` on clusters without `clientAuth.ca`.
+- **Adding or removing `clientAuth.ca`** rolls the nodes one at a time. Removing it does not delete `<cluster>-tls-trust`, since pods mount it until they roll; it is deleted with the cluster.
 
 ## Connecting clients
 

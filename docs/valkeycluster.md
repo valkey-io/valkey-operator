@@ -398,6 +398,8 @@ networking:
     clientAuth:
       mode: Optional             # Optional (default) | Required | Disabled
       certificateUser: Disabled  # Disabled (default) | CN | URI
+      ca:                        # optional; extra roots for verifying client certificates
+        - secretName: client-ca  # or configMapName; key defaults to ca.crt (PEM or SPIFFE bundle)
 ```
 
 #### Discovery (in-cluster announce)
@@ -438,7 +440,7 @@ config:
   tls-auto-reload-interval: "3600"
 ```
 
-For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
+For certificate-based client authentication, certificate-to-ACL-user mapping, and trusting client certificates from a different CA than the server certificate (`clientAuth.ca`), see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
 
 ### Users
 

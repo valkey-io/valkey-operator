@@ -56,6 +56,7 @@ Common reasons when `Ready=False`:
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
+- `TrustBundleError` – failed to read a `clientAuth.ca` source or write the `<cluster>-tls-trust` Secret
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
   - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
@@ -150,6 +151,21 @@ Non-blocking warning when TLS is enabled and discovery still uses IP announce (d
 
 Common reasons:
 - `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
+
+#### `TLSConfigured`
+Reports whether the operator-managed trust bundle `<cluster>-tls-trust` is in place. Set only while `networking.tls.clientAuth.ca` is non-empty; absent otherwise. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca).
+
+| Status | Meaning |
+|---|---|
+| `True` | The trust bundle holds the server root and every `clientAuth.ca` root. |
+| `False` | A source could not be read. The trust bundle keeps its last good contents; if none was ever written, nodes verify clients against the server secret's `ca.crt` alone. |
+
+Common reasons:
+- `TrustBundleReady` – the trust bundle is up to date.
+- `TrustSourceNotFound` – a referenced Secret or ConfigMap, or its key, does not exist.
+- `TrustSourceInvalid` – a source's key holds neither PEM certificates nor a SPIFFE bundle with an X.509 authority.
+- `TrustBundleConflict` – a Secret named `<cluster>-tls-trust` exists but the cluster does not control it, or a spec field names that Secret as the server certificate or a `clientAuth.ca` source. The operator never adopts or writes it, and nodes stay on the server root.
+- `TrustBundlePending` – new roots are held back until every node confirms it runs the current ACL; the current bundle stays in place meanwhile.
 
 ---
 

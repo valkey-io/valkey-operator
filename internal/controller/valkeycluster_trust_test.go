@@ -484,6 +484,50 @@ func TestReconcileTrustBundleConfigMapSources(t *testing.T) {
 	}
 }
 
+func TestDisablesDefaultUser(t *testing.T) {
+	assert.False(t, disablesDefaultUser(trustTestCluster(), false), "a cluster that never used clientAuth.ca leaves default alone")
+	assert.False(t, disablesDefaultUser(&valkeyiov1alpha1.ValkeyCluster{}, false), "no TLS leaves default alone")
+
+	withCA := trustTestCluster("client-ca")
+	assert.True(t, disablesDefaultUser(withCA, false), "disabled from the first reconcile, before the bundle is written")
+	assert.True(t, disablesDefaultUser(withCA, true))
+
+	// clientAuth.ca removed: nodes still trust the removed roots until they
+	// roll, so default stays disabled while the bundle Secret exists.
+	assert.True(t, disablesDefaultUser(trustTestCluster(), true))
+
+	withCA.Spec.Users = []valkeyiov1alpha1.UserAclSpec{{Name: "alice"}}
+	assert.True(t, disablesDefaultUser(withCA, true), "other users do not count as declaring default")
+
+	withCA.Spec.Users = append(withCA.Spec.Users, valkeyiov1alpha1.UserAclSpec{Name: "default", Enabled: true, NoPassword: true})
+	assert.False(t, disablesDefaultUser(withCA, true), "a declared default always wins")
+	removed := trustTestCluster()
+	removed.Spec.Users = withCA.Spec.Users
+	assert.False(t, disablesDefaultUser(removed, true), "a declared default wins after removal too")
+}
+
+func TestTrustBundleExists(t *testing.T) {
+	ctx := context.Background()
+	cluster := trustTestCluster()
+	yes := true
+	for name, tc := range map[string]struct {
+		objs []client.Object
+		want bool
+	}{
+		"absent": {nil, false},
+		"controlled by this cluster": {[]client.Object{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "c-tls-trust", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "valkey.io/v1alpha1", Kind: "ValkeyCluster", Name: "c", UID: "cluster-uid", Controller: &yes}}}}}, true},
+		"created by someone else": {[]client.Object{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "c-tls-trust", Namespace: "ns"}}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _, _ := newTrustReconciler(t, tc.objs...)
+			got, err := r.trustBundleExists(ctx, cluster)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestAddedRoots(t *testing.T) {
 	a, b, c := selfSignedCAPEM(t), selfSignedCAPEM(t), selfSignedCAPEM(t)
 	join := func(ps ...[]byte) []byte { return bytes.Join(ps, nil) }

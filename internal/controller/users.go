@@ -180,18 +180,70 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	return systemsAcls.String(), nil
 }
 
+// defaultUser is the name of Valkey's built-in user.
+const defaultUser = "default"
+
+// implicitDefaultUser locks out Valkey's built-in default user, which is
+// otherwise `on nopass +@all`.
+var implicitDefaultUser = valkeyiov1alpha1.UserAclSpec{
+	Name:      defaultUser,
+	Enabled:   false,
+	ResetPass: true,
+	RawAcl:    "resetkeys resetchannels -@all",
+}
+
+// disablesDefaultUser reports whether the operator disables the default user
+// on the cluster's behalf. clientAuth.ca widens who completes the TLS
+// handshake, and a client whose certificate names no ACL user, or who presents
+// none under mode Optional, is logged in as default. So default is disabled
+// while clientAuth.ca is set, and stays disabled afterwards for as long as the
+// trust bundle Secret exists: nodes keep trusting the removed roots until they
+// roll, and the ACL change reaches them first. The Secret is kept until the
+// cluster is deleted. An explicit default entry in spec.users, in any form,
+// always wins.
+func disablesDefaultUser(cluster *valkeyiov1alpha1.ValkeyCluster, trustBundleExists bool) bool {
+	if slices.ContainsFunc(cluster.Spec.Users, func(u valkeyiov1alpha1.UserAclSpec) bool { return u.Name == defaultUser }) {
+		return false
+	}
+	return len(cluster.GetTLS().ClientAuthCA()) > 0 || trustBundleExists
+}
+
+// trustBundleExists reports whether this cluster has written
+// <cluster>-tls-trust. A Secret of that name that the cluster does not control
+// was never mounted by its nodes, so it does not count. The Secret carries the
+// operator's managed-by label, so the cached client sees it.
+func (r *ValkeyClusterReconciler) trustBundleExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: getTrustBundleSecretName(cluster.Name)}, secret)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return metav1.IsControlledBy(secret, cluster), nil
+}
+
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
+	trustBundle, err := r.trustBundleExists(ctx, cluster)
+	if err != nil {
+		return err
+	}
+	users := slices.Clone(cluster.Spec.Users)
+	if disablesDefaultUser(cluster, trustBundle) {
+		users = append(users, implicitDefaultUser)
+	}
 	// Sort users for consistency in hash calculations
-	slices.SortFunc(cluster.Spec.Users, func(a, b valkeyiov1alpha1.UserAclSpec) int {
+	slices.SortFunc(users, func(a, b valkeyiov1alpha1.UserAclSpec) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
-	for _, user := range cluster.Spec.Users {
+	for _, user := range users {
 
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)

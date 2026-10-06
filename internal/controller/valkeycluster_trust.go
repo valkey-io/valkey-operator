@@ -369,6 +369,9 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		return "", err
 	}
 	msg := fmt.Sprintf("%s holds the server root and %d clientAuth.ca source(s): %s", name, len(sources)-1, describeTrustSources(sources[1:]))
+	if disablesDefaultUser(cluster, true) {
+		msg += "; the default user is disabled because spec.users does not declare it"
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundleReady, msg, metav1.ConditionTrue)
 	return name, nil
 }

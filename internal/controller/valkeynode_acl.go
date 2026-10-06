@@ -89,8 +89,8 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 	// remove it. When the aclfile does not manage `default` (it is absent from
 	// spec.users), ignore the server's copy; otherwise the sets never match and
 	// the node loops forever reporting the ACL as not yet live.
-	if _, managed := desired["default"]; !managed {
-		serverUsers = slices.DeleteFunc(serverUsers, func(u string) bool { return u == "default" })
+	if _, managed := desired[defaultUser]; !managed {
+		serverUsers = slices.DeleteFunc(serverUsers, func(u string) bool { return u == defaultUser })
 	}
 	if !slices.Equal(serverUsers, slices.Sorted(maps.Keys(desired))) {
 		// A user was added or removed and the server has not picked it up yet.

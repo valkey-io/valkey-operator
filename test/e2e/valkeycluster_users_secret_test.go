@@ -127,7 +127,7 @@ spec:
 		By("verifying alice can still authenticate on the new shard with the last aclfile")
 		Eventually(func(g Gomega) {
 			out, err := utils.Run(exec.Command("kubectl", "exec", "valkey-"+clusterName+"-2-0-0", "-c", "server", "--",
-				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli --user alice --pass alice-current PING"))
+				"sh", "-c", "unset REDISCLI_AUTH; VALKEYCLI_AUTH=alice-current valkey-cli --user alice PING"))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(strings.TrimSpace(out)).To(Equal("PONG"))
 		}, 2*time.Minute).Should(Succeed())
@@ -151,7 +151,7 @@ spec:
 		By("verifying bob can authenticate once the aclfile is rebuilt")
 		Eventually(func(g Gomega) {
 			out, err := utils.Run(exec.Command("kubectl", "exec", "valkey-"+clusterName+"-2-0-0", "-c", "server", "--",
-				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli --user bob --pass bob-current PING"))
+				"sh", "-c", "unset REDISCLI_AUTH; VALKEYCLI_AUTH=bob-current valkey-cli --user bob PING"))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(strings.TrimSpace(out)).To(Equal("PONG"))
 		}, 5*time.Minute).Should(Succeed())

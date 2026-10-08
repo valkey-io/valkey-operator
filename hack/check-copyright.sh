@@ -14,8 +14,13 @@ files="$(git diff --name-only --diff-filter=A "${base}...HEAD" -- '*.go')"
 status=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  # 25 lines leaves room for a //go:build line above the header.
-  if [[ "$(head -n 25 "$f")" != *"$expected"* ]]; then
+  content="$(head -n 25 "$f")"
+  # Allow one //go:build line and a blank line above the header.
+  if [[ "$content" == "//go:build "* ]]; then
+    content="${content#*$'\n'}"
+    content="${content#$'\n'}"
+  fi
+  if [[ "$content" != "$expected"* ]]; then
     echo "::error file=${f}::new file must start with the header in hack/boilerplate.go.txt, with the year ${year}"
     status=1
   fi

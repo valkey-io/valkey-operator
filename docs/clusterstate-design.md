@@ -21,20 +21,22 @@ Two consequences follow:
 
 - **Never nil, but often empty.** With nothing reachable, shards and pending nodes
   are both empty, so callers test emptiness rather than nil.
-- **The caller releases the clients.** `GetClusterState` dials each node through
-  the `DialFunc` it is given, and the snapshot holds each client with its release
-  func, so `CloseClients` must run or clients leak; both call sites `defer` it.
-  Release closes the client today. Setup rather than the commands dominates scrape
-  cost, so client reuse across reconciles is planned: a pooling dialer can keep
-  the connection and make release a no-op without changing `ClusterState`.
+- **The pool owns the clients.** `GetClusterState` gets each node's client
+  through the `DialFunc` it is given, and the snapshot holds it for the
+  reconcile. The `ClientProvider` backs the `DialFunc` with the pool in
+  `internal/valkey/pool.go`, which keeps one client per address across
+  reconciles and poller ticks, so callers never close them. Each pooled
+  client stays connected as `_operator`, and valkey-go sends it a PING about
+  every second while idle, so `CLIENT LIST` on a node shows a standing
+  operator connection.
 
 ## NodeState vs ClusterNode
 
 `NodeState` and `ClusterNode` both describe a node. They differ in *whose view* they
 hold, and that is the whole reason both exist.
 
-`NodeState` is one scraped node: the operator connected to it, so it owns the client,
-the dialled address, and that node's own command output.
+`NodeState` is one scraped node: it holds the client the scrape used (owned by the
+pool, not by `NodeState`), the dialled address, and that node's own command output.
 
 `ClusterNode` is one line of that node's `CLUSTER NODES` output, describing a cluster
 member **as the scraped node sees it**. Node A may list B as failed at an old address

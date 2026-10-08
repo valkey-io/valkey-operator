@@ -189,6 +189,53 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		Expect(drainEvents(recorder)).To(ContainElement(ContainSubstring("UsersACLResolved")))
 	})
 
+	It("lands system user changes in the system-passwords Secret while a user Secret is missing", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "acl-system-first", Namespace: ns},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1, Replicas: 0,
+				Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)},
+				Users:    []valkeyiov1alpha1.UserAclSpec{user("alice", "acl-system-first-alice")},
+			},
+		}
+		defer cleanup(cluster, "acl-system-first-alice", "acl-system-first-bob")
+		Expect(k8sClient.Create(ctx, passwordSecret("acl-system-first-alice"))).To(Succeed())
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		r, _ := newReconciler()
+		systemPasswords := func() map[string][]byte {
+			secret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: getSystemPasswordSecretName(cluster.Name), Namespace: ns}, secret)).To(Succeed())
+			return secret.Data
+		}
+
+		By("reconciling with the exporter disabled, so its system user has no password yet")
+		Expect(reconcileOnce(r, cluster)).To(Succeed())
+		Expect(systemPasswords()).NotTo(HaveKey(exporterUser))
+
+		By("enabling the exporter while adding a user whose Secret does not exist")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Exporter.Enabled = boolPtr(true)
+		cluster.Spec.Users = append(cluster.Spec.Users, user("bob", "acl-system-first-bob"))
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		Expect(reconcileOnce(r, cluster)).To(Succeed())
+
+		By("writing the exporter password even though the aclfile could not be rebuilt")
+		Expect(systemPasswords()).To(HaveKey(exporterUser))
+		acl, err := aclFile(cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(acl).NotTo(ContainSubstring("user bob "))
+		Expect(degraded(cluster)).NotTo(BeNil())
+
+		By("adding the exporter to the aclfile once the user Secret resolves")
+		Expect(k8sClient.Create(ctx, passwordSecret("acl-system-first-bob"))).To(Succeed())
+		Expect(reconcileOnce(r, cluster)).To(Succeed())
+		acl, err = aclFile(cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(acl).To(ContainSubstring("user bob "))
+		Expect(acl).To(ContainSubstring("user " + exporterUser + " "))
+		Expect(degraded(cluster)).To(BeNil())
+	})
+
 	It("still blocks the first reconcile until every user Secret resolves", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-first", Namespace: ns},

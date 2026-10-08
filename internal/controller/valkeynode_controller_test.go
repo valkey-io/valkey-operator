@@ -1531,6 +1531,85 @@ var _ = Describe("setLiveConfigCondition", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
 	})
+
+	It("does not write status when only the message changed for the same status and reason", func() {
+		By("setting LiveConfigApplied=False with a first failure message")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("failing again with the same error shape but a different local port")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "a message-only change must not rewrite status, or every retry with a new local port requeues the node (#460)")
+	})
+})
+
+var _ = Describe("setACLCondition", func() {
+	var (
+		node *valkeyiov1alpha1.ValkeyNode
+		r    *ValkeyNodeReconciler
+		ctx  context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "setaclcond-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		r = &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+	})
+
+	It("does not write status when only the message changed for the same status and reason", func() {
+		By("setting ACLApplied=False with a first failure message")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("failing again with the same error shape but a different local port")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "a message-only change must not rewrite status, or every retry with a new local port requeues the node (#460)")
+	})
+
+	It("writes status when the reason changes", func() {
+		By("setting ACLApplied=False with ApplyFailed")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("transitioning to PendingPropagation, which must reach status")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation", "waiting")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).NotTo(Equal(rvAfterFirst), "a reason change must still be written")
+		cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("PendingPropagation"))
+	})
 })
 
 type fakeConfigClient struct {

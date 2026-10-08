@@ -79,6 +79,14 @@ Have an idea? Start a discussion in [GitHub Discussions](https://github.com/valk
 
 Stack PRs for larger changes — break work into a sequence of focused, reviewable PRs rather than one large change. For example: add new primitives in one PR, then wire them into existing controllers in a follow-up.
 
+#### Optional: pre-PR review with an agent
+
+If you use an AI coding agent, the repo ships a `pre-pr-review` skill at [`.agents/skills/pre-pr-review/`](.agents/skills/pre-pr-review/SKILL.md). It runs `make lint test`, reviews your diff, deploys your branch to a fresh kind cluster, and exercises the changed behaviour. It writes a report to `.review/<branch>.md` and prints a block to paste into the PR's Testing section.
+
+You need Docker, [kind](https://kind.sigs.k8s.io/), and the Go toolchain from the [Developer Guide](./docs/developer-guide.md). [`gh`](https://cli.github.com/) is optional; the skill uses it to read linked issues. A run takes roughly ten minutes, most of it the image build. The kind cluster stays up afterwards, and the skill prints the command to delete it.
+
+In Claude Code, run `/pre-pr-review`. In other agents, ask it to run the `pre-pr-review` skill. The check is optional, and CI runs the e2e suite on every PR either way. PRs that have been through it, with its recommendations acted on, get reviewed faster.
+
 We'll review your PR as soon as possible. Be patient and responsive to feedback.
 
 ## Developer Certificate of Origin (DCO)

@@ -20,6 +20,8 @@ limitations under the License.
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -303,6 +305,209 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(node.Status.Ready).To(BeTrue())
 			Expect(node.Status.PodName).NotTo(BeEmpty())
+		})
+	})
+
+	// A trust bundle replaces the server secret's ca.crt as the root clients
+	// are verified against. Starting from the server root alone, a client from
+	// a second CA is refused; once the bundle Secret also holds that CA, the
+	// node reloads it live and the client connects, with no pod restart.
+	Context("trust bundle", Ordered, Label("valkeynode", "TLS", "trust-bundle"), func() {
+		const (
+			name       = "valkeynode-trust"
+			selfSigned = "valkeynode-trust-selfsigned"
+			serverCA   = "valkeynode-trust-server-ca"
+			clientCA   = "valkeynode-trust-client-ca"
+			serverCert = "valkeynode-trust-server"
+			clientCert = "valkeynode-trust-client"
+			bundle     = "valkeynode-trust-bundle"
+			clientPod  = "valkeynode-trust-client"
+			// aclRevisionUser mirrors the operator's bookkeeping user; the hash
+			// is arbitrary but must be a valid ACL password hash.
+			aclRevisionUser = "_operator_acl_revision"
+			aclRevision     = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"
+		)
+		var cleanupNode func()
+
+		caPEM := func(secret string) string {
+			out, err := utils.Run(exec.Command("kubectl", "get", "secret", secret, "-o", "jsonpath={.data.ca\\.crt}"))
+			Expect(err).NotTo(HaveOccurred())
+			pem, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+			Expect(err).NotTo(HaveOccurred())
+			return string(pem)
+		}
+		// writeBundle points the trust bundle Secret at the given CAs' roots.
+		writeBundle := func(cas ...string) {
+			var roots strings.Builder
+			for _, ca := range cas {
+				roots.WriteString(caPEM(ca))
+			}
+			manifest, err := utils.Run(exec.Command("kubectl", "create", "secret", "generic", bundle,
+				"--from-literal=ca.crt="+roots.String(), "--dry-run=client", "-o", "yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			applyManifest(manifest, "trust bundle Secret")
+		}
+		// ping connects from a pod presenting the client certificate. The
+		// server certificate is not verified: what is under test is whether the
+		// node accepts the client's.
+		ping := func() string {
+			deleteResource("pod", clientPod)
+			Eventually(func() error {
+				_, err := utils.Run(exec.Command("kubectl", "get", "pod", clientPod))
+				if err == nil {
+					return fmt.Errorf("previous client pod still exists")
+				}
+				return nil
+			}).Should(Succeed())
+			node, err := utils.GetValkeyNodeStatus(name)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "run", clientPod, "--image=valkey/valkey:9.0.0", "--restart=Never", "--overrides",
+				fmt.Sprintf(`{"spec":{"containers":[{"name":"client","image":"valkey/valkey:9.0.0",
+					"command":["valkey-cli","-h","%s","--tls","--insecure","--cert","/c/tls.crt","--key","/c/tls.key","--user","default","--pass","%s","--no-auth-warning","PING"],
+					"volumeMounts":[{"name":"c","mountPath":"/c","readOnly":true}]}],
+					"volumes":[{"name":"c","secret":{"secretName":"%s"}}]}}`, node.Status.PodIP, e2eDefaultPassword, clientCert)))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pod", clientPod, "-o", "jsonpath={.status.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(BeElementOf("Succeeded", "Failed"))
+			}).Should(Succeed())
+			logs, _ := utils.Run(exec.Command("kubectl", "logs", clientPod))
+			return strings.TrimSpace(logs)
+		}
+		podIdentity := func() string {
+			node, err := utils.GetValkeyNodeStatus(name)
+			Expect(err).NotTo(HaveOccurred())
+			out, err := utils.Run(exec.Command("kubectl", "get", "pod", node.Status.PodName,
+				"-o", "jsonpath={.metadata.uid}/{.status.containerStatuses[0].restartCount}"))
+			Expect(err).NotTo(HaveOccurred())
+			return out
+		}
+
+		BeforeAll(func() {
+			ca := func(n string) string {
+				return fmt.Sprintf(`---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: %[1]s}
+spec:
+  secretName: %[1]s
+  isCA: true
+  commonName: %[1]s
+  issuerRef: {name: %[2]s, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: %[1]s}
+spec: {ca: {secretName: %[1]s}}
+`, n, selfSigned)
+			}
+			applyManifest(fmt.Sprintf(`apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: %s}
+spec: {selfSigned: {}}
+`, selfSigned)+ca(serverCA)+ca(clientCA)+fmt.Sprintf(`---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: %[1]s}
+spec:
+  secretName: %[1]s
+  commonName: localhost
+  dnsNames: [localhost]
+  issuerRef: {name: %[2]s, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: %[3]s}
+spec:
+  secretName: %[3]s
+  commonName: trust-bundle-client
+  usages: [client auth]
+  issuerRef: {name: %[4]s, kind: Issuer}
+`, serverCert, serverCA, clientCert, clientCA), "certificates")
+			for _, cert := range []string{serverCA, clientCA, serverCert, clientCert} {
+				Eventually(func() error {
+					_, err := utils.Run(exec.Command("kubectl", "wait", "certificate/"+cert, "--for=condition=Ready", "--timeout=60s"))
+					return err
+				}).Should(Succeed())
+			}
+			writeBundle(serverCA)
+
+			applySystemUsersSecrets(name)
+			// Written the way the ValkeyCluster controller writes it: hashed
+			// passwords, which is what lets the node confirm the ACL is live
+			// (plaintext ">" passwords never compare equal), and a revision
+			// user, which is what the node publishes once it is.
+			hash := func(pw string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(pw))) }
+			applyManifest(fmt.Sprintf(`apiVersion: v1
+kind: Secret
+type: valkey.io/acl
+metadata:
+  name: internal-%s-acl
+  labels:
+    app.kubernetes.io/managed-by: valkey-operator
+stringData:
+  users.acl: |
+    user default on #%s ~* &* +@all
+    user _operator on #%s ~* &* +@all
+    user _replication on #%s ~* &* +@all
+    user %s off resetchannels -@all #%s
+`, name, hash(e2eDefaultPassword), hash(e2eOperatorPassword), hash(e2eReplicationPassword), aclRevisionUser, aclRevision), "ACL secret with a revision for "+name)
+			applyManifest(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyNode
+metadata:
+  name: %[1]s
+  labels:
+    valkey.io/cluster: %[1]s
+spec:
+  usersACLSecretName: internal-%[1]s-acl
+  tls:
+    serverName: localhost
+    certificates:
+      server: {secretName: %[2]s}
+      trustBundle: {secretName: %[3]s}
+    clientAuth:
+      mode: Required
+`, name, serverCert, bundle), "ValkeyNode "+name)
+			cleanupNode = func() {
+				deleteResource("valkeynode", name)
+				deleteSystemUsersSecrets(name)
+			}
+			waitForValkeyNodeReady(name)
+		})
+
+		AfterAll(func() {
+			deleteResource("pod", clientPod)
+			if cleanupNode != nil {
+				cleanupNode()
+			}
+			for _, n := range []string{serverCert, clientCert, serverCA, clientCA} {
+				deleteResource("certificate", n)
+				deleteResource("secret", n)
+			}
+			for _, n := range []string{serverCA, clientCA, selfSigned} {
+				deleteResource("issuer", n)
+			}
+			deleteResource("secret", bundle)
+		})
+
+		It("publishes the live ACL revision", func() {
+			Eventually(func(g Gomega) {
+				node, err := utils.GetValkeyNodeStatus(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(node.Status.LiveACLRevision).To(Equal(aclRevision))
+			}).Should(Succeed())
+		})
+
+		It("refuses a client whose CA is not in the bundle", func() {
+			Expect(ping()).NotTo(Equal("PONG"))
+		})
+
+		It("trusts a CA added to the bundle live, without restarting the pod", func() {
+			before := podIdentity()
+			writeBundle(serverCA, clientCA)
+			Eventually(func() string { return ping() }, 5*time.Minute, 10*time.Second).Should(Equal("PONG"))
+			Expect(podIdentity()).To(Equal(before), "the new root must be picked up without recreating or restarting the pod")
 		})
 	})
 

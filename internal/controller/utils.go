@@ -89,6 +89,10 @@ const (
 	tlsSecretKeyCA   = "ca.crt"
 	tlsSecretKeyCert = "tls.crt"
 	tlsSecretKeyKey  = "tls.key"
+	// tlsSecretKeyServerCA is where the server secret's ca.crt is projected
+	// when a trust bundle takes over ca.crt. Probes and the exporter verify the
+	// server against it.
+	tlsSecretKeyServerCA = "server-ca.crt"
 )
 
 // Role label values.

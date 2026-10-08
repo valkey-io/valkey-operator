@@ -63,6 +63,19 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
+
+	// clusterStateFunc stands in for the scrape of the live cluster. It is
+	// nil in production; tests set it, since envtest has no Valkey to dial.
+	clusterStateFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState
+}
+
+// scrapeClusterState returns the live cluster state, from the test hook when
+// one is set and from the nodes otherwise.
+func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+	if r.clusterStateFunc != nil {
+		return r.clusterStateFunc(ctx, cluster, nodes, username, password)
+	}
+	return r.getValkeyClusterState(ctx, cluster, nodes, username, password)
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -205,11 +218,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	state := r.getValkeyClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+	state := r.scrapeClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
 	defer state.CloseClients()
 
 	rollSkipped := false
-	if requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state); errors.Is(err, errShardRollSkipped) {
+	// A held roll requeues like any roll in progress; only the message says
+	// which shard is waiting and why. It comes up as a typed error so the
+	// walk can stop at that node the way it stops at one mid-roll.
+	var deferred *rollDeferredError
+	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state)
+	if errors.As(err, &deferred) {
+		err = nil
+	}
+	if errors.Is(err, errShardRollSkipped) {
 		// A shard's roll was skipped because its primary is not identifiable, as
 		// opposed to a node being mid-roll, which still requeues below. Only the
 		// steps further down can repair an unidentifiable primary, so continue
@@ -223,6 +244,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	} else if requeue {
+		// An unschedulable pod is reported first, whether the roll is under
+		// way or held. The pod it reports belongs to a later shard or sits
+		// outside the shard loop: a shard's own replica that is not Ready
+		// requeues before the walk reaches its primary.
 		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 			_ = r.updateStatus(ctx, cluster, nil)
@@ -230,8 +255,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		} else if handled {
 			return result, nil
 		}
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
+		msg := "Updating ValkeyNodes"
+		if deferred != nil {
+			msg = fmt.Sprintf("%s: %s", msg, deferred.Error())
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -633,6 +662,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
 			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+			var deferred *rollDeferredError
+			if errors.As(err, &deferred) {
+				err = nil
+			}
 			if err != nil {
 				return false, err
 			}
@@ -646,7 +679,8 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				if _, replErr := r.replicatePendingReplicas(ctx, cluster, clusterState, nodes); replErr != nil {
 					log.Error(replErr, "replicatePendingReplicas failed during deferred roll")
 				}
-				return true, nil
+				// Requeue, and hand the reason up for the status.
+				return true, deferred
 			case nodeRequeued:
 				return true, nil
 			case nodeCreated:
@@ -711,8 +745,8 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	// change, not pure WorkloadRevision backfill when live already matches.
 	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
 
-	if deferred := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); deferred {
-		return nodeDeferred, nil
+	if cause := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); cause != "" {
+		return nodeDeferred, &rollDeferredError{shardIndex: shardIndex, node: current.Name, cause: cause}
 	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, node, func() error {
@@ -743,28 +777,29 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 }
 
 // maybeProactiveFailoverBeforeRoll runs proactive failover when rolling a
-// primary. Returns true when the primary has no synced replica yet (defer).
-func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, current *valkeyiov1alpha1.ValkeyNode, rolling bool) bool {
+// primary. Returns why the roll has to wait when the primary has no synced
+// replica yet, or the failover did not complete, and "" when it may proceed.
+func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, current *valkeyiov1alpha1.ValkeyNode, rolling bool) string {
 	log := logf.FromContext(ctx)
 	if clusterState == nil || !rolling {
-		return false
+		return ""
 	}
 	shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
 	if shard != nil {
 		log.Info("proactive failover before rolling primary",
 			"name", current.Name, "address", current.Status.PodIP,
 			"syncedReplicas", len(replicas))
-		if err := proactiveFailover(ctx, r.Recorder, cluster, shard, replicas); err != nil {
+		if err := proactiveFailoverFn(ctx, r.Recorder, cluster, shard, replicas); err != nil {
 			// Do not authorize the Spec update (and pod roll) until failover succeeds
 			// or the primary no longer needs failover (checked on next reconcile).
 			log.Info("proactive failover did not complete, deferring roll",
 				"name", current.Name, "err", err)
-			return true
+			return fmt.Sprintf("the proactive failover to a synced replica did not complete (%v)", err)
 		}
-		return false
+		return ""
 	}
 	if cluster.Spec.Replicas == 0 {
-		return false
+		return ""
 	}
 	// findFailoverShard returned nil for one of three reasons:
 	// 1. Node is the shard primary but has no synced replicas: wait for replica to rejoin
@@ -777,9 +812,9 @@ func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.C
 			"name", current.Name, "address", current.Status.PodIP,
 			"shardNodes", len(shardInState.Nodes),
 			"shardId", shardInState.Id)
-		return true
+		return "the shard has no synced replica to fail over to"
 	}
-	return false
+	return ""
 }
 
 // handleUnchangedValkeyNode waits until a settled node is Ready before advancing.
@@ -1337,6 +1372,23 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 // propagated the primary's node ID to the replica yet. This is not a
 // fatal error — the replica will be retried on a future reconcile.
 var errPrimaryNotReady = errors.New("primary not yet in cluster state (awaiting rebalance)")
+
+// rollDeferredError reports that the roll of a shard's primary is on hold:
+// rolling it now would take the shard's only writer down, because there is no
+// synced replica to fail over to, or the proactive failover did not complete.
+// The roll is retried on a later reconcile, and a healthy roll passes through
+// this state too, while the replica it rolled first does its initial sync.
+// It travels up from reconcileValkeyNode so the UpdatingNodes message can
+// say which shard is waiting and why.
+type rollDeferredError struct {
+	shardIndex int
+	node       string
+	cause      string
+}
+
+func (e *rollDeferredError) Error() string {
+	return fmt.Sprintf("the roll of shard %d primary %s is waiting, %s", e.shardIndex, e.node, e.cause)
+}
 
 // errShardRollSkipped reports that at least one shard's roll was skipped because
 // its primary could not be identified in the live topology. It is not a failure:

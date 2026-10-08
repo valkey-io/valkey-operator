@@ -3306,6 +3306,23 @@ spec:
                         required:
                         - secretName
                         type: object
+                      trustBundle:
+                        description: |-
+                          TrustBundle, when set, replaces the server secret's `ca.crt` as the
+                          trust root Valkey verifies clients and peers against
+                          (`tls-ca-cert-file`). It must therefore include the root the server
+                          certificate chains to. The node reloads it live when its contents
+                          change, once its ACL is confirmed live. Probes and the metrics exporter
+                          keep verifying the server against the server secret's `ca.crt`.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                     required:
                     - server
                     type: object
@@ -3629,6 +3646,12 @@ spec:
           status:
             description: ValkeyNodeStatus defines the observed state of ValkeyNode.
             properties:
+              appliedACLRevision:
+                description: |-
+                  AppliedACLRevision is the revision of the operator-managed aclfile that
+                  the running server was last confirmed to hold, recorded as ACLApplied
+                  becomes True.
+                type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:

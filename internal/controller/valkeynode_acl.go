@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -127,10 +128,11 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 // the user set, their password hashes, and the revision user whose hash
 // covers the whole managed ACL. A True result therefore means the current
 // revision is live, permissions included, not only that users and passwords
-// match.
-func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+// match. With it comes that revision, which the node publishes so the cluster
+// controller knows which ACL every node is running.
+func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, string, error) {
 	if node.Spec.UsersACLSecretName == "" {
-		return true, nil
+		return true, "", nil
 	}
 
 	secret := &corev1.Secret{}
@@ -139,23 +141,55 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 		if apierrors.IsNotFound(err) {
 			// The cluster controller owns this Secret and has not created it
 			// yet. There is nothing to apply until it exists.
-			return true, nil
+			return true, "", nil
 		}
-		return false, fmt.Errorf("get ACL secret %s: %w", key.Name, err)
+		return false, "", fmt.Errorf("get ACL secret %s: %w", key.Name, err)
 	}
 	desired := desiredUserPasswordHashes(string(secret.Data[aclFilename]))
 	if len(desired) == 0 {
-		return true, nil
+		return true, "", nil
 	}
 
 	c, err := r.newConfigClient(ctx, r, node)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer c.Close()
 
 	if err := c.LoadACL(ctx); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return aclObservablyInSync(ctx, c, desired)
+	synced, err := aclObservablyInSync(ctx, c, desired)
+	if err != nil || !synced {
+		return false, "", err
+	}
+	return true, aclRevision(desired), nil
+}
+
+// setLiveACLRevision records in status the aclfile revision the running
+// server was confirmed to hold.
+func (r *ValkeyNodeReconciler) setLiveACLRevision(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, revision string) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if current.Status.LiveACLRevision == revision {
+		return nil
+	}
+	patchBase := current.DeepCopy()
+	current.Status.LiveACLRevision = revision
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch liveACLRevision: %w", err)
+	}
+	return nil
+}
+
+// aclRevision is the revision of a managed aclfile: the hash carried by its
+// revision user, which covers every other entry. It is "" for an aclfile
+// without one.
+func aclRevision(desired map[string][]string) string {
+	if hashes := desired[aclRevisionUser]; len(hashes) == 1 {
+		return hashes[0]
+	}
+	return ""
 }

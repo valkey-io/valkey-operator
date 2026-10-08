@@ -219,6 +219,25 @@ type NodeTLSCertificates struct {
 	// `tls.crt` and `tls.key`.
 	// +kubebuilder:validation:Required
 	Server NodeCertificateRef `json:"server"`
+
+	// TrustBundle, when set, replaces the server secret's `ca.crt` as the
+	// trust root Valkey verifies clients and peers against
+	// (`tls-ca-cert-file`). It must therefore include the root the server
+	// certificate chains to. The node reloads it live when its contents
+	// change, once its ACL is confirmed live. Probes and the metrics exporter
+	// keep verifying the server against the server secret's `ca.crt`.
+	// +optional
+	TrustBundle *NodeTrustBundleRef `json:"trustBundle,omitempty"`
+}
+
+// NodeTrustBundleRef references a Secret holding PEM CA certificates under key
+// `ca.crt`.
+type NodeTrustBundleRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // NodeCertificateRef references a certificate and its private key held in a
@@ -263,6 +282,14 @@ type ValkeyNodeStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LiveACLRevision is the revision of the operator-managed aclfile that the
+	// running server was last confirmed to hold. A node reloads its trust
+	// bundle only once its ACL is live, and a controller widening the bundle
+	// can wait for every node to report the current revision, so a new root is
+	// never trusted under a stale ACL.
+	// +optional
+	LiveACLRevision string `json:"liveACLRevision,omitempty"`
 }
 
 const (

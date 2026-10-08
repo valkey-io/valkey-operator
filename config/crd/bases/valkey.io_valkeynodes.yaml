@@ -3193,6 +3193,23 @@ spec:
                         required:
                         - secretName
                         type: object
+                      trustBundle:
+                        description: |-
+                          TrustBundle, when set, replaces the server secret's `ca.crt` as the
+                          trust root Valkey verifies clients and peers against
+                          (`tls-ca-cert-file`). It must therefore include the root the server
+                          certificate chains to. The node reloads it live when its contents
+                          change, once its ACL is confirmed live. Probes and the metrics exporter
+                          keep verifying the server against the server secret's `ca.crt`.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                     required:
                     - server
                     type: object
@@ -3576,6 +3593,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              liveACLRevision:
+                description: |-
+                  LiveACLRevision is the revision of the operator-managed aclfile that the
+                  running server was last confirmed to hold. A node reloads its trust
+                  bundle only once its ACL is live, and a controller widening the bundle
+                  can wait for every node to report the current revision, so a new root is
+                  never trusted under a stale ACL.
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the controller.

@@ -174,6 +174,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -202,6 +203,11 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
+		return ctrl.Result{}, err
+	}
+
+	if err := r.ensureNodeService(ctx, node); err != nil {
+		r.setReadyCondition(ctx, node, "ServiceError", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -1384,6 +1390,7 @@ func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Service{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(

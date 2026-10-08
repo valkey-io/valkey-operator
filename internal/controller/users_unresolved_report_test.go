@@ -69,6 +69,10 @@ func TestReportUsersACLUnresolvedEvents(t *testing.T) {
 	r.reportUsersACLUnresolved(ctx, cluster, missingKey)
 	require.Len(t, drain(), 1, "a changed failure is reported")
 
+	shorterKey := &userSecretUnresolvedError{User: "bob", Secret: "bob-pw", Key: "curr"}
+	r.reportUsersACLUnresolved(ctx, cluster, shorterKey)
+	require.Len(t, drain(), 1, "a key that is a prefix of the previous one is still a new failure")
+
 	r.reportUsersACLUnresolved(ctx, cluster, nil)
 	got := drain()
 	require.Len(t, got, 1, "recovery is reported")

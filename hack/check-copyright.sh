@@ -15,9 +15,12 @@ status=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   content="$(head -n 25 "$f")"
-  # Allow one //go:build line and a blank line above the header.
+  # Allow build constraint lines and a blank line above the header.
   if [[ "$content" == "//go:build "* ]]; then
     content="${content#*$'\n'}"
+    if [[ "$content" == "// +build "* ]]; then
+      content="${content#*$'\n'}"
+    fi
     content="${content#$'\n'}"
   fi
   if [[ "$content" != "$expected"* ]]; then

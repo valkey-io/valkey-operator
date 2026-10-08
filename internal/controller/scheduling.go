@@ -46,10 +46,29 @@ func effectiveNodeSpread(s *valkeyiov1alpha1.SchedulingSpec) (shard, primaries, 
 	return shard, primaries, pods
 }
 
+// effectiveNodeTopologyKey is the label used by node.spread. A nil spec, a
+// nil Node, or an empty TopologyKey all resolve to kubernetes.io/hostname.
+func effectiveNodeTopologyKey(s *valkeyiov1alpha1.SchedulingSpec) string {
+	if s == nil || s.Node == nil || s.Node.TopologyKey == "" {
+		return corev1.LabelHostname
+	}
+	return s.Node.TopologyKey
+}
+
+// effectiveZoneTopologyKey is the label used by zone.spread and zone.pinning.
+// A nil spec, a nil Zone, or an empty TopologyKey all resolve to
+// topology.kubernetes.io/zone.
+func effectiveZoneTopologyKey(s *valkeyiov1alpha1.SchedulingSpec) string {
+	if s == nil || s.Zone == nil || s.Zone.TopologyKey == "" {
+		return corev1.LabelTopologyZone
+	}
+	return s.Zone.TopologyKey
+}
+
 // withNodeShardAntiAffinity returns a copy of base with a node-hostname
 // anti-affinity term for the shard added at the requested strength. base may be
 // nil. Disabled returns base unchanged. The input is never mutated.
-func withNodeShardAntiAffinity(base *corev1.Affinity, clusterName string, shardIndex int, mode valkeyiov1alpha1.SpreadMode) *corev1.Affinity {
+func withNodeShardAntiAffinity(base *corev1.Affinity, clusterName string, shardIndex int, mode valkeyiov1alpha1.SpreadMode, topologyKey string) *corev1.Affinity {
 	switch mode {
 	case valkeyiov1alpha1.SpreadRequired, valkeyiov1alpha1.SpreadPreferred:
 		// falls through to the emitting path below.
@@ -66,7 +85,7 @@ func withNodeShardAntiAffinity(base *corev1.Affinity, clusterName string, shardI
 		out.PodAntiAffinity = &corev1.PodAntiAffinity{}
 	}
 	term := corev1.PodAffinityTerm{
-		TopologyKey: corev1.LabelHostname,
+		TopologyKey: topologyKey,
 		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 			LabelCluster:    clusterName,
 			LabelShardIndex: strconv.Itoa(shardIndex),
@@ -103,13 +122,13 @@ func whenUnsatisfiable(mode valkeyiov1alpha1.SpreadMode) (corev1.UnsatisfiableCo
 // constraints for one ValkeyNode. The primaries constraint is emitted only on
 // node-index-0 pods (the shard's primary at creation); the pods constraint is
 // emitted on every pod. Primaries precede pods in the returned slice.
-func nodeSpreadTSCs(clusterName string, nodeIndex int, primaries, pods valkeyiov1alpha1.SpreadMode) []corev1.TopologySpreadConstraint {
+func nodeSpreadTSCs(clusterName string, nodeIndex int, primaries, pods valkeyiov1alpha1.SpreadMode, topologyKey string) []corev1.TopologySpreadConstraint {
 	var out []corev1.TopologySpreadConstraint
 	if nodeIndex == 0 {
 		if action, ok := whenUnsatisfiable(primaries); ok {
 			out = append(out, corev1.TopologySpreadConstraint{
 				MaxSkew:           1,
-				TopologyKey:       corev1.LabelHostname,
+				TopologyKey:       topologyKey,
 				WhenUnsatisfiable: action,
 				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 					LabelCluster:   clusterName,
@@ -121,7 +140,7 @@ func nodeSpreadTSCs(clusterName string, nodeIndex int, primaries, pods valkeyiov
 	if action, ok := whenUnsatisfiable(pods); ok {
 		out = append(out, corev1.TopologySpreadConstraint{
 			MaxSkew:           1,
-			TopologyKey:       corev1.LabelHostname,
+			TopologyKey:       topologyKey,
 			WhenUnsatisfiable: action,
 			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 				LabelCluster: clusterName,
@@ -155,12 +174,12 @@ func effectiveZoneSpread(s *valkeyiov1alpha1.SchedulingSpec) (shard, primaries, 
 // spread constraints for one ValkeyNode. Unlike the node axis, shard is a
 // balancing TSC (not anti-affinity). shard and pods are emitted on every pod;
 // primaries is emitted only on node-index-0 pods. Order: shard, primaries, pods.
-func zoneSpreadTSCs(clusterName string, shardIndex, nodeIndex int, shard, primaries, pods valkeyiov1alpha1.SpreadMode) []corev1.TopologySpreadConstraint {
+func zoneSpreadTSCs(clusterName string, shardIndex, nodeIndex int, shard, primaries, pods valkeyiov1alpha1.SpreadMode, topologyKey string) []corev1.TopologySpreadConstraint {
 	var out []corev1.TopologySpreadConstraint
 	if action, ok := whenUnsatisfiable(shard); ok {
 		out = append(out, corev1.TopologySpreadConstraint{
 			MaxSkew:           1,
-			TopologyKey:       corev1.LabelTopologyZone,
+			TopologyKey:       topologyKey,
 			WhenUnsatisfiable: action,
 			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 				LabelCluster:    clusterName,
@@ -172,7 +191,7 @@ func zoneSpreadTSCs(clusterName string, shardIndex, nodeIndex int, shard, primar
 		if action, ok := whenUnsatisfiable(primaries); ok {
 			out = append(out, corev1.TopologySpreadConstraint{
 				MaxSkew:           1,
-				TopologyKey:       corev1.LabelTopologyZone,
+				TopologyKey:       topologyKey,
 				WhenUnsatisfiable: action,
 				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 					LabelCluster:   clusterName,
@@ -184,7 +203,7 @@ func zoneSpreadTSCs(clusterName string, shardIndex, nodeIndex int, shard, primar
 	if action, ok := whenUnsatisfiable(pods); ok {
 		out = append(out, corev1.TopologySpreadConstraint{
 			MaxSkew:           1,
-			TopologyKey:       corev1.LabelTopologyZone,
+			TopologyKey:       topologyKey,
 			WhenUnsatisfiable: action,
 			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 				LabelCluster: clusterName,
@@ -224,12 +243,12 @@ func zoneForPod(zones []string, shardIndex, nodeIndex int) string {
 // zone key, the curated value wins; admission rejects a passthrough
 // nodeSelector that sets it while pinning is on (the scheduling.nodeSelector
 // CEL rule on ValkeyClusterSpec), so that collision should be unreachable here.
-func withZonePin(nodeSelector map[string]string, zone string) map[string]string {
+func withZonePin(nodeSelector map[string]string, zone, topologyKey string) map[string]string {
 	if zone == "" {
 		return nodeSelector
 	}
 	enrichedNodeSelector := make(map[string]string, len(nodeSelector)+1)
 	maps.Copy(enrichedNodeSelector, nodeSelector)
-	enrichedNodeSelector[corev1.LabelTopologyZone] = zone
+	enrichedNodeSelector[topologyKey] = zone
 	return enrichedNodeSelector
 }

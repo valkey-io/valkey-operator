@@ -1013,9 +1013,10 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	// Curate node-axis scheduling primitives from node.spread, merged with the
 	// user's escape-hatch passthrough. Preserve nil when nothing is curated.
 	shardMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
-	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardMode)
+	nodeKey := effectiveNodeTopologyKey(cluster.Spec.Scheduling)
+	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardMode, nodeKey)
 	topologySpreadConstraints := scheduling.TopologySpreadConstraints
-	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode); len(curated) > 0 {
+	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode, nodeKey); len(curated) > 0 {
 		topologySpreadConstraints = append(
 			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
 			curated...,
@@ -1023,7 +1024,8 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 
 	zoneShardMode, zonePrimariesMode, zonePodsMode := effectiveZoneSpread(cluster.Spec.Scheduling)
-	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode); len(curated) > 0 {
+	zoneKey := effectiveZoneTopologyKey(cluster.Spec.Scheduling)
+	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode, zoneKey); len(curated) > 0 {
 		topologySpreadConstraints = append(
 			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
 			curated...,
@@ -1033,7 +1035,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	// Pin the pod to its deterministic zone, ANDed with the user's passthrough
 	// nodeSelector. Kubernetes ANDs nodeSelector with any nodeAffinity the user
 	// supplies, so the escape hatch is left verbatim.
-	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex))
+	nodeSelector := withZonePin(scheduling.NodeSelector, zoneForPod(effectiveZonePinning(cluster.Spec.Scheduling), shardIndex, nodeIndex), zoneKey)
 
 	// Resolve the cluster-level exporter default (nil means enabled) into an
 	// explicit true; a ValkeyNode runs the sidecar only then. Disabled stays

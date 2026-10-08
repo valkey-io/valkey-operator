@@ -21,11 +21,12 @@ Two consequences follow:
 
 - **Never nil, but often empty.** With nothing reachable, shards and pending nodes
   are both empty, so callers test emptiness rather than nil.
-- **The caller currently owns the connections.** Each scrape opens its own clients
-  and the snapshot holds them, so `CloseClients` must run or they leak; both call
-  sites `defer` it. This is not settled design: setup rather than the commands
-  dominates scrape cost, so client reuse across reconciles is planned, and it would
-  move connection ownership out of `ClusterState`.
+- **The caller releases the clients.** `GetClusterState` dials each node through
+  the `DialFunc` it is given, and the snapshot holds each client with its release
+  func, so `CloseClients` must run or clients leak; both call sites `defer` it.
+  Release closes the client today. Setup rather than the commands dominates scrape
+  cost, so client reuse across reconciles is planned: a pooling dialer can keep
+  the connection and make release a no-op without changing `ClusterState`.
 
 ## NodeState vs ClusterNode
 

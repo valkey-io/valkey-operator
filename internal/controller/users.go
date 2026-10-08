@@ -187,6 +187,15 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		return strings.Compare(a.Name, b.Name)
 	})
 
+	// Build the system users first, so a change to them (the _exporter user
+	// appearing when the exporter is enabled, for example) lands in the
+	// system-passwords Secret even when a user below cannot be resolved.
+	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
+	if err != nil {
+		log.Error(err, "failed to generate system users ACL")
+		return err
+	}
+
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
 	for _, user := range users {
@@ -206,11 +215,6 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		fmt.Fprintf(&usersAcls, "%s\n", acl)
 	}
 	// append system users ACL
-	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
-	if err != nil {
-		log.Error(err, "failed to generate system users ACL")
-		return err
-	}
 	fmt.Fprintf(&usersAcls, "%s\n", systemUsersAcl)
 
 	// Append the revision user last, so its password hash covers every
@@ -306,7 +310,6 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 	return acl.String()
 }
 
-// Fetches a Secret, and looks for referenced passwords
 // userSecretUnresolvedError reports a user whose password the operator cannot
 // read: the referenced Secret is missing, or it lacks a key listed in
 // password.secret.keys. The cluster controller keeps the last good aclfile and
@@ -324,6 +327,7 @@ func (e *userSecretUnresolvedError) Error() string {
 	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
 }
 
+// Fetches a Secret, and looks for referenced passwords
 func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)

@@ -161,12 +161,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// A user Secret the operator cannot read must not stop topology work. Once
-	// an aclfile exists, the failure is reported on Degraded and the reconcile
-	// carries on with the last good aclfile; see reportUsersACLUnresolved.
-	// Before the first aclfile exists there is nothing to fall back to, so the
-	// first reconcile still blocks (#500 replaces that with per-user handling).
+	// an aclfile exists, that failure is reported on Degraded and the reconcile
+	// carries on with the last good aclfile; see reportUsersACLUnresolved. Any
+	// other ACL failure, and a missing Secret before the first aclfile exists,
+	// still return here (#500 replaces the first-reconcile case with per-user
+	// handling).
 	aclErr := r.reconcileUsersAcl(ctx, cluster)
-	if aclErr != nil && !r.internalAclSecretExists(ctx, cluster) {
+	var unresolved *userSecretUnresolvedError
+	fallback := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
+	if aclErr != nil && !fallback {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, aclErr.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, aclErr
@@ -490,13 +493,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// An aclfile the operator could not rebuild this pass is already on
 	// Degraded (reportUsersACLUnresolved) and stays there: the nodes run the
 	// last good aclfile, so they report ACLApplied, but the declared users are
-	// not all in effect.
-	if failed := nodesWithFailedACL(nodes); aclErr != nil {
-		// keep Degraded=UsersACLUnresolved
-	} else if len(failed) > 0 {
+	// not all in effect. A node that cannot load even that aclfile is named in
+	// the same message.
+	failed := nodesWithFailedACL(nodes)
+	switch {
+	case aclErr != nil:
+		if len(failed) > 0 {
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved,
+				fmt.Sprintf("%v; ACL not applied on %s", aclErr, strings.Join(failed, ", ")), metav1.ConditionTrue)
+		}
+	case len(failed) > 0:
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
 			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
-	} else {
+	default:
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
 	}
@@ -1988,7 +1997,9 @@ func (r *ValkeyClusterReconciler) reportUsersACLUnresolved(ctx context.Context, 
 	}
 	message := aclErr.Error()
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, message, metav1.ConditionTrue)
-	if wasUnresolved && previous.Message == message {
+	// The healthy branch may have appended the nodes that cannot apply the
+	// aclfile to this message; the failure itself is unchanged then.
+	if wasUnresolved && strings.HasPrefix(previous.Message, message) {
 		return
 	}
 	logf.FromContext(ctx).Error(aclErr, "users ACL not updated, nodes keep the last applied aclfile")

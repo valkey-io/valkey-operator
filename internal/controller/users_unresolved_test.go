@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -236,6 +237,46 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		Expect(degraded(cluster)).To(BeNil())
 	})
 
+	It("still returns any other ACL failure on a cluster that has an aclfile", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "acl-write-fails", Namespace: ns},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards: 1, Replicas: 0,
+				Users: []valkeyiov1alpha1.UserAclSpec{user("alice", "acl-write-fails-alice")},
+			},
+		}
+		defer cleanup(cluster, "acl-write-fails-alice", "acl-write-fails-carol")
+		Expect(k8sClient.Create(ctx, passwordSecret("acl-write-fails-alice"))).To(Succeed())
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		r, _ := newReconciler()
+		Expect(reconcileOnce(r, cluster)).To(Succeed())
+		before, err := aclFile(cluster)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("adding a user whose Secret exists while the internal ACL Secret cannot be written")
+		Expect(k8sClient.Create(ctx, passwordSecret("acl-write-fails-carol"))).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Users = append(cluster.Spec.Users, user("carol", "acl-write-fails-carol"))
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+		failing, recorder := newReconciler()
+		failing.Client = failingSecretUpdateClient{Client: k8sClient, name: getInternalSecretName(cluster.Name)}
+		err = reconcileOnce(failing, cluster)
+		Expect(err).To(MatchError(ContainSubstring("injected update failure")))
+
+		By("reporting the failure on Ready, not on Degraded, and leaving the aclfile as it was")
+		stored := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), stored)).To(Succeed())
+		ready := meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersAclError))
+		Expect(meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+		Expect(drainEvents(recorder)).NotTo(ContainElement(ContainSubstring("UsersACLUnresolved")))
+		after, err := aclFile(cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before))
+	})
+
 	It("still blocks the first reconcile until every user Secret resolves", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-first", Namespace: ns},
@@ -268,3 +309,17 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		Expect(nodeNames(cluster)).To(ConsistOf("acl-first-0-0"))
 	})
 })
+
+// failingSecretUpdateClient fails every Update of the named Secret, standing in
+// for an API error while the internal ACL Secret is written.
+type failingSecretUpdateClient struct {
+	client.Client
+	name string
+}
+
+func (c failingSecretUpdateClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if secret, ok := obj.(*corev1.Secret); ok && secret.Name == c.name {
+		return apierrors.NewInternalError(fmt.Errorf("injected update failure"))
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}

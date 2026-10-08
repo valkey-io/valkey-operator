@@ -95,7 +95,7 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
-- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `passwordSecret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to
+- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `passwordSecret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `internal-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
 
 ---
 
@@ -411,6 +411,8 @@ These events are emitted during ACL user management.
 | `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
 | `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
 | `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
+| `UsersACLUnresolved` | Warning | A user's password Secret is missing or lacks a listed key, so the aclfile was not rebuilt; the nodes keep the last applied one. Emitted when the failure appears or changes |
+| `UsersACLResolved` | Normal | The aclfile was rebuilt after a `UsersACLUnresolved` failure |
 
 ### Viewing events
 

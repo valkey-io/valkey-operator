@@ -1,0 +1,8 @@
+apiVersion: valkey.io/v1alpha1
+kind: Valkey
+metadata:
+  name: valkey-sample
+spec:
+  config:
+    maxmemory: 100mb
+    maxmemory-policy: allkeys-lru

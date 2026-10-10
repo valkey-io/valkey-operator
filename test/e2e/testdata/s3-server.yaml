@@ -1,0 +1,65 @@
+# S3-compatible server for the backup and restore e2e tests.
+#
+# It is rclone's own S3 server on the rclone image the backup and restore
+# containers default to, so the tests pull no extra image. Buckets are the
+# directories directly under /data; the bucket the tests use is created
+# before the server starts. The access keys come from the s3-e2e-server
+# Secret, which the test creates next to this manifest.
+#
+# The resources carry no namespace: each test container applies them into
+# a namespace of its own (see installS3Server), so two containers never
+# share or tear down each other's server.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-e2e
+  labels:
+    app.kubernetes.io/name: s3-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: s3-e2e
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: s3-e2e
+    spec:
+      containers:
+      - name: s3
+        image: rclone/rclone:1.75
+        # The image's entrypoint is rclone itself; a shell creates the bucket
+        # first and then becomes the server.
+        command: ["sh", "-c"]
+        args:
+        - mkdir -p /data/valkey-backups &&
+          exec rclone serve s3 --addr :8080
+          --auth-key "$AWS_ACCESS_KEY_ID,$AWS_SECRET_ACCESS_KEY" /data
+        envFrom:
+        - secretRef:
+            name: s3-e2e-server
+        ports:
+        - name: s3
+          containerPort: 8080
+        readinessProbe:
+          tcpSocket:
+            port: s3
+          periodSeconds: 2
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3-e2e
+spec:
+  selector:
+    app.kubernetes.io/name: s3-e2e
+  ports:
+  - name: s3
+    port: 8080
+    targetPort: s3

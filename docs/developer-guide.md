@@ -38,6 +38,11 @@ Run a specific e2e test by label:
 TEST_LABELS="<label>" make test-e2e
 ```
 
+The backup and restore specs (label `Backup`) run as a separate CI job. The
+whole suite takes close to the 30 minute `go test` timeout with them, so run
+the rest locally with `TEST_LABELS='!Backup' make test-e2e` and the backup
+specs with `TEST_LABELS=Backup make test-e2e`.
+
 ## Keeping the "_operator" ACL in sync
 
 The operator connects to Valkey as a system user called `_operator`, whose ACL is

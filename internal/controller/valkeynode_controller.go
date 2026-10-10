@@ -135,7 +135,7 @@ func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
 
 // realConfigClient opens a real Valkey connection to the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.newValkeyNodeClient(ctx, node)
 	if err != nil {
 		return nil, err
 	}
@@ -1067,7 +1067,7 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.newValkeyNodeClient(ctx, node)
 	if err != nil {
 		return "", err
 	}
@@ -1162,16 +1162,34 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 // buildNodeClientOption builds the valkey-go client option for connecting to a
 // node's pod, on a best-effort basis (TLS and operator credentials are applied
 // when available). Shared by resolveRole and the live-config client.
+//
+// While a clientAuth roll is in flight (Required to Optional or Disabled),
+// pods that have not restarted yet still demand a client certificate, so
+// dials following the desired spec fail the handshake with "certificate
+// required". buildNodeClientOptionWithFallback returns a second option that
+// presents the server certificate; callers retry with it only on that error.
 func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
+	opt, _ := r.buildNodeClientOptionWithFallback(ctx, node)
+	return opt
+}
+
+// buildNodeClientOptionWithFallback builds the primary client option plus,
+// when clientAuth is Optional or Disabled, a fallback option presenting the
+// server certificate for dials refused with "certificate required" during a
+// clientAuth roll. Fully rolled pods never receive a certificate, keeping
+// the certificateUser ACL posture from docs/mtls.md.
+func (r *ValkeyNodeReconciler) buildNodeClientOptionWithFallback(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.ClientOption, *vclient.ClientOption) {
 	var tlsConfig *tls.Config
+	var clientCertFallback *tls.Config
 	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
 		secretName := node.Spec.TLS.Certificates.Server.SecretName
-		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, nodeTLSServerName(node), node.Namespace, node.Spec.TLS.RequiresClientCertificate())
+		serverName := nodeTLSServerName(node)
+		primary, fallback, err := r.getTLSConfigWithRolloutFallback(ctx, secretName, serverName, node)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
 				"secretName", secretName)
 		} else {
-			tlsConfig = cfg
+			tlsConfig, clientCertFallback = primary, fallback
 		}
 	}
 
@@ -1183,7 +1201,7 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 		}
 	}
 
-	return vclient.ClientOption{
+	primary := vclient.ClientOption{
 		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
 		ForceSingleClient: true,
 		TLSConfig:         tlsConfig,
@@ -1199,6 +1217,44 @@ func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *
 		WriteBufferEachConn: 8 * 1024,
 		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
 	}
+	if clientCertFallback == nil {
+		return primary, nil
+	}
+	fallback := primary
+	fallback.TLSConfig = clientCertFallback
+	return primary, &fallback
+}
+
+// newValkeyNodeClient opens a valkey-go client to the node's pod. While a
+// clientAuth roll is in flight, pods that have not restarted yet still
+// demand a client certificate, so a dial refused with "certificate
+// required" is retried once presenting the node's server certificate.
+func (r *ValkeyNodeReconciler) newValkeyNodeClient(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, error) {
+	opt, fallback := r.buildNodeClientOptionWithFallback(ctx, node)
+	c, err := vclient.NewClient(opt)
+	if err != nil && fallback != nil && strings.Contains(err.Error(), "certificate required") {
+		logf.FromContext(ctx).Info("node still requires a client certificate, retrying with one",
+			"node", node.Name)
+		c, err = vclient.NewClient(*fallback)
+	}
+	return c, err
+}
+
+// getTLSConfigWithRolloutFallback builds the TLS configuration pair for a
+// node dial: the primary follows the node's desired clientAuth mode, and
+// unless client certificates are required (the primary already presents
+// one), the fallback presents the server certificate so dials to pods
+// still enforcing Required from before a roll can be retried.
+func (r *ValkeyNodeReconciler) getTLSConfigWithRolloutFallback(ctx context.Context, secretName, serverName string, node *valkeyiov1alpha1.ValkeyNode) (*tls.Config, *tls.Config, error) {
+	secret := &corev1.Secret{}
+	loader := func(*tls.Config) (*tls.Config, error) { return nil, nil }
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: secretName}, secret); err == nil {
+		loader = loadClientCertificateFallback(secret)
+	}
+	if node.Spec.TLS.RequiresClientCertificate() {
+		loader = nil
+	}
+	return getTLSConfigWithFallback(ctx, r.APIReader, secretName, serverName, node.Namespace, node.Spec.TLS.RequiresClientCertificate(), loader)
 }
 
 // resolveRole returns the node's live replication role ("primary" or "replica"),
@@ -1216,7 +1272,7 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.newValkeyNodeClient(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""

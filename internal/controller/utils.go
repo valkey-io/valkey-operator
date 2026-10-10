@@ -365,21 +365,36 @@ func nodeTLSServerName(node *valkeyv1.ValkeyNode) string {
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
+	cfg, _, err := getTLSConfigWithFallback(ctx, c, secretName, serverName, namespace, presentClientCert, nil)
+	return cfg, err
+}
+
+// getTLSConfigWithFallback builds the primary TLS configuration, and when
+// clientAuth is Optional or Disabled also returns a fallback that presents
+// the node's server certificate as a client certificate. During a
+// clientAuth roll (Required to Optional or Disabled) pods that have not
+// restarted yet still demand a client certificate, so dials made with the
+// primary configuration fail the handshake with "certificate required";
+// the fallback lets the caller retry those dials instead of stalling the
+// rollout. The certificate is only ever presented on that retry, so once a
+// pod has been rolled it never receives one, keeping the certificateUser
+// ACL mapping documented in docs/mtls.md intact.
+func getTLSConfigWithFallback(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool, clientCertLoader func(*tls.Config) (*tls.Config, error)) (*tls.Config, *tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	caData, caOk := secret.Data[tlsSecretKeyCA]
 
 	if !caOk {
-		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
+		return nil, nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
 	}
 
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caData) {
-		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
+		return nil, nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
 	}
 
 	tlsCfg := &tls.Config{
@@ -387,20 +402,47 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
 	}
-	if !presentClientCert {
-		return tlsCfg, nil
+	if presentClientCert {
+		if err := addTLSCertificates(tlsCfg, secret); err != nil {
+			return nil, nil, err
+		}
+		return tlsCfg, nil, nil
 	}
+	if clientCertLoader != nil {
+		fallback, err := clientCertLoader(tlsCfg.Clone())
+		if err != nil {
+			// The fallback is best-effort: a secret without usable
+			// cert/key entries keeps the primary configuration alone,
+			// and dials to not-yet-rolled pods keep failing until
+			// they restart.
+			return tlsCfg, nil, nil
+		}
+		return tlsCfg, fallback, nil
+	}
+	return tlsCfg, nil, nil
+}
 
+// loadClientCertificateFallback returns a loader that makes cfg present the
+// server certificate from secret as a client certificate, so a dial can
+// retry a handshake refused with "certificate required" against a pod still
+// enforcing clientAuth.mode: Required from before a roll.
+func loadClientCertificateFallback(secret *corev1.Secret) func(*tls.Config) (*tls.Config, error) {
+	return func(cfg *tls.Config) (*tls.Config, error) {
+		return cfg, addTLSCertificates(cfg, secret)
+	}
+}
+
+// addTLSCertificates loads the tls.crt/tls.key pair from secret into cfg.
+func addTLSCertificates(cfg *tls.Config, secret *corev1.Secret) error {
 	certData, certOk := secret.Data[tlsSecretKeyCert]
 	keyData, keyOk := secret.Data[tlsSecretKeyKey]
 	if !certOk || !keyOk {
-		return nil, fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secretName, certOk, keyOk)
+		return fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secret.Name, certOk, keyOk)
 	}
-
 	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secretName, err)
+		return fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secret.Name, err)
 	}
-	tlsCfg.Certificates = []tls.Certificate{cert}
-	return tlsCfg, nil
+	cfg.Certificates = []tls.Certificate{cert}
+	return nil
 }

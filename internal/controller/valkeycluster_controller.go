@@ -1105,18 +1105,43 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 
 // scrapeClusterState connects to the given addresses and builds a live topology
 // snapshot.
+//
+// While a clientAuth roll is in flight (Required to Optional or Disabled),
+// pods that have not restarted yet still demand a client certificate. The
+// desired spec already says not to present one, so those dials fail the
+// handshake with "certificate required" and the scrape would stall the
+// rollout. The fallback TLS configuration presents the server certificate
+// and is used only to retry those refused dials; fully rolled pods never
+// receive a certificate, preserving the certificateUser ACL posture.
 func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
-	var tlsConfig *tls.Config
+	var tlsConfig, clientCertFallback *tls.Config
 	if tlsSpec := nodeTLSFromCluster(cluster); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate())
+		primary, fallback, err := getTLSConfigForScrape(ctx, apiReader, tlsSpec, cluster)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
 				"secretName", tlsSpec.Certificates.Server.SecretName)
 		} else {
-			tlsConfig = cfg
+			tlsConfig, clientCertFallback = primary, fallback
 		}
 	}
-	return valkey.GetClusterState(ctx, addresses, DefaultPort, username, password, tlsConfig)
+	return valkey.GetClusterStateWithFallback(ctx, addresses, DefaultPort, username, password, tlsConfig, clientCertFallback)
+}
+
+// getTLSConfigForScrape builds the TLS configuration pair used to scrape
+// cluster state: the primary configuration follows the desired clientAuth
+// mode, and the fallback presents the server certificate for dials refused
+// with "certificate required" during a clientAuth roll. Under Required mode
+// the primary already presents the certificate, so no fallback is needed.
+func getTLSConfigForScrape(ctx context.Context, apiReader client.Reader, tlsSpec *valkeyiov1alpha1.NodeTLSSpec, cluster *valkeyiov1alpha1.ValkeyCluster) (*tls.Config, *tls.Config, error) {
+	secret := &corev1.Secret{}
+	loader := func(*tls.Config) (*tls.Config, error) { return nil, nil }
+	if err := apiReader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: tlsSpec.Certificates.Server.SecretName}, secret); err == nil {
+		loader = loadClientCertificateFallback(secret)
+	}
+	if tlsSpec.RequiresClientCertificate() {
+		loader = nil
+	}
+	return getTLSConfigWithFallback(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate(), loader)
 }
 
 // healStaleAddressPeers re-introduces live cluster members to nodes whose

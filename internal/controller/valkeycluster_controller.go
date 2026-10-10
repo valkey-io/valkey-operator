@@ -1731,12 +1731,18 @@ func effectiveShards(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyN
 }
 
 // handleScaleIn drains excess shards and cleans up leftover ValkeyNodes.
+// The drain pass runs when the live shard count exceeds spec.shards, and also
+// when any live shard maps, through its ValkeyNode labels, to a shard index
+// the spec no longer keeps: a scale-out interrupted mid-flight can leave a
+// high-index shard owning slots while the live count already matches the
+// lowered spec, and deleting that shard without draining it first loses the
+// keys it owns (gh-491).
 // Returns (result, true) when work was done or an error occurred and the
 // caller should requeue instead of continuing to health checks.
 func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (ctrl.Result, bool) {
 	log := logf.FromContext(ctx)
 
-	if len(state.Shards) > int(cluster.Spec.Shards) {
+	if len(state.Shards) > int(cluster.Spec.Shards) || liveShardOutsideSpec(state, nodes, int(cluster.Spec.Shards)) {
 		drained, err := r.drainExcessShards(ctx, cluster, state, nodes)
 		if err != nil {
 			log.Error(err, "scale-in draining failed")
@@ -1905,6 +1911,25 @@ func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.Valke
 		}
 	}
 	return -1
+}
+
+// liveShardOutsideSpec reports whether any shard of the live topology maps,
+// through its ValkeyNode labels, to a shard index at or beyond expectedShards.
+// A scale-out interrupted mid-flight can leave such a shard live while the
+// shard count already matches the lowered spec: high-index shards join one at
+// a time, so the live count can dip to (or below) the new spec before every
+// shard the spec no longer keeps has lost its slots. The count alone cannot
+// see it (gh-491); the labels can.
+func liveShardOutsideSpec(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, expectedShards int) bool {
+	if state == nil {
+		return false
+	}
+	for _, shard := range state.Shards {
+		if shardIndex := shardIndexFromState(shard, nodes); shardIndex >= expectedShards {
+			return true
+		}
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.

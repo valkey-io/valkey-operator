@@ -387,3 +387,31 @@ func TestParseSlotRanges(t *testing.T) {
 		}
 	}
 }
+
+func TestSlotMigrationState_FutureTimestampStillReported(t *testing.T) {
+	// A node whose clock runs ahead stamps last_update_time in the future.
+	// The failure still happened, so it must still be reported on first
+	// sight: now().Sub(LastUpdate) goes negative, which the window check
+	// does not reject. The skew extends how long the entry is held by at
+	// most the clock difference; it never wedges the reconcile forever
+	// because real time keeps advancing past the window.
+	now := time.Now()
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("failed", "0-399", "skewed clock failure", now.Add(10*time.Minute))}
+	})
+	node := migrationNode(t, s)
+
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if inProgress {
+		t.Fatal("no running job")
+	}
+	if failed == nil {
+		t.Fatal("a future-dated failed job must still be reported on first sight")
+	}
+	if failed.Message != "skewed clock failure" {
+		t.Errorf("message = %q, want %q", failed.Message, "skewed clock failure")
+	}
+}

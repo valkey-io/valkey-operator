@@ -1683,13 +1683,20 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
-	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), nil)
 	if err != nil {
 		return false, err
 	}
 	if inProgress {
 		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
 		return true, nil
+	}
+	if failed != nil {
+		// A migration the operator issued earlier failed asynchronously,
+		// after CLUSTER MIGRATESLOTS accepted it. Surface it through the
+		// same Degraded/Warning path as a synchronous MIGRATESLOTS error
+		// instead of silently re-issuing the same move every reconcile.
+		return false, fmt.Errorf("slot migration from %s to %s failed: %s", move.Src.Address, move.Dst.Address, failed.Message)
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
@@ -1797,13 +1804,18 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			continue
 		}
 
-		inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+		inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), nil)
 		if err != nil {
 			return false, err
 		}
 		if inProgress {
 			log.V(1).Info("drain migration in progress", "src", move.Src.Address)
 			return true, nil
+		}
+		if failed != nil {
+			// Same as the rebalance path: surface an asynchronous
+			// migration failure instead of re-issuing the drain move.
+			return false, fmt.Errorf("slot migration from %s to %s failed: %s", move.Src.Address, move.Dst.Address, failed.Message)
 		}
 
 		if !move.Src.KnowsNode(move.Dst.Id) {

@@ -124,6 +124,18 @@ exporter:
   enabled: false
 ```
 
+#### Scraping, alerting and dashboards
+
+`config/prometheus/` (enabled via the `[PROMETHEUS]` block in `config/default/kustomization.yaml`) ships, in addition to the operator's own `ServiceMonitor`:
+
+- `podmonitor.yaml` — a `PodMonitor` that scrapes every ValkeyNode's `metrics-exporter` sidecar across all namespaces, relabeling `valkey.io/cluster`, `valkey.io/shard-index` and `valkey.io/node-index` onto each metric so they can be joined with the operator's own `valkey_operator_*` metrics.
+- `alerts.yaml` — a `PrometheusRule` covering both operator-level signals (`Failed`/`Degraded` state, unready shards, frequent failovers, dropped RolePoller triggers) and per-node signals from the exporter (`redis_up`, `maxmemory` pressure, rejected connections, failed cluster slots).
+- `dashboard-configmap.yaml` — the Grafana dashboard at [`docs/dashboards/valkey-operator.json`](./dashboards/valkey-operator.json), wrapped in a ConfigMap labeled `grafana_dashboard: "1"` for the kube-prometheus-stack / grafana-operator sidecar auto-discovery convention. Import the JSON file directly if you provision dashboards another way.
+
+All three require the Prometheus Operator CRDs (`ServiceMonitor`/`PodMonitor`/`PrometheusRule`) to already be installed in the cluster.
+
+**kube-prometheus-stack selectors:** by default, a `kube-prometheus-stack` Helm release only picks up `ServiceMonitor`/`PodMonitor`/`PrometheusRule` objects matching its `release: <helm-release-name>` label (via `serviceMonitorSelector`/`podMonitorSelector`/`ruleSelector` on the Prometheus resource). These manifests ship with only `app.kubernetes.io/name`/`app.kubernetes.io/managed-by` labels, so they will not be picked up by a default `kube-prometheus-stack` install. Either add the release label your Prometheus instance selects on, or set that instance's selectors to match all namespaces/labels (`serviceMonitorSelectorNilUsesHelmValues: false`, and similarly for the pod monitor and rule selectors). The same applies to `dashboard-configmap.yaml`: a Grafana sidecar scoped to specific namespaces must also watch the namespace this ConfigMap lands in.
+
 ### Persistence
 
 ```yaml

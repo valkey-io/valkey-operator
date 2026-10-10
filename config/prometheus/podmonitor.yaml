@@ -1,0 +1,34 @@
+# Scrapes the per-node metrics-exporter sidecar (oliver006/redis_exporter) on
+# every ValkeyNode pod across all namespaces. Requires the Prometheus Operator
+# CRDs (the same ones providing ServiceMonitor in monitor.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: valkey-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: valkey-node-metrics-monitor
+  namespace: system
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchExpressions:
+      - key: valkey.io/cluster
+        operator: Exists
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      # Promote the operator's own topology labels onto every exporter metric
+      # so dashboards/alerts can group or filter by cluster/shard/node the same
+      # way they already do for valkey_operator_* metrics.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_valkey_io_cluster]
+          targetLabel: valkey_cluster
+        - sourceLabels: [__meta_kubernetes_pod_label_valkey_io_shard_index]
+          targetLabel: valkey_shard_index
+        - sourceLabels: [__meta_kubernetes_pod_label_valkey_io_node_index]
+          targetLabel: valkey_node_index
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: target_namespace

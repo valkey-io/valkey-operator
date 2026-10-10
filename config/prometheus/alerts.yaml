@@ -32,22 +32,22 @@ spec:
             description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has been Degraded for at least 5m."
 
         - alert: ValkeyClusterNoShardsReady
-          expr: valkey_operator_cluster_shards > 0 and valkey_operator_cluster_shards_ready == 0
+          expr: valkey_operator_cluster_shards_desired > 0 and valkey_operator_cluster_shards_ready == 0
           for: 5m
           labels:
             severity: critical
           annotations:
             summary: "ValkeyCluster {{ $labels.valkey_cluster }} has no ready shards"
-            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has 0 of {{ $value }} shards ready."
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has 0 of {{ $value }} desired shards ready. This also fires when a shard is entirely unreachable and has dropped out of the observed topology."
 
         - alert: ValkeyClusterShardsNotFullyReady
-          expr: valkey_operator_cluster_shards_ready < valkey_operator_cluster_shards
+          expr: valkey_operator_cluster_shards_ready < valkey_operator_cluster_shards_desired
           for: 15m
           labels:
             severity: warning
           annotations:
             summary: "ValkeyCluster {{ $labels.valkey_cluster }} has unready shards"
-            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has fewer ready shards than its spec for at least 15m."
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has only {{ $value }} ready shard(s), fewer than spec.shards, for at least 15m. Compares against the desired count, so a shard that has dropped out of the observed topology entirely still counts as missing."
 
         - alert: ValkeyClusterFrequentFailovers
           expr: increase(valkey_operator_failovers_total[30m]) > 3
@@ -68,7 +68,7 @@ spec:
     - name: valkey-operator.node
       rules:
         - alert: ValkeyNodeDown
-          expr: redis_up == 0
+          expr: redis_up{valkey_cluster!=""} == 0
           for: 2m
           labels:
             severity: critical
@@ -77,7 +77,7 @@ spec:
             description: "The metrics-exporter on pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has been unable to reach its Valkey server for at least 2m."
 
         - alert: ValkeyNodeHighMemoryUsage
-          expr: redis_memory_max_bytes > 0 and (redis_memory_used_bytes / redis_memory_max_bytes) > 0.90
+          expr: redis_memory_max_bytes{valkey_cluster!=""} > 0 and (redis_memory_used_bytes{valkey_cluster!=""} / redis_memory_max_bytes{valkey_cluster!=""}) > 0.90
           for: 10m
           labels:
             severity: warning
@@ -86,7 +86,7 @@ spec:
             description: "Pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has used over 90% of its configured maxmemory for at least 10m."
 
         - alert: ValkeyNodeRejectingConnections
-          expr: increase(redis_rejected_connections_total[5m]) > 0
+          expr: increase(redis_rejected_connections_total{valkey_cluster!=""}[5m]) > 0
           labels:
             severity: warning
           annotations:
@@ -94,7 +94,7 @@ spec:
             description: "Pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) rejected {{ $value }} connections in the last 5m, usually maxclients being hit."
 
         - alert: ValkeyClusterSlotsFailed
-          expr: redis_cluster_slots_fail > 0
+          expr: redis_cluster_slots_fail{valkey_cluster!=""} > 0
           for: 2m
           labels:
             severity: critical

@@ -63,30 +63,36 @@ data:
           "targets": [
             {
               "expr": "valkey_operator_cluster_state_info{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"} == 1",
-              "legendFormat": "{{valkey_cluster}}: {{state}}"
+              "legendFormat": "{{valkey_cluster}}: {{state}}",
+              "instant": true
             }
           ],
           "options": { "textMode": "name", "colorMode": "background" },
           "fieldConfig": {
             "defaults": {
-              "mappings": [
-                { "type": "value", "options": { "1": { "text": "seen", "color": "green" } } }
-              ],
               "thresholds": {
                 "mode": "absolute",
                 "steps": [{ "color": "green", "value": null }]
               }
-            }
+            },
+            "overrides": [
+              { "matcher": { "id": "byRegexp", "options": ".*: Ready$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Reconciling$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Initializing$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Degraded$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Failed$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+            ]
           }
         },
         {
           "type": "timeseries",
-          "title": "Ready shards vs total shards",
+          "title": "Ready shards vs desired shards",
           "id": 2,
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "gridPos": { "h": 8, "w": 9, "x": 6, "y": 1 },
           "targets": [
-            { "expr": "valkey_operator_cluster_shards{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: total shards" },
+            { "expr": "valkey_operator_cluster_shards_desired{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: desired shards" },
+            { "expr": "valkey_operator_cluster_shards{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: observed shards" },
             { "expr": "valkey_operator_cluster_shards_ready{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: ready shards" }
           ],
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }

@@ -132,8 +132,8 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 }
 
 // GetClusterStateWithFallback behaves like GetClusterState, except dials
-// whose TLS handshake is refused with "certificate required" are retried
-// once with clientCertFallback. During a clientAuth roll (Required to
+// whose TLS handshake is refused because the node still demands a client
+// certificate are retried once with clientCertFallback. During a clientAuth roll (Required to
 // Optional or Disabled) pods that have not restarted yet still demand a
 // client certificate even though the desired spec no longer presents one;
 // retrying with the fallback keeps the scrape working so the rollout can
@@ -589,11 +589,34 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 	return nodes
 }
 
+// clientCertRefusedErrors are the client-visible spellings of a TLS server
+// refusing the handshake because the client presented no certificate. Under
+// TLS 1.3 the server sends the certificate_required alert and the client
+// surfaces "certificate required"; the alert does not exist in TLS 1.2, so
+// a server enforcing clientAuth.mode: Required on a tls-protocols: TLSv1.2
+// port instead surfaces as a generic "handshake failure". Both spellings
+// mean the same pod state during a clientAuth roll, so both arm the retry.
+var clientCertRefusedErrors = []string{"certificate required", "handshake failure"}
+
+// ClientCertificateRefused reports whether err is a dial refusal caused by
+// the server demanding a client certificate the configuration did not
+// present -- the posture of a pod still enforcing clientAuth.mode:
+// Required from before a clientAuth roll. It matches the TLS 1.3
+// "certificate required" alert and the TLS 1.2 "handshake failure" form.
+func ClientCertificateRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, clientCertRefusedErrors[0]) || strings.Contains(msg, clientCertRefusedErrors[1])
+}
+
 // Connect to a single Valkey node and scrapes its current state. When the
-// TLS handshake is refused with "certificate required" -- a node still
-// enforcing clientAuth.mode: Required from before a clientAuth roll -- the
-// dial is retried once with clientCertFallback, which presents the node's
-// server certificate. clientCertFallback may be nil, disabling the retry.
+// TLS handshake is refused because the node still demands a client
+// certificate -- a node still enforcing clientAuth.mode: Required from
+// before a clientAuth roll -- the dial is retried once with
+// clientCertFallback, which presents the node's server certificate.
+// clientCertFallback may be nil, disabling the retry.
 func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config, clientCertFallback *tls.Config) *NodeState {
 	log := logf.FromContext(ctx)
 
@@ -616,7 +639,7 @@ func getNodeState(ctx context.Context, address string, port int, username string
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		if clientCertFallback != nil && strings.Contains(err.Error(), "certificate required") {
+		if clientCertFallback != nil && ClientCertificateRefused(err) {
 			// The node has not been rolled yet and still demands a client
 			// certificate; retry presenting the server certificate.
 			log.Info("node still requires a client certificate, retrying with one",

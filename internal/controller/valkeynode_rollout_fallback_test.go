@@ -34,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -136,7 +137,7 @@ func TestGetTLSConfigWithFallback_OptionalBuildsFallback(t *testing.T) {
 	_, f := rolloutTestReconciler(t)
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, loadClientCertificateFallback(f.secret))
+	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Empty(t, primary.Certificates, "primary config must not present a client certificate under Optional")
@@ -152,7 +153,7 @@ func TestGetTLSConfigWithFallback_RequiredNoFallback(t *testing.T) {
 	_, f := rolloutTestReconciler(t)
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", true, nil)
+	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", true, false)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Len(t, primary.Certificates, 1, "primary presents the certificate under Required")
@@ -170,7 +171,7 @@ func TestGetTLSConfigWithFallback_MissingCertKeepsPrimary(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(broken).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, loadClientCertificateFallback(broken))
+	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Nil(t, fallback, "fallback is best-effort: an unusable secret leaves the primary alone")
@@ -242,4 +243,81 @@ func TestGetTLSConfigForScrape_RequiredNoFallback(t *testing.T) {
 	require.NotNil(t, primary)
 	assert.Len(t, primary.Certificates, 1)
 	assert.Nil(t, fallback)
+}
+
+// countingReader wraps a client.Reader and counts Secret reads, so the
+// tests can pin how many API-server requests a TLS configuration build
+// issues. The production APIReader is uncached: every extra read is an
+// extra request on the scrape path, which the cluster poller repeats
+// every few seconds.
+type countingReader struct {
+	client.Reader
+	secretGets int
+}
+
+func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		r.secretGets++
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// TestGetTLSConfigForScrape_SingleSecretRead pins that the scrape-side
+// pair builds the primary and the fallback from one secret read. Before
+// the helper owned the fallback construction, the wrapper read the
+// secret itself and the helper read it again, doubling the API-server
+// requests on the poller's scrape path and letting a transient failure
+// of the first read silently disable the fallback.
+func TestGetTLSConfigForScrape_SingleSecretRead(t *testing.T) {
+	r, f := rolloutTestReconciler(t)
+	cr := &countingReader{Reader: r.APIReader}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+	}
+	tlsSpec := &valkeyiov1alpha1.NodeTLSSpec{
+		Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+			Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "c-server"},
+		},
+	}
+
+	primary, fallback, err := getTLSConfigForScrape(context.Background(), cr, tlsSpec, cluster)
+	require.NoError(t, err)
+	require.NotNil(t, primary)
+	require.NotNil(t, fallback, "Optional mode must arm the fallback")
+	assert.Equal(t, 1, cr.secretGets, "primary and fallback must be built from a single secret read")
+	_ = f
+}
+
+// TestGetTLSConfigWithRolloutFallback_SingleSecretRead: the node-dial
+// side of the pair reads the secret exactly once as well.
+func TestGetTLSConfigWithRolloutFallback_SingleSecretRead(t *testing.T) {
+	r, _ := rolloutTestReconciler(t)
+	cr := &countingReader{Reader: r.APIReader}
+	r.APIReader = cr
+	node := rolloutTestNode()
+
+	primary, fallback, err := r.getTLSConfigWithRolloutFallback(context.Background(), "c-server", "valkey-c.ns.svc.cluster.local", node)
+	require.NoError(t, err)
+	require.NotNil(t, primary)
+	require.NotNil(t, fallback)
+	assert.Equal(t, 1, cr.secretGets, "node dials must issue a single secret read per TLS configuration build")
+}
+
+// TestGetTLSConfigWithFallback_FallbackReadFailureNotSilent: when the
+// single secret read fails, the caller learns about it instead of
+// silently losing the fallback. Before the helper owned the read, a
+// failed wrapper-side read left a no-op loader in place and the helper
+// returned a working primary with no fallback and no error, so dials to
+// not-yet-rolled pods kept failing with nothing in the logs explaining
+// why.
+func TestGetTLSConfigWithFallback_FallbackReadFailureNotSilent(t *testing.T) {
+	_, f := rolloutTestReconciler(t)
+	missing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "nope", Namespace: "ns"},
+		Data:       map[string][]byte{tlsSecretKeyCA: f.caPEM},
+	}
+	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(missing).Build()
+
+	_, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
+	require.Error(t, err, "a failed secret read must surface, not silently drop the fallback")
 }

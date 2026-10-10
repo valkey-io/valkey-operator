@@ -44,19 +44,25 @@ type rolloutTLSDialFixture struct {
 	accepted chan struct{}
 	caPool   *x509.CertPool
 	cert     tls.Certificate
-}
 
-var (
+	// dialTrace records each handshake outcome for failure diagnostics.
+	// It is owned by the fixture: handler goroutines only send to it
+	// (non-blocking, so a full buffer drops a trace line instead of
+	// blocking the handshake), and only the test goroutine reads from
+	// it. It is never closed, so a late handler send cannot panic the
+	// test binary.
 	dialTrace  chan string
 	traceStart time.Time
-)
+}
 
-func newRolloutTLSDialFixture(t *testing.T) *rolloutTLSDialFixture {
+func newRolloutTLSDialFixture(t *testing.T, maxVersion ...uint16) *rolloutTLSDialFixture {
 	t.Helper()
 	f := &rolloutTLSDialFixture{
-		refused:  make(chan struct{}, 8),
-		accepted: make(chan struct{}, 8),
-		caPool:   x509.NewCertPool(),
+		refused:    make(chan struct{}, 8),
+		accepted:   make(chan struct{}, 8),
+		caPool:     x509.NewCertPool(),
+		dialTrace:  make(chan string, 64),
+		traceStart: time.Now(),
 	}
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -114,11 +120,15 @@ func newRolloutTLSDialFixture(t *testing.T) *rolloutTLSDialFixture {
 		t.Fatal(err)
 	}
 
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+	listenerCfg := &tls.Config{
 		Certificates: []tls.Certificate{f.cert},
 		ClientAuth:   tls.RequireAnyClientCert,
 		MinVersion:   tls.VersionTLS12,
-	})
+	}
+	if len(maxVersion) > 0 {
+		listenerCfg.MaxVersion = maxVersion[0]
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", listenerCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,16 +153,18 @@ func newRolloutTLSDialFixture(t *testing.T) *rolloutTLSDialFixture {
 				tc := c.(*tls.Conn)
 				_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
 				if err := tc.Handshake(); err != nil {
-					if dialTrace != nil {
-						dialTrace <- fmt.Sprintf("t=%d REFUSED: %v", time.Since(traceStart).Milliseconds(), err)
+					select {
+					case f.dialTrace <- fmt.Sprintf("t=%d REFUSED: %v", time.Since(f.traceStart).Milliseconds(), err):
+					default:
 					}
 					select {
 					case f.refused <- struct{}{}:
 					default:
 					}
 				} else {
-					if dialTrace != nil {
-						dialTrace <- fmt.Sprintf("t=%d ACCEPTED", time.Since(traceStart).Milliseconds())
+					select {
+					case f.dialTrace <- fmt.Sprintf("t=%d ACCEPTED", time.Since(f.traceStart).Milliseconds()):
+					default:
 					}
 					select {
 					case f.accepted <- struct{}{}:
@@ -183,14 +195,16 @@ func newRolloutTLSDialFixture(t *testing.T) *rolloutTLSDialFixture {
 // dial is never retried, which is what pristine main does.
 func TestGetClusterStateWithFallback_CertificateRequiredRetry(t *testing.T) {
 	f := newRolloutTLSDialFixture(t)
-	dialTrace = make(chan string, 64)
-	traceStart = time.Now()
-	t.Cleanup(func() { dialTrace = nil })
 	defer func() {
-		if t.Failed() {
-			close(dialTrace)
-			for msg := range dialTrace {
+		// Drain the fixture-owned trace without closing it: a handler
+		// goroutine may still be mid-handshake and sending to it, and
+		// a send on a closed channel would panic the test binary.
+		for {
+			select {
+			case msg := <-f.dialTrace:
 				t.Logf("TRACE %s", msg)
+			default:
+				return
 			}
 		}
 	}()
@@ -232,5 +246,62 @@ func TestGetClusterStateWithFallback_CertificateRequiredRetry(t *testing.T) {
 	case <-f.accepted:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("fallback dial never completed its handshake; refusals so far: %d", refusedBefore)
+	}
+}
+
+// TestGetClusterStateWithFallback_TLS12HandshakeFailureRetry pins the TLS
+// 1.2 form of the refusal. The certificate_required alert does not exist
+// in TLS 1.2, so a pod still enforcing clientAuth.mode: Required on a
+// tls-protocols: TLSv1.2 port refuses the primary dial with a generic
+// "handshake failure" instead. ClientCertificateRefused must arm the
+// fallback retry for that spelling too, or a Required-to-Optional roll
+// stalls on every TLS 1.2 cluster. The fixture speaks no RESP, so the
+// assertion is the same as the TLS 1.3 case: the primary dial is
+// refused, the fallback retry completes its handshake.
+func TestGetClusterStateWithFallback_TLS12HandshakeFailureRetry(t *testing.T) {
+	f := newRolloutTLSDialFixture(t, tls.VersionTLS12)
+	defer func() {
+		for {
+			select {
+			case msg := <-f.dialTrace:
+				t.Logf("TRACE %s", msg)
+			default:
+				return
+			}
+		}
+	}()
+
+	primary := &tls.Config{
+		RootCAs:    f.caPool,
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS12,
+	}
+	fallback := primary.Clone()
+	fallback.Certificates = []tls.Certificate{f.cert}
+
+	// Sanity: the primary dial alone is refused under TLS 1.2 as well. A
+	// TLS 1.2 server demanding a client certificate reports the refusal
+	// as a handshake failure, not certificate required.
+	primaryOnly := GetClusterStateWithFallback(context.Background(),
+		[]string{"127.0.0.1"}, f.port, "", "", primary, nil)
+	if primaryOnly != nil && len(primaryOnly.Shards) > 0 {
+		t.Fatal("primary dial without a client certificate unexpectedly succeeded; fixture is not enforcing RequireAnyClientCert")
+	}
+	select {
+	case <-f.refused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the primary dial's handshake to be refused")
+	}
+
+	// The refused dial must be retried with the fallback and complete the
+	// TLS 1.2 handshake.
+	GetClusterStateWithFallback(context.Background(),
+		[]string{"127.0.0.1"}, f.port, "", "", primary, fallback)
+
+	select {
+	case <-f.accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback dial never completed its handshake under TLS 1.2")
 	}
 }

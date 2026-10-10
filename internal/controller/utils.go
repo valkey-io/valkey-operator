@@ -365,21 +365,29 @@ func nodeTLSServerName(node *valkeyv1.ValkeyNode) string {
 
 // getTLSConfig returns the TLS configuration for a ValkeyCluster.
 func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
-	cfg, _, err := getTLSConfigWithFallback(ctx, c, secretName, serverName, namespace, presentClientCert, nil)
+	cfg, _, err := getTLSConfigWithFallback(ctx, c, secretName, serverName, namespace, presentClientCert, false)
 	return cfg, err
 }
 
 // getTLSConfigWithFallback builds the primary TLS configuration, and when
-// clientAuth is Optional or Disabled also returns a fallback that presents
-// the node's server certificate as a client certificate. During a
-// clientAuth roll (Required to Optional or Disabled) pods that have not
-// restarted yet still demand a client certificate, so dials made with the
-// primary configuration fail the handshake with "certificate required";
-// the fallback lets the caller retry those dials instead of stalling the
-// rollout. The certificate is only ever presented on that retry, so once a
-// pod has been rolled it never receives one, keeping the certificateUser
-// ACL mapping documented in docs/mtls.md intact.
-func getTLSConfigWithFallback(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool, clientCertLoader func(*tls.Config) (*tls.Config, error)) (*tls.Config, *tls.Config, error) {
+// buildFallback is set also returns a fallback that presents the node's
+// server certificate as a client certificate. During a clientAuth roll
+// (Required to Optional or Disabled) pods that have not restarted yet
+// still demand a client certificate, so dials made with the primary
+// configuration fail the handshake -- "certificate required" under TLS
+// 1.3, "handshake failure" under TLS 1.2; the fallback lets the caller
+// retry those dials instead of stalling the rollout. The certificate is
+// only ever presented on that retry, so once a pod has been rolled it
+// never receives one, keeping the certificateUser ACL mapping documented
+// in docs/mtls.md intact.
+//
+// Both configurations are built from a single read of the secret, so the
+// fallback certificate and the trusted CA can never come from different
+// secret versions, and callers never issue a second API-server request.
+// The fallback is best-effort: when the secret carries no usable
+// cert/key pair the primary configuration is returned alone, and dials to
+// not-yet-rolled pods keep failing until they restart.
+func getTLSConfigWithFallback(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert, buildFallback bool) (*tls.Config, *tls.Config, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
@@ -408,9 +416,9 @@ func getTLSConfigWithFallback(ctx context.Context, c client.Reader, secretName, 
 		}
 		return tlsCfg, nil, nil
 	}
-	if clientCertLoader != nil {
-		fallback, err := clientCertLoader(tlsCfg.Clone())
-		if err != nil {
+	if buildFallback {
+		fallback := tlsCfg.Clone()
+		if err := addTLSCertificates(fallback, secret); err != nil {
 			// The fallback is best-effort: a secret without usable
 			// cert/key entries keeps the primary configuration alone,
 			// and dials to not-yet-rolled pods keep failing until
@@ -420,16 +428,6 @@ func getTLSConfigWithFallback(ctx context.Context, c client.Reader, secretName, 
 		return tlsCfg, fallback, nil
 	}
 	return tlsCfg, nil, nil
-}
-
-// loadClientCertificateFallback returns a loader that makes cfg present the
-// server certificate from secret as a client certificate, so a dial can
-// retry a handshake refused with "certificate required" against a pod still
-// enforcing clientAuth.mode: Required from before a roll.
-func loadClientCertificateFallback(secret *corev1.Secret) func(*tls.Config) (*tls.Config, error) {
-	return func(cfg *tls.Config) (*tls.Config, error) {
-		return cfg, addTLSCertificates(cfg, secret)
-	}
 }
 
 // addTLSCertificates loads the tls.crt/tls.key pair from secret into cfg.

@@ -124,6 +124,16 @@ exporter:
   enabled: false
 ```
 
+#### Scraping, alerting and dashboards
+
+`config/prometheus/` (enabled via the `[PROMETHEUS]` block in `config/default/kustomization.yaml`) ships, in addition to the operator's own `ServiceMonitor`:
+
+- `podmonitor.yaml` — a `PodMonitor` that scrapes every ValkeyNode's `metrics-exporter` sidecar across all namespaces, relabeling `valkey.io/cluster`, `valkey.io/shard-index` and `valkey.io/node-index` onto each metric so they can be joined with the operator's own `valkey_operator_*` metrics.
+- `alerts.yaml` — a `PrometheusRule` covering both operator-level signals (`Failed`/`Degraded` state, unready shards, frequent failovers, dropped RolePoller triggers) and per-node signals from the exporter (`redis_up`, `maxmemory` pressure, rejected connections, failed cluster slots).
+- `dashboard-configmap.yaml` — the Grafana dashboard at [`docs/dashboards/valkey-operator.json`](./dashboards/valkey-operator.json), wrapped in a ConfigMap labeled `grafana_dashboard: "1"` for the kube-prometheus-stack / grafana-operator sidecar auto-discovery convention. Import the JSON file directly if you provision dashboards another way.
+
+All three require the Prometheus Operator CRDs (`ServiceMonitor`/`PodMonitor`/`PrometheusRule`) to already be installed in the cluster.
+
 ### Persistence
 
 ```yaml

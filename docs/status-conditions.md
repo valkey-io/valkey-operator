@@ -92,7 +92,7 @@ Indicates whether the cluster is impaired but may still be partially functional.
 
 Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
-- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
+- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in), including a slot migration that failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it; the message is the failed job's own description from `CLUSTER GETSLOTMIGRATIONS`
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 
@@ -340,7 +340,7 @@ These events are emitted during scale-out slot rebalancing.
 |---|---|---|
 | `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
 | `SlotsRebalancePending` | Normal | Waiting for a shard to learn its migration target before moving slots |
-| `SlotRebalanceFailed` | Warning | Slot rebalancing failed |
+| `SlotRebalanceFailed` | Warning | Slot rebalancing failed, including an asynchronous `CLUSTER MIGRATESLOTS` job failure read back from `CLUSTER GETSLOTMIGRATIONS` |
 
 ### Scale-in events
 

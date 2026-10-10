@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -29,24 +30,135 @@ import (
 // SlotMigrationInProgress checks whether the source node has any
 // non-terminal CLUSTER MIGRATESLOTS operations running.
 func SlotMigrationInProgress(ctx context.Context, src *NodeState) (bool, error) {
+	inProgress, _, err := SlotMigrationState(ctx, src, nil, nil)
+	return inProgress, err
+}
+
+// SlotMigrationFailure describes a failed CLUSTER MIGRATESLOTS job, as
+// reported by CLUSTER GETSLOTMIGRATIONS on the node that ran it.
+type SlotMigrationFailure struct {
+	// Slots are the slot ranges the failed job covered, parsed from its
+	// slot_ranges field.
+	Slots []SlotsRange
+	// Message is the server's own failure description, for example the
+	// handshake error reported by the target node.
+	Message string
+	// LastUpdate is when the server last changed the job's state, used
+	// to decide whether the failure is recent enough to still report.
+	LastUpdate time.Time
+}
+
+// overlaps reports whether the failed job covered any of the given slot
+// ranges. Jobs from unrelated migrations (manual resharding, a different
+// batch) do not match, so leftover history cannot wedge a rebalance.
+func (f *SlotMigrationFailure) overlaps(ranges []SlotsRange) bool {
+	for _, owned := range f.Slots {
+		for _, planned := range ranges {
+			if owned.Start <= planned.End && planned.Start <= owned.End {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// slotMigrationFailureWindow bounds how long a failed job is reported as
+// the reason a rebalance is not making progress. Failed jobs stay visible
+// in CLUSTER GETSLOTMIGRATIONS output long after they happened, so without
+// a window ancient history would wedge the reconcile loop. While a
+// failure is recent the operator holds off re-issuing the same
+// MIGRATESLOTS (it would only record another failed job); once the window
+// lapses it retries the move, so a transient failure delays the batch by
+// at most one window and a persistent failure retries once per window.
+const slotMigrationFailureWindow = 2 * time.Minute
+
+// SlotMigrationState reports whether the source node has any non-terminal
+// CLUSTER MIGRATESLOTS operations running, and the most recent failed job
+// overlapping the slots the caller plans to move.
+//
+// A job that CLUSTER MIGRATESLOTS accepts runs asynchronously on the
+// server; a failure during its handshake or transfer is recorded only in
+// CLUSTER GETSLOTMIGRATIONS as a terminal "failed" entry. Nothing else
+// reports it, so without reading the job back the next reconcile sees no
+// migration in progress and silently re-issues the same move forever.
+//
+// planned is the set of slot ranges the caller is about to move; a failed
+// job that does not overlap it is ignored. now is injectable for tests; a
+// nil now means time.Now. A failed job older than
+// slotMigrationFailureWindow is not reported either.
+func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, now func() time.Time) (bool, *SlotMigrationFailure, error) {
 	log := logf.FromContext(ctx)
 	cmd := src.Client.B().Arbitrary("CLUSTER", "GETSLOTMIGRATIONS").Build()
 	migrations, err := src.Client.Do(ctx, cmd).ToArray()
 	if err != nil {
-		return false, wrapUnsupportedErr(fmt.Errorf("getslotmigrations failed on %s: %w", src.Address, err))
+		return false, nil, wrapUnsupportedErr(fmt.Errorf("getslotmigrations failed on %s: %w", src.Address, err))
 	}
+	if now == nil {
+		now = time.Now
+	}
+	var failed *SlotMigrationFailure
 	for _, migration := range migrations {
 		values, parseErr := migration.AsStrMap()
 		if parseErr != nil {
 			log.V(1).Info("unable to parse slot migration entry; treating as in progress", "src", src.Address, "error", parseErr)
-			return true, nil
+			return true, nil, nil
 		}
 		state := strings.ToLower(values["state"])
 		if !isSlotMigrationTerminal(state) {
-			return true, nil
+			return true, nil, nil
+		}
+		if state != "failed" {
+			continue
+		}
+		fields, fieldErr := migration.AsMap()
+		if fieldErr != nil {
+			// Not a field/value structure; skip it rather than guessing.
+			log.V(1).Info("unable to parse slot migration entry fields", "src", src.Address, "error", fieldErr)
+			continue
+		}
+		job := SlotMigrationFailure{
+			Slots:      parseSlotRanges(values["slot_ranges"]),
+			Message:    values["message"],
+			LastUpdate: time.Unix(0, 0),
+		}
+		// last_update_time is an integer reply, which AsStrMap does not
+		// carry, so read it from the typed field map. A missing or
+		// unparseable timestamp stays the zero time, and a zero-time job
+		// is never within the recency window, so a garbled entry cannot
+		// wedge the reconcile.
+		if v, ok := fields["last_update_time"]; ok {
+			if t, err := v.AsInt64(); err == nil {
+				job.LastUpdate = time.Unix(t, 0).UTC()
+			}
+		}
+		if !job.overlaps(planned) {
+			continue
+		}
+		if now().Sub(job.LastUpdate) > slotMigrationFailureWindow {
+			continue
+		}
+		if failed == nil || job.LastUpdate.After(failed.LastUpdate) {
+			failed = &job
 		}
 	}
-	return false, nil
+	return false, failed, nil
+}
+
+// parseSlotRanges parses the slot_ranges field of a migration job: one or
+// more "start-end" ranges separated by spaces, both ends inclusive.
+// Unparseable parts are skipped, matching the server's own format.
+func parseSlotRanges(s string) []SlotsRange {
+	var ranges []SlotsRange
+	for _, part := range strings.Fields(s) {
+		start, end, ok := strings.Cut(part, "-")
+		first, err1 := strconv.Atoi(start)
+		last, err2 := strconv.Atoi(end)
+		if !ok || err1 != nil || err2 != nil {
+			continue
+		}
+		ranges = append(ranges, SlotsRange{Start: first, End: last})
+	}
+	return ranges
 }
 
 func isSlotMigrationTerminal(state string) bool {

@@ -25,15 +25,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
-
-	vclient "github.com/valkey-io/valkey-go"
-	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // The scripted RESP helpers below mirror the migration-state harness used by
-// the internal/valkey tests. They live in this file until the migration-
-// failure surfacing PR lands; keep the two copies in sync.
+// the internal/valkey tests.
 
 // migrationStateServer is a scripted RESP server that completes the valkey-go
 // client handshake and answers CLUSTER GETSLOTMIGRATIONS with the entries the
@@ -190,69 +185,4 @@ func readStateCommand(r *bufio.Reader) ([]string, error) {
 		cmd = append(cmd, string(buf[:n]))
 	}
 	return cmd, nil
-}
-
-// stateEntry builds one GETSLOTMIGRATIONS entry: flat field/value pairs,
-// numeric fields as RESP integers, matching the server wire format.
-func stateEntry(state, slotRanges, message string, lastUpdate time.Time) []string {
-	return []string{
-		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",
-		"operation", "EXPORT",
-		"slot_ranges", slotRanges,
-		"target_node", "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9",
-		"source_node", "93941e777e17fcbc92d4398cc957ffea888f472b",
-		"state", state,
-		"message", message,
-		"last_update_time", strconv.FormatInt(lastUpdate.Unix(), 10),
-	}
-}
-
-// scriptedSrcNode builds a NodeState whose client dials the scripted server.
-// The peer table stays empty, so KnowsNode reports false; the failure branch
-// under test is reached before the gossip gate, and no destination dial is
-// ever made: MIGRATESLOTS is issued on the source client.
-func scriptedSrcNode(t *testing.T, s *migrationStateServer, id string) *valkey.NodeState {
-	t.Helper()
-	client, err := vclient.NewClient(vclient.ClientOption{
-		InitAddress:       []string{s.addr},
-		ForceSingleClient: true,
-		DisableCache:      true,
-		DisableRetry:      true,
-		PipelineMultiplex: -1,
-	})
-	if err != nil {
-		t.Fatalf("client init: %v", err)
-	}
-	t.Cleanup(client.Close)
-	host, portStr, _ := net.SplitHostPort(s.addr)
-	port, _ := strconv.Atoi(portStr)
-	return &valkey.NodeState{Client: client, Address: host, Port: port, Id: id}
-}
-
-// plainDstNode builds a destination primary that needs no client: neither the
-// failure branch nor the gossip gate dials it, and its address appears only in
-// the surfaced error message.
-func plainDstNode(address, id string) *valkey.NodeState {
-	return &valkey.NodeState{Address: address, Id: id}
-}
-
-// rebalanceFixture builds a two-shard state whose slot counts differ by more
-// than one slot, so PlanRebalanceMove plans a move from src to dst covering
-// slots 0-399 (capped by rebalanceSlotBatchSize).
-func rebalanceFixture(t *testing.T, server *migrationStateServer) (src, dst *valkey.ShardState) {
-	t.Helper()
-	srcNode := scriptedSrcNode(t, server, "src-primary-id")
-	dstNode := plainDstNode("10.0.0.2", "dst-primary-id")
-	src = &valkey.ShardState{
-		Id:        "src-shard",
-		PrimaryId: "src-primary-id",
-		Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
-		Nodes:     []*valkey.NodeState{srcNode},
-	}
-	dst = &valkey.ShardState{
-		Id:        "dst-shard",
-		PrimaryId: "dst-primary-id",
-		Nodes:     []*valkey.NodeState{dstNode},
-	}
-	return src, dst
 }

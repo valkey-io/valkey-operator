@@ -76,6 +76,22 @@ spec:
             summary: "Valkey node {{ $labels.pod }} is down"
             description: "The metrics-exporter on pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has been unable to reach its Valkey server for at least 2m."
 
+        # redis_up only reports when the exporter itself can still reach
+        # Valkey. If the exporter process or pod is unreachable entirely, its
+        # series (including redis_up) go stale rather than reporting 0, so
+        # ValkeyNodeDown alone misses that failure mode. `up` is Prometheus's
+        # own synthetic per-target metric and carries the same relabeled
+        # labels as every other metric from this PodMonitor (see
+        # podmonitor.yaml), so it can be scoped and alerted on the same way.
+        - alert: ValkeyNodeUnreachable
+          expr: up{valkey_cluster!=""} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} cannot be scraped"
+            description: "Prometheus has been unable to scrape the metrics-exporter sidecar on pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) for at least 2m."
+
         - alert: ValkeyNodeHighMemoryUsage
           expr: redis_memory_max_bytes{valkey_cluster!=""} > 0 and (redis_memory_used_bytes{valkey_cluster!=""} / redis_memory_max_bytes{valkey_cluster!=""}) > 0.90
           for: 10m

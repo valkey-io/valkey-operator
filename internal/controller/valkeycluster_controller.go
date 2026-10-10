@@ -1948,7 +1948,7 @@ func (r *ValkeyClusterReconciler) failoverExcessPrimary(ctx context.Context, clu
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
 	kept := make([]*valkey.NodeState, 0, len(shard.Nodes))
 	for _, replica := range shard.GetSyncedReplicas(state) {
-		_, replicaIdx := nodeRoleAndShard(replica.Address, nodes)
+		replicaIdx := nodeIndexForAddress(replica.Address, nodes)
 		if replicaIdx < 0 || replicaIdx >= nodesPerShard {
 			continue
 		}

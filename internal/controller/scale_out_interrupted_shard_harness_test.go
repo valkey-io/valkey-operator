@@ -23,6 +23,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,12 @@ type migrationStateServer struct {
 	listener net.Listener
 	addr     string
 	reply    func() [][]string
+
+	// mu guards commands, the record of every request the server has
+	// answered, so assertions can check what was issued without racing the
+	// per-connection goroutines.
+	mu       sync.Mutex
+	commands [][]string
 }
 
 func newMigrationStateServer(t *testing.T, reply func() [][]string) *migrationStateServer {
@@ -74,6 +81,7 @@ func (s *migrationStateServer) handle(conn net.Conn) {
 		if err != nil {
 			return
 		}
+		s.record(cmd)
 		if _, err := w.WriteString(s.respond(cmd)); err != nil {
 			return
 		}
@@ -109,6 +117,42 @@ func (s *migrationStateServer) respond(cmd []string) string {
 	default:
 		return "+OK\r\n"
 	}
+}
+
+// record appends one answered request to the server's command log.
+func (s *migrationStateServer) record(cmd []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commands = append(s.commands, append([]string(nil), cmd...))
+}
+
+// recordedCommands returns the commands the server has answered so far.
+func (s *migrationStateServer) recordedCommands() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.commands...)
+}
+
+// hasCommand reports whether the server answered at least one command equal
+// to cmd (case-insensitive verb and subcommand).
+func (s *migrationStateServer) hasCommand(cmd ...string) bool {
+	records := s.recordedCommands()
+	for _, rec := range records {
+		if len(rec) < len(cmd) {
+			continue
+		}
+		match := true
+		for i, want := range cmd {
+			if !strings.EqualFold(rec[i], want) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // readStateCommand reads one RESP array-of-bulk-strings request.

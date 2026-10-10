@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -127,6 +128,15 @@ func TestHandleScaleInDrainsLiveShardOutsideSpec(t *testing.T) {
 	// shard 3.
 	src := state.Shards[2]
 	src.Nodes[0] = scriptedPrimaryAt(t, server, src.Nodes[0].Id, "10.0.3.1", 6379)
+	// Gossip has already introduced the in-spec primaries to shard 3's
+	// primary, so the drain plan's KnowsNode gate passes and the pass
+	// reaches the actual CLUSTER MIGRATESLOTS instead of requeueing at the
+	// peer-table check. The addresses match the fixture ValkeyNodes, so the
+	// label-based shard resolution stays intact.
+	src.Nodes[0].SetClusterNodesForTesting(
+		"node-3-0 10.0.3.1:6379@16379 myself,master - 0 0 3 connected 12288-16383\n" +
+			"node-0-0 10.0.0.1:6379@16379 master - 0 0 1 connected 0-4095\n" +
+			"node-1-0 10.0.1.1:6379@16379 master - 0 0 2 connected 4096-8191\n")
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
@@ -148,6 +158,28 @@ func TestHandleScaleInDrainsLiveShardOutsideSpec(t *testing.T) {
 		t.Fatal("the requeue must carry an interval")
 	}
 
+	// The drain must have reached the actual slot migration: the source's
+	// peer table knows the destination (gossip has introduced it), so the
+	// pass issues CLUSTER MIGRATESLOTS for shard 3's batch before requeueing.
+	if !server.hasCommand("CLUSTER", "MIGRATESLOTS") {
+		t.Fatalf("expected CLUSTER MIGRATESLOTS to be issued, got %v", server.recordedCommands())
+	}
+	// The destination node-id argument must be the in-spec destination
+	// primary the plan picked, not a fixture leftover.
+	dstSeen := false
+	for _, cmd := range server.recordedCommands() {
+		if len(cmd) >= 2 && strings.EqualFold(cmd[0], "CLUSTER") && strings.EqualFold(cmd[1], "MIGRATESLOTS") {
+			for _, arg := range cmd[2:] {
+				if arg == "node-0-0" {
+					dstSeen = true
+				}
+			}
+		}
+	}
+	if !dstSeen {
+		t.Fatalf("CLUSTER MIGRATESLOTS must target the in-spec destination primary node-0-0, got %v", server.recordedCommands())
+	}
+
 	// The out-of-spec shard's ValkeyNode must survive the draining pass:
 	// its slots are still assigned, so deleting the primary now would lose
 	// the keys it owns (the gh-491 failure mode).
@@ -165,4 +197,101 @@ func TestHandleScaleInDrainsLiveShardOutsideSpec(t *testing.T) {
 	err = c.Get(context.Background(), client.ObjectKey{Name: "wedge-3-0", Namespace: "ns"}, &valkeyiov1alpha1.ValkeyNode{})
 	require.Error(t, err, "once drained, the out-of-spec shard's ValkeyNode is deleted")
 	require.True(t, k8serrors.IsNotFound(err))
+}
+
+// TestLabelTriggeredDrainSparesUnresolvedShard pins the classification of a
+// shard whose ValkeyNode labels cannot resolve it (its address matches no
+// ValkeyNode PodIP): when the drain pass runs on the label trigger alone -
+// the live count already equals spec.shards - the unresolved shard is not
+// provably excess, so it must keep every slot and stay available as a drain
+// destination. Only the shard the labels place outside the spec is drained.
+func TestLabelTriggeredDrainSparesUnresolvedShard(t *testing.T) {
+	server := newMigrationStateServer(t, func() [][]string { return nil })
+
+	mk := func(name, shard, node, ip string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{
+				LabelCluster:    "wedge",
+				LabelShardIndex: shard,
+				LabelNodeIndex:  node,
+			}},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: ip},
+		}
+	}
+	// No ValkeyNode carries 10.0.2.1, so the middle shard resolves to -1.
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+		*mk("wedge-0-0", "0", "0", "10.0.0.1"),
+		*mk("wedge-3-0", "3", "0", "10.0.3.1"),
+	}}
+
+	inSpec := &valkey.ShardState{
+		Id:        "shard-0",
+		PrimaryId: "node-0-0",
+		Slots:     []valkey.SlotsRange{{Start: 0, End: 4095}},
+		Nodes:     []*valkey.NodeState{{Address: "10.0.0.1", Port: 6379, Id: "node-0-0", Flags: []string{"master"}}},
+	}
+	unresolved := &valkey.ShardState{
+		Id:        "shard-x",
+		PrimaryId: "node-x-0",
+		Slots:     []valkey.SlotsRange{{Start: 8192, End: 12287}},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-x-0", "10.0.2.1", 6379)},
+	}
+	outOfSpec := &valkey.ShardState{
+		Id:        "shard-3",
+		PrimaryId: "node-3-0",
+		Slots:     []valkey.SlotsRange{{Start: 12288, End: 16383}},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-3-0", "10.0.3.1", 6379)},
+	}
+	// Both scripted primaries know the in-spec destination, so on a body
+	// that drained the unresolved shard too, that migration would actually
+	// be issued and observable instead of hidden behind the gossip gate.
+	peerView := "node-x-0 10.0.2.1:6379@16379 myself,master - 0 0 0 connected 8192-12287\n" +
+		"node-3-0 10.0.3.1:6379@16379 master - 0 0 1 connected 12288-16383\n" +
+		"node-0-0 10.0.0.1:6379@16379 master - 0 0 2 connected 0-4095\n"
+	for _, shard := range []*valkey.ShardState{unresolved, outOfSpec} {
+		shard.Nodes[0].SetClusterNodesForTesting(peerView)
+	}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{inSpec, unresolved, outOfSpec}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	objs := make([]client.Object, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		objs = append(objs, &nodes.Items[i])
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	r := &ValkeyClusterReconciler{Client: c, Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"}}
+	cluster.Spec.Shards = 3
+
+	if _, requeue := r.handleScaleIn(context.Background(), cluster, state, nodes); !requeue {
+		t.Fatal("the out-of-spec shard's slots must trigger a requeue")
+	}
+
+	// The drain must have issued exactly the out-of-spec shard's batch:
+	// slots starting at 12288, targeting the in-spec primary.
+	migrations := 0
+	for _, cmd := range server.recordedCommands() {
+		if len(cmd) >= 2 && strings.EqualFold(cmd[0], "CLUSTER") && strings.EqualFold(cmd[1], "MIGRATESLOTS") {
+			migrations++
+			joined := strings.Join(cmd, " ")
+			if !strings.Contains(joined, "12288") {
+				t.Fatalf("slot migration issued from a shard other than the out-of-spec one: %q", joined)
+			}
+			if !strings.Contains(joined, "node-0-0") {
+				t.Fatalf("the drain must target the in-spec primary: %q", joined)
+			}
+		}
+	}
+	if migrations == 0 {
+		t.Fatalf("expected a CLUSTER MIGRATESLOTS draining shard 3, got %v", server.recordedCommands())
+	}
+	// The unresolved shard keeps every slot it owns: its batch would start
+	// at 8192, and that slot appears in no recorded command.
+	for _, cmd := range server.recordedCommands() {
+		if joined := strings.Join(cmd, " "); strings.Contains(joined, "8192") {
+			t.Fatalf("the unresolved shard must not be drained: %q", joined)
+		}
+	}
 }

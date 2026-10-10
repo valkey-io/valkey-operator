@@ -32,7 +32,7 @@ spec:
             description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has been Degraded for at least 5m."
 
         - alert: ValkeyClusterNoShardsReady
-          expr: valkey_operator_cluster_shards_ready == 0 and valkey_operator_cluster_shards > 0
+          expr: valkey_operator_cluster_shards > 0 and valkey_operator_cluster_shards_ready == 0
           for: 5m
           labels:
             severity: critical

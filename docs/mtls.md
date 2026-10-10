@@ -146,6 +146,12 @@ When `clientAuth.mode` is `Optional` or `Disabled`, those connections do not pre
 
 With `clientAuth.certificateUser: CN`, a presented server certificate CN is the node FQDN, which does not name an ACL user. Operator-managed connections therefore authenticate with `AUTH` as usual after the TLS handshake.
 
+### Rolling `clientAuth` from `Required` to `Optional` or `Disabled`
+
+Changing `clientAuth.mode` from `Required` to `Optional` or `Disabled` does not restart every pod at once: already-restarted pods stop demanding a client certificate, while pods that have not restarted yet still refuse connections that present none. Operator dials follow the desired spec, so during the roll they are refused by the not-yet-restarted pods at the TLS handshake. The refusal surfaces as `certificate required` on a TLS 1.3 port and as `handshake failure` on a `tls-protocols: TLSv1.2` port, which stalls the roll in `Reconciling` or leaves slots unassigned.
+
+To keep the roll moving, a dial refused for presenting no client certificate -- `certificate required` under TLS 1.3, `handshake failure` under TLS 1.2 -- is retried once presenting the node's own **server** certificate. The fallback applies only to that refused dial; once a pod has restarted it never receives a certificate again, so the `certificateUser` mapping posture described above is preserved. A pod that is restarted, then moved back to `Required`, is dialed with the primary configuration as usual.
+
 ## Security considerations
 
 ### Do not use `nopass` on a certificate-mapped user

@@ -128,6 +128,17 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
 func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
+	return GetClusterStateWithFallback(ctx, addresses, port, username, password, tlsCfg, nil)
+}
+
+// GetClusterStateWithFallback behaves like GetClusterState, except dials
+// whose TLS handshake is refused because the node still demands a client
+// certificate are retried once with clientCertFallback. During a clientAuth roll (Required to
+// Optional or Disabled) pods that have not restarted yet still demand a
+// client certificate even though the desired spec no longer presents one;
+// retrying with the fallback keeps the scrape working so the rollout can
+// finish instead of stalling in Reconciling/SlotsUnassigned.
+func GetClusterStateWithFallback(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config, clientCertFallback *tls.Config) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -135,7 +146,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, username, password, tlsCfg)
+		node := getNodeState(ctx, address, port, username, password, tlsCfg, clientCertFallback)
 		if node != nil {
 			// Check if node is pending to be added. A primary carrying only a
 			// migration marker is mid-reshard and already part of the slot map,
@@ -578,8 +589,35 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 	return nodes
 }
 
-// Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
+// clientCertRefusedErrors are the client-visible spellings of a TLS server
+// refusing the handshake because the client presented no certificate. Under
+// TLS 1.3 the server sends the certificate_required alert and the client
+// surfaces "certificate required"; the alert does not exist in TLS 1.2, so
+// a server enforcing clientAuth.mode: Required on a tls-protocols: TLSv1.2
+// port instead surfaces as a generic "handshake failure". Both spellings
+// mean the same pod state during a clientAuth roll, so both arm the retry.
+var clientCertRefusedErrors = []string{"certificate required", "handshake failure"}
+
+// ClientCertificateRefused reports whether err is a dial refusal caused by
+// the server demanding a client certificate the configuration did not
+// present -- the posture of a pod still enforcing clientAuth.mode:
+// Required from before a clientAuth roll. It matches the TLS 1.3
+// "certificate required" alert and the TLS 1.2 "handshake failure" form.
+func ClientCertificateRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, clientCertRefusedErrors[0]) || strings.Contains(msg, clientCertRefusedErrors[1])
+}
+
+// Connect to a single Valkey node and scrapes its current state. When the
+// TLS handshake is refused because the node still demands a client
+// certificate -- a node still enforcing clientAuth.mode: Required from
+// before a clientAuth roll -- the dial is retried once with
+// clientCertFallback, which presents the node's server certificate.
+// clientCertFallback may be nil, disabling the retry.
+func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config, clientCertFallback *tls.Config) *NodeState {
 	log := logf.FromContext(ctx)
 
 	opt := vclient.ClientOption{
@@ -601,18 +639,28 @@ func getNodeState(ctx context.Context, address string, port int, username string
 	}
 	client, err := vclient.NewClient(opt)
 	if err != nil {
-		if !strings.Contains(err.Error(), "WRONGPASS") {
+		if clientCertFallback != nil && ClientCertificateRefused(err) {
+			// The node has not been rolled yet and still demands a client
+			// certificate; retry presenting the server certificate.
+			log.Info("node still requires a client certificate, retrying with one",
+				"address", address)
+			opt.TLSConfig = clientCertFallback
+			client, err = vclient.NewClient(opt)
+		}
+		if err != nil && !strings.Contains(err.Error(), "WRONGPASS") {
 			log.Error(err, "failed to create Valkey client")
 			return nil
 		}
-		// fallback to unauthenticated
-		log.Info("fall back to unauthenticated default user on WRONGPASS error")
-		opt.Username = ""
-		opt.Password = ""
-		client, err = vclient.NewClient(opt)
 		if err != nil {
-			log.Error(err, "failed to create Valkey client")
-			return nil
+			// fallback to unauthenticated
+			log.Info("fall back to unauthenticated default user on WRONGPASS error")
+			opt.Username = ""
+			opt.Password = ""
+			client, err = vclient.NewClient(opt)
+			if err != nil {
+				log.Error(err, "failed to create Valkey client")
+				return nil
+			}
 		}
 	}
 

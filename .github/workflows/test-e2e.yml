@@ -8,7 +8,17 @@ on:
 
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    # The backup specs run in a job of their own, so their time does not
+    # count against the main suite's go test timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - labels: '!Backup'
+            suffix: ''
+          - labels: 'Backup'
+            suffix: ' (Backup)'
+    name: Run on Ubuntu${{ matrix.suffix }}
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -29,7 +39,7 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-${{ github.sha }}
+          key: go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-${{ github.sha }}${{ matrix.labels == 'Backup' && '-backup' || '' }}
           restore-keys: |
             go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-
             go-build-e2e-${{ runner.os }}-
@@ -44,4 +54,4 @@ jobs:
         run: kind version
 
       - name: Running Test e2e
-        run: make test-e2e
+        run: make test-e2e TEST_LABELS='${{ matrix.labels }}'

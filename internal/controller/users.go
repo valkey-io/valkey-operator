@@ -97,6 +97,16 @@ var (
 var (
 	errUnknownSystemUser = errors.New("unknown system user")
 	errMissingSystemUser = errors.New("missing system user")
+
+	// errSystemPasswordSecretMissing marks a regenerate-on-live-cluster
+	// refusal: the system passwords Secret is gone (or lacks _operator /
+	// _replication) on a cluster whose nodes already run the old passwords.
+	// Regenerating would push a new aclfile the running servers cannot load
+	// (the operator authenticates with the new _operator password while the
+	// nodes still hold the old hash), locking the operator out of every node
+	// until each pod restarts. The caller must surface this as a condition
+	// and stop, not regenerate.
+	errSystemPasswordSecretMissing = errors.New("system password secret missing on a running cluster")
 )
 
 func getInternalSecretName(clusterName string) string {
@@ -389,6 +399,42 @@ func generatePassword(length int) ([]byte, error) {
 	return ret, nil
 }
 
+// systemPasswordKeysNeedingGeneration lists the system user keys the Secret
+// still lacks and whose regeneration would lock a running cluster out. The
+// _operator and _replication passwords are baked into the live servers'
+// ACLs, so regenerating them against running nodes bricks the operator's own
+// authentication. The _exporter key is excluded: it rides the pod environment
+// through a secretKeyRef, and enabling the exporter rolls the pods, which
+// adopt the regenerated key together with the new ACL (and a cluster with the
+// exporter disabled never carries the key, so it must not count as missing).
+func systemPasswordKeysNeedingGeneration(secret *corev1.Secret) []string {
+	var missing []string
+	for _, user := range systemUsers {
+		if user == exporterUser {
+			continue
+		}
+		if _, ok := secret.Data[user]; ok {
+			continue
+		}
+		missing = append(missing, user)
+	}
+	return missing
+}
+
+// clusterHasRunningNodes reports whether the cluster owns at least one
+// ValkeyNode. A node's server runs the aclfile the operator last wrote, so
+// presence of any node means a regenerated system password cannot be adopted
+// without a restart.
+func clusterHasRunningNodes(ctx context.Context, c client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := c.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+		// A list failure is not proof of a fresh cluster; treat it as
+		// running so the guard fails closed.
+		return true
+	}
+	return len(nodes.Items) > 0
+}
+
 // validateSystemUserPasswordSecret verifies that the system user password secret
 // contains exactly the expected system user entries. It rejects any unknown users
 // and ensures all required system users are present.
@@ -446,6 +492,28 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			return systemUsersSecret, err
 		}
 		createSecret = true
+	}
+
+	// Refuse to regenerate _operator or _replication on a cluster whose
+	// nodes already run: their running servers hold ACLs built from the old
+	// passwords, and a regenerated Secret feeds the operator and the new
+	// aclfile a password those servers reject (WRONGPASS on every call,
+	// replicas unable to AUTH to their primary after a restart). Until the
+	// Secret is restored the cluster must surface the loss instead of
+	// silently locking the operator out (gh-506).
+	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret)
+	if len(missing) > 0 && clusterHasRunningNodes(ctx, r.Client, cluster) {
+		names := make([]string, 0, len(missing))
+		for _, user := range missing {
+			names = append(names, user)
+		}
+		err := fmt.Errorf(
+			"%w: %s is missing %s; restore the Secret or restart every pod to adopt new passwords",
+			errSystemPasswordSecretMissing, secretName, strings.Join(names, ", "))
+		log.Error(err, "refusing to regenerate system user passwords on a running cluster")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
+			"%s is missing %s on a running cluster; restore the Secret, or restart every pod to adopt new passwords", secretName, strings.Join(names, ", "))
+		return nil, err
 	}
 
 	for _, user := range systemUsers {

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -175,4 +176,66 @@ func TestClusterHasRunningNodesFailsClosed(t *testing.T) {
 
 	fresh := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "none", Namespace: "ns"}}
 	require.False(t, clusterHasRunningNodes(context.Background(), r.Client, fresh), "a cluster with no ValkeyNodes is fresh")
+}
+
+// TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns pins the live-sidecar
+// half of the guard: once a node actually runs the exporter sidecar, its
+// environment holds the _exporter password read at pod start and a
+// regenerated key would reach the servers' ACL without any pod roll (Secret
+// data is not part of WorkloadRevision), breaking the exporter's
+// authentication. The key must be refused until the Secret is restored.
+func TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	delete(secret.Data, exporterUser)
+	node := systemPasswordNode(cluster, "h1-0-0")
+	enabled := true
+	node.Spec.Exporter.Enabled = &enabled
+	objs = append(objs, node)
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "_exporter")
+
+	// The Secret must be untouched: no partial regeneration may replace the
+	// keys the running nodes still accept.
+	stored := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
+	require.Equal(t, []byte("op-old"), stored.Data[operatorUser], "the operator password must not change")
+	require.Empty(t, stored.Data[exporterUser], "the exporter key must not be regenerated while the sidecar runs")
+
+	recorder := r.Recorder.(*events.FakeRecorder)
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, "SystemPasswordSecretMissing")
+		require.Contains(t, e, "_exporter")
+	default:
+		t.Fatal("expected a SystemPasswordSecretMissing warning event")
+	}
+}
+
+// listErrorClient fails every List call, pinning the fail-closed path: an
+// operator that cannot check whether nodes exist must not regenerate.
+type listErrorClient struct {
+	client.Client
+}
+
+func (listErrorClient) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	return fmt.Errorf("list nodes: api unavailable")
+}
+
+// TestClusterHasRunningNodesFailsOnListError pins the list-error branch of
+// the node check: a failed List must read as running so the guard fails
+// closed, and upsertSystemUsersPasswordSecret must refuse to regenerate.
+func TestClusterHasRunningNodesFailsOnListError(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	r, _ := systemPasswordReconciler(t, objs)
+	r.Client = listErrorClient{Client: r.Client}
+
+	require.True(t, clusterHasRunningNodes(context.Background(), r.Client, cluster), "a failed node list must read as running")
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "the upsert must refuse to regenerate when the node list cannot be read")
 }

@@ -1790,9 +1790,12 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 // cannot resolve (shardIndexFromState returns -1) is classified: true drains
 // it (the count-based pass - an unresolvable shard may be one of the excess,
 // and emptying it before deleteExcessValkeyNodes runs is what keeps a
-// still-owning pod alive), false keeps it as a drain destination (the
+// still-owning pod alive), false classifies it into neither bucket (the
 // label-based pass - an unresolved index is not provably outside the spec,
-// and migrating an in-spec shard's slots away for nothing is pure churn).
+// so its slots must not be churned, and it is not provably in spec either,
+// so it must not be offered as a drain destination: deleteExcessValkeyNodes
+// goes by the ValkeyNode labels, which can place that shard's node outside
+// the spec and delete it after a migration onto it, losing the moved slots).
 // Returns true if any work was done (caller should requeue).
 func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, drainUnresolved bool) (bool, error) {
 	log := logf.FromContext(ctx)
@@ -1803,7 +1806,10 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		shardIndex := shardIndexFromState(shard, nodes)
 		switch {
 		case shardIndex < 0 && !drainUnresolved:
-			remaining = append(remaining, shard)
+			// Not provably excess (its slots must not be churned) and not
+			// provably in spec (unsafe as a drain destination - see the
+			// drainUnresolved comment above).
+			continue
 		case shardIndex >= 0 && shardIndex < expectedShards:
 			remaining = append(remaining, shard)
 		default:
@@ -1851,11 +1857,18 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return true, nil
 	}
 
-	// All draining shards have 0 slots — delete their ValkeyNodes.
+	// All draining shards have 0 slots — delete their ValkeyNodes. The
+	// zero-slot state is verified per shard rather than inferred from
+	// PlanDrainMove's nil: that nil also covers an empty destination list,
+	// which must not fall through to deleting a shard that still owns
+	// slots.
 	for _, shard := range draining {
 		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex < 0 {
 			continue
+		}
+		if n := shardSlotCount(shard); n > 0 {
+			return false, fmt.Errorf("draining shard %s still owns %d slots; refusing to delete its ValkeyNodes", shard.Id, n)
 		}
 		nodesPerShard := 1 + int(cluster.Spec.Replicas)
 		for nodeIndex := range nodesPerShard {
@@ -1912,6 +1925,15 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 		}
 	}
 	return deleted, nil
+}
+
+// shardSlotCount counts the hash slots a shard's state still owns.
+func shardSlotCount(shard *valkey.ShardState) int {
+	count := 0
+	for _, r := range shard.Slots {
+		count += r.End - r.Start + 1
+	}
+	return count
 }
 
 // shardIndexFromState determines the shard index for a given Valkey Cluster

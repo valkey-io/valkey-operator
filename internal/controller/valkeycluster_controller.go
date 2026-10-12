@@ -96,9 +96,6 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, cluste
 // spec. The pipeline runs in the following order:
 //
 //   - Ensure the headless Service exists (upsertService).
-//   - Reject per-node Service names that exceed 63 characters when
-//     networking.nodeService is set. The ValkeyNode controller creates those
-//     Services after the flag is copied onto each node.
 //   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
@@ -152,12 +149,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
-	}
-
-	if err := validateClusterNodeServiceNames(cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
@@ -1096,7 +1087,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,
-			NodeService:                   nodeServiceFromCluster(cluster),
+			Service:                       nodeServiceFromCluster(cluster),
 		},
 	}
 }
@@ -1104,11 +1095,11 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 // nodeServiceFromCluster copies the cluster opt-in onto the node.
 // Nil clears it. The cluster writes one node spec per reconcile, so turning
 // the field off removes Services one node at a time.
-func nodeServiceFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.NodeServiceSpec {
-	if !cluster.NodeServiceEnabled() {
+func nodeServiceFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.ValkeyNodeServiceSpec {
+	if !cluster.PerNodeServicesEnabled() {
 		return nil
 	}
-	return &valkeyiov1alpha1.NodeServiceSpec{}
+	return &valkeyiov1alpha1.ValkeyNodeServiceSpec{}
 }
 
 func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {

@@ -19,10 +19,10 @@ package controller
 import (
 	"context"
 	"strings"
-	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -109,7 +111,7 @@ var _ = Describe("per-node Services", func() {
 		Expect(svc.ResourceVersion).To(Equal(created))
 	})
 
-	It("deletes the Service when NodeService is cleared", func() {
+	It("deletes the Service when Service is cleared", func() {
 		node := newServiceNode("clear-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
@@ -117,7 +119,7 @@ var _ = Describe("per-node Services", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
 		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
 
-		stored.Spec.NodeService = nil
+		stored.Spec.Service = nil
 		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
 		err := k8sClient.Get(ctx, types.NamespacedName{
 			Name:      valkeyNodeResourceName(stored),
@@ -152,8 +154,45 @@ var _ = Describe("per-node Services", func() {
 		Expect(got.OwnerReferences).To(BeEmpty())
 	})
 
-	It("does not adopt a Service it does not own", func() {
+	It("does not adopt a Service owned by another ValkeyNode", func() {
 		node := newServiceNode("adopt-0-0")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+
+		other := newServiceNode("adopt-other-0-0")
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, other) }()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other)).To(Succeed())
+
+		taken := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      valkeyNodeResourceName(stored),
+				Namespace: stored.Namespace,
+				Labels:    valkeyNodeLabels(other),
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "mine"},
+				Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort, TargetPort: intstr.FromInt32(DefaultPort)}},
+			},
+		}
+		Expect(controllerutil.SetControllerReference(other, taken, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, taken)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, taken) }()
+
+		r.Client = cachedServiceClient{k8sClient}
+		err := r.ensureNodeService(ctx, stored)
+		Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(taken), got)).To(Succeed())
+		Expect(got.OwnerReferences).To(HaveLen(1))
+		Expect(got.OwnerReferences[0].Name).To(Equal(other.Name))
+		Expect(got.Spec.Selector).To(Equal(map[string]string{"app": "mine"}))
+	})
+
+	It("reports a user Service that the cache cannot see", func() {
+		node := newServiceNode("user-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, node) }()
 		stored := &valkeyiov1alpha1.ValkeyNode{}
@@ -172,25 +211,30 @@ var _ = Describe("per-node Services", func() {
 		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, foreign) }()
 
+		r.Client = cachedServiceClient{k8sClient}
 		err := r.ensureNodeService(ctx, stored)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
 		got := &corev1.Service{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
 		Expect(got.OwnerReferences).To(BeEmpty())
 		Expect(got.Spec.Selector).To(Equal(map[string]string{"app": "mine"}))
 	})
 
-	It("ignores a long name when NodeService is unset", func() {
-		node := newBareNode(strings.Repeat("b", 57))
+	It("reconciles the Deployment for a long name when Service is unset", func() {
+		node := newBareNode(strings.Repeat("d", 57))
+		node.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		key := types.NamespacedName{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
+		defer func() {
+			_ = k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}})
+			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(node.Name), Namespace: node.Namespace}})
+			_ = k8sClient.Delete(ctx, node)
+		}()
 
-		Expect(r.ensureNodeService(ctx, node)).To(Succeed())
-		err := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      valkeyNodeResourceName(node),
-			Namespace: node.Namespace,
-		}, &corev1.Service{})
-		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(node)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, &appsv1.Deployment{})).To(Succeed())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &corev1.Service{}))).To(BeTrue())
 	})
 
 	It("creates a per-node Service when another cluster only shares the name", func() {
@@ -289,38 +333,9 @@ var _ = Describe("per-node Services", func() {
 	})
 })
 
-func TestNodeServiceNameLimit(t *testing.T) {
-	if err := validateNodeServiceName(strings.Repeat("a", 52), 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	long := strings.Repeat("a", 53)
-	err := validateNodeServiceName(long, 0, 0)
-	if err == nil {
-		t.Fatal("expected a name length error")
-	}
-	if !strings.Contains(err.Error(), long) || !strings.Contains(err.Error(), "63") {
-		t.Fatalf("error %q should name the cluster and the 63 character limit", err)
-	}
-}
-
-func TestValidateClusterNodeServiceNames(t *testing.T) {
-	off := &valkeyiov1alpha1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 53)},
-		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
-	}
-	if err := validateClusterNodeServiceNames(off); err != nil {
-		t.Fatal(err)
-	}
-	on := off.DeepCopy()
-	on.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{NodeService: &valkeyiov1alpha1.NodeServiceSpec{}}
-	if err := validateClusterNodeServiceNames(on); err == nil {
-		t.Fatal("expected a name length error")
-	}
-}
-
 func newServiceNode(name string) *valkeyiov1alpha1.ValkeyNode {
 	node := newBareNode(name)
-	node.Spec.NodeService = &valkeyiov1alpha1.NodeServiceSpec{}
+	node.Spec.Service = &valkeyiov1alpha1.ValkeyNodeServiceSpec{}
 	return node
 }
 
@@ -336,4 +351,20 @@ func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
 			},
 		},
 	}
+}
+
+// cachedServiceClient returns NotFound for a Service without the operator
+// managed-by label, the same as the manager cache.
+type cachedServiceClient struct {
+	client.Client
+}
+
+func (c cachedServiceClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if _, ok := obj.(*corev1.Service); ok && obj.GetLabels()["app.kubernetes.io/managed-by"] != "valkey-operator" {
+		return apierrors.NewNotFound(corev1.Resource("services"), key.Name)
+	}
+	return nil
 }

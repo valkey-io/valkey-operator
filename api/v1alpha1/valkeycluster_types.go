@@ -436,15 +436,15 @@ type NetworkingSpec struct {
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
 
-	// NodeService opts in to one ClusterIP Service per node.
+	// PerNodeServices opts in to one ClusterIP Service per node.
 	// Omit it to create none. Each Service selects that one pod.
 	// Announce settings are unchanged.
 	// +optional
-	NodeService *NodeServiceSpec `json:"nodeService,omitempty"`
+	PerNodeServices *PerNodeServicesSpec `json:"perNodeServices,omitempty"`
 }
 
-// NodeServiceSpec is empty. Presence turns per-node Services on.
-type NodeServiceSpec struct{}
+// PerNodeServicesSpec is empty. Presence turns per-node Services on.
+type PerNodeServicesSpec struct{}
 
 // DiscoverySpec configures how nodes announce themselves for in-cluster clients.
 type DiscoverySpec struct {
@@ -612,9 +612,9 @@ func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
 	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
 }
 
-// NodeServiceEnabled reports whether per-node ClusterIP Services are requested.
-func (c *ValkeyCluster) NodeServiceEnabled() bool {
-	return c != nil && c.Spec.Networking != nil && c.Spec.Networking.NodeService != nil
+// PerNodeServicesEnabled reports whether per-node ClusterIP Services are requested.
+func (c *ValkeyCluster) PerNodeServicesEnabled() bool {
+	return c != nil && c.Spec.Networking != nil && c.Spec.Networking.PerNodeServices != nil
 }
 
 // CertificateSource references a certificate and its private key. Today the
@@ -758,6 +758,9 @@ const (
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+//
+// perNodeServices: Service names must not exceed 63 characters.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="per-node Service names would exceed 63 characters; shorten the cluster name"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

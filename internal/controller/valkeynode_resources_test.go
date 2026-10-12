@@ -341,7 +341,7 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		assert.Empty(t, n.Spec.PreferredEndpointType)
 		assert.Equal(t, valkeyv1.DefaultClusterDomain, n.Spec.ClusterDomain)
 		assert.Equal(t, "c", n.Labels[LabelCluster])
-		assert.Nil(t, n.Spec.NodeService)
+		assert.Nil(t, n.Spec.Service)
 	})
 
 	t.Run("IP with custom ClusterDomain still sets ClusterDomain", func(t *testing.T) {
@@ -363,14 +363,14 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		n := buildClusterValkeyNode(c, 0, 0)
 		assert.Equal(t, valkeyv1.PreferredEndpointTypeHostname, n.Spec.PreferredEndpointType)
 		assert.Equal(t, "example.local", n.Spec.ClusterDomain)
-		assert.Nil(t, n.Spec.NodeService)
+		assert.Nil(t, n.Spec.Service)
 	})
 
-	t.Run("nodeService is copied onto the node", func(t *testing.T) {
+	t.Run("perNodeServices is copied onto the node", func(t *testing.T) {
 		c := base.DeepCopy()
-		c.Spec.Networking = &valkeyv1.NetworkingSpec{NodeService: &valkeyv1.NodeServiceSpec{}}
+		c.Spec.Networking = &valkeyv1.NetworkingSpec{PerNodeServices: &valkeyv1.PerNodeServicesSpec{}}
 		n := buildClusterValkeyNode(c, 1, 2)
-		assert.NotNil(t, n.Spec.NodeService)
+		assert.NotNil(t, n.Spec.Service)
 		assert.Equal(t, "valkey-c-1-2", nodeServiceName(c.Name, 1, 2))
 	})
 }

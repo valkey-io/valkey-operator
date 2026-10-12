@@ -35,7 +35,10 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ValkeyCluster is the Schema for the valkeyclusters API
+        description: |-
+          ValkeyCluster is the Schema for the valkeyclusters API
+
+          perNodeServices: Service names must not exceed 63 characters.
         properties:
           apiVersion:
             description: |-
@@ -1916,9 +1919,9 @@ spec:
                         - Hostname
                         type: string
                     type: object
-                  nodeService:
+                  perNodeServices:
                     description: |-
-                      NodeService opts in to one ClusterIP Service per node.
+                      PerNodeServices opts in to one ClusterIP Service per node.
                       Omit it to create none. Each Service selects that one pod.
                       Announce settings are unchanged.
                     type: object
@@ -4069,6 +4072,12 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: per-node Service names would exceed 63 characters; shorten the
+            cluster name
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.perNodeServices)
+            || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) +
+            size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63'
     served: true
     storage: true
     subresources:

@@ -206,10 +206,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureNodeService(ctx, node); err != nil {
-		r.setReadyCondition(ctx, node, "ServiceError", err.Error())
-		return ctrl.Result{}, err
-	}
+	// A Service error must not block the workload. updateStatus reports it
+	// as Ready=False, so the cluster stops copying spec to later nodes.
+	serviceErr := r.ensureNodeService(ctx, node)
 
 	if err := r.ensureWorkload(ctx, node); err != nil {
 		if errors.Is(err, errTransientRequeue) {
@@ -226,9 +225,12 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	roleResolveFailed, err := r.updateStatus(ctx, node)
+	roleResolveFailed, err := r.updateStatus(ctx, node, serviceErr)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if serviceErr != nil {
+		return ctrl.Result{}, serviceErr
 	}
 
 	// Re-read after ensureWorkload may have written WorkloadRollPending status.
@@ -804,7 +806,7 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 }
 
 // updateStatus updates the ValkeyNode status based on workload and Pod state.
-func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (roleResolveFailed bool, err error) {
+func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, serviceErr error) (roleResolveFailed bool, err error) {
 	log := logf.FromContext(ctx)
 
 	current := &valkeyiov1alpha1.ValkeyNode{}
@@ -930,6 +932,17 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				ObservedGeneration: current.Generation,
 			})
 		}
+	}
+
+	if serviceErr != nil {
+		current.Status.Ready = false
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "ServiceError",
+			Message:            serviceErr.Error(),
+			ObservedGeneration: current.Generation,
+		})
 	}
 
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {

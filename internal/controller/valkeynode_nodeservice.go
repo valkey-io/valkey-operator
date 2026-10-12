@@ -34,40 +34,13 @@ func nodeServiceName(clusterName string, shardIndex, nodeIndex int) string {
 	return resourcePrefix + valkeyNodeName(clusterName, shardIndex, nodeIndex)
 }
 
-// validateNodeServiceName rejects a name Kubernetes will not accept.
-// A Service name is a DNS-1123 label, at most 63 characters.
-func validateNodeServiceName(clusterName string, shardIndex, nodeIndex int) error {
-	name := nodeServiceName(clusterName, shardIndex, nodeIndex)
-	if len(name) <= validation.DNS1123LabelMaxLength {
-		return nil
-	}
-	return fmt.Errorf("per-node Service name %q is %d characters; the limit is %d. Shorten cluster name %q", name, len(name), validation.DNS1123LabelMaxLength, clusterName)
-}
-
-// validateClusterNodeServiceNames checks every node name before the cluster
-// controller copies the opt-in onto ValkeyNodes.
-func validateClusterNodeServiceNames(cluster *valkeyiov1alpha1.ValkeyCluster) error {
-	if !cluster.NodeServiceEnabled() {
-		return nil
-	}
-	nodesPerShard := 1 + int(cluster.Spec.Replicas)
-	for shardIndex := range int(cluster.Spec.Shards) {
-		for nodeIndex := range nodesPerShard {
-			if err := validateNodeServiceName(cluster.Name, shardIndex, nodeIndex); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // ensureNodeService creates or deletes this node's ClusterIP Service.
 // The ValkeyNode owns the Service, so scale-in removes it with the node.
-// A nil spec.NodeService deletes the Service this node owns.
+// A nil spec.Service deletes the Service this node owns.
 // The 63 character limit applies only when the field is set.
 func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	name := valkeyNodeResourceName(node)
-	if node.Spec.NodeService == nil {
+	if node.Spec.Service == nil {
 		if len(name) > validation.DNS1123LabelMaxLength {
 			return nil
 		}
@@ -83,9 +56,12 @@ func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valk
 			Namespace: node.Namespace,
 		},
 	}
+	notOwned := fmt.Errorf("service %s/%s exists and is not owned by ValkeyNode %s", svc.Namespace, svc.Name, node.Name)
+	// The cache holds only Services with the operator managed-by label. A
+	// user Service is not in it, so Create returns AlreadyExists for it.
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		if svc.UID != "" && !metav1.IsControlledBy(svc, node) {
-			return fmt.Errorf("service %s/%s exists and is not owned by ValkeyNode %s", svc.Namespace, svc.Name, node.Name)
+			return notOwned
 		}
 		svc.Labels = valkeyNodeLabels(node)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
@@ -100,6 +76,9 @@ func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valk
 		}}
 		return controllerutil.SetControllerReference(node, svc, r.Scheme)
 	})
+	if apierrors.IsAlreadyExists(err) {
+		err = notOwned
+	}
 	if err != nil {
 		r.Recorder.Eventf(node, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert per-node Service: %v", err)
 		return err

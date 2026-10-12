@@ -250,6 +250,44 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 		})
 
+		It("should reconcile the StatefulSet and set Ready=false when the Service name is taken", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:      &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+			})
+			foreign := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": "mine"},
+					Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+
+			Expect(k8sClient.Get(ctx, statefulSetName, &appsv1.StatefulSet{})).To(Succeed())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal("ServiceError"))
+
+			got := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
+			Expect(got.OwnerReferences).To(BeEmpty())
+		})
+
 		It("should surface pending PVC status before the pod is ready when persistence is enabled", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
@@ -1233,7 +1271,7 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 	})
 
 	It("should set Ready=false with PodNotReady condition when no pod exists", func() {
-		_, err := r.updateStatus(ctx, node)
+		_, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
@@ -1248,7 +1286,7 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 
 	It("should not write status when nothing has changed between calls", func() {
 		By("calling updateStatus to establish baseline status")
-		_, err := r.updateStatus(ctx, node)
+		_, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
@@ -1256,7 +1294,7 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 		rvAfterFirst := updated.ResourceVersion
 
 		By("calling updateStatus again with no state change")
-		_, err = r.updateStatus(ctx, node)
+		_, err = r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		updated2 := &valkeyiov1alpha1.ValkeyNode{}
@@ -1345,7 +1383,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 			},
 		}
 
-		failed, err := r.updateStatus(ctx, node)
+		failed, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(failed).To(BeFalse())
 
@@ -1373,7 +1411,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 			},
 		}
 
-		_, err := r.updateStatus(ctx, node)
+		_, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
@@ -1395,14 +1433,14 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 				return RolePrimary
 			},
 		}
-		_, err := r.updateStatus(ctx, node)
+		_, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("resolving empty (transient INFO failure) on the next call")
 		r.resolveRoleFunc = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
 			return ""
 		}
-		failed, err := r.updateStatus(ctx, node)
+		failed, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(failed).To(BeTrue())
 
@@ -1422,7 +1460,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 			Scheme:   k8sClient.Scheme(),
 			Recorder: events.NewFakeRecorder(100),
 		}
-		failed, err := r.updateStatus(ctx, node)
+		failed, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(failed).To(BeFalse())
 

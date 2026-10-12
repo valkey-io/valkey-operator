@@ -161,12 +161,15 @@ type ValkeyNodeSpec struct {
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
 
-	// NodeService is set by the ValkeyCluster controller from
-	// spec.networking.nodeService. When set, this node has one ClusterIP
+	// Service is set by the ValkeyCluster controller from
+	// spec.networking.perNodeServices. When set, this node has one ClusterIP
 	// Service. Empty means no Service.
 	// +optional
-	NodeService *NodeServiceSpec `json:"nodeService,omitempty"`
+	Service *ValkeyNodeServiceSpec `json:"service,omitempty"`
 }
+
+// ValkeyNodeServiceSpec is empty. Presence turns the node's ClusterIP Service on.
+type ValkeyNodeServiceSpec struct{}
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
 // ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this

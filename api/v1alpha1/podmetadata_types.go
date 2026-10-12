@@ -25,7 +25,8 @@ type LabelValue string
 // PodMetadata holds labels and annotations added to Valkey pods. The key and
 // value rules mirror the API server's pod metadata checks, using self.matches()
 // because Kubernetes 1.31 has no CEL format library. MaxProperties only bounds
-// the CEL cost estimate.
+// the CEL cost estimate. Annotation sizes are counted in characters, not bytes:
+// size(bytes()) exceeds the CEL cost budget unless values and counts are capped.
 type PodMetadata struct {
 	// Labels added to the pods.
 	// +kubebuilder:validation:MaxProperties=1024

@@ -33,8 +33,10 @@ type PodMetadata struct {
 	// +optional
 	Labels map[string]LabelValue `json:"labels,omitempty"`
 
-	// Annotations added to the pods. Values are not restricted.
+	// Annotations added to the pods. Values have no format rule, but keys and
+	// values together are limited to 256 KiB, as on any Kubernetes object.
 	// +kubebuilder:validation:MaxProperties=1024
+	// +kubebuilder:validation:XValidation:rule="self.map(k, size(k) + size(self[k])).sum() <= 262144",message="annotations must total at most 256 KiB (keys plus values)"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$') && (!k.contains('/') || k.indexOf('/') <= 253))",message="annotation keys must be an optional DNS subdomain prefix (at most 253 characters) and '/', followed by a name of at most 63 alphanumerics, '-', '_' or '.', starting and ending with an alphanumeric"
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`

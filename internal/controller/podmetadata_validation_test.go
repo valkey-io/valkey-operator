@@ -141,4 +141,15 @@ var _ = Describe("podMetadata CEL validation", func() {
 			}},
 			true, "")
 	})
+
+	for _, total := range []int{apivalidation.TotalAnnotationSizeLimitB, apivalidation.TotalAnnotationSizeLimitB + 1} {
+		annotations := map[string]string{"example.com/a": "x"}
+		annotations["example.com/b"] = strings.Repeat("x", total-len("example.com/a")-len("x")-len("example.com/b"))
+		accepted := len(apivalidation.ValidateAnnotations(annotations, field.NewPath("annotations"))) == 0
+		It(fmt.Sprintf("annotations totalling %d bytes: accepted=%t, like the API server", total, accepted), func() {
+			expectAdmission(fmt.Sprintf("pm-as-%d", total),
+				&valkeyiov1alpha1.PodMetadata{Annotations: annotations},
+				accepted, "annotations must total at most 256 KiB")
+		})
+	}
 })

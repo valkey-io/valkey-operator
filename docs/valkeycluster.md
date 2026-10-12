@@ -178,7 +178,7 @@ podMetadata:
 
 Labels and annotations the operator sets itself (`app.kubernetes.io/*` and `valkey.io/*`) take precedence over entries with the same key.
 
-Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values are not restricted. Each map holds at most 1024 entries.
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB, as on any Kubernetes object. Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 

@@ -2045,10 +2045,14 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: Annotations added to the pods. Values are not restricted.
+                    description: |-
+                      Annotations added to the pods. Values have no format rule, but keys and
+                      values together are limited to 256 KiB, as on any Kubernetes object.
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
+                    - message: annotations must total at most 256 KiB (keys plus values)
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262144
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending

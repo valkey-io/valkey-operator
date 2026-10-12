@@ -412,8 +412,9 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 }
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
-// template, and therefore the ones that feed the WorkloadRevision roll hash.
-// Only the server-config hash lives here: a config change that is not
+// template, and therefore the ones that feed the WorkloadRevision roll hash:
+// the user's spec.podMetadata.annotations plus the server-config hash. The
+// config hash is needed because a config change that is not
 // live-settable still needs a rolling restart to take effect, and the config
 // itself lives in a ConfigMap whose content changes never alter the pod
 // template. The hash is derived from the node spec (Config minus live-settable
@@ -428,6 +429,9 @@ func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]s
 	annotations := map[string]string{}
 	if node.Spec.ServerConfigMapName != "" {
 		annotations[configHashKey] = nodeServerConfigRollHash(node)
+	}
+	if node.Spec.PodMetadata != nil {
+		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)
 	}
 	return annotations
 }

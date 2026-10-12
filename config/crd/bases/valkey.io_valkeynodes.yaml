@@ -2842,6 +2842,21 @@ spec:
                 required:
                 - size
                 type: object
+              podMetadata:
+                description: PodMetadata adds labels and annotations to the ValkeyNode
+                  pod.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations added to the pods.
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels added to the pods.
+                    type: object
+                type: object
               podSecurityContext:
                 description: |-
                   Override the PodSecurityContext applied to the ValkeyNode pod.

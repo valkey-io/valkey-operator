@@ -195,6 +195,50 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
 		})
 
+		It("applies podMetadata to the pod template and keeps it out of the selector", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				PodMetadata: &valkeyiov1alpha1.PodMetadata{
+					Labels:      map[string]string{"team": "data", LabelCluster: "spoofed"},
+					Annotations: map[string]string{"example.com/owner": "data"},
+				},
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet with the pod metadata")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "data"))
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(LabelCluster, resourceName), "operator labels win over podMetadata")
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue("example.com/owner", "data"))
+			Expect(sts.Spec.Selector.MatchLabels).NotTo(HaveKey("team"))
+			selector := sts.Spec.Selector.DeepCopy()
+
+			By("changing a pod label, which the immutable selector must not follow")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.PodMetadata.Labels["team"] = "platform"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "platform"))
+			Expect(sts.Spec.Selector).To(Equal(selector))
+
+			By("leaving the StatefulSet alone on a no-op reconcile")
+			updatedResourceVersion := sts.ResourceVersion
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(updatedResourceVersion))
+		})
+
 		It("should not update the StatefulSet on reconciles when nothing changed", func() {
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,

@@ -15,6 +15,7 @@
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
+- [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
@@ -162,6 +163,22 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 |---|---|
 | `Cluster` | Operator creates and owns a single cluster-wide PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
+
+### Pod metadata
+
+```yaml
+podMetadata:
+  labels:
+    team: data
+  annotations:
+    example.com/owner: data-platform
+```
+
+`podMetadata` adds labels and annotations to every Valkey pod, for example to select the pods from a `PodMonitor`, a `NetworkPolicy`, or a Service. They are set on each ValkeyNode pod template but kept out of the workload selector, so they can be changed at any time. Changing them rolls all pods.
+
+Labels and annotations the operator sets itself (`app.kubernetes.io/*` and `valkey.io/*`) take precedence over entries with the same key.
+
+The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 
 ### Graceful shutdown
 

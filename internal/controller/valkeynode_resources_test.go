@@ -1456,7 +1456,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			node.Labels = map[string]string{LabelCluster: "mycluster"}
 			node.Spec.WorkloadType = workloadType
 			node.Spec.PodMetadata = &valkeyv1.PodMetadata{
-				Labels: map[string]string{
+				Labels: map[string]valkeyv1.LabelValue{
 					"team":       "data",
 					LabelCluster: "spoofed",
 				},
@@ -1499,7 +1499,7 @@ func TestComputeWorkloadRevision_PodMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, base, empty, "an empty podMetadata must not roll pods")
 
-	node.Spec.PodMetadata.Labels = map[string]string{"team": "data"}
+	node.Spec.PodMetadata.Labels = map[string]valkeyv1.LabelValue{"team": "data"}
 	withLabel, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, base, withLabel, "a pod label change must roll pods")

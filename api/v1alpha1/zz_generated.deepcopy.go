@@ -334,7 +334,7 @@ func (in *PodMetadata) DeepCopyInto(out *PodMetadata) {
 	*out = *in
 	if in.Labels != nil {
 		in, out := &in.Labels, &out.Labels
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]LabelValue, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}

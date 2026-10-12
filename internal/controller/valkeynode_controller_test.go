@@ -199,7 +199,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				PodMetadata: &valkeyiov1alpha1.PodMetadata{
-					Labels:      map[string]string{"team": "data", LabelCluster: "spoofed"},
+					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data", LabelCluster: "spoofed"},
 					Annotations: map[string]string{"example.com/owner": "data"},
 				},
 			})

@@ -2849,13 +2849,34 @@ spec:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: Annotations added to the pods.
+                    description: Annotations added to the pods. Values are not restricted.
+                    maxProperties: 1024
                     type: object
+                    x-kubernetes-validations:
+                    - message: annotation keys must be an optional DNS subdomain prefix
+                        (at most 253 characters) and '/', followed by a name of at
+                        most 63 alphanumerics, '-', '_' or '.', starting and ending
+                        with an alphanumeric
+                      rule: self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
                   labels:
                     additionalProperties:
+                      description: |-
+                        LabelValue is a Kubernetes label value. It is a named type so the CRD schema
+                        can bound its length, which keeps the CEL rules within the cost budget.
+                      maxLength: 63
+                      pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
                       type: string
                     description: Labels added to the pods.
+                    maxProperties: 1024
                     type: object
+                    x-kubernetes-validations:
+                    - message: label keys must be an optional DNS subdomain prefix
+                        (lowercase, at most 253 characters) and '/', followed by a
+                        name of at most 63 alphanumerics, '-', '_' or '.', starting
+                        and ending with an alphanumeric
+                      rule: self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
                 type: object
               podSecurityContext:
                 description: |-

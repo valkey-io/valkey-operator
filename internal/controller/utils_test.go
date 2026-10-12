@@ -439,7 +439,7 @@ func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
 
 func TestBuildClusterValkeyNodePodMetadata(t *testing.T) {
 	podMetadata := &valkeyv1.PodMetadata{
-		Labels:      map[string]string{"team": "data"},
+		Labels:      map[string]valkeyv1.LabelValue{"team": "data"},
 		Annotations: map[string]string{"example.com/scrape": "true"},
 	}
 	cluster := &valkeyv1.ValkeyCluster{

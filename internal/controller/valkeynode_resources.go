@@ -622,7 +622,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 // podTemplateLabels returns a new map so the workload selector never picks up
 // user labels: the selector is immutable after creation.
 func podTemplateLabels(node *valkeyiov1alpha1.ValkeyNode, selectorLabels map[string]string) map[string]string {
-	var user map[string]string
+	var user map[string]valkeyiov1alpha1.LabelValue
 	if node.Spec.PodMetadata != nil {
 		user = node.Spec.PodMetadata.Labels
 	}
@@ -631,9 +631,11 @@ func podTemplateLabels(node *valkeyiov1alpha1.ValkeyNode, selectorLabels map[str
 
 // withUserMetadata returns user entries overlaid by the operator's, so an
 // operator key always wins.
-func withUserMetadata(user, operator map[string]string) map[string]string {
+func withUserMetadata[V ~string](user map[string]V, operator map[string]string) map[string]string {
 	out := make(map[string]string, len(user)+len(operator))
-	maps.Copy(out, user)
+	for k, v := range user {
+		out[k] = string(v)
+	}
 	maps.Copy(out, operator)
 	return out
 }

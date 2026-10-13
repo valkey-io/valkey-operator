@@ -166,3 +166,14 @@ func TestSentinelSetArgs(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestSentinelSetArgsRenameCommand(t *testing.T) {
+	got := sentinelSetArgs("mymaster", map[string]string{
+		"rename-command": "CONFIG c0nf",
+		"quorum":         "2",
+	})
+	want := []string{"SET", "mymaster", "quorum", "2", "rename-command", "CONFIG", "c0nf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

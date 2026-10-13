@@ -169,11 +169,17 @@ func sentinelMonitorArgs(name, host string, port, quorum int) []string {
 }
 
 // sentinelSetArgs returns the arguments of SENTINEL SET, with options sorted
-// by name so the command is deterministic.
+// by name so the command is deterministic. rename-command takes two operands,
+// so its "<old> <new>" value is sent as two arguments.
 func sentinelSetArgs(name string, options map[string]string) []string {
 	args := make([]string, 0, 2+2*len(options))
 	args = append(args, "SET", name)
 	for _, k := range slices.Sorted(maps.Keys(options)) {
+		if k == "rename-command" {
+			args = append(args, k)
+			args = append(args, strings.Fields(options[k])...)
+			continue
+		}
 		args = append(args, k, options[k])
 	}
 	return args

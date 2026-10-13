@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,8 +143,8 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
 	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
 
-	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence)
-	require.Len(t, c.VolumeMounts, 3)
+	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence) + init output
+	require.Len(t, c.VolumeMounts, 4)
 	assert.Equal(t, "scripts", c.VolumeMounts[0].Name)
 	assert.Equal(t, "/scripts", c.VolumeMounts[0].MountPath)
 	assert.Equal(t, "valkey-conf", c.VolumeMounts[1].Name)
@@ -152,9 +153,11 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
 	assert.Equal(t, dataMountPath, c.VolumeMounts[2].MountPath)
 	assert.False(t, c.VolumeMounts[2].ReadOnly, "/data must be writable for nodes.conf")
+	assert.Equal(t, initVolumeName, c.VolumeMounts[3].Name)
+	assert.Equal(t, initMountPath, c.VolumeMounts[3].MountPath)
 
-	// Volumes: scripts + valkey-conf + /data emptyDir
-	require.Len(t, pts.Spec.Volumes, 3)
+	// Volumes: scripts + valkey-conf + /data emptyDir + init output emptyDir
+	require.Len(t, pts.Spec.Volumes, 4)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
@@ -163,6 +166,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
 	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
+	assert.Equal(t, initVolumeName, pts.Spec.Volumes[3].Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {
@@ -193,6 +197,112 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *tes
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
 	assert.False(t, dataMount.ReadOnly)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_InitContainer(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.InitContainers, 1)
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, "init", ic.Name)
+	assert.Equal(t, []string{"/bin/sh", "/scripts/init.sh"}, ic.Command)
+	assert.Equal(t, "valkey/valkey:9.0.0", ic.Image)
+	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
+	assert.Equal(t, corev1.TerminationMessagePathDefault, ic.TerminationMessagePath)
+	assert.Equal(t, corev1.TerminationMessageReadFile, ic.TerminationMessagePolicy)
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "scripts", MountPath: "/scripts"},
+		{Name: "valkey-conf", MountPath: "/config", ReadOnly: true},
+		{Name: initVolumeName, MountPath: initMountPath},
+	}, ic.VolumeMounts)
+
+	var initVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == initVolumeName {
+			initVol = &pts.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, initVol, "init-conf volume must exist")
+	assert.NotNil(t, initVol.EmptyDir, "init-conf should be an emptyDir")
+
+	assert.Contains(t, pts.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: initVolumeName, MountPath: initMountPath},
+		"server container must mount the init container's output directory")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_InitContainerFollowsServerPatches(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+	}
+	securityContext := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+	node.Spec.Containers = []corev1.Container{
+		{Name: "server", Image: "custom-valkey:latest", SecurityContext: securityContext},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.InitContainers, 1)
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, "custom-valkey:latest", ic.Image)
+	assert.Equal(t, corev1.PullAlways, ic.ImagePullPolicy)
+	assert.Equal(t, node.Spec.Resources, ic.Resources, "matching the server keeps the pod's QoS class")
+	assert.Equal(t, securityContext, ic.SecurityContext, "restricted PSA checks init containers too")
+}
+
+func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	dep, err := buildValkeyNodeDeployment(node)
+	require.NoError(t, err)
+	require.Len(t, dep.Spec.Template.Spec.InitContainers, 1)
+	assert.Equal(t, "init", dep.Spec.Template.Spec.InitContainers[0].Name)
+
+	sts, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	require.Len(t, sts.Spec.Template.Spec.InitContainers, 1)
+	assert.Equal(t, "init", sts.Spec.Template.Spec.InitContainers[0].Name)
+}
+
+func TestInitScript(t *testing.T) {
+	out, err := exec.Command("sh", filepath.Join("scripts", "init.sh")).CombinedOutput()
+	require.NoError(t, err, "init.sh must succeed: %s", out)
+}
+
+// TestDockerignoreIncludesScripts guards the image build: .dockerignore
+// excludes everything by default, and a script missing from the build context
+// is missing from the embed FS, so the operator panics at startup.
+func TestDockerignoreIncludesScripts(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", ".dockerignore"))
+	require.NoError(t, err)
+	var includes []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if pattern, ok := strings.CutPrefix(strings.TrimSpace(line), "!"); ok {
+			includes = append(includes, pattern)
+		}
+	}
+
+	entries, err := os.ReadDir("scripts")
+	require.NoError(t, err)
+	for _, e := range entries {
+		path := "internal/controller/scripts/" + e.Name()
+		included := false
+		for _, pattern := range includes {
+			if ok, _ := filepath.Match(pattern, path); ok {
+				included = true
+			}
+		}
+		assert.True(t, included, "%s is embedded but excluded from the image build by .dockerignore", path)
+	}
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -546,6 +656,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
+	assert.Contains(t, cm.Data, "init.sh")
 }
 
 func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
@@ -664,7 +775,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 3)
+	require.Len(t, pts.Spec.Volumes, 4)
 	var dataVol *corev1.Volume
 	for i := range pts.Spec.Volumes {
 		if pts.Spec.Volumes[i].Name == dataVolumeName {
@@ -677,7 +788,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	assert.Equal(t, "valkey-mynode-data", dataVol.PersistentVolumeClaim.ClaimName)
 
 	server := pts.Spec.Containers[0]
-	require.Len(t, server.VolumeMounts, 3)
+	require.Len(t, server.VolumeMounts, 4)
 	var dataMount *corev1.VolumeMount
 	for i := range server.VolumeMounts {
 		if server.VolumeMounts[i].Name == dataVolumeName {
@@ -1019,8 +1130,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir
-	require.Len(t, pts.Spec.Volumes, 4)
+	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir, init output
+	require.Len(t, pts.Spec.Volumes, 5)
 	aclVol := pts.Spec.Volumes[2]
 	assert.Equal(t, "users-acl", aclVol.Name)
 	require.NotNil(t, aclVol.Secret)
@@ -1029,11 +1140,11 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	require.NotNil(t, pts.Spec.Volumes[3].EmptyDir)
 
 	// VolumeMounts on the server container (always Containers[0]):
-	// scripts, valkey-conf, /data, users-acl
+	// scripts, valkey-conf, /data, init output, users-acl
 	c := pts.Spec.Containers[0]
-	require.Len(t, c.VolumeMounts, 4)
+	require.Len(t, c.VolumeMounts, 5)
 	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
-	aclMount := c.VolumeMounts[3]
+	aclMount := c.VolumeMounts[4]
 	assert.Equal(t, "users-acl", aclMount.Name)
 	assert.Equal(t, "/config/users", aclMount.MountPath)
 	assert.True(t, aclMount.ReadOnly)
@@ -1045,8 +1156,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 3, "scripts, valkey-conf, /data emptyDir")
-	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 3, "scripts, valkey-conf, /data")
+	require.Len(t, pts.Spec.Volumes, 4, "scripts, valkey-conf, /data emptyDir, init output")
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 4, "scripts, valkey-conf, /data, init output")
 }
 
 func TestLivenessCheckScript(t *testing.T) {

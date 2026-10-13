@@ -55,7 +55,7 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, plus an empty valkey.conf.
+// and readiness probe scripts, the init container script, plus an empty valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
@@ -65,6 +65,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+	}
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 
 	return &corev1.ConfigMap{
@@ -77,6 +81,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
+			initScriptKey:        string(initScript),
 		},
 	}, nil
 }
@@ -335,12 +340,12 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      "scripts",
-					MountPath: "/scripts",
+					Name:      scriptsVolumeName,
+					MountPath: scriptsMountPath,
 				},
 				{
-					Name:      "valkey-conf",
-					MountPath: "/config",
+					Name:      configVolumeName,
+					MountPath: configMountPath,
 					ReadOnly:  true,
 				},
 			},
@@ -352,6 +357,9 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
 		Name:      dataVolumeName,
 		MountPath: dataMountPath,
+	}, corev1.VolumeMount{
+		Name:      initVolumeName,
+		MountPath: initMountPath,
 	})
 
 	if node.Spec.TLS != nil {
@@ -515,6 +523,30 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 	}
 }
 
+// buildInitContainer returns the init container that runs init.sh from the
+// scripts ConfigMap before the server starts. The script lives in the
+// ConfigMap so changing it never changes the pod template. The container takes
+// the server's image, pull policy, resources and security context after
+// spec.containers patches: matching resources keeps the pod's QoS class, and
+// Pod Security admission checks init containers as well.
+func buildInitContainer(server corev1.Container) corev1.Container {
+	c := []corev1.Container{{
+		Name:            "init",
+		Image:           server.Image,
+		ImagePullPolicy: server.ImagePullPolicy,
+		Command:         []string{shellPath, scriptsMountPath + "/" + initScriptKey},
+		Resources:       *server.Resources.DeepCopy(),
+		SecurityContext: server.SecurityContext.DeepCopy(),
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
+			{Name: configVolumeName, MountPath: configMountPath, ReadOnly: true},
+			{Name: initVolumeName, MountPath: initMountPath},
+		},
+	}}
+	applyContainerAPIDefaults(c)
+	return c[0]
+}
+
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
@@ -531,6 +563,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	podSpec := corev1.PodSpec{
+		InitContainers:                []corev1.Container{buildInitContainer(containers[0])},
 		Containers:                    containers,
 		ImagePullSecrets:              node.Spec.ImagePullSecrets,
 		NodeSelector:                  node.Spec.NodeSelector,
@@ -551,7 +584,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		SchedulerName: corev1.DefaultSchedulerName,
 		Volumes: []corev1.Volume{
 			{
-				Name: "scripts",
+				Name: scriptsVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -562,7 +595,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				},
 			},
 			{
-				Name: "valkey-conf",
+				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -620,7 +653,10 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		}
 	}
-	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
+	podSpec.Volumes = append(podSpec.Volumes, dataVolume, corev1.Volume{
+		Name:         initVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
 
 	// Mirror the remaining API-server defaults (see the comment on the struct
 	// literal above): a nil here is not "unset" once stored, it is a diff.

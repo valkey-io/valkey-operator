@@ -1423,6 +1423,37 @@ var _ = Describe("EventRecorder", func() {
 			Expect(events).To(ContainElement(ContainSubstring("Normal")))
 		})
 
+		It("should ship init.sh in the server configmap, including one created before it existed", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "init-script-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			Expect(r.upsertConfigMap(ctx, cluster)).To(Succeed())
+			cm := &corev1.ConfigMap{}
+			cmKey := types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}
+			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			Expect(cm.Data).To(HaveKey(initScriptKey))
+
+			By("simulating a configmap written by an operator release without init.sh")
+			delete(cm.Data, initScriptKey)
+			cm.Annotations[scriptsHashKey] = "previous-release"
+			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
+
+			Expect(r.upsertConfigMap(ctx, cluster)).To(Succeed())
+			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			Expect(cm.Data).To(HaveKey(initScriptKey))
+			Expect(cm.Annotations).To(HaveKeyWithValue(scriptsHashKey, scriptsHash))
+		})
+
 	})
 
 	Context("When reconciling cluster state", func() {

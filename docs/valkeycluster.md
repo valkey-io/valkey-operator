@@ -117,6 +117,8 @@ and the operator fails over the shard primary on every reconcile while the
 cluster still reports Ready. The same happens for any other field such a
 policy adds to the template.
 
+Each pod also runs an operator-managed init container named `init`, so a sidecar cannot use that name: the pod spec would hold two containers called `init`, and Kubernetes rejects the workload. The init container cannot be patched through `containers`. It takes its image, pull policy, resources and `securityContext` from the patched `server` container.
+
 ### Service account
 
 ```yaml

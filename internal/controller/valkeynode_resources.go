@@ -495,7 +495,7 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 }
 
 // buildInitContainer returns the init container that runs init.sh from the
-// scripts ConfigMap before the server starts. The script lives in the
+// scripts ConfigMap, when present, before the server starts. The script lives in the
 // ConfigMap so changing it never changes the pod template. The container takes
 // the server's image, pull policy, resources and security context after
 // spec.containers patches: matching resources keeps the pod's QoS class, and
@@ -505,7 +505,7 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 		Name:            "init",
 		Image:           server.Image,
 		ImagePullPolicy: server.ImagePullPolicy,
-		Command:         []string{shellPath, scriptsMountPath + "/" + initScriptKey},
+		Command:         initContainerCommand(scriptsMountPath + "/" + initScriptKey),
 		Resources:       *server.Resources.DeepCopy(),
 		SecurityContext: server.SecurityContext.DeepCopy(),
 		VolumeMounts: []corev1.VolumeMount{
@@ -516,6 +516,15 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	}}
 	applyContainerAPIDefaults(c)
 	return c[0]
+}
+
+// initContainerCommand runs script when it exists and exits 0 otherwise. An
+// external ConfigMap (spec.serverConfigMapName on a standalone ValkeyNode)
+// may predate init.sh, and its absence must not block the pod.
+func initContainerCommand(script string) []string {
+	return []string{shellPath, "-c", fmt.Sprintf(
+		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
+		script, shellPath)}
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single

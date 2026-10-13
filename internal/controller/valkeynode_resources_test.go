@@ -208,7 +208,7 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainer(t *testing.T) {
 	require.Len(t, pts.Spec.InitContainers, 1)
 	ic := pts.Spec.InitContainers[0]
 	assert.Equal(t, "init", ic.Name)
-	assert.Equal(t, []string{"/bin/sh", "/scripts/init.sh"}, ic.Command)
+	assert.Equal(t, initContainerCommand("/scripts/init.sh"), ic.Command)
 	assert.Equal(t, "valkey/valkey:9.0.0", ic.Image)
 	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
 	assert.Equal(t, corev1.TerminationMessagePathDefault, ic.TerminationMessagePath)
@@ -271,6 +271,32 @@ func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sts.Spec.Template.Spec.InitContainers, 1)
 	assert.Equal(t, "init", sts.Spec.Template.Spec.InitContainers[0].Name)
+}
+
+// TestInitContainerCommand runs the init container's command against a
+// temporary script path. A ConfigMap without init.sh (an external ConfigMap
+// on a standalone ValkeyNode) must not block the pod.
+func TestInitContainerCommand(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "init.sh")
+	run := func() (string, int) {
+		cmd := initContainerCommand(script)
+		out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return string(out), exitErr.ExitCode()
+		}
+		require.NoError(t, err)
+		return string(out), 0
+	}
+
+	out, code := run()
+	assert.Equal(t, 0, code, "a missing script is skipped")
+	assert.Contains(t, out, "skipping")
+
+	require.NoError(t, os.WriteFile(script, []byte("echo ran\nexit 3\n"), 0o644))
+	out, code = run()
+	assert.Equal(t, 3, code, "a present script runs and its exit code stands")
+	assert.Contains(t, out, "ran")
 }
 
 func TestInitScript(t *testing.T) {

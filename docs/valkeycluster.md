@@ -90,6 +90,8 @@ containers:
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
 
+Each pod also runs an operator-managed init container named `init`, so a sidecar cannot use that name: the pod spec would hold two containers called `init`, and Kubernetes rejects the workload. The init container cannot be patched through `containers`. It takes its image, pull policy, resources and `securityContext` from the patched `server` container.
+
 ### Service account
 
 ```yaml

@@ -124,6 +124,18 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 		}
 		Eventually(verifyROFS).Should(Succeed())
 
+		By("verifying the init container inherits the server's securityContext")
+		verifyInitROFS := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", noPersistClusterName),
+				"-o", "jsonpath={.items[0].spec.initContainers[?(@.name=='init')].securityContext.readOnlyRootFilesystem}",
+				"-n", pssRestrictedNamespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(output)).To(Equal("true"))
+		}
+		Eventually(verifyInitROFS).Should(Succeed())
+
 		By("verifying /data is backed by an emptyDir")
 		verifyEmptyDir := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pod",

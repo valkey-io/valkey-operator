@@ -18,7 +18,6 @@ package valkey
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"slices"
@@ -29,9 +28,18 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DialFunc connects to the Valkey node at address (host:port). On error the
+// client is nil and release is a no-op. The caller calls release once when done
+// with the client and never calls Close on it.
+type DialFunc func(ctx context.Context, address string) (client vclient.Client, release func(), err error)
+
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
-	Client      vclient.Client
+	// Client is for commands only. CloseClients releases it; never call Close
+	// on it directly.
+	Client vclient.Client
+	// release hands Client back to whoever dialled it.
+	release     func()
 	Address     string
 	Port        int
 	Id          string
@@ -127,7 +135,7 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
+func GetClusterState(ctx context.Context, addresses []string, port int, dial DialFunc) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -135,7 +143,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, username, password, tlsCfg)
+		node := getNodeState(ctx, address, port, dial)
 		if node != nil {
 			// Check if node is pending to be added. A primary carrying only a
 			// migration marker is mid-reshard and already part of the slot map,
@@ -171,19 +179,22 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 	return &state
 }
 
-// CloseClients disconnects all valkey-go clients.
+// CloseClients releases every node's client.
 func (s *ClusterState) CloseClients() {
 	for _, node := range s.PendingNodes {
-		if node.Client != nil {
-			node.Client.Close()
-		}
+		node.releaseClient()
 	}
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
-			if node.Client != nil {
-				node.Client.Close()
-			}
+			node.releaseClient()
 		}
+	}
+}
+
+func (n *NodeState) releaseClient() {
+	if n.release != nil {
+		n.release()
+		n.release = nil
 	}
 }
 
@@ -579,44 +590,17 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
 	log := logf.FromContext(ctx)
 
-	opt := vclient.ClientOption{
-		InitAddress:       []string{fmt.Sprintf("%s:%d", address, port)},
-		ForceSingleClient: true, // Don't connect to another cluster node.
-		Username:          username,
-		Password:          password,
-		TLSConfig:         tlsConfig,
-		// valkey-go defaults to data-plane sizes: up to 4 connections per
-		// client, each with 0.5 MiB buffers either way and a 1024-entry ring.
-		// Tuned to this controller's usage: one connection issuing a few
-		// commands with no concurrency, CLUSTER NODES the largest response and
-		// CLUSTER MIGRATESLOTS the largest request. Exceeding a buffer costs a
-		// flush, no error.
-		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
-		ReadBufferEachConn:  16 * 1024,
-		WriteBufferEachConn: 8 * 1024,
-		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
-	}
-	client, err := vclient.NewClient(opt)
+	client, release, err := dial(ctx, fmt.Sprintf("%s:%d", address, port))
 	if err != nil {
-		if !strings.Contains(err.Error(), "WRONGPASS") {
-			log.Error(err, "failed to create Valkey client")
-			return nil
-		}
-		// fallback to unauthenticated
-		log.Info("fall back to unauthenticated default user on WRONGPASS error")
-		opt.Username = ""
-		opt.Password = ""
-		client, err = vclient.NewClient(opt)
-		if err != nil {
-			log.Error(err, "failed to create Valkey client")
-			return nil
-		}
+		log.Error(err, "failed to create Valkey client")
+		return nil
 	}
 
 	node := NodeState{Client: client,
+		release: release,
 		Address: address,
 		Port:    port}
 

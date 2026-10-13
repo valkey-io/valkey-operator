@@ -75,7 +75,7 @@ When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spe
 
 ## Init container
 
-Every ValkeyNode pod runs an `init` container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap and can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
+Every ValkeyNode pod runs an `init` container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap, or logs and exits 0 when the ConfigMap has no `init.sh` (an external ConfigMap set through `serverConfigMapName` may omit it), and can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
 
 The init container copies the server container's image, pull policy, resources and security context after `spec.containers` patches, so the pod keeps its QoS class and passes the same Pod Security admission checks as the server.
 

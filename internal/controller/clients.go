@@ -36,6 +36,38 @@ type connConfig struct {
 	tls      *tls.Config
 	username string
 	password string
+	// clientCertFallback presents the node's own server certificate as a
+	// client certificate. During a clientAuth roll (Required to Optional or
+	// Disabled) pods that have not restarted yet still demand a client
+	// certificate the primary configuration no longer presents; a dial
+	// refused at the handshake is retried once with this configuration so
+	// the roll keeps moving instead of stalling in Reconciling. It is nil
+	// unless clientAuth is Optional or Disabled, and is only ever used for
+	// that retry, keeping the certificateUser ACL posture documented in
+	// docs/mtls.md intact.
+	clientCertFallback *tls.Config
+}
+
+// clientCertRefusedErrors lists the handshake-refusal spellings that arm the
+// clientAuth-roll fallback retry. TLS 1.3 surfaces the server's demand as
+// "certificate required"; the certificate_required alert does not exist in
+// TLS 1.2, so a node enforcing clientAuth.mode: Required on a
+// tls-protocols: TLSv1.2 port instead refuses the dial with a generic
+// "handshake failure". Both spellings mean the same pod state during a
+// clientAuth roll, so both arm the retry.
+var clientCertRefusedErrors = []string{"certificate required", "handshake failure"}
+
+// clientCertificateRefused reports whether err is a dial refusal caused by
+// the server demanding a client certificate the configuration did not
+// present -- the posture of a pod still enforcing clientAuth.mode:
+// Required from before a clientAuth roll. It matches the TLS 1.3
+// "certificate required" alert and the TLS 1.2 "handshake failure" form.
+func clientCertificateRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, clientCertRefusedErrors[0]) || strings.Contains(msg, clientCertRefusedErrors[1])
 }
 
 // dialValkey connects to the Valkey node at address (host:port), retrying once
@@ -60,6 +92,14 @@ func dialValkey(ctx context.Context, newClient func(vclient.ClientOption) (vclie
 		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
 	}
 	c, err := newClient(opt)
+	if err != nil && cfg.clientCertFallback != nil && clientCertificateRefused(err) {
+		// The node has not been rolled yet and still demands a client
+		// certificate; retry presenting the node's own server certificate.
+		logf.FromContext(ctx).Info("node still requires a client certificate, retrying with one",
+			"address", address)
+		opt.TLSConfig = cfg.clientCertFallback
+		c, err = newClient(opt)
+	}
 	if err != nil && strings.Contains(err.Error(), "WRONGPASS") {
 		logf.FromContext(ctx).Info("fall back to unauthenticated default user on WRONGPASS error", "address", address)
 		opt.Username = ""
@@ -102,12 +142,18 @@ type unpooledProvider struct {
 	newClient func(vclient.ClientOption) (vclient.Client, error)
 }
 
-// tlsConfig returns nil when spec names no server certificate secret.
-func (p *unpooledProvider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, error) {
+// tlsConfig returns nil when spec names no server certificate secret. Unless
+// client certificates are required -- the primary configuration already
+// presents one -- it also returns the clientAuth-roll fallback described in
+// docs/mtls.md: a configuration presenting the node's own server certificate,
+// used only to retry dials refused by pods still enforcing the previous
+// clientAuth.mode: Required from before a roll.
+func (p *unpooledProvider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, *tls.Config, error) {
 	if spec == nil || spec.Certificates.Server.SecretName == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return getTLSConfig(ctx, p.apiReader, spec.Certificates.Server.SecretName, spec.ServerName, namespace, spec.RequiresClientCertificate())
+	present := spec.RequiresClientCertificate()
+	return getTLSConfigWithFallback(ctx, p.apiReader, spec.Certificates.Server.SecretName, spec.ServerName, namespace, present, !present)
 }
 
 func (p *unpooledProvider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
@@ -118,7 +164,7 @@ func (p *unpooledProvider) ForCluster(ctx context.Context, cluster *valkeyiov1al
 	cfg := connConfig{username: operatorUser, password: password}
 
 	tlsSpec := nodeTLSFromCluster(cluster)
-	tlsCfg, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
+	tlsCfg, clientCertFallback, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
 	if err != nil {
 		// Fail each dial, not the caller: the cluster reconcile still has
 		// ValkeyNodes to create while the secret is being issued.
@@ -130,6 +176,7 @@ func (p *unpooledProvider) ForCluster(ctx context.Context, cluster *valkeyiov1al
 		}, nil
 	}
 	cfg.tls = tlsCfg
+	cfg.clientCertFallback = clientCertFallback
 
 	return func(ctx context.Context, address string) (vclient.Client, func(), error) {
 		return dialValkey(ctx, p.newClient, address, cfg)
@@ -145,11 +192,14 @@ func (p *unpooledProvider) ForNode(ctx context.Context, node *valkeyiov1alpha1.V
 		tlsSpec = tlsSpec.DeepCopy()
 		tlsSpec.ServerName = nodeTLSServerName(node)
 	}
-	tlsCfg, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
+	tlsCfg, clientCertFallback, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("TLS config: %w", err)
 	}
-	cfg := connConfig{tls: tlsCfg}
+	// Arm the client-cert fallback for the node dial exactly like ForCluster:
+	// during a clientAuth roll, pods that have not restarted yet still demand
+	// a client certificate, and dialValkey retries such refusals once with it.
+	cfg := connConfig{tls: tlsCfg, clientCertFallback: clientCertFallback}
 
 	// A node outside a cluster has no operator user, and a cluster's password
 	// secret does not exist until the cluster controller writes it. Both dial

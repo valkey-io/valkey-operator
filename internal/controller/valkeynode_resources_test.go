@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moby/patternmatcher"
+	"github.com/moby/patternmatcher/ignorefile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -310,25 +312,32 @@ func TestInitScript(t *testing.T) {
 func TestDockerignoreIncludesScripts(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", ".dockerignore"))
 	require.NoError(t, err)
-	var includes []string
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if pattern, ok := strings.CutPrefix(strings.TrimSpace(line), "!"); ok {
-			includes = append(includes, pattern)
-		}
-	}
 
 	entries, err := os.ReadDir("scripts")
 	require.NoError(t, err)
 	for _, e := range entries {
 		path := "internal/controller/scripts/" + e.Name()
-		included := false
-		for _, pattern := range includes {
-			if ok, _ := filepath.Match(pattern, path); ok {
-				included = true
-			}
-		}
-		assert.True(t, included, "%s is embedded but excluded from the image build by .dockerignore", path)
+		assert.True(t, dockerContextIncludes(t, string(data), path),
+			"%s is embedded but excluded from the image build by .dockerignore", path)
 	}
+
+	// A later rule that excludes a script again must be caught: in
+	// .dockerignore the last matching rule wins.
+	reExcluded := string(data) + "\ninternal/controller/scripts/init.sh\n"
+	assert.False(t, dockerContextIncludes(t, reExcluded, "internal/controller/scripts/init.sh"))
+}
+
+// dockerContextIncludes reports whether path survives the .dockerignore rules,
+// using the matcher Docker uses for the build context.
+func dockerContextIncludes(t *testing.T, dockerignore, path string) bool {
+	t.Helper()
+	patterns, err := ignorefile.ReadAll(strings.NewReader(dockerignore))
+	require.NoError(t, err)
+	pm, err := patternmatcher.New(patterns)
+	require.NoError(t, err)
+	excluded, err := pm.MatchesOrParentMatches(path)
+	require.NoError(t, err)
+	return !excluded
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {

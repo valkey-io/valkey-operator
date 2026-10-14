@@ -531,7 +531,7 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 // Pod Security admission checks init containers as well.
 func buildInitContainer(server corev1.Container) corev1.Container {
 	c := []corev1.Container{{
-		Name:            "init",
+		Name:            "server-init",
 		Image:           server.Image,
 		ImagePullPolicy: server.ImagePullPolicy,
 		Command:         initContainerCommand(scriptsMountPath + "/" + initScriptKey),

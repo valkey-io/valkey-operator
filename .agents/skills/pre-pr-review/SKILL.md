@@ -14,7 +14,7 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
    Save `git status --porcelain` to `/tmp/review-<slug>-status.before` and `git diff | sha256sum` to `/tmp/review-<slug>-diff.before`. If the status prints anything, carry on and mark the run dirty: the image builds from the working tree, so uncommitted changes are part of the review.
 
    Derive `<slug>` from the branch name: lowercase it, replace each run of characters outside `a-z0-9` with `-`, trim to 40 characters, strip leading and trailing `-`. `feat/Zone-Pinning` becomes `feat-zone-pinning`. The cluster is `review-<slug>`.
-2. **Understand the change.** Read `git diff <base>` (commits plus uncommitted changes) and `git log <base>..HEAD`. For each issue referenced in the commit messages (`Fixes #n`, `Closes #n`), read it with `gh issue view <n> --repo valkey-io/valkey-operator --comments` when `gh` is installed; otherwise ask the contributor for the issue and its repro steps. Done when you can list (a) every behaviour the diff changes, each with a scenario that exercises it, including one that reproduces the issue's original failure, and (b) the cluster shape those scenarios need: node count, zone labels, cert-manager.
+2. **Understand the change.** Read `git diff <base>` (commits plus uncommitted changes) and `git log <base>..HEAD`. `git diff` leaves out untracked files, which the image still builds from, so also read each file `git ls-files --others --exclude-standard` lists that belongs to the change, and include them in step 4's review. For each issue referenced in the commit messages (`Fixes #n`, `Closes #n`), read it with `gh issue view <n> --repo valkey-io/valkey-operator --comments` when `gh` is installed; otherwise ask the contributor for the issue and its repro steps. Done when you can list (a) every behaviour the diff changes, each with a scenario that exercises it, including one that reproduces the issue's original failure, and (b) the cluster shape those scenarios need: node count, zone labels, cert-manager.
 3. **Fast checks.** Run `make lint test`. Record pass or fail, and the failing output, for the report. Continue to step 4 on failure.
 
    `make test` runs `manifests generate fmt`, so it rewrites files the contributor forgot to regenerate or format. Compare `git status --porcelain` with `/tmp/review-<slug>-status.before` and `git diff | sha256sum` with `/tmp/review-<slug>-diff.before`; the hash catches a rewrite of a file that was already modified, whose status line reads ` M` both times. Run `git diff` on anything that changed. Report these files that make changed as a "fix first" finding: CI's generated-code check fails on them. Repeat this check after step 6.
@@ -30,17 +30,18 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
    Extend the node list when step 2's cluster shape needs more (zone labels, extra workers). The cluster outlives the review.
 
    From here on, every cluster-touching command, `make` and `kubectl` alike, runs with `KUBECONFIG=/tmp/kind-review-<slug>.kubeconfig`. Shell state may not carry between commands, so set it at the top of each block.
-6. **Build and deploy.** `make deploy` rewrites `config/manager/kustomization.yaml`; the copy and restore around it keep the contributor's version, uncommitted edits included.
+6. **Build and deploy.** `make deploy` rewrites `config/manager/kustomization.yaml`; the backup and the `EXIT` trap put back the contributor's version, uncommitted edits included, even when the block fails or is killed. `set -e` stops the block at the first failure, so a failed build never deploys an image left over from an earlier run.
 
    ```sh
+   set -e
    export KUBECONFIG=/tmp/kind-review-<slug>.kubeconfig
    [ "$(kubectl config current-context)" = kind-review-<slug> ] || exit 1
+   cp config/manager/kustomization.yaml /tmp/review-<slug>-kustomization.yaml.bak
+   trap 'cp /tmp/review-<slug>-kustomization.yaml.bak config/manager/kustomization.yaml' EXIT
    make docker-build IMG=valkey-operator:review-<slug>
    kind load docker-image valkey-operator:review-<slug> --name review-<slug>
    make install
-   cp config/manager/kustomization.yaml /tmp/review-<slug>-kustomization.yaml.bak
    make deploy IMG=valkey-operator:review-<slug>
-   cp /tmp/review-<slug>-kustomization.yaml.bak config/manager/kustomization.yaml
    kubectl -n valkey-operator-system rollout status deploy --timeout=180s
    ```
 
@@ -53,15 +54,16 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
 8. **Run the related e2e specs.** Grep `test/e2e/` for the functions, fields, files and resource names the diff touches, and list the `Label(...)` values on the matching `Describe`/`Context`/`It` blocks. Pick the narrowest label that covers each match (`external-cm`, not `valkeynode`). Each label takes about two minutes. AfterSuite removes the review deployment and the CRDs, so this is the last cluster step:
 
    ```sh
+   set -e
    export KUBECONFIG=/tmp/kind-review-<slug>.kubeconfig
    [ "$(kubectl config current-context)" = kind-review-<slug> ] || exit 1
-   make undeploy
    cp config/manager/kustomization.yaml /tmp/review-<slug>-kustomization.yaml.bak
+   trap 'cp /tmp/review-<slug>-kustomization.yaml.bak config/manager/kustomization.yaml' EXIT
+   make undeploy
    KIND_CLUSTER=review-<slug> CERT_MANAGER_INSTALL_SKIP=true go test -tags=e2e ./test/e2e/ -v -ginkgo.label-filter "<label> || <label>"
-   cp /tmp/review-<slug>-kustomization.yaml.bak config/manager/kustomization.yaml
    ```
 
-   Drop `CERT_MANAGER_INSTALL_SKIP=true` when a selected label needs TLS. Record pass or fail per label.
+   BeforeSuite runs `make deploy`, which rewrites `kustomization.yaml`; the trap restores it as in step 6. Several labels run for longer than a default tool timeout, so run this block in the background or with a long timeout. Drop `CERT_MANAGER_INSTALL_SKIP=true` when a selected label needs TLS. Record pass or fail per label.
 9. **Report.** Run `git check-ignore -q .review`. If it succeeds, write `.review/<slug>.md`. Otherwise the branch predates the ignore rule, so write `/tmp/review-<slug>.md` and say so in the output. Sections, in order:
    1. Verdict: "ready to open" or "fix first", with the reasons
    2. Change summary

@@ -207,7 +207,7 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainer(t *testing.T) {
 
 	require.Len(t, pts.Spec.InitContainers, 1)
 	ic := pts.Spec.InitContainers[0]
-	assert.Equal(t, "init", ic.Name)
+	assert.Equal(t, "server-init", ic.Name)
 	assert.Equal(t, initContainerCommand("/scripts/init.sh"), ic.Command)
 	assert.Equal(t, "valkey/valkey:9.0.0", ic.Image)
 	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
@@ -265,12 +265,12 @@ func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
 	dep, err := buildValkeyNodeDeployment(node)
 	require.NoError(t, err)
 	require.Len(t, dep.Spec.Template.Spec.InitContainers, 1)
-	assert.Equal(t, "init", dep.Spec.Template.Spec.InitContainers[0].Name)
+	assert.Equal(t, "server-init", dep.Spec.Template.Spec.InitContainers[0].Name)
 
 	sts, err := buildValkeyNodeStatefulSet(node)
 	require.NoError(t, err)
 	require.Len(t, sts.Spec.Template.Spec.InitContainers, 1)
-	assert.Equal(t, "init", sts.Spec.Template.Spec.InitContainers[0].Name)
+	assert.Equal(t, "server-init", sts.Spec.Template.Spec.InitContainers[0].Name)
 }
 
 // TestInitContainerCommand runs the init container's command against a

@@ -128,7 +128,7 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 		verifyInitROFS := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pod",
 				"-l", fmt.Sprintf("valkey.io/cluster=%s", noPersistClusterName),
-				"-o", "jsonpath={.items[0].spec.initContainers[?(@.name=='init')].securityContext.readOnlyRootFilesystem}",
+				"-o", "jsonpath={.items[0].spec.initContainers[?(@.name=='server-init')].securityContext.readOnlyRootFilesystem}",
 				"-n", pssRestrictedNamespace)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

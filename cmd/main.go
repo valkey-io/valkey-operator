@@ -267,10 +267,11 @@ func main() {
 	roleEvents := make(chan event.GenericEvent, roleEventBufferSize)
 
 	if err := (&controller.ValkeyNodeReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorder("valkeynode-controller"),
-		RoleEvents: roleEvents,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorder("valkeynode-controller"),
+		RoleEvents:    roleEvents,
+		ValkeyClients: valkeyClients,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ValkeyNode")
 		os.Exit(1)

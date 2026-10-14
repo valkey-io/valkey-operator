@@ -74,6 +74,9 @@ type SentinelPeer struct {
 	Flags []string
 }
 
+// Every Sentinel* command function below requires a client connected directly
+// to a Sentinel, not a valkey-go Sentinel-mode client; see sentinelDo.
+
 // DefaultQuorum returns the majority of the given number of Sentinels.
 func DefaultQuorum(sentinels int) int {
 	return sentinels/2 + 1
@@ -185,6 +188,10 @@ func sentinelSetArgs(name string, options map[string]string) []string {
 	return args
 }
 
+// sentinelDo sends a SENTINEL subcommand. c must be connected directly to a
+// Sentinel (a plain client whose InitAddress is the Sentinel address). A
+// valkey-go client built with the Sentinel option routes Do to the monitored
+// master instead, so it would answer these commands from the wrong node.
 func sentinelDo(ctx context.Context, c vclient.Client, args ...string) vclient.ValkeyResult {
 	return c.Do(ctx, c.B().Arbitrary("SENTINEL").Args(args...).Build())
 }

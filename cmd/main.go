@@ -253,10 +253,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	valkeyClients := controller.NewClientProvider(mgr.GetClient(), mgr.GetAPIReader())
+
 	if err := (&controller.ValkeyClusterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("valkeycluster-controller"),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorder("valkeycluster-controller"),
+		ValkeyClients: valkeyClients,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "ValkeyCluster")
 		os.Exit(1)
@@ -268,10 +271,11 @@ func main() {
 	roleEvents := make(chan event.GenericEvent, roleEventBufferSize)
 
 	if err := (&controller.ValkeyNodeReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorder("valkeynode-controller"),
-		RoleEvents: roleEvents,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorder("valkeynode-controller"),
+		RoleEvents:    roleEvents,
+		ValkeyClients: valkeyClients,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ValkeyNode")
 		os.Exit(1)
@@ -279,10 +283,10 @@ func main() {
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.Add(&controller.RolePoller{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Interval:  controller.DefaultRolePollInterval,
-		Events:    roleEvents,
+		Client:        mgr.GetClient(),
+		ValkeyClients: valkeyClients,
+		Interval:      controller.DefaultRolePollInterval,
+		Events:        roleEvents,
 	}); err != nil {
 		setupLog.Error(err, "Failed to add role poller")
 		os.Exit(1)

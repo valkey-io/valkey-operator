@@ -4063,6 +4063,11 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 37 characters: the longest derived
+            name, internal-<name>-system-passwords, must fit the 63-character DNS
+            label limit'
+          rule: self.metadata.name.size() <= 37
     served: true
     storage: true
     subresources:

@@ -740,6 +740,7 @@ const (
 // +kubebuilder:subresource:status
 
 // ValkeyCluster is the Schema for the valkeyclusters API
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 37",message="metadata.name must be at most 37 characters: the longest derived name, internal-<name>-system-passwords, must fit the 63-character DNS label limit"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1

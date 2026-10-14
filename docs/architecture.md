@@ -12,7 +12,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 
 1. Upserts a headless Service and PodDisruptionBudget
 2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
-3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
+3. Upserts a ConfigMap containing `valkey.conf`, the health-check scripts and the init container script. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
 5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover)
 6. Issues CLUSTER MEET, CLUSTER ADDSLOTSRANGE, CLUSTER REPLICATE in phases
@@ -59,7 +59,7 @@ Each tick opens one connection per node through the `ClientProvider` in `interna
 ## Key packages
 
 - `internal/valkey/` — pure Valkey protocol layer: `ClusterState` / `NodeState` types, CLUSTER NODES parsing, slot range arithmetic, slot migration and rebalancing logic
-- `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness shell scripts) into the ConfigMap
+- `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the ConfigMap
 - `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
@@ -72,6 +72,12 @@ ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-ind
 ## Config hash propagation
 
 When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spec.config` to each ValkeyNode. The ValkeyNode pod-template builders derive a SHA-256 roll hash from the node spec (config minus the live-settable allowlist, plus TLS) and stamp it as a pod template annotation — gated on `spec.serverConfigMapName`, the marker that a parent manages the node's config. The changed template then rolls out one node at a time, authorized by `spec.workloadRevision`. The hash render is shared with the ValkeyCluster ConfigMap path, and `internal/controller/config_rollhash_test.go` pins it byte-for-byte so operator upgrades do not roll pods.
+
+## Init container
+
+Every ValkeyNode pod runs a `server-init` init container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap, or logs and exits 0 when the ConfigMap has no `init.sh` (an external ConfigMap set through `serverConfigMapName` may omit it), and can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
+
+The init container copies the server container's image, pull policy, resources and security context after `spec.containers` patches, so the pod keeps its QoS class and passes the same Pod Security admission checks as the server.
 
 ## Auto-generated files
 

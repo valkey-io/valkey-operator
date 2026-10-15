@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	vclient "github.com/valkey-io/valkey-go"
@@ -132,7 +131,7 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 
 // realConfigClient returns the pooled client for the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return nil, err
 	}
@@ -145,12 +144,10 @@ type ValkeyNodeReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
-	// ValkeyClients hands out pooled Valkey clients. Nil falls back to a
-	// provider and pool built on first use from Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. SetupWithManager
+	// requires it.
 	ValkeyClients ClientProvider
 
-	fallbackOnce    sync.Once
-	fallbackClients ClientProvider
 	// newConfigClient returns the pooled client for a node's pod, for live
 	// config application. SetupWithManager defaults it to realConfigClient;
 	// tests override it with a fake.
@@ -1070,7 +1067,7 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return "", err
 	}
@@ -1176,7 +1173,7 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""
@@ -1335,6 +1332,9 @@ func valkeyPodPredicate() predicate.Predicate {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.ValkeyClients == nil {
+		return errors.New("ValkeyNode reconciler has no ClientProvider")
+	}
 	r.APIReader = mgr.GetAPIReader()
 	if r.newConfigClient == nil {
 		r.newConfigClient = realConfigClient

@@ -41,7 +41,8 @@ type connConfig struct {
 func clientOption(address string, cfg connConfig) vclient.ClientOption {
 	return vclient.ClientOption{
 		InitAddress:       []string{address},
-		ForceSingleClient: true, // Don't connect to another cluster node.
+		ForceSingleClient: true,              // Don't connect to another cluster node.
+		ClientName:        "valkey-operator", // Names the connection in CLIENT LIST.
 		Username:          cfg.username,
 		Password:          cfg.password,
 		TLSConfig:         cfg.tls,
@@ -158,28 +159,4 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 	}
 
 	return p.pool.Get(ctx, clientOption(fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort), cfg), token)
-}
-
-// valkeyClients returns r.ValkeyClients, or a provider and pool built once
-// from the reconciler's own readers when it is unset.
-func (r *ValkeyClusterReconciler) valkeyClients() ClientProvider {
-	if r.ValkeyClients != nil {
-		return r.ValkeyClients
-	}
-	r.fallbackOnce.Do(func() {
-		r.fallbackClients = NewClientProvider(r.Client, r.APIReader, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
-	})
-	return r.fallbackClients
-}
-
-// valkeyClients returns r.ValkeyClients, or a provider and pool built once
-// from the reconciler's own readers when it is unset.
-func (r *ValkeyNodeReconciler) valkeyClients() ClientProvider {
-	if r.ValkeyClients != nil {
-		return r.ValkeyClients
-	}
-	r.fallbackOnce.Do(func() {
-		r.fallbackClients = NewClientProvider(r.Client, r.APIReader, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
-	})
-	return r.fallbackClients
 }

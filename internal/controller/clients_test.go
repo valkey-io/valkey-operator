@@ -144,6 +144,7 @@ func TestForCluster(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, []string{"10.0.0.1:6379"}, got[0].InitAddress)
 		assert.True(t, got[0].ForceSingleClient)
+		assert.Equal(t, "valkey-operator", got[0].ClientName)
 		assert.Equal(t, operatorUser, got[0].Username)
 		assert.Equal(t, "pw", got[0].Password)
 		assert.Nil(t, got[0].TLSConfig)
@@ -475,14 +476,8 @@ func TestProviderSharesClientsAcrossPaths(t *testing.T) {
 	}
 }
 
-func TestValkeyClientsFallbackIsBuiltOnce(t *testing.T) {
-	c := providerTestClient(t)
-
-	cluster := &ValkeyClusterReconciler{Client: c, APIReader: c}
-	assert.Same(t, cluster.valkeyClients(), cluster.valkeyClients())
-	node := &ValkeyNodeReconciler{Client: c, APIReader: c}
-	assert.Same(t, node.valkeyClients(), node.valkeyClients())
-
-	set := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
-	assert.Same(t, set, (&ValkeyNodeReconciler{ValkeyClients: set}).valkeyClients())
+func TestSetupWithManagerRequiresValkeyClients(t *testing.T) {
+	// The check comes before the manager is used, so none is needed.
+	assert.ErrorContains(t, (&ValkeyClusterReconciler{}).SetupWithManager(nil), "no ClientProvider")
+	assert.ErrorContains(t, (&ValkeyNodeReconciler{}).SetupWithManager(nil), "no ClientProvider")
 }

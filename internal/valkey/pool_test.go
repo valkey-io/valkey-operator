@@ -59,12 +59,15 @@ type fakeDialer struct {
 	opts []vclient.ClientOption
 	errs []error
 	made []*fakeClient
-	// gate, when set, holds every dial until it is closed.
-	gate chan struct{}
+	// gate, when set, holds every dial until it is closed. Each held dial
+	// first sends on arrived.
+	gate    chan struct{}
+	arrived chan struct{}
 }
 
 func (d *fakeDialer) newClient(opt vclient.ClientOption) (vclient.Client, error) {
 	if d.gate != nil {
+		d.arrived <- struct{}{}
 		<-d.gate
 	}
 	d.mu.Lock()
@@ -101,9 +104,9 @@ func option(address, password string) vclient.ClientOption {
 }
 
 func TestSignatureSeparatesFields(t *testing.T) {
-	assert.NotEqual(t, signature("a", "bc", ""), signature("ab", "c", ""))
-	assert.Equal(t, signature("_operator", "pw", "t"), signature("_operator", "pw", "t"))
-	assert.NotContains(t, signature("_operator", "secret-password", ""), "secret-password")
+	assert.NotEqual(t, signatureOf("a", "bc", ""), signatureOf("ab", "c", ""))
+	assert.Equal(t, signatureOf("_operator", "pw", "t"), signatureOf("_operator", "pw", "t"))
+	assert.NotContains(t, signatureOf("_operator", "secret-password", ""), "secret-password")
 }
 
 func TestPoolGetReusesClient(t *testing.T) {
@@ -288,7 +291,7 @@ func TestPoolGetWrongPassFallback(t *testing.T) {
 		require.NoError(t, err)
 
 		late := &fakeClient{}
-		c, err := p.store("10.0.0.1:6379", signature(opt.Username, opt.Password, ""), late, true)
+		c, err := p.store("10.0.0.1:6379", signatureOf(opt.Username, opt.Password, ""), late, true)
 		require.NoError(t, err)
 		assert.Same(t, good, c)
 		assert.Equal(t, 1, late.closes())
@@ -296,9 +299,9 @@ func TestPoolGetWrongPassFallback(t *testing.T) {
 }
 
 func TestPoolGetConcurrentCallersShareOneClient(t *testing.T) {
-	d := &fakeDialer{gate: make(chan struct{})}
-	p, _ := testPool(d)
 	const callers = 8
+	d := &fakeDialer{gate: make(chan struct{}), arrived: make(chan struct{}, callers)}
+	p, _ := testPool(d)
 	got := make([]vclient.Client, callers)
 
 	var wg sync.WaitGroup
@@ -309,10 +312,19 @@ func TestPoolGetConcurrentCallersShareOneClient(t *testing.T) {
 			got[i] = c
 		})
 	}
-	time.Sleep(10 * time.Millisecond) // let most callers reach the dial
+	// Open the gate only once every caller is dialling, so all of them dial
+	// before any client is stored.
+	for range callers {
+		select {
+		case <-d.arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("not every caller reached the dial")
+		}
+	}
 	close(d.gate)
 	wg.Wait()
 
+	assert.Equal(t, callers, d.dials())
 	for _, c := range got {
 		assert.Same(t, got[0], c)
 	}

@@ -56,8 +56,8 @@ type Pool struct {
 }
 
 type entry struct {
-	client vclient.Client
-	sig    string
+	client    vclient.Client
+	signature string
 	// fallback marks a client dialled as the default user after WRONGPASS.
 	fallback bool
 	lastUsed time.Time
@@ -74,10 +74,10 @@ func NewPool(idleTTL time.Duration, newClient func(vclient.ClientOption) (vclien
 	}
 }
 
-// signature fingerprints the inputs a client was built from. Each field is
+// signatureOf fingerprints the inputs a client was built from. Each field is
 // length-prefixed so none can run into the next, and the result is hashed so
 // the password is not kept in the pool.
-func signature(fields ...string) string {
+func signatureOf(fields ...string) string {
 	h := sha256.New()
 	for _, f := range fields {
 		var n [8]byte
@@ -103,14 +103,14 @@ func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken strin
 		return nil, fmt.Errorf("pool needs exactly one address, got %d", len(opt.InitAddress))
 	}
 	address := opt.InitAddress[0]
-	sig := signature(opt.Username, opt.Password, tlsToken)
+	signature := signatureOf(opt.Username, opt.Password, tlsToken)
 
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return nil, ErrPoolClosed
 	}
-	if e := p.entries[address]; e != nil && e.sig == sig && !e.fallback {
+	if e := p.entries[address]; e != nil && e.signature == signature && !e.fallback {
 		e.lastUsed = p.now()
 		c := e.client
 		p.mu.Unlock()
@@ -122,7 +122,7 @@ func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken strin
 	fallback := false
 	if isWrongPass(err) {
 		// Still locked out: keep handing out the client we already have.
-		if kept := p.lookup(address, sig); kept != nil {
+		if kept := p.lookup(address, signature); kept != nil {
 			return kept, nil
 		}
 		logf.FromContext(ctx).Info("fall back to unauthenticated default user on WRONGPASS error", "address", address)
@@ -134,14 +134,14 @@ func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken strin
 	if err != nil {
 		return nil, err
 	}
-	return p.store(address, sig, c, fallback)
+	return p.store(address, signature, c, fallback)
 }
 
-// lookup returns the pooled client for address if it was built from sig.
-func (p *Pool) lookup(address, sig string) vclient.Client {
+// lookup returns the pooled client for address if it was built from signature.
+func (p *Pool) lookup(address, signature string) vclient.Client {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e := p.entries[address]; e != nil && e.sig == sig {
+	if e := p.entries[address]; e != nil && e.signature == signature {
 		e.lastUsed = p.now()
 		return e.client
 	}
@@ -151,7 +151,7 @@ func (p *Pool) lookup(address, sig string) vclient.Client {
 // store pools c for address and closes the client it replaces. If another
 // caller already pooled a client for the same inputs, and c would not upgrade
 // a fallback, store keeps that one and closes c.
-func (p *Pool) store(address, sig string, c vclient.Client, fallback bool) (vclient.Client, error) {
+func (p *Pool) store(address, signature string, c vclient.Client, fallback bool) (vclient.Client, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -160,7 +160,7 @@ func (p *Pool) store(address, sig string, c vclient.Client, fallback bool) (vcli
 	}
 	var replaced vclient.Client
 	if e := p.entries[address]; e != nil {
-		if e.sig == sig && (!e.fallback || fallback) {
+		if e.signature == signature && (!e.fallback || fallback) {
 			e.lastUsed = p.now()
 			kept := e.client
 			p.mu.Unlock()
@@ -169,7 +169,7 @@ func (p *Pool) store(address, sig string, c vclient.Client, fallback bool) (vcli
 		}
 		replaced = e.client
 	}
-	p.entries[address] = &entry{client: c, sig: sig, fallback: fallback, lastUsed: p.now()}
+	p.entries[address] = &entry{client: c, signature: signature, fallback: fallback, lastUsed: p.now()}
 	p.mu.Unlock()
 	if replaced != nil {
 		replaced.Close()
@@ -194,8 +194,9 @@ func (p *Pool) Start(ctx context.Context) error {
 	}
 }
 
-// NeedLeaderElection reports that only the elected leader sweeps. Its
-// callers, the reconcilers and the role poller, only run there.
+// NeedLeaderElection makes the pool a leader-election Runnable: added to the
+// manager, it sweeps only on the elected leader. Its callers, the reconcilers
+// and the role poller, only run there.
 func (p *Pool) NeedLeaderElection() bool {
 	return true
 }

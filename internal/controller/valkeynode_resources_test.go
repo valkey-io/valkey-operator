@@ -1204,6 +1204,26 @@ func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
 	assert.Empty(t, replica.Spec.TopologySpreadConstraints, "replicas carry no primaries TSC")
 }
 
+func TestBuildClusterValkeyNode_RendersNodeTopologyKey(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: valkeyv1.ValkeyClusterSpec{
+			Shards: 3, Replicas: 1,
+			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{
+				TopologyKey: "topology.example.io/hostname",
+				Spread: valkeyv1.NodeSpread{
+					Shard: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
+				},
+			}},
+		},
+	}
+	node := buildClusterValkeyNode(cluster, 0, 1)
+	terms := node.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	require.Len(t, terms, 1)
+	assert.Equal(t, "topology.example.io/hostname", terms[0].TopologyKey)
+	assert.Equal(t, "0", terms[0].LabelSelector.MatchLabels[LabelShardIndex])
+}
+
 func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	userTSC := corev1.TopologySpreadConstraint{
 		MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.ScheduleAnyway,

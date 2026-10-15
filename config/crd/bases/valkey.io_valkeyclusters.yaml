@@ -3769,6 +3769,52 @@ spec:
                             type: string
                           type: array
                       type: object
+                    databases:
+                      description: |-
+                        Database restrictions. Requires Valkey 9.1+; on older images the
+                        directives are dropped from the rendered ACL and a ConfigurationWarning
+                        condition is set on the cluster.
+                      properties:
+                        allDbs:
+                          default: false
+                          description: |-
+                            Allow this user to access all databases; maps to Valkey: alldbs
+                            This is already Valkey's default for every user, so setting it changes
+                            nothing on the server: the resulting user is indistinguishable from one
+                            that omits this block entirely. It is accepted as a way to state the
+                            intent explicitly.
+                            Whether alldbs is echoed back by ACL LIST depends on the server version
+                            (9.1.0 prints it for every user; later 9.1.x omit it as the default), so
+                            do not rely on its presence or absence either way.
+                          type: boolean
+                        ids:
+                          description: |-
+                            Specific database IDs this user is allowed to access; maps to Valkey: db=0,1,2
+                            Selecting ids clears Valkey's default alldbs grant on its own, so no
+                            separate reset is needed. At least one id is required: Valkey rejects an
+                            id-less db= as a syntax error.
+                          items:
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          minItems: 1
+                          type: array
+                        resetDbs:
+                          default: false
+                          description: |-
+                            Clear the allowed databases and the alldbs flag; maps to Valkey: resetdbs
+                            The user cannot access any database until ids or allDbs is set.
+                          type: boolean
+                      type: object
+                      x-kubernetes-validations:
+                      - message: databases.ids and databases.allDbs are mutually exclusive
+                        rule: '!(has(self.ids) && self.allDbs)'
+                      - message: databases.ids and databases.resetDbs are mutually
+                          exclusive
+                        rule: '!(has(self.ids) && self.resetDbs)'
+                      - message: databases.allDbs and databases.resetDbs are mutually
+                          exclusive
+                        rule: '!(self.allDbs && self.resetDbs)'
                     enabled:
                       default: true
                       description: If the user is enabled or not

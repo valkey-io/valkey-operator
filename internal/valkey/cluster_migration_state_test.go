@@ -164,14 +164,20 @@ func migrationNode(t *testing.T, s *migrationServer) *NodeState {
 	return &NodeState{Client: client, Address: host, Port: port}
 }
 
+// migTargetA and migTargetB are the node IDs used as migration
+// destinations in the scripted GETSLOTMIGRATIONS entries below.
+const (
+	migTargetA = "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9"
+	migTargetB = "c3b1e5a9f0d8472b91e6a3f5d2c8b0a4e7f91234"
+)
+
 // migrationEntry builds one GETSLOTMIGRATIONS entry: field/value pairs in
 // the flat array form, with numeric fields as RESP integers.
-func migrationEntry(state, slotRanges, message string, lastUpdate time.Time) []string {
-	return []string{
+func migrationEntry(state, targetNode, slotRanges, message string, lastUpdate time.Time) []string {
+	entry := []string{
 		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",
 		"operation", "EXPORT",
 		"slot_ranges", slotRanges,
-		"target_node", "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9",
 		"source_node", "93941e777e17fcbc92d4398cc957ffea888f472b",
 		"create_time", strconv.FormatInt(lastUpdate.Add(-time.Minute).Unix(), 10),
 		"last_update_time", strconv.FormatInt(lastUpdate.Unix(), 10),
@@ -181,17 +187,23 @@ func migrationEntry(state, slotRanges, message string, lastUpdate time.Time) []s
 		"cow_size", "0",
 		"remaining_repl_size", "0",
 	}
+	// The map parser is order-insensitive; an empty targetNode models a
+	// server that does not report the field at all.
+	if targetNode != "" {
+		entry = append(entry, "target_node", targetNode)
+	}
+	return entry
 }
 
 func TestSlotMigrationState_FailedJobReported(t *testing.T) {
 	failMsg := "Received error during handshake to target: -ERR Slots are being manually imported"
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", "0-399", failMsg, now.Add(-30*time.Second))}
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", failMsg, now.Add(-30*time.Second))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -203,6 +215,9 @@ func TestSlotMigrationState_FailedJobReported(t *testing.T) {
 	}
 	if failed.Message != failMsg {
 		t.Errorf("message = %q, want %q", failed.Message, failMsg)
+	}
+	if failed.TargetNode != migTargetA {
+		t.Errorf("target node = %q, want %q", failed.TargetNode, migTargetA)
 	}
 	if len(failed.Slots) != 1 || failed.Slots[0] != (SlotsRange{Start: 0, End: 399}) {
 		t.Errorf("slots = %v, want [0-399]", failed.Slots)
@@ -216,13 +231,13 @@ func TestSlotMigrationState_InProgressStillWorks(t *testing.T) {
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{
-			migrationEntry("failed", "0-399", "old failure", now.Add(-30*time.Second)),
-			migrationEntry("running", "400-799", "", now),
+			migrationEntry("failed", migTargetA, "0-399", "old failure", now.Add(-30*time.Second)),
+			migrationEntry("running", migTargetA, "400-799", "", now),
 		}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -239,11 +254,11 @@ func TestSlotMigrationState_NoOverlapNoReport(t *testing.T) {
 	// slots the operator is not planning to move. It must not surface.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", "16000-16383", "manual reshard gone wrong", now.Add(-30*time.Second))}
+		return [][]string{migrationEntry("failed", migTargetA, "16000-16383", "manual reshard gone wrong", now.Add(-30*time.Second))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -260,11 +275,11 @@ func TestSlotMigrationState_StaleFailureIgnored(t *testing.T) {
 	// still be able to retry the move rather than wedging forever.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", "0-399", "ancient failure", now.Add(-3*slotMigrationFailureWindow))}
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "ancient failure", now.Add(-3*slotMigrationFailureWindow))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -280,13 +295,13 @@ func TestSlotMigrationState_MostRecentFailureWins(t *testing.T) {
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{
-			migrationEntry("failed", "0-399", "older failure", now.Add(-90*time.Second)),
-			migrationEntry("failed", "0-399", "newer failure", now.Add(-30*time.Second)),
+			migrationEntry("failed", migTargetA, "0-399", "older failure", now.Add(-90*time.Second)),
+			migrationEntry("failed", migTargetA, "0-399", "newer failure", now.Add(-30*time.Second)),
 		}
 	})
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -300,18 +315,18 @@ func TestSlotMigrationState_MostRecentFailureWins(t *testing.T) {
 
 func TestSlotMigrationState_NewestOfMixedTargets(t *testing.T) {
 	// The drain case from the issue: the same batch fails against
-	// several destinations. The most recent failure is the actionable
-	// one to report.
+	// several destinations. With no destination filter, the most recent
+	// failure is the actionable one to report.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{
-			migrationEntry("failed", "0-399", "target A refused", now.Add(-60*time.Second)),
-			migrationEntry("failed", "0-399", "target B refused", now.Add(-15*time.Second)),
+			migrationEntry("failed", migTargetA, "0-399", "target A refused", now.Add(-60*time.Second)),
+			migrationEntry("failed", migTargetB, "0-399", "target B refused", now.Add(-15*time.Second)),
 		}
 	})
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, "", func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -320,14 +335,64 @@ func TestSlotMigrationState_NewestOfMixedTargets(t *testing.T) {
 	}
 }
 
-func TestSlotMigrationState_SuccessAndEmptyHistory(t *testing.T) {
+func TestSlotMigrationState_ForeignTargetFiltered(t *testing.T) {
+	// A failed S->A job must not block, or speak for, a later plan that
+	// moves the same slots to B: when the caller names its planned
+	// destination, the job is filtered out.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("success", "0-399", "", now.Add(-time.Second))}
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake refused by A", now.Add(-30*time.Second))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if failed != nil {
+		t.Fatalf("a failure for another destination must not be reported, got %+v", failed)
+	}
+
+	// The same job is still reported for the destination it failed on.
+	_, failed, err = SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if failed == nil || failed.Message != "handshake refused by A" {
+		t.Fatalf("the matching-destination failure must still be reported, got %+v", failed)
+	}
+}
+
+func TestSlotMigrationState_UnknownTargetStillReported(t *testing.T) {
+	// A server that does not report target_node cannot be filtered by
+	// destination: such a failure still matches every destination, so
+	// the retry loop cannot be silently unblocked.
+	now := time.Now()
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("failed", "", "0-399", "target-less failure", now.Add(-30*time.Second))}
+	})
+	node := migrationNode(t, s)
+
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if failed == nil {
+		t.Fatal("a failure with no reported destination must still be reported")
+	}
+	if failed.TargetNode != "" {
+		t.Errorf("target node = %q, want empty", failed.TargetNode)
+	}
+}
+
+func TestSlotMigrationState_SuccessAndEmptyHistory(t *testing.T) {
+	now := time.Now()
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("success", migTargetA, "0-399", "", now.Add(-time.Second))}
+	})
+	node := migrationNode(t, s)
+
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -337,7 +402,7 @@ func TestSlotMigrationState_SuccessAndEmptyHistory(t *testing.T) {
 
 	empty := newMigrationServer(t, func() [][]string { return nil })
 	emptyNode := migrationNode(t, empty)
-	inProgress, failed, err = SlotMigrationState(context.Background(), emptyNode, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err = SlotMigrationState(context.Background(), emptyNode, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState empty: %v", err)
 	}
@@ -352,11 +417,11 @@ func TestSlotMigrationState_ZeroTimestampNotRecent(t *testing.T) {
 	// operator keeps retrying the move instead of reporting garbage.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", "0-399", "garbled entry", time.Unix(0, 0))}
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "garbled entry", time.Unix(0, 0))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -397,11 +462,11 @@ func TestSlotMigrationState_FutureTimestampStillReported(t *testing.T) {
 	// because real time keeps advancing past the window.
 	now := time.Now()
 	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", "0-399", "skewed clock failure", now.Add(10*time.Minute))}
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "skewed clock failure", now.Add(10*time.Minute))}
 	})
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}

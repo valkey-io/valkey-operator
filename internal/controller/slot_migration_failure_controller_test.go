@@ -151,19 +151,29 @@ func readStateCommand(r *bufio.Reader) ([]string, error) {
 	return cmd, nil
 }
 
+// foreignTargetID is a node ID that is not the planned destination in the
+// fixtures below (dst-primary-id); entries targeted at it model a failure
+// for some other move.
+const foreignTargetID = "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9"
+
 // stateEntry builds one GETSLOTMIGRATIONS entry: flat field/value pairs,
-// numeric fields as RESP integers, matching the server wire format.
-func stateEntry(state, slotRanges, message string, lastUpdate time.Time) []string {
-	return []string{
+// numeric fields as RESP integers, matching the server wire format. An
+// empty targetNode omits the field, modeling a server that does not
+// report the migration destination.
+func stateEntry(state, targetNode, slotRanges, message string, lastUpdate time.Time) []string {
+	entry := []string{
 		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",
 		"operation", "EXPORT",
 		"slot_ranges", slotRanges,
-		"target_node", "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9",
 		"source_node", "93941e777e17fcbc92d4398cc957ffea888f472b",
 		"state", state,
 		"message", message,
 		"last_update_time", strconv.FormatInt(lastUpdate.Unix(), 10),
 	}
+	if targetNode != "" {
+		entry = append(entry, "target_node", targetNode)
+	}
+	return entry
 }
 
 // scriptedSrcNode builds a NodeState whose client dials the scripted server.
@@ -221,7 +231,7 @@ func TestRebalanceSlotsSurfacesMigrationFailure(t *testing.T) {
 	// recency window, must surface as an error carrying the job message
 	// instead of being silently retried every reconcile.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "0-399", "handshake failed: ERR synthesize", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "handshake failed: ERR synthesize", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -260,7 +270,7 @@ func TestRebalanceSlotsAncientFailureDoesNotBlock(t *testing.T) {
 	// the reconcile proceeds past the failure gate (here up to the gossip
 	// gate, which requeues without error).
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "0-399", "ancient failure", time.Now().Add(-6*time.Minute))}
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "ancient failure", time.Now().Add(-6*time.Minute))}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -282,7 +292,7 @@ func TestDrainExcessShardsSurfacesMigrationFailure(t *testing.T) {
 	// dst shard (index 0). A failed drain migration within the recency
 	// window must surface as an error instead of being re-issued.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "0-399", "transfer failed: ERR drain", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed: ERR drain", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -312,6 +322,63 @@ func TestDrainExcessShardsSurfacesMigrationFailure(t *testing.T) {
 	var migrationFailed *slotMigrationFailedError
 	if !errors.As(err, &migrationFailed) {
 		t.Fatalf("drain failure must stay distinguishable as an async slot migration failure, got %T", err)
+	}
+}
+
+func TestRebalanceSlotsForeignDestinationFailureDoesNotBlock(t *testing.T) {
+	// A failed S->A job must not wedge a rebalance that now plans the
+	// same slots to a different destination B: the move proceeds past
+	// the failure gate (here up to the gossip gate, which requeues
+	// without error).
+	server := newMigrationStateServer(t, func() [][]string {
+		return [][]string{stateEntry("failed", foreignTargetID, "0-399", "handshake failed at the old destination", time.Now())}
+	})
+	src, dst := rebalanceFixture(t, server)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = 2
+
+	inProgress, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	if err != nil {
+		t.Fatalf("a failure for another destination must not error, got %v", err)
+	}
+	if !inProgress {
+		t.Fatal("expected the rebalance to proceed past the failure gate")
+	}
+}
+
+func TestDrainExcessShardsForeignDestinationFailureProceeds(t *testing.T) {
+	// Scale-in drains must also ignore a leftover failure that targeted a
+	// node other than the shard the drain plan picked: the drain
+	// proceeds past the failure gate to the gossip requeue.
+	server := newMigrationStateServer(t, func() [][]string {
+		return [][]string{stateEntry("failed", foreignTargetID, "0-399", "transfer failed to the old destination", time.Now())}
+	})
+	src, dst := rebalanceFixture(t, server)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = 1
+
+	srcPod := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "src-node", Labels: map[string]string{LabelShardIndex: "1", LabelNodeIndex: "0"}},
+		Status:     valkeyiov1alpha1.ValkeyNodeStatus{PodIP: src.Nodes[0].Address},
+	}
+	dstPod := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "dst-node", Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "0"}},
+		Status:     valkeyiov1alpha1.ValkeyNodeStatus{PodIP: dst.Nodes[0].Address},
+	}
+
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{src, dst}}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{*srcPod, *dstPod}}
+
+	requeue, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
+	if err != nil {
+		t.Fatalf("a failure for another destination must not error, got %v", err)
+	}
+	if !requeue {
+		t.Fatal("expected the drain to proceed past the failure gate and requeue")
 	}
 }
 
@@ -381,7 +448,7 @@ func TestHandleScaleInMigrationFailureEmitsSlotRebalanceFailed(t *testing.T) {
 	// it, leave DrainFailed to other drain errors, and hold Degraded=True
 	// with reason RebalanceFailed.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "0-399", "transfer failed: ERR drain", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed: ERR drain", time.Now())}
 	})
 	cluster, state, nodes := scaleInFixture(t, server, 1, false)
 

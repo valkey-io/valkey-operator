@@ -30,13 +30,16 @@ import (
 // SlotMigrationInProgress checks whether the source node has any
 // non-terminal CLUSTER MIGRATESLOTS operations running.
 func SlotMigrationInProgress(ctx context.Context, src *NodeState) (bool, error) {
-	inProgress, _, err := SlotMigrationState(ctx, src, nil, nil)
+	inProgress, _, err := SlotMigrationState(ctx, src, nil, "", nil)
 	return inProgress, err
 }
 
 // SlotMigrationFailure describes a failed CLUSTER MIGRATESLOTS job, as
 // reported by CLUSTER GETSLOTMIGRATIONS on the node that ran it.
 type SlotMigrationFailure struct {
+	// TargetNode is the node ID the failed job was migrating to, from
+	// its target_node field. Empty when the server does not report one.
+	TargetNode string
 	// Slots are the slot ranges the failed job covered, parsed from its
 	// slot_ranges field.
 	Slots []SlotsRange
@@ -83,10 +86,16 @@ const slotMigrationFailureWindow = 2 * time.Minute
 // migration in progress and silently re-issues the same move forever.
 //
 // planned is the set of slot ranges the caller is about to move; a failed
-// job that does not overlap it is ignored. now is injectable for tests; a
-// nil now means time.Now. A failed job older than
+// job that does not overlap it is ignored. targetNode is the node ID the
+// caller plans to migrate those slots to; a failed job that reports a
+// different target_node is ignored, because it belongs to another move and
+// must not wedge (or be misattributed to) this one. An empty targetNode
+// disables the destination filter, and a job whose target_node the server
+// does not report still matches every destination, so a server without the
+// field can never silently unblock the retry loop. now is injectable for
+// tests; a nil now means time.Now. A failed job older than
 // slotMigrationFailureWindow is not reported either.
-func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, now func() time.Time) (bool, *SlotMigrationFailure, error) {
+func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, targetNode string, now func() time.Time) (bool, *SlotMigrationFailure, error) {
 	log := logf.FromContext(ctx)
 	cmd := src.Client.B().Arbitrary("CLUSTER", "GETSLOTMIGRATIONS").Build()
 	migrations, err := src.Client.Do(ctx, cmd).ToArray()
@@ -117,6 +126,7 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 			continue
 		}
 		job := SlotMigrationFailure{
+			TargetNode: values["target_node"],
 			Slots:      parseSlotRanges(values["slot_ranges"]),
 			Message:    values["message"],
 			LastUpdate: time.Unix(0, 0),
@@ -130,6 +140,14 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 			if t, err := v.AsInt64(); err == nil {
 				job.LastUpdate = time.Unix(t, 0).UTC()
 			}
+		}
+		// A failure that named a different destination belongs to
+		// another move and must not wedge (or speak for) this one. An
+		// entry with no reported target_node still matches every
+		// destination, so a server that omits the field cannot
+		// silently unblock the retry loop.
+		if targetNode != "" && job.TargetNode != "" && job.TargetNode != targetNode {
+			continue
 		}
 		if !job.overlaps(planned) {
 			continue

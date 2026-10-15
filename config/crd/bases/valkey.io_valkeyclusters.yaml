@@ -35,17 +35,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          ValkeyCluster is the Schema for the valkeyclusters API
-          Every ValkeyNode gets a workload named valkey-<name>-<shard>-<node>. With
-          workloadType StatefulSet, Kubernetes stamps each pod with a
-          controller-revision-hash label of the StatefulSet name plus an 11-character
-          suffix, and label values stop at 63 characters, so a StatefulSet name longer
-          than 52 never gets a pod. The rule counts the digits of the highest shard
-          index (shards - 1) and node index (replicas), so a scale-out that pushes an
-          index into more digits is rejected too. A Deployment carries no such label;
-          there the headless Service valkey-<name>, a DNS label of at most 63
-          characters, is the limit.
+        description: ValkeyCluster is the Schema for the valkeyclusters API
         properties:
           apiVersion:
             description: |-

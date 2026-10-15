@@ -467,15 +467,58 @@ users:
 - `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys` — key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
 - `channels` — pub/sub channel patterns
+- `databases` — logical database restrictions; see [Database restrictions](#database-restrictions). Requires Valkey `9.1.0` or newer
 - `permissions` — raw ACL string appended after any generated rules
 
 ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.
 
 > **Upgrade note:** Live application relies on the operator's `_operator` user holding the `acl|load`, `acl|getuser`, and `acl|users` commands, which older operator versions did not grant. Upgrading onto this version rewrites the pod template (it drops a now-unused annotation), so every existing cluster rolls once and picks up the new grants on restart, after which ACL changes apply live. The exception is a cluster old enough to predate that annotation entirely: it gets no automatic roll, so it needs a one-time manual pod restart after the upgrade before live ACL applies.
 
+#### Database restrictions
+
+`databases` scopes a user to specific logical databases. At most one of the three fields may be set:
+
+| Field | Valkey directive | Effect |
+|---|---|---|
+| `ids` | `db=0,1,2` | Restrict the user to the listed database IDs. At least one ID is required |
+| `allDbs` | `alldbs` | Allow all databases. **This is already the default for every user, so setting it changes nothing** — the resulting user is indistinguishable from one that omits `databases` entirely. It is accepted only as a way to state the intent explicitly. Whether `ACL LIST` echoes `alldbs` back depends on the server version (Valkey `9.1.0` prints it for every user; later `9.1.x` omit it as the default), so do not script against its presence either way |
+| `resetDbs` | `resetdbs` | Clear the allowed databases and the `alldbs` flag. The user can access **no** database until `ids` or `allDbs` is set |
+
+> **`databases` on its own does nothing useful.** The operator always runs Valkey in cluster mode, where the number of databases comes from `cluster-databases` and **defaults to 1** — so db 0 is the only database that exists. With the default, `ids: [0]` restricts nothing, and any selection that leaves out db 0 (including `resetDbs`) locks the user out of everything. Raise `cluster-databases` in `spec.config` first:
+
+```yaml
+spec:
+  config:
+    # Required: defaults to 1, so without this only db 0 exists.
+    # Startup-only, so changing it rolls the pods.
+    cluster-databases: "2"
+  users:
+    - name: dbuser
+      passwordSecret:
+        name: my-users-secret
+        keys: [dbuserpw]
+      commands:
+        allow: ["@read", "@write"]
+      keys:
+        readWrite: ["*"]
+      databases:
+        ids: [0]
+```
+
+Valkey accepts a database ID that does not exist without complaint, so a typo here is not rejected at apply time and surfaces only as `NOPERM` errors when the user runs commands. Selecting `ids` clears the default `alldbs` grant on its own, so no separate reset is needed.
+
+#### Version-gated ACLs
+
+`spec.users[].databases` requires Valkey `9.1.0` or newer. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support the directives, it drops them from the rendered ACL and sets a `ConfigurationWarning` condition with reason `UnsupportedAclDirective`. The spec is **not** rejected and the cluster still reaches Ready — the user is created without the database restriction, so it can access every database, including any that `ids` or `resetDbs` would have denied.
+
+The warning message names every affected user, the required version, and the detected version or detection failure. It clears on the next reconcile once you switch to a supporting image or remove the field.
+
+As with [Version-gated config](#version-gated-config), apply the image bump and wait for the roll to finish before adding a version-gated directive, so the gate sees the new version. The gate reads `spec.image`, the image you asked for, while ACLs are applied live to the pods that are currently running — so bumping the image and adding `databases` in one step writes `db=` into the ACL while some pods still run the old version. A running pod on the old version rejects the reload; `ACL LOAD` is all-or-nothing, so it keeps its current ACL, and the cluster reports `Degraded` with reason `ACLApplyFailed` until the roll replaces it. A pod on the old version that restarts is worse off: it reads the same mounted ACL file at startup, refuses to start, and can crash-loop.
+
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)
+- `databases.ids`, `databases.allDbs`, and `databases.resetDbs` are mutually exclusive
 
 ### Workload type
 

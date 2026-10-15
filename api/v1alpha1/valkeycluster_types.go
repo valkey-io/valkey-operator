@@ -728,6 +728,7 @@ const (
 	ReasonPodDisruptionBudgetError      = "PodDisruptionBudgetError"
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
+	ReasonUnsupportedAclDirective       = "UnsupportedAclDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
 	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"

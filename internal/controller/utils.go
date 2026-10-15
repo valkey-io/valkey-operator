@@ -288,6 +288,44 @@ func primaryNodeIndexForShard(shardIndex, nodesPerShard int, nodes *valkeyv1.Val
 	return idx
 }
 
+// findMeetTarget picks the node to MEET all isolated nodes against. A seed that
+// later dies strands every node MEETed to it in a separate partition, so it
+// prefers a live, slot-owning primary: an established member of the main
+// component. Selection is deterministic (lowest node ID) so both call sites and
+// successive reconciles converge on one target, forming a single connected
+// component rather than disjoint sub-meshes.
+//
+// Priority: (1) a live, slot-owning primary; (2) any shard primary as a
+// fallback; (3) a non-isolated pending node from a previous MEET batch;
+// (4) the first isolated node as a bootstrap seed when every node is isolated.
+func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
+	var best *valkey.NodeState
+	for _, shard := range state.Shards {
+		p := shard.GetPrimaryNode()
+		if p == nil || len(p.GetSlots()) == 0 || state.IsNodeFailed(p.Id) {
+			continue
+		}
+		if best == nil || p.Id < best.Id {
+			best = p
+		}
+	}
+	if best != nil {
+		return best
+	}
+	// Fallback: any shard primary, even if not obviously stable.
+	for _, shard := range state.Shards {
+		if p := shard.GetPrimaryNode(); p != nil {
+			return p
+		}
+	}
+	for _, node := range state.PendingNodes {
+		if !node.IsIsolated() {
+			return node
+		}
+	}
+	return isolated[0]
+}
+
 // replicaFirstNodeOrder returns the node indices for a shard ordered so that
 // replicas are processed before the primary. The primary is identified via
 // clusterState — the live cluster topology — rather than by node-index convention,

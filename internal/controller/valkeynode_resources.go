@@ -19,6 +19,8 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"strconv"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -63,18 +65,102 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
 	}
 
+	data := map[string]string{
+		"valkey.conf":        generateValkeyNodeConfig(node),
+		"liveness-check.sh":  string(liveness),
+		"readiness-check.sh": string(readiness),
+	}
+	if node.Spec.RestoreFrom != nil {
+		restore, err := restoreScripts()
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(data, restore)
+	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GetServerConfigMapName(node.Name),
 			Namespace: node.Namespace,
 			Labels:    valkeyNodeLabels(node),
 		},
-		Data: map[string]string{
-			"valkey.conf":        generateValkeyNodeConfig(node),
-			"liveness-check.sh":  string(liveness),
-			"readiness-check.sh": string(readiness),
-		},
+		Data: data,
 	}, nil
+}
+
+// configOrDefault reads a directive the user may have set in spec.config.
+func configOrDefault(node *valkeyiov1alpha1.ValkeyNode, key, def string) string {
+	if v, ok := node.Spec.Config[key]; ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// buildRestoreInitContainers returns the two init containers that seed a
+// shard's first node from a snapshot: a fetch on the backup image that stages
+// this shard's RDB under the data dir, and an install on the server image
+// that asks the cluster whether the shard's slots are already served and, if
+// not, moves the file into place. See scripts/restore-*.sh.
+func buildRestoreInitContainers(node *valkeyiov1alpha1.ValkeyNode) []corev1.Container {
+	restore := node.Spec.RestoreFrom
+	clusterName := node.Labels[LabelCluster]
+
+	layoutEnv := []corev1.EnvVar{
+		{Name: "DATA_DIR", Value: dataMountPath},
+		{Name: "RESTORE_SHARD_INDEX", Value: node.Labels[LabelShardIndex]},
+		{Name: "RESTORE_DBFILENAME", Value: configOrDefault(node, "dbfilename", "dump.rdb")},
+		{Name: "RESTORE_APPENDONLY", Value: configOrDefault(node, "appendonly", "no")},
+		{Name: "RESTORE_APPENDDIRNAME", Value: configOrDefault(node, "appenddirname", "appendonlydir")},
+		{Name: "RESTORE_APPENDFILENAME", Value: configOrDefault(node, "appendfilename", "appendonly.aof")},
+	}
+	fetchEnv := append(s3Env(restore.Storage.S3),
+		corev1.EnvVar{Name: "RESTORE_BUCKET", Value: restore.Storage.S3.Bucket},
+		corev1.EnvVar{Name: "RESTORE_PATH", Value: restore.Path},
+		corev1.EnvVar{Name: "RESTORE_EXPECTED_SHARDS", Value: strconv.Itoa(int(restore.Shards))},
+	)
+	fetchEnv = append(fetchEnv, layoutEnv...)
+
+	installEnv := append([]corev1.EnvVar{
+		{Name: "VALKEY_HOST", Value: headlessServiceName(clusterName)},
+		{Name: "VALKEY_PORT", Value: strconv.Itoa(DefaultPort)},
+	}, layoutEnv...)
+	if secret := operatorUserPasswordSecret(clusterName); secret != nil {
+		installEnv = append(installEnv,
+			corev1.EnvVar{Name: "VALKEY_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "VALKEYCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: secret}})
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: dataVolumeName, MountPath: dataMountPath},
+		{Name: scriptsVolumeName, MountPath: "/scripts", ReadOnly: true},
+	}
+	installMounts := mounts
+	if node.Spec.TLS != nil {
+		installEnv = append(installEnv, corev1.EnvVar{Name: envValkeyTLSArgs, Value: valkeyCLITLSArgs(node.Spec.TLS)})
+		installMounts = append(append([]corev1.VolumeMount{}, mounts...),
+			corev1.VolumeMount{Name: tlsVolumeName, MountPath: tlsCertMountPath, ReadOnly: true})
+	}
+
+	return []corev1.Container{
+		{
+			Name:                     "restore-fetch",
+			Image:                    backupImage(restore.Image),
+			ImagePullPolicy:          corev1.PullIfNotPresent,
+			Command:                  []string{"sh", "/scripts/restore-fetch.sh"},
+			Env:                      fetchEnv,
+			VolumeMounts:             mounts,
+			TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		},
+		{
+			Name:                     "restore-install",
+			Image:                    effectiveImage(node.Spec.Image),
+			ImagePullPolicy:          corev1.PullIfNotPresent,
+			Command:                  []string{"sh", "/scripts/restore-install.sh"},
+			Env:                      installEnv,
+			VolumeMounts:             installMounts,
+			TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		},
+	}
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -331,7 +417,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      "scripts",
+					Name:      scriptsVolumeName,
 					MountPath: "/scripts",
 				},
 				{
@@ -356,17 +442,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			MountPath: tlsCertMountPath,
 			ReadOnly:  true,
 		})
-		tlsArgs := fmt.Sprintf("--tls --cacert %s", tlsCertMountPath+"/"+tlsSecretKeyCA)
-		if node.Spec.TLS.RequiresClientCertificate() {
-			tlsArgs = fmt.Sprintf("%s --cert %s --key %s", tlsArgs,
-				tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)
-		}
+		tlsArgs := valkeyCLITLSArgs(node.Spec.TLS)
 		containers[0].Env = append(containers[0].Env,
 			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
 			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCA},
 			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
 			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
-			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: tlsArgs},
+			corev1.EnvVar{Name: envValkeyTLSArgs, Value: tlsArgs},
 		)
 	}
 
@@ -522,7 +604,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		SchedulerName: corev1.DefaultSchedulerName,
 		Volumes: []corev1.Volume{
 			{
-				Name: "scripts",
+				Name: scriptsVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -592,6 +674,10 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		}
 	}
 	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
+
+	if node.Spec.RestoreFrom != nil {
+		podSpec.InitContainers = buildRestoreInitContainers(node)
+	}
 
 	// Mirror the remaining API-server defaults (see the comment on the struct
 	// literal above): a nil here is not "unset" once stored, it is a diff.

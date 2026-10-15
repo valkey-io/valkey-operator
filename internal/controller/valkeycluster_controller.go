@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"reflect"
@@ -63,19 +62,22 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
+	// ValkeyClients dials Valkey nodes. Nil falls back to a provider built from
+	// Client and APIReader.
+	ValkeyClients ClientProvider
 
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
-	clusterStateFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState
+	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
 // one is set and from the nodes otherwise.
-func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
+func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, dial valkey.DialFunc) *valkey.ClusterState {
 	if r.clusterStateFunc != nil {
-		return r.clusterStateFunc(ctx, cluster, nodes, username, password)
+		return r.clusterStateFunc(ctx, nodes)
 	}
-	return r.getValkeyClusterState(ctx, cluster, nodes, username, password)
+	return valkey.GetClusterState(ctx, nodeAddresses(nodes), DefaultPort, dial)
 }
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -125,7 +127,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, cluste
 //     for periodic health checks.
 //
 // For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
@@ -211,14 +213,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// One cluster-state snapshot per reconcile, shared throughout reconcile
-	operatorPassword, err := fetchSystemUserPassword(ctx, operatorUser, r.Client, cluster.Name, cluster.Namespace)
+	dial, err := r.valkeyClients().ForCluster(ctx, cluster)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
-	state := r.scrapeClusterState(ctx, cluster, nodes, operatorUser, operatorPassword)
+	state := r.scrapeClusterState(ctx, nodes, dial)
 	defer state.CloseClients()
 
 	rollSkipped := false
@@ -1047,7 +1049,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 
 	// Hostname announce only when discovery selects Hostname. ClusterDomain is
-	// always written so node TLS ServerName matches getValkeyClusterState.
+	// always written so node TLS ServerName matches the one ForCluster dials with.
 	var preferredEndpoint valkeyiov1alpha1.PreferredEndpointType
 	if cluster.PrefersHostnameAnnounce() {
 		preferredEndpoint = valkeyiov1alpha1.PreferredEndpointTypeHostname
@@ -1086,10 +1088,6 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-func (r *ValkeyClusterReconciler) getValkeyClusterState(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, username, password string) *valkey.ClusterState {
-	return scrapeClusterState(ctx, r.APIReader, cluster, nodeAddresses(nodes), username, password)
-}
-
 // nodeAddresses returns the pod IPs of every node that has one. Nodes still
 // waiting for an IP are skipped: there is nothing to dial.
 func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
@@ -1101,22 +1099,6 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 		ips = append(ips, node.Status.PodIP)
 	}
 	return ips
-}
-
-// scrapeClusterState connects to the given addresses and builds a live topology
-// snapshot.
-func scrapeClusterState(ctx context.Context, apiReader client.Reader, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string, username, password string) *valkey.ClusterState {
-	var tlsConfig *tls.Config
-	if tlsSpec := nodeTLSFromCluster(cluster); tlsSpec != nil && tlsSpec.Certificates.Server.SecretName != "" {
-		cfg, err := getTLSConfig(ctx, apiReader, tlsSpec.Certificates.Server.SecretName, tlsSpec.ServerName, cluster.Namespace, tlsSpec.RequiresClientCertificate())
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state, falling back to plaintext",
-				"secretName", tlsSpec.Certificates.Server.SecretName)
-		} else {
-			tlsConfig = cfg
-		}
-	}
-	return valkey.GetClusterState(ctx, addresses, DefaultPort, username, password, tlsConfig)
 }
 
 // healStaleAddressPeers re-introduces live cluster members to nodes whose

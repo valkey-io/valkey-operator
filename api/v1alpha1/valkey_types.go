@@ -323,6 +323,37 @@ type Valkey struct {
 	Status ValkeyStatus `json:"status,omitzero"`
 }
 
+// GetTLS returns the TLS config from spec.networking.tls, or nil.
+func (v *Valkey) GetTLS() *ValkeyTLSSpec {
+	if v == nil || v.Spec.Networking == nil {
+		return nil
+	}
+	return v.Spec.Networking.TLS
+}
+
+// GetClusterDomain returns networking.clusterDomain, default cluster.local.
+func (v *Valkey) GetClusterDomain() string {
+	if v == nil || v.Spec.Networking == nil || v.Spec.Networking.ClusterDomain == "" {
+		return DefaultClusterDomain
+	}
+	return v.Spec.Networking.ClusterDomain
+}
+
+// ExporterEnabled resolves the default: a nil spec.exporter.enabled means enabled.
+func (s ValkeySpec) ExporterEnabled() bool {
+	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
+}
+
+// PodDisruptionBudgetEnabled reports whether the operator should keep a budget over the pods.
+// Mode defaults to Managed, but a budget needs at least one replica.
+// A single-pod budget either allows evicting it or blocks drains.
+func (s ValkeySpec) PodDisruptionBudgetEnabled() bool {
+	if s.PodDisruptionBudget != nil && s.PodDisruptionBudget.Mode == ValkeyPDBModeDisabled {
+		return false
+	}
+	return s.Replicas > 0
+}
+
 // +kubebuilder:object:root=true
 
 // ValkeyList contains a list of Valkey.

@@ -124,6 +124,19 @@ func labels(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return l
 }
 
+// valkeyLabels returns the standard labels for a Valkey merged with its user-defined labels.
+// The k8s recommended labels win over user-defined labels with the same key.
+// It mirrors labels() for ValkeyCluster.
+func valkeyLabels(v *valkeyv1.Valkey) map[string]string {
+	l := baseLabels(v.Name, "valkey")
+	for k, val := range v.Labels {
+		if _, exists := l[k]; !exists {
+			l[k] = val
+		}
+	}
+	return l
+}
+
 // Annotations returns a copy of user defined annotations.
 func annotations(cluster *valkeyv1.ValkeyCluster) map[string]string {
 	return maps.Clone(cluster.Annotations)

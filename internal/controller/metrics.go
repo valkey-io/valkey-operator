@@ -43,7 +43,7 @@ var (
 	clusterShards = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_shards",
-			Help: "Total number of shards in a ValkeyCluster.",
+			Help: "Number of shards currently observed in a ValkeyCluster's live topology. Can be lower than valkey_operator_cluster_shards_desired if a shard is entirely unreachable.",
 		},
 		[]string{labelValkeyCluster, labelTargetNamespace},
 	)
@@ -52,6 +52,14 @@ var (
 		prometheus.GaugeOpts{
 			Name: "valkey_operator_cluster_shards_ready",
 			Help: "Number of ready shards in a ValkeyCluster.",
+		},
+		[]string{labelValkeyCluster, labelTargetNamespace},
+	)
+
+	clusterShardsDesired = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "valkey_operator_cluster_shards_desired",
+			Help: "Desired number of shards for a ValkeyCluster, from spec.shards. Unlike valkey_operator_cluster_shards, this does not drop when a shard becomes entirely unreachable.",
 		},
 		[]string{labelValkeyCluster, labelTargetNamespace},
 	)
@@ -103,6 +111,7 @@ func initClusterMetrics(name, namespace string) {
 
 	clusterShards.WithLabelValues(name, namespace)
 	clusterShardsReady.WithLabelValues(name, namespace)
+	clusterShardsDesired.WithLabelValues(name, namespace)
 	slotMigrationBatchesTotal.WithLabelValues(name, namespace)
 	roleTriggersTotal.WithLabelValues(name, namespace)
 	roleTriggersDroppedTotal.WithLabelValues(name, namespace)
@@ -124,6 +133,7 @@ func updateClusterMetrics(cluster *valkeyiov1alpha1.ValkeyCluster) {
 
 	clusterShards.WithLabelValues(name, ns).Set(float64(cluster.Status.Shards))
 	clusterShardsReady.WithLabelValues(name, ns).Set(float64(cluster.Status.ReadyShards))
+	clusterShardsDesired.WithLabelValues(name, ns).Set(float64(cluster.Spec.Shards))
 }
 
 // deleteClusterMetrics removes all metrics for a deleted ValkeyCluster.
@@ -133,6 +143,7 @@ func deleteClusterMetrics(name, namespace string) {
 	}
 	clusterShards.DeleteLabelValues(name, namespace)
 	clusterShardsReady.DeleteLabelValues(name, namespace)
+	clusterShardsDesired.DeleteLabelValues(name, namespace)
 	failoversTotal.DeletePartialMatch(prometheus.Labels{labelValkeyCluster: name, labelTargetNamespace: namespace})
 	slotMigrationBatchesTotal.DeleteLabelValues(name, namespace)
 	roleTriggersTotal.DeleteLabelValues(name, namespace)

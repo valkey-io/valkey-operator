@@ -138,7 +138,7 @@ func TestValidateSystemUserPasswordSecret(t *testing.T) {
 			},
 		},
 	}
-	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	err := validateSystemUserPasswordSecret(userSecret, cluster.Spec.ExporterEnabled())
 	if !errors.Is(err, errMissingSystemUser) {
 		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
 	}
@@ -158,7 +158,7 @@ func TestValidateSystemUserPasswordSecret_UnknownUser(t *testing.T) {
 			},
 		},
 	}
-	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	err := validateSystemUserPasswordSecret(userSecret, cluster.Spec.ExporterEnabled())
 	if !errors.Is(err, errUnknownSystemUser) {
 		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errUnknownSystemUser.Error(), err.Error())
 	}
@@ -176,7 +176,7 @@ func TestValidateSystemUserPasswordSecret_UnknownUserAndMissingRequiredUser(t *t
 			},
 		},
 	}
-	err := validateSystemUserPasswordSecret(userSecret, cluster)
+	err := validateSystemUserPasswordSecret(userSecret, cluster.Spec.ExporterEnabled())
 	if !errors.Is(err, errMissingSystemUser) {
 		t.Errorf("Validate System Users Password Failed. Expected '%s', got: '%s'", errMissingSystemUser.Error(), err.Error())
 	}

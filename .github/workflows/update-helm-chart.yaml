@@ -1,0 +1,25 @@
+name: Update Helm Chart
+
+on:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  update-helm-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout valkey-operator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      
+      - name: Check that RBAC permissions are changed
+        run: echo 'do something'
+      
+      - name: Checkout valkey-helm
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Update cluster-role
+        run: echo 'do something'
+      
+      - name: Create Pull Request
+        run: echo 'do something'

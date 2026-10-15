@@ -19,6 +19,7 @@ package controller
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 
@@ -246,6 +248,10 @@ func TestRebalanceSlotsSurfacesMigrationFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "slot migration from ") {
 		t.Fatalf("error must name the move, got %q", err.Error())
 	}
+	var migrationFailed *slotMigrationFailedError
+	if !errors.As(err, &migrationFailed) {
+		t.Fatalf("rebalance failure must stay distinguishable as an async slot migration failure, got %T", err)
+	}
 }
 
 func TestRebalanceSlotsAncientFailureDoesNotBlock(t *testing.T) {
@@ -302,5 +308,146 @@ func TestDrainExcessShardsSurfacesMigrationFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "transfer failed: ERR drain") {
 		t.Fatalf("error must carry the failed job message, got %q", err.Error())
+	}
+	var migrationFailed *slotMigrationFailedError
+	if !errors.As(err, &migrationFailed) {
+		t.Fatalf("drain failure must stay distinguishable as an async slot migration failure, got %T", err)
+	}
+}
+
+// recorderEvents drains the fake recorder's buffered events so tests can
+// assert on what handleScaleIn emitted.
+func recorderEvents(recorder events.EventRecorder) []string {
+	rec, ok := recorder.(*events.FakeRecorder)
+	if !ok {
+		return nil
+	}
+	var got []string
+	reading := true
+	for reading {
+		select {
+		case ev := <-rec.Events:
+			got = append(got, ev)
+		default:
+			reading = false
+		}
+	}
+	return got
+}
+
+func scaleInFixture(t *testing.T, server *migrationStateServer, specShards int32, srcPrimaryMissing bool) (*valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
+	t.Helper()
+	if server != nil {
+		src, dst := rebalanceFixture(t, server)
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{src, dst}}
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+			{ObjectMeta: metav1.ObjectMeta{Name: "src-node", Labels: map[string]string{LabelShardIndex: "1", LabelNodeIndex: "0"}},
+				Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: src.Nodes[0].Address}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "dst-node", Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "0"}},
+				Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: dst.Nodes[0].Address}},
+		}}
+		cluster := &valkeyiov1alpha1.ValkeyCluster{}
+		cluster.Spec.Shards = specShards
+		return cluster, state, nodes
+	}
+	// No scripted server: a drain whose plan cannot find a destination
+	// primary errors before any migration state is read.
+	src := &valkey.ShardState{
+		Id:        "src-shard",
+		PrimaryId: "src-primary-id",
+		Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+		Nodes:     []*valkey.NodeState{plainDstNode("10.0.0.1", "src-primary-id")},
+	}
+	dst := &valkey.ShardState{
+		Id:        "dst-shard",
+		PrimaryId: "missing-primary-id",
+		Nodes:     []*valkey.NodeState{plainDstNode("10.0.0.2", "dst-node-id")},
+	}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{src, dst}}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+		{ObjectMeta: metav1.ObjectMeta{Name: "src-node", Labels: map[string]string{LabelShardIndex: "1", LabelNodeIndex: "0"}},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "dst-node", Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "0"}},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.2"}},
+	}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = specShards
+	return cluster, state, nodes
+}
+
+func TestHandleScaleInMigrationFailureEmitsSlotRebalanceFailed(t *testing.T) {
+	// An asynchronously failed drain migration is the rebalance failure
+	// class: handleScaleIn must keep the SlotRebalanceFailed event for
+	// it, leave DrainFailed to other drain errors, and hold Degraded=True
+	// with reason RebalanceFailed.
+	server := newMigrationStateServer(t, func() [][]string {
+		return [][]string{stateEntry("failed", "0-399", "transfer failed: ERR drain", time.Now())}
+	})
+	cluster, state, nodes := scaleInFixture(t, server, 1, false)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+
+	_, requeue := r.handleScaleIn(context.Background(), cluster, state, nodes)
+	if !requeue {
+		t.Fatal("expected handleScaleIn to requeue on the surfaced failure")
+	}
+
+	got := recorderEvents(r.Recorder)
+	var rebalanceFailed, drainFailed bool
+	for _, ev := range got {
+		if strings.Contains(ev, "SlotRebalanceFailed") {
+			rebalanceFailed = true
+		}
+		if strings.Contains(ev, "DrainFailed") {
+			drainFailed = true
+		}
+	}
+	if !rebalanceFailed {
+		t.Fatalf("expected a SlotRebalanceFailed event, got %q", got)
+	}
+	if drainFailed {
+		t.Fatalf("an async migration failure must not emit DrainFailed, got %q", got)
+	}
+
+	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	if cond == nil {
+		t.Fatal("expected a Degraded condition")
+	}
+	if cond.Reason != valkeyiov1alpha1.ReasonRebalanceFailed {
+		t.Fatalf("Degraded reason = %q, want %q", cond.Reason, valkeyiov1alpha1.ReasonRebalanceFailed)
+	}
+	if cond.Status != metav1.ConditionTrue {
+		t.Fatalf("Degraded status = %q, want True", cond.Status)
+	}
+}
+
+func TestHandleScaleInDrainPlanErrorEmitsDrainFailed(t *testing.T) {
+	// Drain failures that are not asynchronous migration failures keep
+	// the DrainFailed event: here the drain plan cannot find a
+	// destination primary, which fails before any migration state is read.
+	cluster, state, nodes := scaleInFixture(t, nil, 1, true)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+
+	_, requeue := r.handleScaleIn(context.Background(), cluster, state, nodes)
+	if !requeue {
+		t.Fatal("expected handleScaleIn to requeue on the drain failure")
+	}
+
+	got := recorderEvents(r.Recorder)
+	var rebalanceFailed, drainFailed bool
+	for _, ev := range got {
+		if strings.Contains(ev, "SlotRebalanceFailed") {
+			rebalanceFailed = true
+		}
+		if strings.Contains(ev, "DrainFailed") {
+			drainFailed = true
+		}
+	}
+	if !drainFailed {
+		t.Fatalf("expected a DrainFailed event, got %q", got)
+	}
+	if rebalanceFailed {
+		t.Fatalf("a non-migration drain failure must not emit SlotRebalanceFailed, got %q", got)
 	}
 }

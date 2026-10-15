@@ -70,9 +70,8 @@ spec:
             description: spec defines the desired state of Valkey
             properties:
               acl:
-                description: |-
-                  ACL configures the Valkey access control the operator manages.
-                  The controller does not apply these users yet.
+                description: ACL configures the Valkey access control the operator
+                  manages.
                 properties:
                   users:
                     description: Users managed by the operator.

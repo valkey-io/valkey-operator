@@ -195,7 +195,6 @@ type ValkeySpec struct {
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// ACL configures the Valkey access control the operator manages.
-	// The controller does not apply these users yet.
 	// +optional
 	ACL *ValkeyACLSpec `json:"acl,omitempty"`
 
@@ -350,6 +349,49 @@ type Valkey struct {
 	// +kubebuilder:default:={state: "Initializing", replicas:0, readyReplicas:0}
 	// +optional
 	Status ValkeyStatus `json:"status,omitzero"`
+}
+
+// GetTLS returns the TLS config from spec.networking.tls, or nil.
+func (v *Valkey) GetTLS() *ValkeyTLSSpec {
+	if v == nil || v.Spec.Networking == nil {
+		return nil
+	}
+	return v.Spec.Networking.TLS
+}
+
+// GetClusterDomain returns networking.clusterDomain, default cluster.local.
+func (v *Valkey) GetClusterDomain() string {
+	if v == nil || v.Spec.Networking == nil || v.Spec.Networking.ClusterDomain == "" {
+		return DefaultClusterDomain
+	}
+	return v.Spec.Networking.ClusterDomain
+}
+
+// ExporterEnabled resolves the default: a nil spec.exporter.enabled means enabled.
+func (s ValkeySpec) ExporterEnabled() bool {
+	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
+}
+
+// ACLUsers returns a copy of spec.acl.users, so callers may sort or extend it without changing the spec.
+func (s ValkeySpec) ACLUsers() []ACLUserSpec {
+	if s.ACL == nil {
+		return nil
+	}
+	users := make([]ACLUserSpec, 0, len(s.ACL.Users))
+	for _, u := range s.ACL.Users {
+		users = append(users, *u.DeepCopy())
+	}
+	return users
+}
+
+// PodDisruptionBudgetEnabled reports whether the operator should keep a budget over the pods.
+// Mode defaults to Managed, but a budget needs at least one replica.
+// A single-pod budget either allows evicting it or blocks drains.
+func (s ValkeySpec) PodDisruptionBudgetEnabled() bool {
+	if s.PodDisruptionBudget != nil && s.PodDisruptionBudget.Mode == ValkeyPDBModeDisabled {
+		return false
+	}
+	return s.Replicas > 0
 }
 
 // +kubebuilder:object:root=true

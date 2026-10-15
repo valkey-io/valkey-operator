@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -30,11 +31,14 @@ import (
 // stay within 52 characters: Kubernetes puts it, plus an 11-character suffix,
 // into the controller-revision-hash pod label, and label values stop at 63.
 // With workloadType Deployment the limit is the headless Service
-// valkey-<cluster>, a DNS label of at most 63 characters.
+// valkey-<cluster>, a DNS label of at most 63 characters, until the indexes
+// grow enough for the node name <cluster>-<shard>-<node>, a pod label value,
+// to reach 63 first.
 var _ = Describe("Resource name length validation", func() {
 	const (
 		statefulSetLimit = "the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters"
 		serviceLimit     = "the headless Service name valkey-<name> must stay within 63 characters"
+		nodeNameLimit    = "the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 	)
 
 	nameCluster := func(name string, shards, replicas int32, workload valkeyiov1alpha1.WorkloadType) *valkeyiov1alpha1.ValkeyCluster {
@@ -94,5 +98,17 @@ var _ = Describe("Resource name length validation", func() {
 		err := k8sClient.Create(ctx, nameCluster(strings.Repeat("d", 57), 1, 0, valkeyiov1alpha1.WorkloadTypeDeployment))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(serviceLimit))
+	})
+
+	It("limits a Deployment cluster by its node name once the indexes grow", func() {
+		By("a 63-character node name")
+		// Dry run: admission runs the rules, and the controller never has to build ten thousand ValkeyNodes.
+		cluster := nameCluster(strings.Repeat("e", 56), 10000, 0, valkeyiov1alpha1.WorkloadTypeDeployment) // <56>-9999-0
+		Expect(k8sClient.Create(ctx, cluster, client.DryRunAll)).To(Succeed())
+
+		By("a 64-character node name")
+		err := k8sClient.Create(ctx, nameCluster(strings.Repeat("e", 56), 10001, 0, valkeyiov1alpha1.WorkloadTypeDeployment)) // <56>-10000-0
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(nodeNameLimit))
 	})
 })

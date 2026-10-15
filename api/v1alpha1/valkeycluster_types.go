@@ -748,7 +748,9 @@ const (
 // digits of the highest shard index (shards - 1) and node index (replicas),
 // so a scale-out that pushes an index into more digits is rejected too. A
 // Deployment carries no such label; there the headless Service valkey-<name>,
-// a DNS label of at most 63 characters, is the limit.
+// a DNS label of at most 63 characters, is the limit, until the indexes grow
+// enough for the ValkeyNode name <name>-<shard>-<node>, which every pod
+// carries as its app.kubernetes.io/instance label value, to reach 63 first.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
@@ -757,6 +759,7 @@ const (
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

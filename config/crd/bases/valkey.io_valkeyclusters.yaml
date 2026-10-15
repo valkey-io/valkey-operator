@@ -4128,6 +4128,12 @@ spec:
             must stay within 63 characters'
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
             || size(self.metadata.name) <= 56'
+        - message: 'metadata.name is too long: the ValkeyNode name <name>-<shard>-<node>
+            is the app.kubernetes.io/instance label value of its pod and must stay
+            within 63 characters'
+          rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
+            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
+            ? self.spec.replicas : 0)) <= 61'
     served: true
     storage: true
     subresources:

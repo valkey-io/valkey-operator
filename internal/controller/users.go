@@ -130,10 +130,6 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("getting system users secret: " + cluster.Name)
-	// System users never set Databases, so this only keeps the signature
-	// honest; it is computed rather than hardcoded so the two call sites cannot
-	// drift apart.
-	databasesSupported := databasesAclSupported(cluster.Spec.Image)
 	// Every reconcile, including one where the Secret is already complete.
 	// Rotation is decided here. A Get that finds the Secret and returns
 	// would leave the passwords in place forever.
@@ -160,7 +156,8 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 				RawAcl: systemUsersAcls[user],
 			},
 		}
-		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes, databasesSupported))
+		// System users have no databases block, so the version check is skipped.
+		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes, false))
 	}
 
 	return systemsAcls.String(), nil
@@ -217,8 +214,6 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		return err
 	}
 
-	// Resolved once per reconcile: every user in this file is rendered against
-	// the same image, and re-deriving it per user would parse the tag N times.
 	databasesSupported := databasesAclSupported(cluster.Spec.Image)
 
 	// Process each user, generating a complete ACL string
@@ -295,15 +290,6 @@ func appendAcl(acl *strings.Builder, permissions []string, prefix string) {
 	}
 }
 
-// appendDatabasesAcl renders the database-scoping directive for a user.
-//
-// databasesSupported is threaded in from the caller rather than derived here so
-// that the version decision lives in exactly one place (databasesAclSupported);
-// see the comment on aclDatabasesMinVersion. When the running Valkey predates
-// the directives, they are dropped silently: emitting db= against an older
-// server would fail ACL LOAD for the entire file, taking every other user's
-// permissions down with it. The matching ConfigurationWarning is raised
-// separately by aclVersionGateWarnings.
 func appendDatabasesAcl(acl *strings.Builder, databases valkeyiov1alpha1.DatabasesAclSpec, databasesSupported bool) {
 	if !databasesSupported {
 		return
@@ -315,13 +301,7 @@ func appendDatabasesAcl(acl *strings.Builder, databases valkeyiov1alpha1.Databas
 	case databases.AllDbs:
 		acl.WriteString(" alldbs")
 	case len(databases.IDs) > 0:
-		// db= clears alldbs and any previously selected ids on its own, so it
-		// needs no preceding reset. This is deliberately unlike the channels
-		// case above, where resetchannels is required because the server-side
-		// default is governed by acl-pubsub-default.
-		//
-		// Guarded on a non-empty list: "db=" with no id is a syntax error that
-		// would break ACL LOAD for the whole file.
+		// db= replaces alldbs itself, so no reset is needed. A bare db= breaks ACL LOAD.
 		ids := make([]string, len(databases.IDs))
 		for i, id := range databases.IDs {
 			ids[i] = strconv.Itoa(int(id))
@@ -368,7 +348,6 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string, databas
 		appendAcl(&acl, user.Channels.Patterns, "&")
 	}
 
-	// Add database restrictions
 	appendDatabasesAcl(&acl, user.Databases, databasesSupported)
 
 	// Build command ACLs

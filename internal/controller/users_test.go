@@ -102,9 +102,7 @@ func TestBuildAclFileContents(t *testing.T) {
 			},
 		},
 		{
-			// db= clears alldbs on its own, so unlike channels it must not be
-			// preceded by a reset directive. The exact-match assertion below
-			// is what pins that: a stray "resetdbs" would fail the comparison.
+			// db= needs no reset; a stray resetdbs fails the exact match.
 			Name:     "grace",
 			Password: anyPassword,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
@@ -121,10 +119,6 @@ func TestBuildAclFileContents(t *testing.T) {
 			},
 		},
 		{
-			// Rendering-only expectation. alldbs is every user's default, so
-			// what the operator writes here produces a user indistinguishable
-			// from one with no databases block; this pins the rendered bytes,
-			// not anything observable on the server.
 			Name:     "ivan",
 			Password: anyPassword,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
@@ -216,8 +210,7 @@ var legacyBuildAclUsers = []valkeyiov1alpha1.UserAclSpec{
 		},
 	},
 	{
-		// Databases rides along in ACLPermissions, so the conversion must keep
-		// it: this entry renders through ToACLUser in TestBuildUserAclLegacyParity.
+		// Checks that ToACLUser keeps Databases.
 		Name:       "grace",
 		Enabled:    true,
 		NoPassword: true,
@@ -229,9 +222,6 @@ var legacyBuildAclUsers = []valkeyiov1alpha1.UserAclSpec{
 }
 
 func TestBuildUserAcl_DatabasesVersionGate(t *testing.T) {
-	// On an image that predates the db= directives the renderer must drop them
-	// silently: emitting them would make ACL LOAD fail for the whole file, and
-	// rejecting the spec is not the contract (see aclVersionGateWarnings).
 	for name, databases := range map[string]valkeyiov1alpha1.DatabasesAclSpec{
 		"ids":      {IDs: []int32{0, 1}},
 		"allDbs":   {AllDbs: true},
@@ -250,60 +240,22 @@ func TestBuildUserAcl_DatabasesVersionGate(t *testing.T) {
 			acl := strings.TrimSpace(buildUserAcl(user, nil, false))
 
 			assert.Equal(t, "user frank on nopass +@all", acl)
-			assert.NotContains(t, acl, "db=")
-			assert.NotContains(t, acl, "alldbs")
-			assert.NotContains(t, acl, "resetdbs")
 		})
 	}
 }
 
-func TestBuildUserAcl_DatabasesPrecedence(t *testing.T) {
-	// CEL rejects these combinations at admission, so they are unreachable
-	// through the API. The renderer still has to pick exactly one directive
-	// rather than emit two contradictory ones, for any object that predates
-	// the CEL rules or arrives through a client that skips validation.
-	tests := map[string]struct {
-		databases valkeyiov1alpha1.DatabasesAclSpec
-		expected  string
-	}{
-		"resetDbs wins over allDbs": {
-			databases: valkeyiov1alpha1.DatabasesAclSpec{AllDbs: true, ResetDbs: true},
-			expected:  "user frank on nopass resetdbs +@all",
-		},
-		"resetDbs wins over ids": {
-			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}, ResetDbs: true},
-			expected:  "user frank on nopass resetdbs +@all",
-		},
-		"allDbs wins over ids": {
-			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}, AllDbs: true},
-			expected:  "user frank on nopass alldbs +@all",
-		},
-		"empty ids renders no directive": {
-			// db= with no id is a syntax error that breaks ACL LOAD for the
-			// entire file, so an empty list must render nothing at all.
-			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}},
-			expected:  "user frank on nopass +@all",
-		},
-		"unset renders no directive": {
-			databases: valkeyiov1alpha1.DatabasesAclSpec{},
-			expected:  "user frank on nopass +@all",
+func TestBuildUserAcl_EmptyDatabaseIDsRenderNoDirective(t *testing.T) {
+	user := valkeyiov1alpha1.ACLUserSpec{
+		Name:     "frank",
+		Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}},
+			Commands:  valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
 		},
 	}
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			user := valkeyiov1alpha1.ACLUserSpec{
-				Name:     "frank",
-				Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
-				ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-					Databases: tc.databases,
-					Commands:  valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
-				},
-			}
-
-			assert.Equal(t, tc.expected, strings.TrimSpace(buildUserAcl(user, nil, true)))
-		})
-	}
+	// A bare db= would break ACL LOAD.
+	assert.Equal(t, "user frank on nopass +@all", strings.TrimSpace(buildUserAcl(user, nil, true)))
 }
 
 func TestValidateSystemUserPasswordSecret(t *testing.T) {

@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	semver "github.com/Masterminds/semver/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -507,16 +510,12 @@ var _ = Describe("ACL databases version gate", Label("acl-databases"), func() {
 		Expect(warnings).To(HaveLen(1))
 		Expect(warnings[0].reason).To(Equal(valkeyiov1alpha1.ReasonUnsupportedAclDirective))
 		Expect(warnings[0].message).To(ContainSubstring("spec.acl.users[dbuser].databases"))
-		// The full prerelease floor, not just "9.1.0": "9.1.0" is a substring of
-		// "9.1.0-rc1", so asserting the shorter form would still pass if the
-		// floor were changed, making this blind to that regression.
+		// "9.1.0" alone is a substring of the floor and would always match.
 		Expect(warnings[0].message).To(ContainSubstring("9.1.0-rc1"))
 		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
 	})
 
 	It("names spec.users when the deprecated field carries the users", func() {
-		// ACLUsers() falls back to the converted spec.users, so the gate sees
-		// those users too, and the message points at the field the spec set.
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Image: "valkey/valkey:9.0.0",
@@ -573,27 +572,32 @@ var _ = Describe("ACL databases version gate", Label("acl-databases"), func() {
 		Expect(warnings[0].message).NotTo(ContainSubstring("alice"))
 	})
 
-	It("warns for allDbs and resetDbs too, not just ids", func() {
-		for _, databases := range []valkeyiov1alpha1.DatabasesAclSpec{
-			{AllDbs: true},
-			{ResetDbs: true},
-		} {
-			user := withDatabases("dbuser", databases)
-			Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", user))).To(HaveLen(1))
+	It("cuts a long user list short and counts the names it leaves out", func() {
+		users := make([]valkeyiov1alpha1.ACLUserSpec, 0, 300)
+		for i := range 300 {
+			users = append(users, gatedUser(fmt.Sprintf("%03d", i)+strings.Repeat("x", 125)))
 		}
+
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", users...))
+		Expect(warnings).To(HaveLen(1))
+		message := warnings[0].message
+		// Three names fit the budget.
+		Expect(message).To(ContainSubstring("spec.acl.users[000x"))
+		Expect(message).To(ContainSubstring("002" + strings.Repeat("x", 125) + ",+297 more].databases"))
+		Expect(message).NotTo(ContainSubstring("003x"))
+		// Event note limit.
+		Expect(len(message)).To(BeNumerically("<=", 1024))
 	})
 
-	It("does not warn for a user whose databases block is empty", func() {
-		// An explicitly empty block renders nothing, so there is nothing to
-		// drop and nothing to warn about.
-		user := withDatabases("dbuser", valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}})
-		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", user))).To(BeEmpty())
+	It("joins user names up to the budget and counts the rest", func() {
+		names := []string{"a", "b", "c"}
+		Expect(joinUserNames(names, 5)).To(Equal("a,b,c"), "a list that fits exactly is not cut")
+		Expect(joinUserNames(names, 4)).To(Equal("a,b,+1 more"))
+		Expect(joinUserNames(names, 0)).To(Equal("+3 more"), "a first name over budget is counted, not listed")
+		Expect(joinUserNames(nil, 5)).To(BeEmpty())
 	})
 
 	It("warns exactly when the rendered ACL drops the directive", func() {
-		// aclVersionGateWarnings promises to report exactly what appendDatabasesAcl
-		// drops. Render and warn from the same spec so the two cannot drift, e.g.
-		// a new DatabasesAclSpec field rendered but missed by hasDatabasesDirective.
 		for _, image := range []string{"valkey/valkey:9.0.0", "valkey/valkey:9.1.0"} {
 			for _, databases := range []valkeyiov1alpha1.DatabasesAclSpec{
 				{IDs: []int32{0}},

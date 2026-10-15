@@ -328,9 +328,10 @@ func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error
 func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int, error) {
 	prologue, cli := valkeyCLIPrefix(opts)
 	// Generate commands, execute them and verify replies (in non-interactive mode).
+	// Skip cluster-mode "-> Redirected" lines so replies stay aligned with GETs.
 	script := fmt.Sprintf(
 		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s"+
-			" | awk -v v=val: '{n++; if ($0 == v n) ok++} END{print ok+0}'",
+			" | awk -v v=val: '/^-> Redirected/{next} {n++; if ($0 == v n) ok++} END{print ok+0}'",
 		prologue, count, prefix, cli)
 	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
 	if err != nil {

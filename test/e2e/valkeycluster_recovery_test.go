@@ -89,11 +89,12 @@ var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), f
 		utils.CollectValkeyDebugInfo(cluster, cliOpts)
 	}
 
-	// Scaling replicas down while a shard's primary sits above the new node-index
-	// bound puts the primary on a node the desired topology no longer includes, so
-	// completing the scale-down means removing the node currently serving the
-	// shard.
-	Context("when the primary sits on a node the new replica count removes", Label("replica-scale-down"), func() {
+	// A replica scale-down removes the highest node-index on every shard. When one
+	// shard's primary has failed over onto that index, completing the scale-down
+	// means removing the node currently serving it. That one shard's remediation
+	// must not hold back the others: the shards whose primary did not move still
+	// scale down, so the cluster settles at two nodes per shard.
+	Context("when one shard's primary sits on a node the new replica count removes", Label("replica-scale-down"), func() {
 		const clusterName = "valkeycluster-replica-scaledown-e2e"
 		const keyPrefix = "e2e:scaledown"
 		const seedKeys = 500
@@ -103,47 +104,45 @@ var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), f
 			deleteCluster(clusterName)
 		})
 
-		It("completes the scale-down and keeps the data", func() {
-			By("creating a 1-shard cluster with 2 replicas, so node-index 2 exists")
+		It("scales every shard down even though one shard's primary is out of range", func() {
+			By("creating a 3-shard cluster with 2 replicas, so node-index 2 exists on each shard")
 			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
   name: %s
 spec:
-  shards: 1
+  shards: 3
   replicas: 2
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
 			waitForReady(clusterName)
 
-			By("seeding keys so the scale-down can be checked for data loss")
+			By("seeding keys across all shards so the scale-down can be checked for data loss")
 			Eventually(func(g Gomega) {
 				g.Expect(utils.WriteValkeyKeys(podFor(clusterName, 0, 0), keyPrefix, seedKeys, cliOpts)).To(Succeed())
 			}).Should(Succeed())
 
-			By("failing over to node-index 2, moving the primary off index 0")
-			// A graceful CLUSTER FAILOVER holds writes until the target has caught
-			// up, so no keys are lost here.
+			By("failing over only shard 0 to node-index 2, moving its primary off index 0")
+			// A graceful CLUSTER FAILOVER on the index-2 replica promotes it and
+			// holds writes until it has caught up, so no keys are lost.
 			_, err := utils.ValkeyCLI(podFor(clusterName, 0, 2), cliOpts, "CLUSTER", "FAILOVER")
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for node-index 2 to report primary")
+			By("waiting for shard 0's node-index 2 to report primary")
 			Eventually(func(g Gomega) {
 				role, err := roleOf(clusterName, 0, 2)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(role).To(Equal("primary"))
+				g.Expect(role).To(Equal("primary"), "shard 0 node-index 2 should be primary")
 			}).Should(Succeed())
 
-			By("scaling replicas from 2 to 1, which puts the primary out of range")
-			// nodesPerShard becomes 2, so the primary at node-index 2 is now on a
-			// node the desired topology does not include.
+			By("scaling replicas from 2 to 1, which puts shard 0's primary out of range")
 			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
 				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for the cluster to return to Ready with two nodes")
+			By("waiting for the whole cluster to return to Ready with two nodes per shard")
 			Eventually(func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(clusterName)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -152,28 +151,28 @@ spec:
 
 				nodes, err := utils.GetValkeyClusterNodes(clusterName)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(nodes.Items).To(HaveLen(2), "the excess ValkeyNode should be removed")
+				g.Expect(nodes.Items).To(HaveLen(3*2),
+					"all three shards should scale down to two nodes")
+			}).Should(Succeed())
+
+			By("confirming shard 0 recovered a primary on a remaining node")
+			Eventually(func(g Gomega) {
+				role0, err := roleOf(clusterName, 0, 0)
+				g.Expect(err).NotTo(HaveOccurred())
+				role1, err := roleOf(clusterName, 0, 1)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect([]string{role0, role1}).To(ContainElement("primary"),
+					"one of shard 0's remaining nodes should be promoted")
 			}).Should(Succeed())
 
 			By("verifying no keys were lost")
-			// The removed node held the primary role, so its slots had to be handed
-			// off during termination rather than dropped. The role lands on either
-			// surviving node, so read from whichever holds it.
+			// Shard 1's node 0 is an untouched primary; -c redirects from there
+			// read every shard's keys, including shard 0's handed-off slots.
 			Eventually(func(g Gomega) {
-				primary := -1
-				for node := range 2 {
-					role, err := roleOf(clusterName, 0, node)
-					g.Expect(err).NotTo(HaveOccurred())
-					if role == "primary" {
-						primary = node
-					}
-				}
-				g.Expect(primary).NotTo(Equal(-1), "no surviving node reports primary")
-
-				found, err := utils.CountValkeyKeys(podFor(clusterName, 0, primary), keyPrefix, seedKeys, cliOpts)
+				found, err := utils.CountValkeyKeys(podFor(clusterName, 1, 0), keyPrefix, seedKeys, cliOpts)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).To(Equal(seedKeys),
-					"keys should survive removal of the primary-holding node")
+					"keys should survive the scale-down")
 			}).Should(Succeed())
 		})
 	})

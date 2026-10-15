@@ -193,15 +193,7 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
 
 	image := effectiveImage(cluster.Spec.Image)
-	imageSource := "spec.image"
-	if cluster.Spec.Image == "" {
-		imageSource = "default image"
-	}
-
-	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
-	if version, ok := valkey.VersionFromImage(image); ok {
-		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
-	}
+	versionDetail := detectedVersionDetail(cluster.Spec.Image)
 
 	warnings := make([]configWarning, 0, len(droppedKeys)+1)
 	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
@@ -224,6 +216,24 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 	}
 
 	return warnings
+}
+
+// detectedVersionDetail renders the "where the version came from" half of a
+// version-gate warning message. Shared by the config and ACL gates so that a
+// user who trips both reads one consistent explanation, and so the empty-image
+// wording ("default image" rather than a spec.image that was never set) is
+// decided in exactly one place.
+func detectedVersionDetail(specImage string) string {
+	image := effectiveImage(specImage)
+	imageSource := "spec.image"
+	if specImage == "" {
+		imageSource = "default image"
+	}
+
+	if version, ok := valkey.VersionFromImage(image); ok {
+		return fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
+	}
+	return fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
 }
 
 // clientAuthUserSupported reports whether the selected certificate-to-user

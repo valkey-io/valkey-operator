@@ -28,7 +28,7 @@ Two consequences follow:
   reconciles and poller ticks, so callers never close them. Each pooled
   client stays connected as `_operator`, and valkey-go sends it a PING about
   every second while idle, so `CLIENT LIST` on a node shows a standing
-  operator connection.
+  operator connection named `valkey-operator`.
 
 ## NodeState vs ClusterNode
 

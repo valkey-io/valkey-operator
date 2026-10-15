@@ -23,7 +23,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -63,12 +62,9 @@ type ValkeyClusterReconciler struct {
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
-	// ValkeyClients hands out pooled Valkey clients. Nil falls back to a
-	// provider and pool built on first use from Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. SetupWithManager
+	// requires it.
 	ValkeyClients ClientProvider
-
-	fallbackOnce    sync.Once
-	fallbackClients ClientProvider
 
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
@@ -217,7 +213,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// One cluster-state snapshot per reconcile, shared throughout reconcile
-	dial, err := r.valkeyClients().ForCluster(ctx, cluster)
+	dial, err := r.ValkeyClients.ForCluster(ctx, cluster)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonSystemUsersAclError, err.Error(), metav1.ConditionFalse)
@@ -1894,6 +1890,9 @@ func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.Valke
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.ValkeyClients == nil {
+		return errors.New("ValkeyCluster reconciler has no ClientProvider")
+	}
 	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyCluster{}).

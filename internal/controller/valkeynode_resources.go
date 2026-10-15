@@ -356,14 +356,14 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			MountPath: tlsCertMountPath,
 			ReadOnly:  true,
 		})
-		tlsArgs := fmt.Sprintf("--tls --cacert %s", tlsCertMountPath+"/"+tlsSecretKeyCA)
+		tlsArgs := fmt.Sprintf("--tls --cacert %s", nodeServerCAPath(node.Spec.TLS))
 		if node.Spec.TLS.RequiresClientCertificate() {
 			tlsArgs = fmt.Sprintf("%s --cert %s --key %s", tlsArgs,
 				tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)
 		}
 		containers[0].Env = append(containers[0].Env,
 			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCA},
+			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: nodeServerCAPath(node.Spec.TLS)},
 			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
 			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
 			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: tlsArgs},
@@ -563,14 +563,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	if node.Spec.TLS != nil {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: tlsVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: node.Spec.TLS.Certificates.Server.SecretName,
-				},
-			},
-		})
+		podSpec.Volumes = append(podSpec.Volumes, tlsVolume(node.Spec.TLS))
 	}
 
 	if node.Spec.ServiceAccountName != "" {
@@ -607,6 +600,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		}
 		if sec := podSpec.Volumes[i].Secret; sec != nil && sec.DefaultMode == nil {
 			sec.DefaultMode = func(i int32) *int32 { return &i }(corev1.SecretVolumeSourceDefaultMode)
+		}
+		if pr := podSpec.Volumes[i].Projected; pr != nil && pr.DefaultMode == nil {
+			pr.DefaultMode = func(i int32) *int32 { return &i }(corev1.ProjectedVolumeSourceDefaultMode)
 		}
 	}
 
@@ -689,4 +685,55 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			},
 		},
 	}, nil
+}
+
+// tlsVolume is the volume mounted at tlsCertMountPath. Without a trust bundle
+// it is the server secret as is. With one, it is a projection that keeps every
+// path valkey.conf names: tls.crt and tls.key from the server secret, ca.crt
+// from the trust bundle, and the server secret's own ca.crt moved aside to
+// server-ca.crt for probes and the exporter. Keeping tls-ca-cert-file at the
+// same path means the shared ConfigMap does not change when a trust bundle is
+// added, so a pod that restarts before its roll still finds every file its
+// config names.
+func tlsVolume(tls *valkeyiov1alpha1.NodeTLSSpec) corev1.Volume {
+	server := tls.Certificates.Server.SecretName
+	if tls.Certificates.TrustBundle == nil {
+		return corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: server},
+			},
+		}
+	}
+	return corev1.Volume{
+		Name: tlsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: server},
+						Items: []corev1.KeyToPath{
+							{Key: tlsSecretKeyCert, Path: tlsSecretKeyCert},
+							{Key: tlsSecretKeyKey, Path: tlsSecretKeyKey},
+							{Key: tlsSecretKeyCA, Path: tlsSecretKeyServerCA},
+						},
+					}},
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tls.Certificates.TrustBundle.SecretName},
+						Items:                []corev1.KeyToPath{{Key: tlsSecretKeyCA, Path: tlsSecretKeyCA}},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// nodeServerCAPath is the in-pod path of the root the server certificate chains
+// to, which probes and the exporter verify the server against. It is ca.crt
+// unless a trust bundle has taken that path over.
+func nodeServerCAPath(tls *valkeyiov1alpha1.NodeTLSSpec) string {
+	if tls != nil && tls.Certificates.TrustBundle != nil {
+		return tlsCertMountPath + "/" + tlsSecretKeyServerCA
+	}
+	return tlsCertMountPath + "/" + tlsSecretKeyCA
 }

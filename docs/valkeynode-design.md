@@ -83,8 +83,17 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `role` - current reported replication role from node
 - `podIP` — used by the parent to connect and issue Valkey commands
 - `podName` — name of the managed pod
+- `liveACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
+
+## TLS Trust Bundle
+
+`spec.tls.certificates.trustBundle` names a Secret whose `ca.crt` replaces the server secret's `ca.crt` as the root Valkey verifies clients and peers against (`tls-ca-cert-file`). It lets clients present certificates from CAs other than the one that issued the server certificate. The bundle must still include the server's own root, since peers present the server certificate to each other.
+
+- **Mounting.** The `tls-certs` volume becomes a projection: `tls.crt` and `tls.key` from the server secret, `ca.crt` from the bundle, and the server secret's `ca.crt` at `server-ca.crt`. Every path in `valkey.conf` stays the same, so setting a bundle changes the pod template but not the config or its roll hash. Probes and the metrics exporter verify the server against `server-ca.crt`.
+- **Live reload.** Valkey reads `tls-ca-cert-file` only at startup or when its TLS config is set, and `tls-auto-reload-interval` was not observed to reload the CA. So on every reconcile the node controller sets `tls-ca-cert-file` to its unchanged path, which rebuilds the TLS context with the current file. A changed bundle therefore takes effect within the kubelet's volume refresh plus one requeue, without a pod restart, for new connections.
+- **ACL first.** The reload runs only once the node's ACL is confirmed live, and the node then publishes that ACL's revision in `status.liveACLRevision`. The ACL and the bundle are separate mounts that the kubelet refreshes independently. A parent that widens the bundle can wait for every node to report the current revision, so a new root is never trusted under a stale ACL, even by a container that restarts mid-update.
 
 ## Naming Conventions
 

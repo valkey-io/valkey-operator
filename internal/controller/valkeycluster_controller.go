@@ -1081,6 +1081,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			Config:                        cluster.Spec.Config,
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			ServiceAccountName:            cluster.Spec.ServiceAccountName,
+			PodMetadata:                   cluster.Spec.PodMetadata,
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,

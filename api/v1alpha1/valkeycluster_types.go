@@ -398,6 +398,12 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// PodMetadata adds labels and annotations to every Valkey pod of the cluster.
+	// They are not part of the workload selector, so they can be changed at any
+	// time; a change rolls the pods. Keys the operator sets itself are rejected.
+	// +optional
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.

@@ -580,6 +580,11 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		},
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		// Do not take a Service a ValkeyNode already owns. A free name is
+		// still created. The other cluster object existing is not enough.
+		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
+			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
+		}
 		svc.Labels = labels(cluster)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		// ClusterIP is immutable after creation; preserve the existing value on updates.
@@ -1084,8 +1089,19 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,
+			Service:                       nodeServiceFromCluster(cluster),
 		},
 	}
+}
+
+// nodeServiceFromCluster copies the cluster opt-in onto the node.
+// Nil clears it. The cluster writes one node spec per reconcile, so turning
+// the field off removes Services one node at a time.
+func nodeServiceFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.ValkeyNodeServiceSpec {
+	if !cluster.PerNodeServicesEnabled() {
+		return nil
+	}
+	return &valkeyiov1alpha1.ValkeyNodeServiceSpec{}
 }
 
 // nodeAddresses returns the pod IPs of every node that has one. Nodes still

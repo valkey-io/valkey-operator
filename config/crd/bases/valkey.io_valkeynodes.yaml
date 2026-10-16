@@ -3210,6 +3210,12 @@ spec:
                   ServerConfigMapName specifies the name of the ConfigMap that contains the
                   scripts, and Valkey config for the ValkeyNode.
                 type: string
+              service:
+                description: |-
+                  Service is set by the ValkeyCluster controller from
+                  spec.networking.perNodeServices. When set, this node has one ClusterIP
+                  Service. Empty means no Service.
+                type: object
               serviceAccountName:
                 description: |-
                   ServiceAccountName is the name of the Kubernetes ServiceAccount used by

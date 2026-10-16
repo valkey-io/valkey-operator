@@ -377,7 +377,7 @@ type ValkeyClusterSpec struct {
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// Networking groups how clients and peers reach cluster nodes (TLS,
-	// in-cluster discovery announce, and later external access).
+	// in-cluster discovery announce, per-node Services, and later external access).
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
 
@@ -435,7 +435,16 @@ type NetworkingSpec struct {
 	// TLS configuration for the cluster.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+
+	// PerNodeServices opts in to one ClusterIP Service per node.
+	// Omit it to create none. Each Service selects that one pod.
+	// Announce settings are unchanged.
+	// +optional
+	PerNodeServices *PerNodeServicesSpec `json:"perNodeServices,omitempty"`
 }
+
+// PerNodeServicesSpec is empty. Presence turns per-node Services on.
+type PerNodeServicesSpec struct{}
 
 // DiscoverySpec configures how nodes announce themselves for in-cluster clients.
 type DiscoverySpec struct {
@@ -603,6 +612,11 @@ func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
 	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
 }
 
+// PerNodeServicesEnabled reports whether per-node ClusterIP Services are requested.
+func (c *ValkeyCluster) PerNodeServicesEnabled() bool {
+	return c != nil && c.Spec.Networking != nil && c.Spec.Networking.PerNodeServices != nil
+}
+
 // CertificateSource references a certificate and its private key. Today the
 // only source is a Secret; future sources (cert-manager, operator-generated)
 // are added as sibling fields forming a union where exactly one may be set.
@@ -744,6 +758,9 @@ const (
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+//
+// perNodeServices: Service names must not exceed 63 characters.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="per-node Service names would exceed 63 characters; shorten the cluster name"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

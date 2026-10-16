@@ -198,8 +198,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 		It("applies podMetadata to the pod template and keeps it out of the selector", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				PodMetadata: &valkeyiov1alpha1.PodMetadata{
-					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data", LabelCluster: "spoofed"},
+				PodMetadata: &valkeyiov1alpha1.EmbeddedObjectMetadata{
+					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data"},
 					Annotations: map[string]string{"example.com/owner": "data"},
 				},
 			})
@@ -215,7 +215,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "data"))
-			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(LabelCluster, resourceName), "operator labels win over podMetadata")
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(LabelCluster, resourceName))
 			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue("example.com/owner", "data"))
 			Expect(sts.Spec.Selector.MatchLabels).NotTo(HaveKey("team"))
 			selector := sts.Spec.Selector.DeepCopy()

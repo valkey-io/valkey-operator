@@ -438,7 +438,7 @@ func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
 }
 
 func TestBuildClusterValkeyNodePodMetadata(t *testing.T) {
-	podMetadata := &valkeyv1.PodMetadata{
+	podMetadata := &valkeyv1.EmbeddedObjectMetadata{
 		Labels:      map[string]valkeyv1.LabelValue{"team": "data"},
 		Annotations: map[string]string{"example.com/scrape": "true"},
 	}

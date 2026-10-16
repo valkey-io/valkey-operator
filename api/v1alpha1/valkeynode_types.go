@@ -134,7 +134,7 @@ type ValkeyNodeSpec struct {
 
 	// PodMetadata adds labels and annotations to the ValkeyNode pod.
 	// +optional
-	PodMetadata *PodMetadata `json:"podMetadata,omitempty"`
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 
 	// TerminationGracePeriodSeconds is the pod termination grace period, set by
 	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM

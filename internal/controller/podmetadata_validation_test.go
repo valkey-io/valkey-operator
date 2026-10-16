@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,9 +35,10 @@ import (
 )
 
 // The podMetadata rules must accept exactly what the API server accepts on a
-// pod: stricter rules would block valid metadata, looser ones would let the
-// workload write fail after admission. Each case is checked against the
-// apimachinery validators the API server itself uses.
+// pod, apart from the keys reserved for the operator: stricter rules would
+// block valid metadata, looser ones would let the workload write fail after
+// admission. Each case is checked against the apimachinery validators the API
+// server itself uses.
 var _ = Describe("podMetadata CEL validation", func() {
 	var ctx context.Context
 
@@ -46,7 +49,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 	keys := []string{
 		"team",
 		"Team",
-		"app.kubernetes.io/name",
+		"app.kubernetes.io/version",
 		"prometheus.io/scrape",
 		"example.com/some.key_name-1",
 		"a.b.c.d.e/x.y.z",
@@ -83,7 +86,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 		"x:y",
 	}
 
-	podMetadataObjects := func(name string, pm *valkeyiov1alpha1.PodMetadata) []client.Object {
+	podMetadataObjects := func(name string, pm *valkeyiov1alpha1.EmbeddedObjectMetadata) []client.Object {
 		return []client.Object{
 			&valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-c", Namespace: "default"},
@@ -95,7 +98,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 			},
 		}
 	}
-	expectAdmission := func(name string, pm *valkeyiov1alpha1.PodMetadata, wantAccepted bool, wantMessage string) {
+	expectAdmission := func(name string, pm *valkeyiov1alpha1.EmbeddedObjectMetadata, wantAccepted bool, wantMessage string) {
 		GinkgoHelper()
 		for _, obj := range podMetadataObjects(name, pm) {
 			err := k8sClient.Create(ctx, obj)
@@ -113,14 +116,14 @@ var _ = Describe("podMetadata CEL validation", func() {
 		labelAccepted := len(validation.IsQualifiedName(key)) == 0
 		It(fmt.Sprintf("label key %q: accepted=%t, like the API server", key, labelAccepted), func() {
 			expectAdmission(fmt.Sprintf("pm-lk-%d", i),
-				&valkeyiov1alpha1.PodMetadata{Labels: map[string]valkeyiov1alpha1.LabelValue{key: "v"}},
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Labels: map[string]valkeyiov1alpha1.LabelValue{key: "v"}},
 				labelAccepted, "label keys must be")
 		})
 
 		annotationAccepted := len(apivalidation.ValidateAnnotations(map[string]string{key: "v"}, field.NewPath("annotations"))) == 0
 		It(fmt.Sprintf("annotation key %q: accepted=%t, like the API server", key, annotationAccepted), func() {
 			expectAdmission(fmt.Sprintf("pm-ak-%d", i),
-				&valkeyiov1alpha1.PodMetadata{Annotations: map[string]string{key: "v"}},
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{key: "v"}},
 				annotationAccepted, "annotation keys must be")
 		})
 	}
@@ -129,27 +132,71 @@ var _ = Describe("podMetadata CEL validation", func() {
 		accepted := len(validation.IsValidLabelValue(value)) == 0
 		It(fmt.Sprintf("label value %q: accepted=%t, like the API server", value, accepted), func() {
 			expectAdmission(fmt.Sprintf("pm-lv-%d", i),
-				&valkeyiov1alpha1.PodMetadata{Labels: map[string]valkeyiov1alpha1.LabelValue{"team": valkeyiov1alpha1.LabelValue(value)}},
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Labels: map[string]valkeyiov1alpha1.LabelValue{"team": valkeyiov1alpha1.LabelValue(value)}},
 				accepted, "spec.podMetadata.labels.team")
 		})
 	}
 
 	It("does not restrict annotation values", func() {
 		expectAdmission("pm-av",
-			&valkeyiov1alpha1.PodMetadata{Annotations: map[string]string{
+			&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{
 				"example.com/config": "{\"a\": [1, 2]}\nmulti-line, with spaces / slashes: ok",
 			}},
 			true, "")
 	})
 
+	reservedLabelKeys := []string{
+		LabelCluster,
+		"valkey.io/anything",
+		"app.kubernetes.io/name",
+		"app.kubernetes.io/instance",
+		"app.kubernetes.io/component",
+		"app.kubernetes.io/part-of",
+		"app.kubernetes.io/managed-by",
+	}
+	for i, key := range reservedLabelKeys {
+		It(fmt.Sprintf("rejects the operator's label key %q", key), func() {
+			expectAdmission(fmt.Sprintf("pm-rl-%d", i),
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Labels: map[string]valkeyiov1alpha1.LabelValue{key: "v"}},
+				false, "are reserved for the operator")
+		})
+	}
+
+	for i, key := range []string{configHashKey, "valkey.io/anything"} {
+		It(fmt.Sprintf("rejects the operator's annotation key %q", key), func() {
+			expectAdmission(fmt.Sprintf("pm-ra-%d", i),
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{key: "v"}},
+				false, "are reserved for the operator")
+		})
+	}
+
+	It("accepts keys that only look like the operator's", func() {
+		expectAdmission("pm-nr",
+			&valkeyiov1alpha1.EmbeddedObjectMetadata{
+				Labels: map[string]valkeyiov1alpha1.LabelValue{
+					"app.kubernetes.io/version": "9.0",
+					"team.valkey.io/owner":      "data",
+					"valkey.io":                 "v",
+				},
+				Annotations: map[string]string{"app.kubernetes.io/name": "v"},
+			},
+			true, "")
+	})
+
+	// The pod also carries the operator's config-hash annotation, so the limit
+	// is checked against the final map, as the API server will see it.
+	operatorAnnotations := map[string]string{configHashKey: strings.Repeat("0", sha256.Size*2)}
+	operatorSize := len(configHashKey) + sha256.Size*2
 	for _, total := range []int{apivalidation.TotalAnnotationSizeLimitB, apivalidation.TotalAnnotationSizeLimitB + 1} {
 		annotations := map[string]string{"example.com/a": "x"}
-		annotations["example.com/b"] = strings.Repeat("x", total-len("example.com/a")-len("x")-len("example.com/b"))
-		accepted := len(apivalidation.ValidateAnnotations(annotations, field.NewPath("annotations"))) == 0
-		It(fmt.Sprintf("annotations totalling %d bytes: accepted=%t, like the API server", total, accepted), func() {
+		annotations["example.com/b"] = strings.Repeat("x", total-operatorSize-len("example.com/a")-len("x")-len("example.com/b"))
+		final := maps.Clone(annotations)
+		maps.Copy(final, operatorAnnotations)
+		accepted := len(apivalidation.ValidateAnnotations(final, field.NewPath("annotations"))) == 0
+		It(fmt.Sprintf("annotations totalling %d bytes on the pod: accepted=%t, like the API server", total, accepted), func() {
 			expectAdmission(fmt.Sprintf("pm-as-%d", total),
-				&valkeyiov1alpha1.PodMetadata{Annotations: annotations},
-				accepted, "annotations must total at most 256 KiB")
+				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: annotations},
+				accepted, "annotations must total at most 262059 characters")
 		})
 	}
 })

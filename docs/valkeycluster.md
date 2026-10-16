@@ -176,9 +176,9 @@ podMetadata:
 
 `podMetadata` adds labels and annotations to every Valkey pod, for example to select the pods from a `PodMonitor`, a `NetworkPolicy`, or a Service. They are set on each ValkeyNode pod template but kept out of the workload selector, so they can be changed at any time. Changing them rolls all pods.
 
-Labels and annotations the operator sets itself (`app.kubernetes.io/*` and `valkey.io/*`) take precedence over entries with the same key.
+Keys the operator owns are rejected: any label or annotation key under `valkey.io/`, and the `app.kubernetes.io/` `name`, `instance`, `component`, `part-of` and `managed-by` labels. Other `app.kubernetes.io/` keys, such as `app.kubernetes.io/version`, are allowed.
 
-Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB, as on any Kubernetes object. Each map holds at most 1024 entries.
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-hash` annotation (85 bytes). Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 

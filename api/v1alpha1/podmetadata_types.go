@@ -16,8 +16,11 @@ limitations under the License.
 
 package v1alpha1
 
-// LabelValue is a Kubernetes label value. It is a named type so the CRD schema
-// can bound its length, which keeps the CEL rules within the cost budget.
+// A named type lets the CRD schema bound label values, which keeps the
+// podMetadata CEL rules within the cost budget.
+
+// LabelValue is a label value: at most 63 characters, empty or alphanumerics,
+// '-', '_' and '.', starting and ending with an alphanumeric.
 // +kubebuilder:validation:MaxLength=63
 // +kubebuilder:validation:Pattern=`^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$`
 type LabelValue string

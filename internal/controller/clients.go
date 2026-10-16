@@ -19,10 +19,16 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"strings"
 
 	vclient "github.com/valkey-io/valkey-go"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // connConfig is what a connection to a Valkey node needs beyond its address.
@@ -64,4 +70,118 @@ func dialValkey(ctx context.Context, newClient func(vclient.ClientOption) (vclie
 		return nil, func() {}, err
 	}
 	return c, c.Close, nil
+}
+
+// ClientProvider hands out connected Valkey clients. Callers call the release
+// func they are given when done, and never call Close on a client.
+type ClientProvider interface {
+	// ForCluster resolves the cluster's TLS config and operator credentials
+	// once and returns a DialFunc that connects to any of its nodes with them.
+	// It returns an error only when the operator password cannot be read. A
+	// TLS config that cannot be built fails each dial instead.
+	ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error)
+
+	// ForNode connects to the node's pod. It returns an error when the node
+	// has no pod IP, the TLS config cannot be built, the operator password
+	// cannot be read for a reason other than the secret not existing, or the
+	// dial fails. On error the client is nil and release is a no-op.
+	ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, func(), error)
+}
+
+// NewClientProvider returns a ClientProvider that dials a new client per call
+// and closes it on release. c reads the operator password secret, apiReader
+// the TLS secret.
+func NewClientProvider(c client.Client, apiReader client.Reader) ClientProvider {
+	return &unpooledProvider{client: c, apiReader: apiReader, newClient: vclient.NewClient}
+}
+
+type unpooledProvider struct {
+	client    client.Client
+	apiReader client.Reader
+	// newClient is vclient.NewClient; tests replace it.
+	newClient func(vclient.ClientOption) (vclient.Client, error)
+}
+
+// tlsConfig returns nil when spec names no server certificate secret.
+func (p *unpooledProvider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, error) {
+	if spec == nil || spec.Certificates.Server.SecretName == "" {
+		return nil, nil
+	}
+	return getTLSConfig(ctx, p.apiReader, spec.Certificates.Server.SecretName, spec.ServerName, namespace, spec.RequiresClientCertificate())
+}
+
+func (p *unpooledProvider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
+	password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, cluster.Name, cluster.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("operator password: %w", err)
+	}
+	cfg := connConfig{username: operatorUser, password: password}
+
+	tlsSpec := nodeTLSFromCluster(cluster)
+	tlsCfg, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
+	if err != nil {
+		// Fail each dial, not the caller: the cluster reconcile still has
+		// ValkeyNodes to create while the secret is being issued.
+		logf.FromContext(ctx).Error(err, "failed to build TLS config for cluster state",
+			"secretName", tlsSpec.Certificates.Server.SecretName)
+		tlsErr := fmt.Errorf("TLS config: %w", err)
+		return func(context.Context, string) (vclient.Client, func(), error) {
+			return nil, func() {}, tlsErr
+		}, nil
+	}
+	cfg.tls = tlsCfg
+
+	return func(ctx context.Context, address string) (vclient.Client, func(), error) {
+		return dialValkey(ctx, p.newClient, address, cfg)
+	}, nil
+}
+
+func (p *unpooledProvider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, func(), error) {
+	if node.Status.PodIP == "" {
+		return nil, func() {}, fmt.Errorf("node %s has no pod IP", node.Name)
+	}
+	tlsSpec := node.Spec.TLS
+	if tlsSpec != nil {
+		tlsSpec = tlsSpec.DeepCopy()
+		tlsSpec.ServerName = nodeTLSServerName(node)
+	}
+	tlsCfg, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("TLS config: %w", err)
+	}
+	cfg := connConfig{tls: tlsCfg}
+
+	// A node outside a cluster has no operator user, and a cluster's password
+	// secret does not exist until the cluster controller writes it. Both dial
+	// as the default user.
+	if clusterName, ok := node.Labels[LabelCluster]; ok {
+		password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, clusterName, node.Namespace)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, func() {}, fmt.Errorf("operator password: %w", err)
+		}
+		if password != "" {
+			cfg.username = operatorUser
+			cfg.password = password
+		}
+	}
+
+	return dialValkey(ctx, p.newClient, fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort), cfg)
+}
+
+// valkeyClients returns r.ValkeyClients, or a provider built from the
+// reconciler's own readers when it is unset.
+func (r *ValkeyClusterReconciler) valkeyClients() ClientProvider {
+	if r.ValkeyClients != nil {
+		return r.ValkeyClients
+	}
+	return NewClientProvider(r.Client, r.APIReader)
+}
+
+// valkeyClients returns r.ValkeyClients, or a provider built from the
+// reconciler's own readers when it is unset.
+func (r *ValkeyNodeReconciler) valkeyClients() ClientProvider {
+	if r.ValkeyClients != nil {
+		return r.ValkeyClients
+	}
+	return NewClientProvider(r.Client, r.APIReader)
 }

@@ -1149,16 +1149,38 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
-// Priority: (1) a shard primary, it owns slots and is an established cluster
-// member even if cluster_known_nodes is 1 (e.g. a single-node cluster being
-// scaled up); (2) a non-isolated pending node from a previous MEET batch;
-// (3) the first isolated node as a bootstrap seed when every single node is
-// isolated (fresh bootstrap, first reconcile).
+// Priority:
+//  1. a live shard primary, it owns slots and is an established cluster
+//     member even if cluster_known_nodes is 1 (e.g. a single-node cluster
+//     being scaled up)
+//  2. a shard member that no peer reports failed, e.g. a replica when every
+//     primary is down, since an isolated seed would start a separate cluster
+//  3. any shard member: it just answered the operator, so a peer's failure
+//     report is likely stale, and it is still in the cluster that owns the
+//     slots
+//  4. a non-isolated pending node from a previous MEET batch
+//  5. the first isolated node as a bootstrap seed when every single node is
+//     isolated (fresh bootstrap, first reconcile)
 func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
+	var healthy, member *valkey.NodeState
 	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil {
+		if p := shard.GetPrimaryNode(); p != nil && len(p.GetSlots()) > 0 && !state.IsNodeFailed(p.Id) {
 			return p
 		}
+		for _, n := range shard.Nodes {
+			if member == nil {
+				member = n
+			}
+			if healthy == nil && !state.IsNodeFailed(n.Id) {
+				healthy = n
+			}
+		}
+	}
+	if healthy != nil {
+		return healthy
+	}
+	if member != nil {
+		return member
 	}
 	for _, node := range state.PendingNodes {
 		if !node.IsIsolated() {

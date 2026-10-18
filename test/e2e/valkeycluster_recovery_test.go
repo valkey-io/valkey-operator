@@ -416,4 +416,173 @@ spec:
 			}).Should(Succeed())
 		})
 	})
+
+	// When every primary is lost at once, the recreated primary pods start
+	// before any replica is promoted, so no primary is reachable when the
+	// operator introduces them to the cluster. They must still join the existing
+	// cluster, not form a separate one around one of themselves, and be attached
+	// as replicas of the promoted primaries.
+	Context("when every primary is lost at once", Label("all-primaries-lost"), func() {
+		const clusterName = "valkeycluster-all-primaries-lost-e2e"
+		const shards = 3
+		const keyCount = 150
+		const keyPrefix = "e2e:allprimaries"
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		It("re-forms one cluster when every primary's StatefulSet is deleted at once", func() {
+			By("creating a 3-shard cluster with 1 replica and no persistence")
+			// A long cluster-node-timeout delays the replica promotions well past
+			// the recreated pods' start, so they are introduced to the cluster
+			// while no primary is reachable.
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: %d
+  replicas: 1
+  config:
+    cluster-node-timeout: "60000"
+`, clusterName, shards))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("finding each shard's primary and replica")
+			// The scenario deletes node-index 0 of each shard, so confirm that
+			// it holds the primary.
+			primaries := make([]string, shards)
+			replicas := make([]string, shards)
+			for shard := range shards {
+				primaries[shard], replicas[shard] = podFor(clusterName, shard, 0), podFor(clusterName, shard, 1)
+				Eventually(func(g Gomega) {
+					role, err := roleOf(clusterName, shard, 0)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(role).To(Equal("primary"))
+				}).Should(Succeed())
+			}
+
+			By("writing test keys across the cluster")
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(primaries[0], keyPrefix, keyCount, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("waiting for every replica to hold its primary's keys")
+			Eventually(func(g Gomega) {
+				for shard := range shards {
+					primaryKeys, err := utils.ValkeyCLI(primaries[shard], cliOpts, "DBSIZE")
+					g.Expect(err).NotTo(HaveOccurred(), primaryKeys)
+					replicaKeys, err := utils.ValkeyCLI(replicas[shard], cliOpts, "DBSIZE")
+					g.Expect(err).NotTo(HaveOccurred(), replicaKeys)
+					g.Expect(strings.TrimSpace(primaryKeys)).NotTo(Equal("0"), "shard %d got none of the test keys", shard)
+					g.Expect(replicaKeys).To(Equal(primaryKeys), "shard %d's replica is not in sync", shard)
+				}
+			}).Should(Succeed())
+
+			By("stopping the primaries from handing off on SIGTERM")
+			// With the operator's shutdown-on-sigterm failover, a terminating
+			// primary can hand its slots to its replica before it exits, leaving
+			// a live primary to introduce the recreated pods to.
+			for _, pod := range primaries {
+				out, err := utils.ValkeyCLI(pod, cliOpts, "CONFIG", "SET", "shutdown-on-sigterm", `"nosave now"`)
+				Expect(err).NotTo(HaveOccurred(), out)
+			}
+
+			By("deleting every primary's StatefulSet at once")
+			jsonpath := func(pod, path string) string {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o", "jsonpath="+path))
+				Expect(err).NotTo(HaveOccurred())
+				return strings.TrimSpace(out)
+			}
+			replicaIDs := make([]string, 0, shards)
+			for _, pod := range replicas {
+				out, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "MYID")
+				Expect(err).NotTo(HaveOccurred(), out)
+				replicaIDs = append(replicaIDs, strings.TrimSpace(out))
+			}
+			oldUIDs := make(map[string]string, shards)
+			var statefulSets []string
+			for _, pod := range primaries {
+				oldUIDs[pod] = jsonpath(pod, "{.metadata.uid}")
+				sts := jsonpath(pod, `{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}`)
+				Expect(sts).NotTo(BeEmpty(), "pod %s has no StatefulSet owner", pod)
+				statefulSets = append(statefulSets, sts)
+			}
+			for _, sts := range statefulSets {
+				_, err := utils.Run(exec.Command("kubectl", "delete", "statefulset", sts, "--wait=false"))
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("waiting for the primary pods to be recreated")
+			// The status still reads Ready right after the deletion, so wait for
+			// the replacement pods before waiting for Ready.
+			Eventually(func(g Gomega) {
+				for _, pod := range primaries {
+					out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o",
+						`jsonpath={.metadata.uid} {.status.containerStatuses[?(@.name=="server")].ready}`))
+					g.Expect(err).NotTo(HaveOccurred())
+					fields := strings.Fields(out)
+					g.Expect(fields).To(HaveLen(2), "pod %s has no server container status yet", pod)
+					g.Expect(fields[0]).NotTo(Equal(oldUIDs[pod]), "pod %s has not been recreated yet", pod)
+					g.Expect(fields[1]).To(Equal("true"), "pod %s is not ready", pod)
+				}
+			}, 5*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("checking the recreated pods join the existing cluster before any replica is promoted")
+			// The scenario under test needs every primary to be down when the
+			// recreated pods are MEETed. If a replica wins the race, the test
+			// would pass without exercising it, so stop instead. A recreated pod
+			// that knows a surviving replica joined the existing cluster rather
+			// than only meeting the other recreated pods.
+			Eventually(func(g Gomega) {
+				for _, pod := range replicas {
+					info, err := utils.ValkeyCLI(pod, cliOpts, "INFO", "replication")
+					g.Expect(err).NotTo(HaveOccurred(), info)
+					if strings.Contains(info, "role:master") {
+						StopTrying(fmt.Sprintf("replica %s was promoted before every recreated pod joined the cluster; "+
+							"raise cluster-node-timeout", pod)).Now()
+					}
+				}
+				for _, pod := range primaries {
+					nodes, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "NODES")
+					g.Expect(err).NotTo(HaveOccurred(), nodes)
+					g.Expect(replicaIDs).To(ContainElement(Satisfy(func(id string) bool {
+						return strings.Contains(nodes, id)
+					})), "pod %s has not joined the existing cluster yet", pod)
+				}
+			}, time.Minute, time.Second).Should(Succeed())
+
+			By("waiting for the cluster to become Ready again")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
+					"cluster state: %s, reason: %s: %s", cr.Status.State, cr.Status.Reason, cr.Status.Message)
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(shards)))
+			}, 8*time.Minute, 5*time.Second).Should(Succeed(), "cluster did not recover after every primary was replaced")
+
+			By("verifying every node is in the same cluster")
+			Eventually(func(g Gomega) {
+				for _, pod := range append(append([]string{}, primaries...), replicas...) {
+					info, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "INFO")
+					g.Expect(err).NotTo(HaveOccurred(), info)
+					g.Expect(info).To(ContainSubstring("cluster_state:ok"), "pod %s", pod)
+					g.Expect(info).To(ContainSubstring(fmt.Sprintf("cluster_known_nodes:%d", 2*shards)), "pod %s", pod)
+				}
+			}).Should(Succeed())
+
+			By("verifying every test key survived")
+			// The original replicas were never deleted; -c follows redirects
+			// from there to whichever node now serves each shard.
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(replicas[0], keyPrefix, keyCount, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(keyCount), "test keys were lost after every primary was replaced")
+			}, time.Minute).Should(Succeed())
+		})
+	})
 })

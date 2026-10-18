@@ -295,3 +295,70 @@ func TestLabelTriggeredDrainSparesUnresolvedShard(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleScaleInDefersLabelDeletionWhileUnresolvedShardOwnsSlots pins the
+// cleanup guard in front of deleteExcessValkeyNodes. That pass deletes purely
+// by shard-index label, and an unresolved live shard's serving pod cannot be
+// identified, so a node that looks excess by label cannot be proven not to be
+// that pod - deleting it would delete its StatefulSet and pod while the shard
+// still owns slots, undoing the drain pass's protection. Here the live count
+// matches the spec and no resolved shard is out of spec, so the drain pass
+// never runs and only the guard keeps the labeled node alive.
+func TestHandleScaleInDefersLabelDeletionWhileUnresolvedShardOwnsSlots(t *testing.T) {
+	// Two live shards, spec.Shards=3: the count alone sees nothing to do.
+	// shard-x owns 8192-12287 and matches no ValkeyNode (wedge-3-0's
+	// recorded PodIP is stale), so the labels cannot place it either.
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		{
+			Id:        "shard-0",
+			PrimaryId: "node-0-0",
+			Slots:     []valkey.SlotsRange{{Start: 0, End: 4095}},
+			Nodes:     []*valkey.NodeState{{Address: "10.0.0.1", Port: 6379, Id: "node-0-0", Flags: []string{"master"}}},
+		},
+		{
+			Id:        "shard-x",
+			PrimaryId: "node-x-0",
+			Slots:     []valkey.SlotsRange{{Start: 8192, End: 12287}},
+			Nodes:     []*valkey.NodeState{{Address: "10.0.2.1", Port: 6379, Id: "node-x-0", Flags: []string{"master"}}},
+		},
+	}}
+	mk := func(name, shard, node, ip string) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{
+				LabelCluster:    "wedge",
+				LabelShardIndex: shard,
+				LabelNodeIndex:  node,
+			}},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: ip},
+		}
+	}
+	n00 := mk("wedge-0-0", "0", "0", "10.0.0.1")
+	n30 := mk("wedge-3-0", "3", "0", "10.0.3.1")
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{*n00, *n30}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n30).Build()
+	recorder := events.NewFakeRecorder(64)
+	r := &ValkeyClusterReconciler{Client: c, Recorder: recorder}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"}}
+	cluster.Spec.Shards = 3
+
+	result, requeue := r.handleScaleIn(context.Background(), cluster, state, nodes)
+	require.True(t, requeue, "the deferral must requeue instead of deleting")
+	require.NotZero(t, result.RequeueAfter, "the deferral carries a requeue interval")
+
+	// The label-excess ValkeyNode must survive: deleting it now could delete
+	// the unresolved shard's serving pod, which still owns 8192-12287.
+	err := c.Get(context.Background(), client.ObjectKey{Name: "wedge-3-0", Namespace: "ns"}, &valkeyiov1alpha1.ValkeyNode{})
+	require.NoError(t, err, "a slot-owning unresolved shard must not have its ValkeyNode deleted by label")
+
+	// The deferral surfaces as an event instead of a silent stall.
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, "ExcessValkeyNodeCleanupDeferred")
+	default:
+		t.Fatal("expected an ExcessValkeyNodeCleanupDeferred event")
+	}
+}

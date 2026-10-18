@@ -1753,6 +1753,18 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 
 	// Clean up leftover ValkeyNodes from a previous scale-in where drained
 	// primaries became replicas before their ValkeyNodes could be deleted.
+	// The labels alone cannot drive this while any live shard matches no
+	// ValkeyNode and still owns slots: that shard's serving pod cannot be
+	// identified, so no labeled candidate can be proven not to be it, and
+	// deleting a ValkeyNode deletes its StatefulSet and pod - which would
+	// undo the drain pass's protection of those slots (gh-491). Defer the
+	// cleanup until the address mapping heals instead.
+	if unresolvedShardOwnsSlots(state, nodes) {
+		log.Info("deferring excess ValkeyNode cleanup: a slot-owning shard matches no ValkeyNode")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ExcessValkeyNodeCleanupDeferred", "ScaleIn",
+			"Excess ValkeyNode cleanup deferred: a live shard that still owns slots matches no ValkeyNode")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	}
 	if deleted, err := r.deleteExcessValkeyNodes(ctx, cluster); err != nil {
 		log.Error(err, "failed to delete excess ValkeyNodes")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -1761,6 +1773,23 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 	}
 
 	return ctrl.Result{}, false
+}
+
+// unresolvedShardOwnsSlots reports whether any live shard that the ValkeyNode
+// labels cannot resolve still owns hash slots. Such a shard's serving pod is
+// unidentifiable, so a ValkeyNode that looks excess by label cannot be proven
+// not to be its node; deleting it would delete the pod while it still owns
+// slots.
+func unresolvedShardOwnsSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	if state == nil {
+		return false
+	}
+	for _, shard := range state.Shards {
+		if shardIndexFromState(shard, nodes) < 0 && shardSlotCount(shard) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // drainExcessShards handles scale-in by migrating slots away from shards

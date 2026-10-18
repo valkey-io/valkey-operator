@@ -454,20 +454,6 @@ func exporterRunsOnAnyNode(nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
 	return false
 }
 
-// clusterHasRunningNodes reports whether the cluster owns at least one
-// ValkeyNode. A node's server runs the aclfile the operator last wrote, so
-// presence of any node means a regenerated system password cannot be adopted
-// without a restart.
-func clusterHasRunningNodes(ctx context.Context, c client.Client, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := c.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		// A list failure is not proof of a fresh cluster; treat it as
-		// running so the guard fails closed.
-		return true
-	}
-	return len(nodes.Items) > 0
-}
-
 // validateSystemUserPasswordSecret verifies that the system user password secret
 // contains exactly the expected system user entries. It rejects any unknown users
 // and ensures all required system users are present.
@@ -541,7 +527,12 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		nodes = nil
 	}
 	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret, cluster, nodes)
-	if len(missing) > 0 && clusterHasRunningNodes(ctx, r.Client, cluster) {
+	// Base the running-cluster decision on the same list the exporter
+	// check used. The previous shape listed twice, and a second
+	// successful empty list could read a failed first one as a fresh
+	// cluster and regenerate the passwords of a live cluster.
+	running := nodes == nil || len(nodes.Items) > 0
+	if len(missing) > 0 && running {
 		names := make([]string, 0, len(missing))
 		for _, user := range missing {
 			names = append(names, user)

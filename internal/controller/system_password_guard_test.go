@@ -163,21 +163,6 @@ func TestCreateSystemUsersAclRefusesOnRunningCluster(t *testing.T) {
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
 }
 
-// TestClusterHasRunningNodesFailsClosed pins the two directions of the node
-// check: any list error reads as running (fail closed), and a cluster with
-// no ValkeyNodes is fresh.
-func TestClusterHasRunningNodesFailsClosed(t *testing.T) {
-	cluster, _, objs := systemPasswordFixture(false)
-	r, _ := systemPasswordReconciler(t, objs)
-	node := systemPasswordNode(cluster, "h1-0-0")
-	require.NoError(t, r.Client.Create(context.Background(), node))
-
-	require.True(t, clusterHasRunningNodes(context.Background(), r.Client, cluster), "a cluster with a ValkeyNode is running")
-
-	fresh := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "none", Namespace: "ns"}}
-	require.False(t, clusterHasRunningNodes(context.Background(), r.Client, fresh), "a cluster with no ValkeyNodes is fresh")
-}
-
 // TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns pins the live-sidecar
 // half of the guard: once a node actually runs the exporter sidecar, its
 // environment holds the _exporter password read at pod start and a
@@ -225,17 +210,46 @@ func (listErrorClient) List(_ context.Context, _ client.ObjectList, _ ...client.
 	return fmt.Errorf("list nodes: api unavailable")
 }
 
-// TestClusterHasRunningNodesFailsOnListError pins the list-error branch of
-// the node check: a failed List must read as running so the guard fails
-// closed, and upsertSystemUsersPasswordSecret must refuse to regenerate.
-func TestClusterHasRunningNodesFailsOnListError(t *testing.T) {
+// TestUpsertRefusesWhenTheNodeListFails pins the list-error branch of the
+// guard: the regeneration decision comes from the one node list it makes,
+// so when that list fails the upsert must refuse instead of regenerating.
+func TestUpsertRefusesWhenTheNodeListFails(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	r, _ := systemPasswordReconciler(t, objs)
 	r.Client = listErrorClient{Client: r.Client}
 
-	require.True(t, clusterHasRunningNodes(context.Background(), r.Client, cluster), "a failed node list must read as running")
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "the upsert must refuse to regenerate when its node list cannot be read")
+}
+
+// listOnceThenErrorClient fails only the first List call and delegates every
+// later one to the real client. A guard that lists twice could read the
+// successful empty second list as a fresh cluster and regenerate the
+// passwords of a live cluster whose first list failed; the single-list guard
+// must instead treat its one failed list as running and refuse.
+type listOnceThenErrorClient struct {
+	client.Client
+	failed bool
+}
+
+func (c *listOnceThenErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if !c.failed {
+		c.failed = true
+		return fmt.Errorf("list nodes: transient api error")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestUpsertRefusesWhenOnlyTheFirstNodeListFails pins that exact transient
+// shape: the guard's node list fails once, and even though every later list
+// would succeed and report no ValkeyNodes, the upsert must still refuse.
+func TestUpsertRefusesWhenOnlyTheFirstNodeListFails(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	r, _ := systemPasswordReconciler(t, objs)
+	r.Client = &listOnceThenErrorClient{Client: r.Client}
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.Error(t, err)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "the upsert must refuse to regenerate when the node list cannot be read")
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "a failed node list must read as running even when a retry would report no nodes")
 }

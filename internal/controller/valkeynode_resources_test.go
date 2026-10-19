@@ -98,8 +98,8 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+	// Command: without persistence the server starts through the entrypoint script
+	assert.Equal(t, []string{shellPath, "/scripts/entrypoint.sh", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
@@ -542,10 +542,11 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
-	// Must contain both script keys and valkey.conf
+	// Must contain the script keys and valkey.conf
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
+	assert.Contains(t, cm.Data, "entrypoint.sh")
 }
 
 func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
@@ -686,6 +687,18 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	}
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
+}
+
+func TestBuildContainersDef_PersistentNodeStartsServerDirectly(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {

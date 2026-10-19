@@ -51,7 +51,8 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, plus an empty valkey.conf.
+// and readiness probe scripts, the server entrypoint script, plus an empty
+// valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
@@ -61,6 +62,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+	}
+	entrypoint, err := scripts.ReadFile("scripts/entrypoint.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded entrypoint.sh: %w", err)
 	}
 
 	return &corev1.ConfigMap{
@@ -73,8 +78,26 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
+			entrypointScriptKey:  string(entrypoint),
 		},
 	}, nil
+}
+
+// serverCommand returns the command of the server container. Without
+// persistence the server starts through entrypoint.sh: /data is then an
+// emptyDir that outlives a restart of the container while the dataset does
+// not, and the script drops the node identity in it when the previous run was
+// a primary with a replica, so that the replica is promoted and keeps the data
+// instead of full-syncing from a primary that came back empty.
+func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
+	args := make([]string, 0, 6+len(announceArgs))
+	args = append(args, "/config/valkey.conf")
+	args = append(args, announceArgs...)
+	args = append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
+	if node.Spec.Persistence != nil {
+		return append([]string{"valkey-server"}, args...)
+	}
+	return append([]string{shellPath, "/scripts/" + entrypointScriptKey}, args...)
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -251,15 +274,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			Name:      "server",
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: append([]string{
-				"valkey-server",
-				"/config/valkey.conf",
-			}, append(announceArgs, []string{
-				"--primaryuser",
-				replicationUser,
-				"--primaryauth",
-				"$(PRIMARY_AUTH)",
-			}...)...),
+			Command:   serverCommand(node, announceArgs),
 			Env: append(announceEnv, corev1.EnvVar{
 				Name: "PRIMARY_AUTH",
 				ValueFrom: &corev1.EnvVarSource{

@@ -1708,6 +1708,42 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(fake.closed).To(BeTrue())
 	})
 
+	It("sets a key that left spec.config back to its default and forgets it", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		node := nodeWith(map[string]string{"maxmemory": "1gb"})
+		node.Status.LiveConfigKeys = []string{"maxmemory", "maxmemory-policy"}
+		applied, err := r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory": "1gb", "maxmemory-policy": "noeviction"}))
+		Expect(node.Status.LiveConfigKeys).To(Equal([]string{"maxmemory"}))
+	})
+
+	It("resets the last key that left spec.config and then has nothing to apply", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		node := nodeWith(nil)
+		node.Status.LiveConfigKeys = []string{"maxclients"}
+		applied, err := r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxclients": "10000"}))
+		Expect(node.Status.LiveConfigKeys).To(BeEmpty())
+
+		applied, err = r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeFalse())
+	})
+
 	It("does not open a client when no allowlisted keys are present", func() {
 		called := false
 		r := &ValkeyNodeReconciler{

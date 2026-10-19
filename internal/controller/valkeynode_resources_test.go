@@ -98,8 +98,8 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command: without persistence the server starts through the entrypoint script
-	assert.Equal(t, []string{shellPath, "/scripts/entrypoint.sh", "/config/valkey.conf",
+	// Command: a standalone node starts the server directly
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
@@ -689,8 +689,28 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
 }
 
-func TestBuildContainersDef_PersistentNodeStartsServerDirectly(t *testing.T) {
-	node := newTestValkeyNode("mynode", "test-ns")
+// clusterMember labels the node as a ValkeyCluster member, as
+// buildClusterValkeyNode does before the workload revision is computed.
+func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
+	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	return node
+}
+
+func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughEntrypoint(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "/scripts/entrypoint.sh", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+	// The startup probe allows for the replica hand-off wait: 20 periods plus 300s / 5s.
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestBuildContainersDef_PersistentClusterNodeStartsServerDirectly(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
@@ -699,6 +719,7 @@ func TestBuildContainersDef_PersistentNodeStartsServerDirectly(t *testing.T) {
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {

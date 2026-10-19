@@ -83,21 +83,47 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	}, nil
 }
 
-// serverCommand returns the command of the server container. Without
-// persistence the server starts through entrypoint.sh: /data is then an
-// emptyDir that outlives a restart of the container while the dataset does
+// replicaHandoffMaxSeconds caps the wait of entrypoint.sh for the replicas of
+// a crashed primary to be promoted before the server starts. The startup probe
+// of a container that runs the script allows for it on top of its own budget.
+// Keep in sync with the cap in scripts/entrypoint.sh.
+const replicaHandoffMaxSeconds = 300
+
+// usesEntrypoint reports whether the server container of the node starts
+// through entrypoint.sh: a cluster member without persistence. Membership is
+// read from the cluster label rather than the owner reference, because the
+// cluster controller computes the workload revision of a node it builds
+// before the reference is set, and both controllers must build the same
+// template or they roll the node against each other. /data is then
+// an emptyDir that outlives a restart of the container while the dataset does
 // not, and the script drops the node identity in it when the previous run was
-// a primary with a replica, so that the replica is promoted and keeps the data
-// instead of full-syncing from a primary that came back empty.
+// a primary with a replica, and holds the server back until the replica has
+// been promoted, so that the replica keeps the data instead of full-syncing
+// from a primary that came back empty.
+func usesEntrypoint(node *valkeyiov1alpha1.ValkeyNode) bool {
+	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
+}
+
+// serverCommand returns the command of the server container.
 func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
 	args := make([]string, 0, 6+len(announceArgs))
 	args = append(args, "/config/valkey.conf")
 	args = append(args, announceArgs...)
 	args = append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
-	if node.Spec.Persistence != nil {
+	if !usesEntrypoint(node) {
 		return append([]string{"valkey-server"}, args...)
 	}
 	return append([]string{shellPath, "/scripts/" + entrypointScriptKey}, args...)
+}
+
+// startupFailureThreshold returns the failure threshold of the startup probe:
+// 20 periods, plus the replica hand-off wait of entrypoint.sh where it runs.
+func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode, periodSeconds int32) int32 {
+	threshold := int32(20)
+	if usesEntrypoint(node) {
+		threshold += replicaHandoffMaxSeconds / periodSeconds
+	}
+	return threshold
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -299,7 +325,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			StartupProbe: &corev1.Probe{
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
-				FailureThreshold:    20,
+				FailureThreshold:    startupFailureThreshold(node, 5),
 				TimeoutSeconds:      5,
 				SuccessThreshold:    1,
 				ProbeHandler: corev1.ProbeHandler{

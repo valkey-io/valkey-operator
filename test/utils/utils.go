@@ -311,7 +311,8 @@ func valkeyCLIPrefix(opts ValkeyCLIOptions) (prologue, cli string) {
 func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error {
 	prologue, cli := valkeyCLIPrefix(opts)
 	script := fmt.Sprintf(
-		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s | grep -c '^OK$'",
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | grep -c '^OK$'",
 		prologue, count, prefix, cli)
 	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
 	if err != nil {
@@ -330,8 +331,8 @@ func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int,
 	// Generate commands, execute them and verify replies (in non-interactive mode).
 	// Skip cluster-mode "-> Redirected" lines so replies stay aligned with GETs.
 	script := fmt.Sprintf(
-		"%sawk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s"+
-			" | awk -v v=val: '/^-> Redirected/{next} {n++; if ($0 == v n) ok++} END{print ok+0}'",
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | awk -v v=val: '/^-> Redirected/{next} {n++; if ($0 == v n) ok++} END{print ok+0}'",
 		prologue, count, prefix, cli)
 	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
 	if err != nil {

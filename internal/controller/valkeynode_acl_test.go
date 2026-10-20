@@ -187,9 +187,17 @@ func TestACLObservablyInSync(t *testing.T) {
 	})
 }
 
-func TestACLFailureReason(t *testing.T) {
+func TestLiveApplyFailure(t *testing.T) {
+	node := &valkeyiov1alpha1.ValkeyNode{}
+	node.Labels = map[string]string{LabelCluster: "vc"}
 	wrongPass := errors.New("WRONGPASS invalid username-password pair or user is disabled.")
-	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonAuthFailed, aclFailureReason(wrongPass))
-	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonAuthFailed, aclFailureReason(fmt.Errorf("load ACL: %w", wrongPass)))
-	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, aclFailureReason(errors.New("ERR Error in ACL SETUSER modifier")))
+
+	reason, message := liveApplyFailure(node, fmt.Errorf("load ACL: %w", wrongPass))
+	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, reason)
+	assert.Contains(t, message, "WRONGPASS")
+	assert.Contains(t, message, getSystemPasswordSecretName("vc"))
+
+	reason, message = liveApplyFailure(node, errors.New("ERR Error in ACL SETUSER modifier"))
+	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, reason)
+	assert.Equal(t, "ERR Error in ACL SETUSER modifier", message)
 }

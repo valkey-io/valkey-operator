@@ -147,9 +147,10 @@ func TestNodesWithFailedACL(t *testing.T) {
 		node("applied", valkeyiov1alpha1.ValkeyNodeReasonApplied, metav1.ConditionTrue),
 		node("propagating", valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation, metav1.ConditionFalse),
 		node("broken", valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, metav1.ConditionFalse),
+		node("locked-out", valkeyiov1alpha1.ValkeyNodeReasonAuthFailed, metav1.ConditionFalse),
 		{}, // no ACLApplied condition at all
 	}}
 
-	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken"}))
+	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken", "locked-out"}))
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
 }

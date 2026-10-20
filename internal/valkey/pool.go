@@ -58,9 +58,7 @@ type Pool struct {
 type entry struct {
 	client    vclient.Client
 	signature string
-	// fallback marks a client dialled as the default user after WRONGPASS.
-	fallback bool
-	lastUsed time.Time
+	lastUsed  time.Time
 }
 
 // NewPool returns an empty pool that dials with newClient and closes clients
@@ -88,16 +86,17 @@ func signatureOf(fields ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func isWrongPass(err error) bool {
+// IsWrongPass reports whether err is Valkey rejecting the client's username
+// or password.
+func IsWrongPass(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "WRONGPASS")
 }
 
 // Get returns the pooled client for opt's single address, dialling a new one
 // when there is none or when opt's credentials or tlsToken no longer match.
 // tlsToken must change whenever opt.TLSConfig does; the pool does not inspect
-// TLSConfig. On WRONGPASS it dials as the default user and pools that client
-// as a fallback, which each later Get tries to replace with one dialled from
-// opt.
+// TLSConfig. A failed dial, WRONGPASS included, returns its error and leaves
+// any pooled client in place.
 func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken string) (vclient.Client, error) {
 	if len(opt.InitAddress) != 1 {
 		return nil, fmt.Errorf("pool needs exactly one address, got %d", len(opt.InitAddress))
@@ -110,7 +109,7 @@ func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken strin
 		p.mu.Unlock()
 		return nil, ErrPoolClosed
 	}
-	if e := p.entries[address]; e != nil && e.signature == signature && !e.fallback {
+	if e := p.entries[address]; e != nil && e.signature == signature {
 		e.lastUsed = p.now()
 		c := e.client
 		p.mu.Unlock()
@@ -119,39 +118,16 @@ func (p *Pool) Get(ctx context.Context, opt vclient.ClientOption, tlsToken strin
 	p.mu.Unlock()
 
 	c, err := p.newClient(opt)
-	fallback := false
-	if isWrongPass(err) {
-		// Still locked out: keep handing out the client we already have.
-		if kept := p.lookup(address, signature); kept != nil {
-			return kept, nil
-		}
-		logf.FromContext(ctx).Info("fall back to unauthenticated default user on WRONGPASS error", "address", address)
-		opt.Username = ""
-		opt.Password = ""
-		c, err = p.newClient(opt)
-		fallback = true
-	}
 	if err != nil {
 		return nil, err
 	}
-	return p.store(address, signature, c, fallback)
-}
-
-// lookup returns the pooled client for address if it was built from signature.
-func (p *Pool) lookup(address, signature string) vclient.Client {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e := p.entries[address]; e != nil && e.signature == signature {
-		e.lastUsed = p.now()
-		return e.client
-	}
-	return nil
+	return p.store(address, signature, c)
 }
 
 // store pools c for address and closes the client it replaces. If another
-// caller already pooled a client for the same inputs, and c would not upgrade
-// a fallback, store keeps that one and closes c.
-func (p *Pool) store(address, signature string, c vclient.Client, fallback bool) (vclient.Client, error) {
+// caller already pooled a client for the same inputs, store keeps that one and
+// closes c.
+func (p *Pool) store(address, signature string, c vclient.Client) (vclient.Client, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -160,7 +136,7 @@ func (p *Pool) store(address, signature string, c vclient.Client, fallback bool)
 	}
 	var replaced vclient.Client
 	if e := p.entries[address]; e != nil {
-		if e.signature == signature && (!e.fallback || fallback) {
+		if e.signature == signature {
 			e.lastUsed = p.now()
 			kept := e.client
 			p.mu.Unlock()
@@ -169,7 +145,7 @@ func (p *Pool) store(address, signature string, c vclient.Client, fallback bool)
 		}
 		replaced = e.client
 	}
-	p.entries[address] = &entry{client: c, signature: signature, fallback: fallback, lastUsed: p.now()}
+	p.entries[address] = &entry{client: c, signature: signature, lastUsed: p.now()}
 	p.mu.Unlock()
 	if replaced != nil {
 		replaced.Close()

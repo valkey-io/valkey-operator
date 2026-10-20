@@ -1580,7 +1580,6 @@ var _ = Describe("setLiveConfigCondition", func() {
 type fakeConfigClient struct {
 	params map[string]string
 	err    error
-	closed bool
 
 	// aclHashes is the server's current user -> password hashes, as ACL USERS
 	// and ACL GETUSER would report them.
@@ -1626,8 +1625,6 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	}
 	return normalizeHashes(slices.Clone(hashes)), nil
 }
-
-func (f *fakeConfigClient) Close() { f.closed = true }
 
 var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	ctx := context.Background()
@@ -1686,7 +1683,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("reports synced once the mounted file has caught up", func() {
@@ -1711,7 +1707,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 })
 
@@ -1722,7 +1717,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 
 	ctx := context.Background()
 
-	It("applies only allowlisted keys and closes the client", func() {
+	It("applies only allowlisted keys", func() {
 		fake := &fakeConfigClient{}
 		r := &ValkeyNodeReconciler{
 			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
@@ -1736,7 +1731,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeTrue())
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("returns an error when CONFIG SET fails", func() {
@@ -1749,7 +1743,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
 		Expect(applied).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {

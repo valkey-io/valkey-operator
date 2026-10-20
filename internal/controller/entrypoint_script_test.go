@@ -89,7 +89,9 @@ func runEntrypoint(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) entr
 	}
 
 	cmd := exec.Command(shellPath, "scripts/entrypoint.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
-	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "VALKEY_DATA_DIR="+dataDir)
+	// TMPDIR points nowhere: the root filesystem of the server container may
+	// be read-only, so the script must not depend on a writable /tmp.
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "VALKEY_DATA_DIR="+dataDir, "TMPDIR=/nonexistent")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	_, statErr := os.Stat(filepath.Join(dataDir, "nodes.conf"))

@@ -95,9 +95,10 @@ const replicaHandoffMaxSeconds = 300
 // buildClusterValkeyNode sets, rather than from the owner reference: the
 // cluster controller computes the workload revision of a node it builds
 // before the reference is set, and both controllers must build the same
-// template or they roll the node against each other. A standalone ValkeyNode
-// may carry the cluster label and an external ConfigMap without the script,
-// so the cluster label alone is not enough. /data is then
+// template or they roll the node against each other. The node must also
+// mount the cluster's own ConfigMap, which carries the script: a standalone
+// ValkeyNode may carry the labels and point at an external ConfigMap that
+// does not. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
 // not, and the script drops the node identity in it when the previous run was
 // a primary with a replica, and holds the server back until the replica has
@@ -105,7 +106,8 @@ const replicaHandoffMaxSeconds = 300
 // from a primary that came back empty.
 func usesEntrypoint(node *valkeyiov1alpha1.ValkeyNode) bool {
 	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != "" &&
-		node.Labels[LabelShardIndex] != "" && node.Labels[LabelNodeIndex] != ""
+		node.Labels[LabelShardIndex] != "" && node.Labels[LabelNodeIndex] != "" &&
+		node.Spec.ServerConfigMapName == GetServerConfigMapName(node.Labels[LabelCluster])
 }
 
 // serverCommand returns the command of the server container.

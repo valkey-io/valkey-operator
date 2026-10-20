@@ -689,11 +689,23 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
 }
 
-// clusterMember labels the node as buildClusterValkeyNode does before the
-// workload revision is computed.
+// clusterMember labels the node and points it at the cluster ConfigMap as
+// buildClusterValkeyNode does before the workload revision is computed.
 func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
 	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	node.Spec.ServerConfigMapName = GetServerConfigMapName("c")
 	return node
+}
+
+func TestBuildContainersDef_ExternalConfigMapWithClusterLabelsStartsServerDirectly(t *testing.T) {
+	// A node with the cluster labels but an external ConfigMap cannot rely on
+	// the script being in it.
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.ServerConfigMapName = "my-own-config"
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, "valkey-server", containers[0].Command[0])
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_StandaloneNodeWithClusterLabelStartsServerDirectly(t *testing.T) {

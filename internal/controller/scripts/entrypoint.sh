@@ -68,9 +68,10 @@ timeout_cmd() {
 # replica_moved_on succeeds once the replica at $1:$2 reports itself a
 # primary, or a replica of a primary other than this node. The answer goes
 # through a file rather than a pipe, so a call that is cut short by the
-# timeout cannot hold the read open through a child of its own.
+# timeout cannot hold the read open through a child of its own. The file
+# lives in the data dir: the root filesystem may be read-only.
 replica_moved_on() {
-    out_file=$(mktemp)
+    out_file="$data_dir/.role-reply"
     if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$out_file" 2>/dev/null; then
         rm -f "$out_file"
         return 1

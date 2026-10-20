@@ -306,6 +306,12 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 		}
+		// The ACL step below is not reached, so report the lockout here.
+		if aclFailureReason(err) == valkeyiov1alpha1.ValkeyNodeReasonAuthFailed {
+			if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonAuthFailed, err.Error()); condErr != nil {
+				log.Error(condErr, "failed to set ACLApplied condition")
+			}
+		}
 		return true, ctrl.Result{}, err
 	}
 	if applied {
@@ -332,7 +338,7 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, aclFailureReason(err), err.Error()); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 		}
 		return true, ctrl.Result{}, err
@@ -415,6 +421,15 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
+}
+
+// aclFailureReason is the ACLApplied reason for a failed apply: AuthFailed
+// when the node rejected the operator's credentials, ApplyFailed otherwise.
+func aclFailureReason(err error) string {
+	if valkey.IsWrongPass(err) {
+		return valkeyiov1alpha1.ValkeyNodeReasonAuthFailed
+	}
+	return valkeyiov1alpha1.ValkeyNodeReasonApplyFailed
 }
 
 // setACLCondition sets the ACLApplied condition, reporting whether the ACL the

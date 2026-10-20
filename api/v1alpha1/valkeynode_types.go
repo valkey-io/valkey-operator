@@ -296,6 +296,10 @@ const (
 	ValkeyNodeReasonApplied            = "Applied"
 	ValkeyNodeReasonPendingPropagation = "PendingPropagation"
 	ValkeyNodeReasonApplyFailed        = "ApplyFailed"
+	// ValkeyNodeReasonAuthFailed is the ACLApplied reason when the node rejects
+	// the operator's credentials (WRONGPASS), so the operator can neither apply
+	// nor check the ACL. Like ApplyFailed, it does not clear on its own.
+	ValkeyNodeReasonAuthFailed = "AuthFailed"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means

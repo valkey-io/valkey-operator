@@ -209,93 +209,17 @@ func TestPoolGetDialErrorStoresNothing(t *testing.T) {
 	})
 }
 
-func TestPoolGetWrongPassFallback(t *testing.T) {
+func TestPoolGetWrongPassReturnsError(t *testing.T) {
 	ctx := context.Background()
-	opt := option("10.0.0.1:6379", "pw")
+	d := &fakeDialer{errs: []error{errWrongPass}}
+	p, _ := testPool(d)
 
-	t.Run("dials as the default user and pools the client", func(t *testing.T) {
-		d := &fakeDialer{errs: []error{errWrongPass}}
-		p, _ := testPool(d)
-
-		c, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-		require.Equal(t, 2, d.dials())
-		assert.Equal(t, opt.InitAddress, d.opts[1].InitAddress)
-		assert.Empty(t, d.opts[1].Username)
-		assert.Empty(t, d.opts[1].Password)
-		assert.Same(t, d.made[0], c)
-	})
-
-	t.Run("replaces the fallback once the operator user works", func(t *testing.T) {
-		d := &fakeDialer{errs: []error{errWrongPass}}
-		p, _ := testPool(d)
-		fallback, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-
-		c, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-		assert.NotSame(t, fallback, c)
-		assert.Equal(t, "pw", d.opts[2].Password)
-		assert.Equal(t, 1, d.made[0].closes())
-
-		again, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-		assert.Same(t, c, again)
-		assert.Equal(t, 3, d.dials())
-	})
-
-	t.Run("keeps the fallback while WRONGPASS persists", func(t *testing.T) {
-		d := &fakeDialer{errs: []error{errWrongPass, nil, errWrongPass}}
-		p, _ := testPool(d)
-		fallback, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-
-		c, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-		assert.Same(t, fallback, c)
-		assert.Equal(t, 3, d.dials(), "one operator attempt, no second fallback dial")
-		assert.Zero(t, d.made[0].closes())
-	})
-
-	t.Run("returns other errors from the operator attempt", func(t *testing.T) {
-		refused := errors.New("dial tcp 10.0.0.1:6379: connect: connection refused")
-		d := &fakeDialer{errs: []error{errWrongPass, nil, refused}}
-		p, _ := testPool(d)
-		_, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-
-		c, err := p.Get(ctx, opt, "")
-		require.ErrorIs(t, err, refused)
-		assert.Nil(t, c)
-		assert.Zero(t, d.made[0].closes())
-	})
-
-	t.Run("returns the fallback dial's error and pools nothing", func(t *testing.T) {
-		noauth := errors.New("NOAUTH Authentication required.")
-		d := &fakeDialer{errs: []error{errWrongPass, noauth}}
-		p, _ := testPool(d)
-
-		c, err := p.Get(ctx, opt, "")
-		require.ErrorIs(t, err, noauth)
-		assert.Nil(t, c)
-
-		_, err = p.Get(ctx, opt, "")
-		require.NoError(t, err)
-		assert.Equal(t, 3, d.dials())
-	})
-
-	t.Run("a fallback never replaces a working client for the same inputs", func(t *testing.T) {
-		d := &fakeDialer{}
-		p, _ := testPool(d)
-		good, err := p.Get(ctx, opt, "")
-		require.NoError(t, err)
-
-		late := &fakeClient{}
-		c, err := p.store("10.0.0.1:6379", signatureOf(opt.Username, opt.Password, ""), late, true)
-		require.NoError(t, err)
-		assert.Same(t, good, c)
-		assert.Equal(t, 1, late.closes())
-	})
+	c, err := p.Get(ctx, option("10.0.0.1:6379", "pw"), "")
+	require.ErrorIs(t, err, errWrongPass)
+	assert.True(t, IsWrongPass(err))
+	assert.Nil(t, c)
+	require.Equal(t, 1, d.dials(), "no second dial as the default user")
+	assert.Equal(t, "_operator", d.opts[0].Username)
 }
 
 func TestPoolGetConcurrentCallersShareOneClient(t *testing.T) {

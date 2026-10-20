@@ -1915,7 +1915,8 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	var failed []string
 	for i := range nodes.Items {
 		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
-		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
+		if c != nil && c.Status == metav1.ConditionFalse &&
+			(c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed || c.Reason == valkeyiov1alpha1.ValkeyNodeReasonAuthFailed) {
 			failed = append(failed, nodes.Items[i].Name)
 		}
 	}

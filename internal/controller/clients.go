@@ -24,7 +24,6 @@ import (
 	"strconv"
 
 	vclient "github.com/valkey-io/valkey-go"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -67,13 +66,14 @@ type ClientProvider interface {
 	// ForCluster resolves the cluster's TLS config and operator credentials
 	// once and returns a DialFunc that returns the pooled client for any of
 	// its nodes. It returns an error only when the operator password cannot be
-	// read. A TLS config that cannot be built fails each dial instead.
+	// read or is empty. A TLS config that cannot be built fails each dial
+	// instead.
 	ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error)
 
 	// ForNode returns the pooled client for the node's pod. It returns an
-	// error when the node has no pod IP, the TLS config cannot be built, the
-	// operator password cannot be read for a reason other than the secret not
-	// existing, or the dial fails. On error the client is nil.
+	// error when the node has no pod IP or cluster label, the TLS config cannot
+	// be built, the operator password cannot be read or is empty, or the dial
+	// fails. On error the client is nil.
 	ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, error)
 }
 
@@ -105,10 +105,24 @@ func (p *provider) tlsConfig(ctx context.Context, namespace string, spec *valkey
 	return cfg, fmt.Sprintf("%s/%s/%s/%t", name, resourceVersion, spec.ServerName, clientCert), nil
 }
 
-func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
-	password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, cluster.Name, cluster.Namespace)
+// operatorPassword reads the operator password from the cluster's system
+// passwords Secret. The operator always connects as operatorUser, so a missing
+// Secret or an empty password is an error.
+func (p *provider) operatorPassword(ctx context.Context, clusterName, namespace string) (string, error) {
+	password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, clusterName, namespace)
 	if err != nil {
-		return nil, fmt.Errorf("operator password: %w", err)
+		return "", fmt.Errorf("operator password: %w", err)
+	}
+	if password == "" {
+		return "", fmt.Errorf("operator password: secret %s has no %s key", getSystemPasswordSecretName(clusterName), operatorUser)
+	}
+	return password, nil
+}
+
+func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
+	password, err := p.operatorPassword(ctx, cluster.Name, cluster.Namespace)
+	if err != nil {
+		return nil, err
 	}
 	cfg := connConfig{username: operatorUser, password: password}
 
@@ -135,6 +149,10 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 	if node.Status.PodIP == "" {
 		return nil, fmt.Errorf("node %s has no pod IP", node.Name)
 	}
+	clusterName := node.Labels[LabelCluster]
+	if clusterName == "" {
+		return nil, fmt.Errorf("node %s has no %s label", node.Name, LabelCluster)
+	}
 	tlsSpec := node.Spec.TLS
 	if tlsSpec != nil {
 		tlsSpec = tlsSpec.DeepCopy()
@@ -144,21 +162,11 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 	if err != nil {
 		return nil, fmt.Errorf("TLS config: %w", err)
 	}
-	cfg := connConfig{tls: tlsCfg}
-
-	// A node outside a cluster has no operator user, and a cluster's password
-	// secret does not exist until the cluster controller writes it. Both dial
-	// as the default user.
-	if clusterName, ok := node.Labels[LabelCluster]; ok {
-		password, err := fetchSystemUserPassword(ctx, operatorUser, p.client, clusterName, node.Namespace)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("operator password: %w", err)
-		}
-		if password != "" {
-			cfg.username = operatorUser
-			cfg.password = password
-		}
+	password, err := p.operatorPassword(ctx, clusterName, node.Namespace)
+	if err != nil {
+		return nil, err
 	}
+	cfg := connConfig{tls: tlsCfg, username: operatorUser, password: password}
 
 	return p.pool.Get(ctx, clientOption(net.JoinHostPort(node.Status.PodIP, strconv.Itoa(DefaultPort)), cfg), token)
 }

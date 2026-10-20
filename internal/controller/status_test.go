@@ -128,7 +128,8 @@ func TestApplyConfigurationWarnings(t *testing.T) {
 // TestNodesWithFailedACL pins the distinction the cluster status depends on:
 // a failed apply is surfaced, propagation is not. Reporting propagation would
 // take the cluster out of healthy on every routine ACL edit, since it is the
-// normal state until the mounted aclfile catches up.
+// normal state until the mounted aclfile catches up. A node rejecting the
+// operator's password is reported separately, before the topology checks.
 func TestNodesWithFailedACL(t *testing.T) {
 	g := NewWithT(t)
 
@@ -147,10 +148,12 @@ func TestNodesWithFailedACL(t *testing.T) {
 		node("applied", valkeyiov1alpha1.ValkeyNodeReasonApplied, metav1.ConditionTrue),
 		node("propagating", valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation, metav1.ConditionFalse),
 		node("broken", valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, metav1.ConditionFalse),
-		node("locked-out", valkeyiov1alpha1.ValkeyNodeReasonAuthFailed, metav1.ConditionFalse),
+		node("locked-out", valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, metav1.ConditionFalse),
 		{}, // no ACLApplied condition at all
 	}}
 
-	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken", "locked-out"}))
+	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken"}))
+	g.Expect(nodesRejectingOperator(nodes)).To(Equal([]string{"locked-out"}))
+	g.Expect(nodesRejectingOperator(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
 }

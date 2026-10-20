@@ -36,7 +36,7 @@ import (
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
-func scaleOutInterruptedFixture() (*valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList, []valkeyiov1alpha1.ValkeyNode) {
+func scaleOutInterruptedFixture() (*valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
 	// gh-491 shape: a scale-out to 4 shards was interrupted after shard 3
 	// joined with its slot range but before shard 2 ever joined; the spec
 	// was then lowered to 3. Three shards are live, so the count matches
@@ -69,15 +69,15 @@ func scaleOutInterruptedFixture() (*valkey.ClusterState, *valkeyiov1alpha1.Valke
 		shard(1, "10.0.1.1", []valkey.SlotsRange{{Start: 4096, End: 8191}}),
 		shard(3, "10.0.3.1", []valkey.SlotsRange{{Start: 12288, End: 16383}}),
 	}}
-	return state, nodes, []valkeyiov1alpha1.ValkeyNode{*n00, *n10, *n30}
+	return state, nodes
 }
 
 // scriptedPrimaryAt builds a NodeState whose client dials the scripted RESP
 // server but whose address stays the fixture address, so shard label
 // resolution (shardIndexFromState) keeps matching the ValkeyNode.
-func scriptedPrimaryAt(t *testing.T, s *migrationStateServer, id, host string, port int) *valkey.NodeState {
+func scriptedPrimaryAt(t *testing.T, s *migrationStateServer, id, host string) *valkey.NodeState {
 	t.Helper()
-	client, err := vclient.NewClient(vclient.ClientOption{
+	c, err := vclient.NewClient(vclient.ClientOption{
 		InitAddress:       []string{s.addr},
 		ForceSingleClient: true,
 		DisableCache:      true,
@@ -87,12 +87,12 @@ func scriptedPrimaryAt(t *testing.T, s *migrationStateServer, id, host string, p
 	if err != nil {
 		t.Fatalf("client init: %v", err)
 	}
-	t.Cleanup(client.Close)
-	return &valkey.NodeState{Client: client, Address: host, Port: port, Id: id, Flags: []string{"master"}}
+	t.Cleanup(c.Close)
+	return &valkey.NodeState{Client: c, Address: host, Port: 6379, Id: id, Flags: []string{"master"}}
 }
 
 func TestLiveShardOutsideSpecDetectsInterruptedScaleOut(t *testing.T) {
-	state, nodes, _ := scaleOutInterruptedFixture()
+	state, nodes := scaleOutInterruptedFixture()
 	if !liveShardOutsideSpec(state, nodes, 3) {
 		t.Fatal("a live shard at index 3 with spec.shards=3 must be detected")
 	}
@@ -120,14 +120,14 @@ func TestHandleScaleInDrainsLiveShardOutsideSpec(t *testing.T) {
 	// runs, issues the slot migration and requeues; the shard's
 	// ValkeyNode survives until a later pass sees its slots gone.
 	server := newMigrationStateServer(t, func() [][]string { return nil })
-	state, nodes, _ := scaleOutInterruptedFixture()
+	state, nodes := scaleOutInterruptedFixture()
 
 	// The drain source is shard 3's primary; it dials the scripted server so
 	// the migration-in-progress probe runs on a real client, while keeping
 	// the fixture address so the ValkeyNode labels still resolve to
 	// shard 3.
 	src := state.Shards[2]
-	src.Nodes[0] = scriptedPrimaryAt(t, server, src.Nodes[0].Id, "10.0.3.1", 6379)
+	src.Nodes[0] = scriptedPrimaryAt(t, server, src.Nodes[0].Id, "10.0.3.1")
 	// Gossip has already introduced the in-spec primaries to shard 3's
 	// primary, so the drain plan's KnowsNode gate passes and the pass
 	// reaches the actual CLUSTER MIGRATESLOTS instead of requeueing at the
@@ -234,13 +234,13 @@ func TestLabelTriggeredDrainSparesUnresolvedShard(t *testing.T) {
 		Id:        "shard-x",
 		PrimaryId: "node-x-0",
 		Slots:     []valkey.SlotsRange{{Start: 8192, End: 12287}},
-		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-x-0", "10.0.2.1", 6379)},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-x-0", "10.0.2.1")},
 	}
 	outOfSpec := &valkey.ShardState{
 		Id:        "shard-3",
 		PrimaryId: "node-3-0",
 		Slots:     []valkey.SlotsRange{{Start: 12288, End: 16383}},
-		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-3-0", "10.0.3.1", 6379)},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-3-0", "10.0.3.1")},
 	}
 	// Both scripted primaries know the in-spec destination, so on a body
 	// that drained the unresolved shard too, that migration would actually

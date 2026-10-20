@@ -35,12 +35,12 @@ import (
 )
 
 // drainDestinationNode builds one labeled ValkeyNode fixture.
-func drainDestinationNode(name, shard, node, ip string) *valkeyiov1alpha1.ValkeyNode {
+func drainDestinationNode(name, shard, ip string) *valkeyiov1alpha1.ValkeyNode {
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{
 			LabelCluster:    "wedge",
 			LabelShardIndex: shard,
-			LabelNodeIndex:  node,
+			LabelNodeIndex:  "0",
 		}},
 		Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: ip},
 	}
@@ -60,15 +60,15 @@ func TestLabelTriggeredDrainNeverMigratesOntoUnresolvedShard(t *testing.T) {
 	// No ValkeyNode carries 10.0.2.1, so the first live shard resolves to -1
 	// and would be the first drain destination a naive body offers.
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
-		*drainDestinationNode("wedge-0-0", "0", "0", "10.0.0.1"),
-		*drainDestinationNode("wedge-3-0", "3", "0", "10.0.3.1"),
+		*drainDestinationNode("wedge-0-0", "0", "10.0.0.1"),
+		*drainDestinationNode("wedge-3-0", "3", "10.0.3.1"),
 	}}
 
 	unresolved := &valkey.ShardState{
 		Id:        "shard-x",
 		PrimaryId: "node-x-0",
 		Slots:     []valkey.SlotsRange{{Start: 8192, End: 12287}},
-		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-x-0", "10.0.2.1", 6379)},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-x-0", "10.0.2.1")},
 	}
 	inSpec := &valkey.ShardState{
 		Id:        "shard-0",
@@ -80,7 +80,7 @@ func TestLabelTriggeredDrainNeverMigratesOntoUnresolvedShard(t *testing.T) {
 		Id:        "shard-3",
 		PrimaryId: "node-3-0",
 		Slots:     []valkey.SlotsRange{{Start: 12288, End: 16383}},
-		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-3-0", "10.0.3.1", 6379)},
+		Nodes:     []*valkey.NodeState{scriptedPrimaryAt(t, server, "node-3-0", "10.0.3.1")},
 	}
 	// The drain source knows both candidate destinations, so the gossip gate
 	// cannot mask the destination choice: whichever primary the plan picks,
@@ -139,8 +139,8 @@ func TestHandleScaleInRefusesToDeleteUndrainedShard(t *testing.T) {
 		Slots:     []valkey.SlotsRange{{Start: 12288, End: 16383}},
 		Nodes:     []*valkey.NodeState{{Address: "10.0.3.1", Port: 6379, Id: "node-3-0", Flags: []string{"master"}}},
 	}}}
-	n00 := drainDestinationNode("wedge-0-0", "0", "0", "10.0.0.1")
-	n30 := drainDestinationNode("wedge-3-0", "3", "0", "10.0.3.1")
+	n00 := drainDestinationNode("wedge-0-0", "0", "10.0.0.1")
+	n30 := drainDestinationNode("wedge-3-0", "3", "10.0.3.1")
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{*n00, *n30}}
 
 	scheme := runtime.NewScheme()

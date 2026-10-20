@@ -90,18 +90,22 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 const replicaHandoffMaxSeconds = 300
 
 // usesEntrypoint reports whether the server container of the node starts
-// through entrypoint.sh: a cluster member without persistence. Membership is
-// read from the cluster label rather than the owner reference, because the
+// through entrypoint.sh: a node the cluster controller built, without
+// persistence. That is read from the shard and node index labels, which only
+// buildClusterValkeyNode sets, rather than from the owner reference: the
 // cluster controller computes the workload revision of a node it builds
 // before the reference is set, and both controllers must build the same
-// template or they roll the node against each other. /data is then
+// template or they roll the node against each other. A standalone ValkeyNode
+// may carry the cluster label and an external ConfigMap without the script,
+// so the cluster label alone is not enough. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
 // not, and the script drops the node identity in it when the previous run was
 // a primary with a replica, and holds the server back until the replica has
 // been promoted, so that the replica keeps the data instead of full-syncing
 // from a primary that came back empty.
 func usesEntrypoint(node *valkeyiov1alpha1.ValkeyNode) bool {
-	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
+	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != "" &&
+		node.Labels[LabelShardIndex] != "" && node.Labels[LabelNodeIndex] != ""
 }
 
 // serverCommand returns the command of the server container.

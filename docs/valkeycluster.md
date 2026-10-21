@@ -52,7 +52,7 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
-`cluster-replica-no-failover` disables automatic promotion for a replica. The operator does not work around it. While the cluster keeps failover quorum, recovery is left to Valkey's own election, so a shard whose only replica will not promote itself stays unavailable until you clear the setting or intervene. The operator forces a `CLUSTER FAILOVER TAKEOVER` only when quorum is lost, where no election can succeed at all.
+`cluster-replica-no-failover` stops a replica from promoting itself. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (a `fail` flag, or `fail?` from a majority of the slot-owning primaries). If the cluster has lost failover quorum, no election can succeed, so the operator takes over regardless of this setting. With persistence enabled, recovery is left to Valkey.
 
 #### Version-gated config
 

@@ -195,7 +195,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-system-first", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards: 1, Replicas: 0,
-				Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)},
+				Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 				Users:    []valkeyiov1alpha1.UserAclSpec{user("alice", "acl-system-first-alice")},
 			},
 		}
@@ -215,7 +215,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 
 		By("enabling the exporter while adding a user whose Secret does not exist")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
-		cluster.Spec.Exporter.Enabled = boolPtr(true)
+		cluster.Spec.Exporter.Enabled = new(true)
 		cluster.Spec.Users = append(cluster.Spec.Users, user("bob", "acl-system-first-bob"))
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 		Expect(reconcileOnce(r, cluster)).To(Succeed())

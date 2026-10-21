@@ -17,8 +17,14 @@ limitations under the License.
 package valkey
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
+
+	vclient "github.com/valkey-io/valkey-go"
+	vmock "github.com/valkey-io/valkey-go/mock"
+	"go.uber.org/mock/gomock"
 )
 
 func TestParseSlotsRange(t *testing.T) {
@@ -1056,5 +1062,57 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 	}
 	if !seen["r1"] || !seen["r2"] {
 		t.Errorf("expected r1 and r2, got %v", seen)
+	}
+}
+
+func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
+	var dialled []string
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		dialled = append(dialled, address)
+		return nil, errors.New("connection refused")
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dial)
+
+	if want := []string{"10.0.0.1:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
+		t.Fatalf("dialled %v, want %v", dialled, want)
+	}
+	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateBracketsIPv6Addresses(t *testing.T) {
+	var dialled []string
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		dialled = append(dialled, address)
+		return nil, errors.New("connection refused")
+	}
+
+	GetClusterState(context.Background(), []string{"fd00::1", "10.0.0.2"}, 6379, dial)
+
+	if want := []string{"[fd00::1]:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
+		t.Fatalf("dialled %v, want %v", dialled, want)
+	}
+}
+
+// A pooled client can be stale: Get returns it without redialling, and the
+// server has gone away since it was last used. getNodeState must not turn
+// that into a ghost node with empty Id/Flags/ShardId.
+func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	stale := vmock.NewClient(ctrl)
+	stale.EXPECT().
+		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
+
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return stale, nil
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
+
+	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
 	}
 }

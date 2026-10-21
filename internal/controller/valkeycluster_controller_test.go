@@ -69,11 +69,12 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			// then shard 2 with a primary at 10.0.0.1 whose only replica is not synced.
 			scraped := &valkey.ClusterState{}
 			reconciler := &ValkeyClusterReconciler{
-				Client:    counting,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  events.NewFakeRecorder(200),
-				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyCluster, *valkeyiov1alpha1.ValkeyNodeList, string, string) *valkey.ClusterState {
+				Client:        counting,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      events.NewFakeRecorder(200),
+				ValkeyClients: testValkeyClients(k8sClient),
+				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
 					return scraped
 				},
 			}
@@ -205,10 +206,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			By("Reconciling the created resource")
 			fakeRecorder := events.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client:    k8sClient,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  fakeRecorder,
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      fakeRecorder,
+				ValkeyClients: testValkeyClients(k8sClient),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -270,10 +272,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 
 			fakeRecorder := events.NewFakeRecorder(100)
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client:    k8sClient,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  fakeRecorder,
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      fakeRecorder,
+				ValkeyClients: testValkeyClients(k8sClient),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -345,10 +348,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 
 			By("reconciling the deleting resource")
 			controllerReconciler := &ValkeyClusterReconciler{
-				Client:    k8sClient,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  events.NewFakeRecorder(100),
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      events.NewFakeRecorder(100),
+				ValkeyClients: testValkeyClients(k8sClient),
 			}
 			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -418,10 +422,11 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:    k8sClient,
-			APIReader: k8sClient,
-			Scheme:    k8sClient.Scheme(),
-			Recorder:  events.NewFakeRecorder(100),
+			Client:        k8sClient,
+			APIReader:     k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(k8sClient),
 		}
 
 		By("reconciling to create the ConfigMap and ValkeyNodes")
@@ -531,10 +536,11 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		}()
 
 		r := &ValkeyClusterReconciler{
-			Client:    staleConfigMapClient{Client: k8sClient},
-			APIReader: staleConfigMapClient{Client: k8sClient},
-			Scheme:    k8sClient.Scheme(),
-			Recorder:  events.NewFakeRecorder(100),
+			Client:        staleConfigMapClient{Client: k8sClient},
+			APIReader:     staleConfigMapClient{Client: k8sClient},
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(staleConfigMapClient{Client: k8sClient}),
 		}
 
 		By("reconciling with a client that cannot yet see the freshly created ConfigMap")
@@ -777,7 +783,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Shards:   1,
 					Replicas: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
-						Enabled: boolPtr(false),
+						Enabled: new(false),
 					},
 				},
 			}
@@ -854,7 +860,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Shards:   1,
 					Replicas: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
-						Enabled: boolPtr(false),
+						Enabled: new(false),
 					},
 				},
 			}
@@ -879,7 +885,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, systemUsersSecret) }()
 			Expect(systemUsersSecret.Data).NotTo(HaveKey(exporterUser))
 
-			cluster.Spec.Exporter.Enabled = boolPtr(true)
+			cluster.Spec.Exporter.Enabled = new(true)
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 			err = reconciler.reconcileUsersAcl(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -1005,10 +1011,11 @@ var _ = Describe("EventRecorder", func() {
 		ctx = context.Background()
 		fakeRecorder = events.NewFakeRecorder(100)
 		r = &ValkeyClusterReconciler{
-			Client:    k8sClient,
-			APIReader: k8sClient,
-			Scheme:    k8sClient.Scheme(),
-			Recorder:  fakeRecorder,
+			Client:        k8sClient,
+			APIReader:     k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      fakeRecorder,
+			ValkeyClients: testValkeyClients(k8sClient),
 		}
 	})
 

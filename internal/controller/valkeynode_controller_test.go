@@ -360,6 +360,88 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
 		})
 
+		It("should reload ACL after the Secret changes while the Service name stays taken", func() {
+			const aclSecret = "taken-service-acl-retry"
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName: aclSecret,
+			})
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
+				Data:       map[string][]byte{aclFilename: []byte("user alice on #aaa ~* +@all\n")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			foreign := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": "mine"},
+					Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + "-acl-retry-pod",
+					Namespace: "default",
+					Labels:    valkeyNodeLabels(node),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+			pod.Status.PodIP = "10.0.0.9"
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			fake := &fakeConfigClient{aclOnLoad: map[string][]string{"alice": {"aaa"}}}
+			r := &ValkeyNodeReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+				resolveRoleFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) string {
+					return RolePrimary
+				},
+				newConfigClient: func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+					return fake, nil
+				},
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			Expect(fake.aclLoads).To(Equal(1))
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret)).To(Succeed())
+			secret.Data[aclFilename] = []byte("user bob on #bbb ~* +@all\n")
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+			fake.aclOnLoad = map[string][]string{"bob": {"bbb"}}
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			Expect(fake.aclLoads).To(Equal(2))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal("ServiceError"))
+			aclCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+			Expect(aclCond).NotTo(BeNil())
+			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
 		It("should not apply live config or ACL when the Service name is taken and the pod is not up", func() {
 			const aclSecret = "taken-service-acl-down"
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{

@@ -64,6 +64,21 @@ func TestFindMeetTarget(t *testing.T) {
 		assert.Equal(t, "bbbb", got.Id)
 	})
 
+	t.Run("uses the only primary when one replica reports it fail?", func(t *testing.T) {
+		// A replica cut off from the bus marks every peer fail?. That alone
+		// must not rule out the primary that is serving every slot.
+		p := meetTestNode("pppp", "10.0.0.1", "master", "-", "0-16383")
+		r := &valkey.NodeState{Id: "rrrr", Address: "10.0.0.2"}
+		r.SetClusterNodesForTesting("rrrr 10.0.0.2:6379@16379 myself,slave pppp 0 0 1 connected\n" +
+			"pppp 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\n")
+		state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+			{Id: "s1", PrimaryId: "pppp", Slots: []valkey.SlotsRange{{Start: 0, End: 16383}}, Nodes: []*valkey.NodeState{r, p}},
+		}}
+		got := findMeetTarget(state, isolated)
+		require.NotNil(t, got)
+		assert.Equal(t, "pppp", got.Id)
+	})
+
 	t.Run("uses a replica when every primary is down", func(t *testing.T) {
 		// All primaries were deleted at once: each shard has only its replica
 		// left, and the recreated primaries are isolated. They must join the

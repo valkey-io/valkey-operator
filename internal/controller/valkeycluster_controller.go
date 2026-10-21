@@ -1152,7 +1152,7 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 //  1. a live shard primary, it owns slots and is an established cluster
 //     member even if cluster_known_nodes is 1 (e.g. a single-node cluster
 //     being scaled up)
-//  2. a shard member that no peer reports failed, e.g. a replica when every
+//  2. a shard member whose failure is not confirmed, e.g. a replica when every
 //     primary is down, since an isolated seed would start a separate cluster
 //  3. any shard member: it just answered the operator, so a peer's failure
 //     report is likely stale, and it is still in the cluster that owns the
@@ -1163,14 +1163,14 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
 	var healthy, member *valkey.NodeState
 	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil && len(p.GetSlots()) > 0 && !state.IsNodeFailed(p.Id) {
+		if p := shard.GetPrimaryNode(); p != nil && len(p.GetSlots()) > 0 && !state.IsNodeFailedByMajority(p.Id) {
 			return p
 		}
 		for _, n := range shard.Nodes {
 			if member == nil {
 				member = n
 			}
-			if healthy == nil && !state.IsNodeFailed(n.Id) {
+			if healthy == nil && !state.IsNodeFailedByMajority(n.Id) {
 				healthy = n
 			}
 		}

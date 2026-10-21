@@ -168,7 +168,7 @@ spec:
   shards: %d
   replicas: 1
   config:
-    cluster-node-timeout: "30000"
+    cluster-node-timeout: "60000"
 `, clusterName, shards))
 
 			By("waiting for the cluster to become Ready")
@@ -210,11 +210,19 @@ spec:
 				Expect(err).NotTo(HaveOccurred())
 				return strings.TrimSpace(out)
 			}
+			replicaIDs := make([]string, 0, shards)
+			for _, pod := range replicas {
+				out, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "MYID")
+				Expect(err).NotTo(HaveOccurred(), out)
+				replicaIDs = append(replicaIDs, strings.TrimSpace(out))
+			}
 			oldUIDs := make(map[string]string, shards)
 			var statefulSets []string
 			for _, pod := range primaries {
 				oldUIDs[pod] = jsonpath(pod, "{.metadata.uid}")
-				statefulSets = append(statefulSets, jsonpath(pod, "{.metadata.ownerReferences[0].name}"))
+				sts := jsonpath(pod, `{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}`)
+				Expect(sts).NotTo(BeEmpty(), "pod %s has no StatefulSet owner", pod)
+				statefulSets = append(statefulSets, sts)
 			}
 			for _, sts := range statefulSets {
 				_, err := utils.Run(exec.Command("kubectl", "delete", "statefulset", sts, "--wait=false"))
@@ -236,23 +244,27 @@ spec:
 				}
 			}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
-			By("checking the recreated pods are introduced before any replica is promoted")
+			By("checking the recreated pods join the existing cluster before any replica is promoted")
 			// The scenario under test needs every primary to be down when the
 			// recreated pods are MEETed. If a replica wins the race, the test
-			// would pass without exercising it, so stop instead.
+			// would pass without exercising it, so stop instead. A recreated pod
+			// that knows a surviving replica joined the existing cluster rather
+			// than only meeting the other recreated pods.
 			Eventually(func(g Gomega) {
 				for _, pod := range replicas {
 					info, err := utils.ValkeyCLI(pod, cliOpts, "INFO", "replication")
 					g.Expect(err).NotTo(HaveOccurred(), info)
 					if strings.Contains(info, "role:master") {
-						StopTrying(fmt.Sprintf("replica %s was promoted before every recreated pod was introduced to the cluster; "+
+						StopTrying(fmt.Sprintf("replica %s was promoted before every recreated pod joined the cluster; "+
 							"raise cluster-node-timeout", pod)).Now()
 					}
 				}
 				for _, pod := range primaries {
-					info, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "INFO")
-					g.Expect(err).NotTo(HaveOccurred(), info)
-					g.Expect(info).NotTo(MatchRegexp(`(?m)^cluster_known_nodes:1\r?$`), "pod %s has not been introduced yet", pod)
+					nodes, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "NODES")
+					g.Expect(err).NotTo(HaveOccurred(), nodes)
+					g.Expect(replicaIDs).To(ContainElement(Satisfy(func(id string) bool {
+						return strings.Contains(nodes, id)
+					})), "pod %s has not joined the existing cluster yet", pod)
 				}
 			}, time.Minute, time.Second).Should(Succeed())
 

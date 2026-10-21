@@ -158,7 +158,13 @@ func getShardPrimaryPod(clusterName, namespace string, shardIndex int) (string, 
 	}
 
 	ip := primaries[shardIndex]
-	return getPodByIP(namespace, ip)
+	pod, err := getPodByIP(namespace, ip)
+	if err != nil {
+		// CLUSTER NODES can still list a node whose pod was just deleted, e.g.
+		// by an earlier compound step.
+		return "", fmt.Errorf("skip: shard %d primary %s has no pod: %w", shardIndex, ip, err)
+	}
+	return pod, nil
 }
 
 // getShardReplicaPod queries CLUSTER NODES to find a replica pod for a shard.
@@ -179,7 +185,13 @@ func getShardReplicaPod(clusterName, namespace string, shardIndex int) (string, 
 		return "", err
 	}
 
-	return getPodByIP(namespace, replicaIP)
+	pod, err := getPodByIP(namespace, replicaIP)
+	if err != nil {
+		// CLUSTER NODES can still list a node whose pod was just deleted, e.g.
+		// by an earlier compound step.
+		return "", fmt.Errorf("skip: shard %d replica %s has no pod: %w", shardIndex, replicaIP, err)
+	}
+	return pod, nil
 }
 
 // getPodByIP finds a pod name by its IP address.
@@ -528,14 +540,16 @@ func getPodNodeName(podName, namespace string) (string, error) {
 var partitionRules = [][]string{
 	{"INPUT", "-j", "DROP"},
 	{"OUTPUT", "-j", "DROP"},
+	{"FORWARD", "-j", "DROP"},
 }
 
 // partitionWorkerNode adds iptables DROP rules to isolate a worker node from the
 // cluster network. In Kind, worker nodes are docker containers. docker exec still
-// works as it uses the Docker daemon socket, not the container's network.
+// works as it uses the Docker daemon socket, not the container's network. The
+// rules are inserted at the top of each chain, ahead of the CNI's ACCEPT rules.
 func partitionWorkerNode(worker string) error {
 	for _, rule := range partitionRules {
-		args := append([]string{"exec", worker, "iptables", "-A"}, rule...)
+		args := append([]string{"exec", worker, "iptables", "-I"}, rule...)
 		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil {
 			return fmt.Errorf("failed to partition worker node %s: %w", worker, err)

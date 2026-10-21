@@ -65,6 +65,7 @@ All configuration is via environment variables:
 | `CHAOS_CPU_PRESSURE` | `false` | Throttle Kind worker node CPUs each iteration |
 | `CHAOS_CPU_MIN` | `0.3` | Minimum CPU limit when throttling |
 | `CHAOS_CPU_MAX` | `1.0` | Maximum CPU limit when throttling |
+| `CHAOS_COMPOUND_MAX_DELAY` | per compound, `10s` unless listed | Max random delay between the steps of a compound scenario, for all compounds |
 
 Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, CHAOS_NODE_TIMEOUT_MAX_MS]` and sets it on the cluster, so failover and recovery timing vary across runs.
 
@@ -89,6 +90,8 @@ Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, C
 | `network-partition-replica` | Isolates a replica from the cluster (disabled by default) |
 | `crash-primary` | Crashes the primary's server process (DEBUG SEGFAULT) (disabled by default) |
 | `crash-replica` | Crashes a replica's server process (DEBUG SEGFAULT) (disabled by default) |
+| `scale-shards+scale-shards` | Scales shards, then scales them again while the first change is in progress |
+| `scale-replicas+delete-primary-pod` | Scales replicas, then deletes the primary pod of targeted shards |
 
 Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 
@@ -122,18 +125,21 @@ Set `CHAOS_WRITE_RPS=0` to disable (client seeds and exits).
 
 **Stats output** (printed at test end and in pod logs):
 ```text
-2026/06/14 15:50:53 writes=5721 errors=21 rps=20.0
+2026/06/14 15:50:53 writes=5721 missing=0 errors=21 rps=20.0
 ```
-- `writes` — successful SET commands since seeding completed
-- `errors` — failed SET commands (cluster unavailable, CLUSTERDOWN, timeout)
-- `rps` — configured target rate
+- `writes`: successful SET commands since seeding completed
+- `missing`: updates skipped because the key no longer existed (lost data)
+- `errors`: failed SET commands (cluster unavailable, CLUSTERDOWN, timeout)
+- `rps`: configured target rate
 
 Errors during faults are expected. Sustained errors after recovery indicate an operator bug.
 
 ### Compound Scenarios
 
 Use the `+` separator in `CHAOS_SCENARIOS` to inject multiple faults back-to-back within a single iteration.
-Each sub-scenario runs sequentially with a random 0-9s delay between them, testing that the operator handles overlapping faults mid-reconciliation.
+Each sub-scenario runs sequentially with a random delay between them, testing that the operator handles overlapping faults mid-reconciliation.
+`CHAOS_COMPOUND_MAX_DELAY` sets the maximum delay for all compounds.
+A scenario can appear more than once.
 
 ```bash
 # Scale shards while killing a primary during the operation
@@ -144,9 +150,18 @@ CHAOS_SCENARIOS=scale-shards+delete-primary-pod,scale-replicas+delete-replica-po
 
 # Triple fault: scale + kill primary + kill replica
 CHAOS_SCENARIOS=scale-shards+delete-primary-pod+delete-replica-pod make test-chaos
+
+# Change the shard count again while the first change is still running
+CHAOS_SCENARIOS=scale-shards+scale-shards CHAOS_COMPOUND_MAX_DELAY=60s make test-chaos
 ```
 
-Compound scenarios are always marked as potentially losing data; the test logs a warning showing how many keys were lost and re-seeds after each iteration.
+A compound is expected to lose data when:
+
+- one of its steps loses data on its own, or
+- one step kills a primary while another removes its replicas (e.g. `delete-replica-pod`).
+
+Replicas added by `scale-replicas` in the same iteration do not count, since they have not synced yet.
+The test then logs how many keys were lost and re-seeds. Otherwise the data is verified, as after a single scenario.
 
 ## Reading the Output
 

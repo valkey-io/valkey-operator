@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Valkey Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
@@ -77,7 +93,7 @@ func main() {
 		return
 	}
 
-	var writes, errors atomic.Int64
+	var writes, missing, errors atomic.Int64
 	interval := time.Second / time.Duration(rps)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -86,8 +102,9 @@ func main() {
 	go func() {
 		for range time.Tick(5 * time.Second) {
 			w := writes.Load()
+			m := missing.Load()
 			e := errors.Load()
-			log.Printf("writes=%d errors=%d rps=%.1f\n", w, e, float64(rps))
+			log.Printf("writes=%d missing=%d errors=%d rps=%.1f\n", w, m, e, float64(rps))
 		}
 	}()
 
@@ -96,7 +113,13 @@ func main() {
 		key := fmt.Sprintf("key:%012d", keyIdx%numKeys)
 		keyIdx++
 
-		err := client.Do(ctx, client.B().Set().Key(key).Value(value).Build()).Error()
+		// Use option XX to only update keys that exist, so a seeded key that was
+		// lost stays lost and the integrity check sees it.
+		err := client.Do(ctx, client.B().Set().Key(key).Value(value).Xx().Build()).Error()
+		if valkey.IsValkeyNil(err) {
+			missing.Add(1)
+			continue
+		}
 		if err != nil {
 			errors.Add(1)
 			continue

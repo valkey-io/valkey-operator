@@ -43,54 +43,87 @@ const namespace = "valkey-operator-system"
 
 // ChaosContext holds the configuration for a chaos test iteration.
 type ChaosContext struct {
-	ClusterName   string
-	Namespace     string
-	WorkloadType  string
-	TargetShards  []int
-	Shards        int
-	MinShards     int
-	MaxShards     int
-	Replicas      int
-	MaxReplicas   int
-	TolerationSec int
-	Rand          *rand.Rand
+	ClusterName  string
+	Namespace    string
+	WorkloadType string
+	TargetShards []int
+	Shards       int
+	MinShards    int
+	MaxShards    int
+	Replicas     int
+	MaxReplicas  int
+	// LowestReplicas is the lowest spec.replicas this iteration; replicas added since have not synced.
+	LowestReplicas   int
+	TolerationSec    int
+	CompoundMaxDelay time.Duration
+	Rand             *rand.Rand
 }
 
 // Scenario defines a named chaos scenario.
 type Scenario struct {
 	Name                 string
-	LosesData            bool // may lose data, skip verification and re-seed
-	LosesDataIfNoReplica bool // loses data only when replicas == 0
-	DisabledByDefault    bool // excluded unless explicitly listed in CHAOS_SCENARIOS
+	LosesData            bool     // may lose data, skip verification and re-seed
+	LosesDataIfNoReplica bool     // loses data only when replicas == 0
+	DestroysReplicas     bool     // removes replicas' data, so a primary lost alongside has no copy left
+	IgnoresTargets       bool     // does not act on ctx.TargetShards, so they need not exist when it runs
+	DisabledByDefault    bool     // excluded unless explicitly listed in CHAOS_SCENARIOS
+	Steps                []string // the scenarios a compound runs, in order
 	Inject               func(ctx *ChaosContext) error
 }
 
-// losesData reports whether the scenario is expected to lose data at the given
-// replica count. Scenarios that kill a whole shard only lose data when there is
-// no replica to fail over to.
-func (s Scenario) losesData(replicas int) bool {
-	return s.LosesData || (s.LosesDataIfNoReplica && replicas == 0)
+// losesData reports whether the scenario is expected to lose data, given the
+// lowest replica count during the iteration. Scenarios that kill a whole shard
+// only lose data when there is no replica to fail over to. A compound loses
+// data when one of its steps would, or when one step kills a primary while
+// another destroys the replicas it would fail over to.
+func (s Scenario) losesData(lowestReplicas int) bool {
+	if len(s.Steps) == 0 {
+		return s.LosesData || (s.LosesDataIfNoReplica && lowestReplicas == 0)
+	}
+	var needsReplica, destroysReplicas bool
+	for _, name := range s.Steps {
+		step := scenarioByName(name)
+		if step.LosesData {
+			return true
+		}
+		needsReplica = needsReplica || step.LosesDataIfNoReplica
+		destroysReplicas = destroysReplicas || step.DestroysReplicas
+	}
+	return needsReplica && (lowestReplicas == 0 || destroysReplicas)
 }
 
 var allScenarios = []Scenario{
 	{Name: "delete-primary-pod", LosesDataIfNoReplica: true, Inject: deletePrimaryPod},
-	{Name: "delete-replica-pod", Inject: deleteReplicaPod},
-	{Name: "delete-shard-pods", LosesData: true, Inject: deleteShardPods},
+	{Name: "delete-replica-pod", DestroysReplicas: true, Inject: deleteReplicaPod},
+	{Name: "delete-shard-pods", LosesData: true, DestroysReplicas: true, Inject: deleteShardPods},
 	{Name: "delete-primary-workload", LosesDataIfNoReplica: true, Inject: deletePrimaryWorkload},
-	{Name: "delete-replica-workload", Inject: deleteReplicaWorkload},
+	{Name: "delete-replica-workload", DestroysReplicas: true, Inject: deleteReplicaWorkload},
 	{Name: "pause-primary-container", Inject: pausePrimaryContainer},
 	{Name: "pause-replica-container", Inject: pauseReplicaContainer},
-	{Name: "scale-shards", Inject: scaleShards},
-	{Name: "scale-replicas", Inject: scaleReplicas},
-	{Name: "rolling-update", LosesDataIfNoReplica: true, Inject: rollingUpdate},
-	{Name: "delete-recreate-cluster", LosesData: true, Inject: deleteRecreateCluster},
-	{Name: "delete-controller-pod", Inject: deleteControllerPod},
+	{Name: "scale-shards", IgnoresTargets: true, Inject: scaleShards},
+	{Name: "scale-replicas", IgnoresTargets: true, Inject: scaleReplicas},
+	{Name: "rolling-update", LosesDataIfNoReplica: true, IgnoresTargets: true, Inject: rollingUpdate},
+	{Name: "delete-recreate-cluster", LosesData: true, IgnoresTargets: true, Inject: deleteRecreateCluster},
+	{Name: "delete-controller-pod", IgnoresTargets: true, Inject: deleteControllerPod},
 	{Name: "pause-worker-node", DisabledByDefault: true, LosesData: true, Inject: pauseWorkerNode},
 	{Name: "network-partition-primary", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: networkPartitionPrimary},
 	{Name: "network-partition-replica", DisabledByDefault: true, Inject: networkPartitionReplica},
 	{Name: "crash-primary", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: crashPrimary},
-	{Name: "crash-replica", DisabledByDefault: true, Inject: crashReplica},
+	{Name: "crash-replica", DisabledByDefault: true, DestroysReplicas: true, Inject: crashReplica},
 }
+
+// defaultCompounds are the compound scenarios run, alongside the single ones,
+// when CHAOS_SCENARIOS is unset.
+var defaultCompounds = []struct {
+	name     string
+	maxDelay time.Duration
+}{
+	{name: "scale-shards+scale-shards", maxDelay: 2 * time.Minute},
+	{name: "scale-replicas+delete-primary-pod"},
+}
+
+// defaultCompoundDelay is the longest random delay between compound steps.
+const defaultCompoundDelay = 10 * time.Second
 
 var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 	var (
@@ -121,6 +154,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		nodeTimeoutMs   int
 		nodeTimeoutMin  int
 		nodeTimeoutMax  int
+		compoundDelay   time.Duration
 	)
 
 	BeforeAll(func() {
@@ -146,6 +180,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		writeRPS = envIntOrDefault("CHAOS_WRITE_RPS", 20, 0 /* min */)
 		nodeTimeoutMin = envIntOrDefault("CHAOS_NODE_TIMEOUT_MIN_MS", 5000, 1 /* min */)
 		nodeTimeoutMax = envIntOrDefault("CHAOS_NODE_TIMEOUT_MAX_MS", 15000, nodeTimeoutMin /* min */)
+		compoundDelay = envDurationOrDefault("CHAOS_COMPOUND_MAX_DELAY", 0)
 
 		// The scale scenarios move within these ranges, so the starting counts
 		// have to be inside them.
@@ -180,6 +215,11 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  TargetShards:     %s\n", targetShards)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  RecoveryTimeout:  %s\n", recoveryTimeout)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  NodeTimeout:      %dms (range=[%d, %d])\n", nodeTimeoutMs, nodeTimeoutMin, nodeTimeoutMax)
+		if compoundDelay > 0 {
+			_, _ = fmt.Fprintf(GinkgoWriter, "  CompoundMaxDelay: %s (all compounds)\n", compoundDelay)
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "  CompoundMaxDelay: per compound (default %s)\n", defaultCompoundDelay)
+		}
 		if tolerationSec > 0 {
 			_, _ = fmt.Fprintf(GinkgoWriter, "  Tolerations:      not-ready=%ds, unreachable=%ds (default: 300s)\n", tolerationSec, tolerationSec)
 		} else {
@@ -415,17 +455,20 @@ spec:
 			}
 
 			ctx := &ChaosContext{
-				ClusterName:   clusterName,
-				Namespace:     "default",
-				WorkloadType:  workloadType,
-				TargetShards:  targetShardsForIteration,
-				Shards:        shards,
-				MinShards:     minShards,
-				MaxShards:     maxShards,
-				Replicas:      replicas,
-				MaxReplicas:   maxReplicas,
-				TolerationSec: tolerationSec,
-				Rand:          rnd,
+				ClusterName:    clusterName,
+				Namespace:      "default",
+				WorkloadType:   workloadType,
+				TargetShards:   targetShardsForIteration,
+				Shards:         shards,
+				MinShards:      minShards,
+				MaxShards:      maxShards,
+				Replicas:       replicas,
+				MaxReplicas:    maxReplicas,
+				LowestReplicas: replicas,
+				TolerationSec:  tolerationSec,
+				Rand:           rnd,
+
+				CompoundMaxDelay: compoundDelay,
 			}
 
 			// Apply random CPU pressure to Kind worker nodes
@@ -488,7 +531,7 @@ spec:
 			// Log cluster state after recovery
 			logClusterState(clusterName, "default", "after")
 
-			if !scenario.losesData(replicas) {
+			if !scenario.losesData(ctx.LowestReplicas) {
 				By(fmt.Sprintf("Iteration %d: verifying test data integrity", iteration))
 				Eventually(func() error {
 					return verifyTestData(clusterName, "default", seededKeys)
@@ -524,7 +567,7 @@ func deletePrimaryPod(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary pod: %s (shard %d)\n", pod, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary pod: %s\n", pod)
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
@@ -546,7 +589,7 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 		if err != nil {
 			return fmt.Errorf("skip: deleting replica pod for shard %d: %w", shard, err)
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica pod: %s (shard %d)\n", pod, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica pod: %s\n", pod)
 		pods = append(pods, pod)
 	}
 	for _, pod := range pods {
@@ -568,7 +611,7 @@ func crashPrimary(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Crashing primary server: %s (shard %d)\n", pod, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Crashing primary server: %s\n", pod)
 		pods = append(pods, pod)
 	}
 	crashedAt := time.Now()
@@ -598,7 +641,7 @@ func crashReplica(ctx *ChaosContext) error {
 		if err != nil {
 			return fmt.Errorf("skip: crashing replica server for shard %d: %w", shard, err)
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Crashing replica server: %s (shard %d)\n", pod, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Crashing replica server: %s\n", pod)
 		pods = append(pods, pod)
 	}
 	crashedAt := time.Now()
@@ -652,7 +695,7 @@ func deletePrimaryWorkload(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary %s: %s (shard %d)\n", ctx.WorkloadType, workload, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting primary %s: %s\n", ctx.WorkloadType, workload)
 		workloads = append(workloads, workload)
 	}
 	for _, workload := range workloads {
@@ -678,7 +721,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica %s: %s (shard %d)\n", ctx.WorkloadType, workload, shard)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica %s: %s\n", ctx.WorkloadType, workload)
 		workloads = append(workloads, workload)
 	}
 	for _, workload := range workloads {
@@ -797,7 +840,8 @@ func pausePrimaryContainer(ctx *ChaosContext) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing primary container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing primary container in pod: %s for %s\n",
+			pod, duration.Truncate(time.Millisecond))
 		pods = append(pods, pod)
 	}
 	var paused []string
@@ -825,7 +869,8 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 		if err != nil {
 			return fmt.Errorf("skip: pausing replica container for shard %d: %w", shard, err)
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing replica container in pod: %s (shard %d) for %s\n", pod, shard, duration.Truncate(time.Millisecond))
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing replica container in pod: %s for %s\n",
+			pod, duration.Truncate(time.Millisecond))
 		pods = append(pods, pod)
 	}
 	var paused []string
@@ -934,6 +979,7 @@ func scaleReplicas(ctx *ChaosContext) error {
 		return err
 	}
 	ctx.Replicas = newReplicas
+	ctx.LowestReplicas = min(ctx.LowestReplicas, newReplicas)
 	return nil
 }
 
@@ -1183,8 +1229,9 @@ func envDurationOrDefault(key string, defaultVal time.Duration) time.Duration {
 }
 
 // filterScenarios resolves CHAOS_SCENARIOS into the scenarios to run. An empty
-// filter selects everything except DisabledByDefault. Names joined by + become
-// a single compound scenario. Unknown names fail the suite.
+// filter selects everything except DisabledByDefault, plus defaultCompounds.
+// Names joined by + become a single compound scenario. Unknown names fail the
+// suite.
 func filterScenarios(all []Scenario, filter string) []Scenario {
 	if filter == "" {
 		var result []Scenario
@@ -1193,26 +1240,16 @@ func filterScenarios(all []Scenario, filter string) []Scenario {
 				result = append(result, s)
 			}
 		}
+		for _, c := range defaultCompounds {
+			result = append(result, compoundScenario(c.name, compoundMaxDelay(c.name)))
+		}
 		return result
 	}
 	var result []Scenario
 	for _, name := range strings.Split(filter, ",") {
 		name = strings.TrimSpace(name)
 		if strings.Contains(name, "+") {
-			// Ad-hoc compound: "scale-shards+delete-primary-pod"
-			parts := strings.Split(name, "+")
-			group := make([]string, len(parts))
-			for i, p := range parts {
-				group[i] = strings.TrimSpace(p)
-				if scenarioByName(group[i]) == nil {
-					Fail(fmt.Sprintf("CHAOS_SCENARIOS compound %q contains unknown scenario: %q", name, group[i]))
-				}
-			}
-			result = append(result, Scenario{
-				Name:      name,
-				LosesData: true, // compound scenarios may lose data due to overlapping faults
-				Inject:    makeCompoundInject(group),
-			})
+			result = append(result, compoundScenario(name, compoundMaxDelay(name)))
 			continue
 		}
 		found := false
@@ -1230,6 +1267,36 @@ func filterScenarios(all []Scenario, filter string) []Scenario {
 	return result
 }
 
+// compoundScenario builds the compound scenario for names joined by +, such as
+// "scale-shards+delete-primary-pod", with the longest random delay between its
+// steps. Unknown names fail the suite.
+func compoundScenario(name string, maxDelay time.Duration) Scenario {
+	parts := strings.Split(name, "+")
+	group := make([]string, len(parts))
+	for i, p := range parts {
+		group[i] = strings.TrimSpace(p)
+		if scenarioByName(group[i]) == nil {
+			Fail(fmt.Sprintf("compound scenario %q contains unknown scenario: %q", name, group[i]))
+		}
+	}
+	return Scenario{
+		Name:   name,
+		Steps:  group,
+		Inject: makeCompoundInject(group, maxDelay),
+	}
+}
+
+// compoundMaxDelay returns the longest random delay between the steps of the
+// named compound: its delay in defaultCompounds, or defaultCompoundDelay.
+func compoundMaxDelay(name string) time.Duration {
+	for _, c := range defaultCompounds {
+		if c.name == name && c.maxDelay > 0 {
+			return c.maxDelay
+		}
+	}
+	return defaultCompoundDelay
+}
+
 // scenarioByName looks up a scenario in allScenarios, returning nil when absent.
 func scenarioByName(name string) *Scenario {
 	for i := range allScenarios {
@@ -1241,33 +1308,45 @@ func scenarioByName(name string) *Scenario {
 }
 
 // makeCompoundInject builds an Inject that runs each named scenario in turn with
-// a random delay between them, so their faults overlap. Sub-scenarios that skip
-// are logged and do not abort the group.
-func makeCompoundInject(group []string) func(*ChaosContext) error {
+// a random delay below maxDelay between them, or below ctx.CompoundMaxDelay when
+// set, so their faults overlap. Sub-scenarios that skip are logged and do not
+// abort the group.
+func makeCompoundInject(group []string, maxDelay time.Duration) func(*ChaosContext) error {
 	return func(ctx *ChaosContext) error {
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Compound test: %s\n", strings.Join(group, " + "))
+		if ctx.CompoundMaxDelay > 0 {
+			maxDelay = ctx.CompoundMaxDelay
+		}
 		for i, n := range group {
 			if i > 0 {
-				delay := time.Duration(ctx.Rand.Intn(10)) * time.Second
+				var delay time.Duration
+				if maxSec := int(maxDelay / time.Second); maxSec > 0 {
+					delay = time.Duration(ctx.Rand.Intn(maxSec)) * time.Second
+				}
 				_, _ = fmt.Fprintf(GinkgoWriter, "    delay %s before %s\n", delay, n)
 				time.Sleep(delay)
+				// Shows how far the earlier steps had got when this one starts.
+				logClusterState(ctx.ClusterName, ctx.Namespace, "before "+n)
 			}
 			s := scenarioByName(n)
 			if s == nil {
 				return fmt.Errorf("unknown scenario in compound: %s", n)
 			}
-			// An earlier scale-shards step may have removed targeted shards.
-			targets := make([]int, 0, len(ctx.TargetShards))
-			for _, shard := range ctx.TargetShards {
-				if shard < ctx.Shards {
-					targets = append(targets, shard)
+			if !s.IgnoresTargets {
+				// An earlier scale-shards step may have removed targeted shards.
+				targets := make([]int, 0, len(ctx.TargetShards))
+				for _, shard := range ctx.TargetShards {
+					if shard < ctx.Shards {
+						targets = append(targets, shard)
+					}
 				}
+				if len(targets) == 0 {
+					_, _ = fmt.Fprintf(GinkgoWriter, "    %s skipped: no targeted shard left after scaling to %d shards\n",
+						n, ctx.Shards)
+					continue
+				}
+				ctx.TargetShards = targets
 			}
-			if len(targets) == 0 {
-				_, _ = fmt.Fprintf(GinkgoWriter, "    %s skipped: no targeted shard left after scaling to %d shards\n", n, ctx.Shards)
-				continue
-			}
-			ctx.TargetShards = targets
 			if err := s.Inject(ctx); err != nil {
 				if strings.Contains(err.Error(), "skip:") {
 					_, _ = fmt.Fprintf(GinkgoWriter, "    %s skipped: %s\n", n, err)

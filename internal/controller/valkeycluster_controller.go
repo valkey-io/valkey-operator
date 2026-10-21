@@ -565,13 +565,6 @@ func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Cont
 	if ready < cluster.Spec.Shards {
 		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
-		return
-	}
-	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed); c != nil && c.Status == metav1.ConditionTrue {
-		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, c.Reason, c.Message, metav1.ConditionTrue)
-	}
-	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned); c != nil && c.Status == metav1.ConditionTrue {
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, c.Reason, c.Message, metav1.ConditionTrue)
 	}
 }
 

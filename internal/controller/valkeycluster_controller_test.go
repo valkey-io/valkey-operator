@@ -881,7 +881,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		GinkgoHelper()
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		Expect(nodeList.Items).To(HaveLen(3))
+		Expect(nodeList.Items).NotTo(BeEmpty())
 		for i := range nodeList.Items {
 			node := &nodeList.Items[i]
 			node.Status.Ready = true
@@ -957,6 +957,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(err).NotTo(HaveOccurred())
 		markAllNodesReady(cluster.Name)
 		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
 		createClusterPod(cluster.Name, 0, 1, true)
 		createClusterPod(cluster.Name, 1, 0, true)
 		createClusterPod(cluster.Name, 2, 0, true)
@@ -968,11 +969,13 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
 		Expect(updated.Status.ReadyShards).To(Equal(int32(3)))
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
 		Expect(formed).NotTo(BeNil())
 		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
-		Expect(formed.ObservedGeneration).To(Equal(updated.Generation))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
 	})
 
 	It("keeps ClusterFormed True when every primary Pod is Ready during a roll", func() {
@@ -983,6 +986,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(err).NotTo(HaveOccurred())
 		markAllNodesReady(cluster.Name)
 		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
 		createClusterPod(cluster.Name, 0, 0, true)
 		createClusterPod(cluster.Name, 1, 0, true)
 		createClusterPod(cluster.Name, 2, 0, true)
@@ -994,16 +998,51 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
 		Expect(updated.Status.ReadyShards).To(Equal(int32(3)))
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
 		Expect(formed).NotTo(BeNil())
 		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
-		Expect(formed.ObservedGeneration).To(Equal(updated.Generation))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
 
 		ready := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("does not move ClusterFormed to the new generation when a replica pod is not Ready", func() {
+		cluster, r := createCluster("roll-status-replica-down")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Shards = 1
+		cluster.Spec.Replicas = 1
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
+		createClusterPod(cluster.Name, 0, 0, true)
+		createClusterPod(cluster.Name, 0, 1, false)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
+		Expect(updated.Status.ReadyShards).To(Equal(int32(1)))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
 	})
 })
 

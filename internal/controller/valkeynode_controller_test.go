@@ -817,7 +817,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 						// Keep the pod to the server container so the assertions
 						// below are about the workload, not the exporter.
-						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)},
+						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 					},
 				})).To(Succeed())
 			}
@@ -1073,6 +1073,41 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			Expect(rolled).To(BeFalse())
 		})
 
+		It("returns false when a recreated StatefulSet still runs the adopted pod", func() {
+			// A new StatefulSet starts with currentRevision == updateRevision, so
+			// only UpdatedReplicas shows the adopted pod is on an older revision.
+			r := makeReconciler()
+			replicas := int32(1)
+			stsNameAdopt := types.NamespacedName{Name: "valkey-" + nodeName + "-adopt", Namespace: ns}
+			nodeAdopt := makeNode(nodeName+"-adopt", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsNameAdopt.Name, Namespace: stsNameAdopt.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeAdopt.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeAdopt.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			Expect(k8sClient.Get(ctx, stsNameAdopt, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 0
+			sts.Status.CurrentRevision = "rev-new"
+			sts.Status.UpdateRevision = "rev-new"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeAdopt)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
 		It("returns true when fully rolled out", func() {
 			r := makeReconciler()
 			replicas := int32(1)
@@ -1096,6 +1131,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.ObservedGeneration = sts.Generation
 			sts.Status.Replicas = 1
 			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 1
 			sts.Status.CurrentRevision = "rev-1"
 			sts.Status.UpdateRevision = "rev-1"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
@@ -1255,6 +1291,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		sts.Status.ObservedGeneration = sts.Generation
 		sts.Status.Replicas = 1
 		sts.Status.ReadyReplicas = 1
+		sts.Status.UpdatedReplicas = 1
 		sts.Status.CurrentRevision = "rev-1"
 		sts.Status.UpdateRevision = "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
@@ -1499,7 +1536,6 @@ var _ = Describe("setLiveConfigCondition", func() {
 type fakeConfigClient struct {
 	params map[string]string
 	err    error
-	closed bool
 
 	// aclHashes is the server's current user -> password hashes, as ACL USERS
 	// and ACL GETUSER would report them.
@@ -1545,8 +1581,6 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	}
 	return normalizeHashes(slices.Clone(hashes)), nil
 }
-
-func (f *fakeConfigClient) Close() { f.closed = true }
 
 var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	ctx := context.Background()
@@ -1605,7 +1639,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("reports synced once the mounted file has caught up", func() {
@@ -1630,7 +1663,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 })
 
@@ -1641,7 +1673,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 
 	ctx := context.Background()
 
-	It("applies only allowlisted keys and closes the client", func() {
+	It("applies only allowlisted keys", func() {
 		fake := &fakeConfigClient{}
 		r := &ValkeyNodeReconciler{
 			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
@@ -1655,7 +1687,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeTrue())
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("returns an error when CONFIG SET fails", func() {
@@ -1668,7 +1699,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
 		Expect(applied).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {

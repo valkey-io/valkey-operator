@@ -390,6 +390,14 @@ type ValkeyClusterSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ServiceAccountName specifies the name of the ServiceAccount to use for
+	// ValkeyCluster pods. If unset, the namespace's default ServiceAccount is used.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
@@ -522,7 +530,7 @@ type TLSSpec struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots used by the cluster.
@@ -721,6 +729,8 @@ const (
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
+	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

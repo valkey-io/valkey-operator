@@ -18,7 +18,6 @@ package valkey
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"slices"
@@ -29,8 +28,15 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DialFunc returns a client for the Valkey node at address (host:port). The
+// client belongs to whoever supplies the DialFunc; callers never call Close on
+// it.
+type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
+
 // NodeState represents the current state of an inspected cluster node.
 type NodeState struct {
+	// Client is for commands only. It belongs to whoever supplies the
+	// DialFunc; never call Close on it.
 	Client      vclient.Client
 	Address     string
 	Port        int
@@ -127,7 +133,7 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
-func GetClusterState(ctx context.Context, addresses []string, port int, username, password string, tlsCfg *tls.Config) *ClusterState {
+func GetClusterState(ctx context.Context, addresses []string, port int, dial DialFunc) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
@@ -135,7 +141,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 
 	for _, address := range addresses {
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, username, password, tlsCfg)
+		node := getNodeState(ctx, address, port, dial)
 		if node != nil {
 			// Check if node is pending to be added. A primary carrying only a
 			// migration marker is mid-reshard and already part of the slot map,
@@ -169,22 +175,6 @@ func GetClusterState(ctx context.Context, addresses []string, port int, username
 		}
 	}
 	return &state
-}
-
-// CloseClients disconnects all valkey-go clients.
-func (s *ClusterState) CloseClients() {
-	for _, node := range s.PendingNodes {
-		if node.Client != nil {
-			node.Client.Close()
-		}
-	}
-	for _, shard := range s.Shards {
-		for _, node := range shard.Nodes {
-			if node.Client != nil {
-				node.Client.Close()
-			}
-		}
-	}
 }
 
 // GetUnassignedSlots returns all unassigned slots
@@ -238,15 +228,19 @@ func (s *ShardState) GetPrimaryNode() *NodeState {
 }
 
 // GetSyncedReplicas returns replica nodes that are connected and have their
-// replication link up (master_link_status:up). Nodes with fail/pfail flags
-// are excluded.
-func (s *ShardState) GetSyncedReplicas() []*NodeState {
+// replication link up (master_link_status:up). A replica that a majority of
+// the other live nodes report as failing ("fail" or "fail?") is excluded.
+// That view has to come from the peers, since a node's own CLUSTER NODES
+// entry never carries a failure flag, and it has to be a majority, since a
+// node cut off from the bus flags every peer in its own table and would
+// otherwise leave no failover target anywhere.
+func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 	var replicas []*NodeState
 	for _, node := range s.Nodes {
 		if node.Id == s.PrimaryId {
 			continue
 		}
-		if slices.Contains(node.Flags, "fail") || slices.Contains(node.Flags, "pfail") {
+		if state.IsNodeFailedByMajority(node.Id) {
 			continue
 		}
 		if node.Info["master_link_status"] != "up" {
@@ -255,6 +249,14 @@ func (s *ShardState) GetSyncedReplicas() []*NodeState {
 		replicas = append(replicas, node)
 	}
 	return replicas
+}
+
+// SetClusterNodesForTesting replaces the node's peer table with one parsed
+// from raw CLUSTER NODES output. The scrape fills the table for live nodes;
+// tests in other packages use this to build a node with a particular view of
+// its peers, and nothing else should.
+func (n *NodeState) SetClusterNodesForTesting(raw string) {
+	n.nodes = ParseClusterNodes(raw)
 }
 
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
@@ -326,6 +328,21 @@ func (s *ClusterState) HasReplicaOf(nodeId string) bool {
 	return false
 }
 
+// clusterSize returns cluster_size from CLUSTER INFO: cluster->size in Valkey,
+// every primary that owns slots, reachable or not. Takes the largest value any
+// scraped node reports, in case gossip has not fully propagated.
+func (s *ClusterState) clusterSize() int {
+	var size int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if n, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && n > size {
+				size = n
+			}
+		}
+	}
+	return size
+}
+
 // HasFailoverQuorum returns true if a majority of slot-owning primaries are
 // reachable. Valkey requires a majority of primaries to vote in a failover
 // election; if quorum is unreachable, no automatic failover can succeed.
@@ -335,22 +352,64 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	if len(s.Shards) == 0 {
 		return false
 	}
-	var livePrimaries, clusterSize int
+	var livePrimaries int
 	for _, shard := range s.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
 			livePrimaries++
 		}
-		for _, node := range shard.Nodes {
-			// Take the max across nodes in case gossip hasn't fully propagated.
-			if size, err := strconv.Atoi(node.ClusterInfo["cluster_size"]); err == nil && size > clusterSize {
-				clusterSize = size
-			}
-		}
 	}
+	clusterSize := s.clusterSize()
 	if clusterSize == 0 {
 		return false
 	}
 	return livePrimaries > (clusterSize / 2)
+}
+
+// IsNodeFailedByMajority reports whether nodeId is down by the evidence the
+// peers hold, weighing the two flags the way Valkey does. A confirmed "fail"
+// is authoritative from any viewer: Valkey only sets it once a majority of
+// primaries reported the node unreachable, and then broadcasts it, so one
+// table carrying it already stands for a cluster-wide decision. A "fail?" is
+// one node's own opinion, and a node cut off from the cluster bus marks every
+// peer that way in its own table, so it counts only with the quorum Valkey
+// itself requires before promoting it: reports from at least size/2+1 voting
+// primaries, where size is cluster_size from CLUSTER INFO, every primary that
+// owns slots. That is cluster->size in Valkey and the denominator
+// HasFailoverQuorum already uses, so a primary the scrape never reached, or
+// one that has no entry for nodeId yet, still counts as a voter that has not
+// reported. A replica's suspicion never reaches that vote. IsNodeFailed keeps
+// the any-viewer rule for both flags on the takeover path, where one report
+// is the trigger.
+func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
+	var reports int
+	for _, shard := range s.Shards {
+		for _, node := range shard.Nodes {
+			if node.Id == nodeId {
+				continue // its own entry never carries a failure flag
+			}
+			for _, entry := range node.nodes {
+				if entry.Id != nodeId {
+					continue
+				}
+				if entry.HasFlag("fail") {
+					return true
+				}
+				if node.isVotingPrimary() && entry.HasFlag("fail?") {
+					reports++
+				}
+				break
+			}
+		}
+	}
+	size := s.clusterSize()
+	return size > 0 && reports >= size/2+1
+}
+
+// isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns
+// slots, which is the only kind of node whose failure reports Valkey counts.
+func (n *NodeState) isVotingPrimary() bool {
+	myself := n.Myself()
+	return n.IsPrimary() && myself != nil && myself.HasSlotAssignment()
 }
 
 // IsNodeFailed returns true if any live node reports the given node ID as
@@ -510,41 +569,14 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, username string, password string, tlsConfig *tls.Config) *NodeState {
-	log := logf.FromContext(ctx)
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
+	hostPort := fmt.Sprintf("%s:%d", address, port)
+	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
-	opt := vclient.ClientOption{
-		InitAddress:       []string{fmt.Sprintf("%s:%d", address, port)},
-		ForceSingleClient: true, // Don't connect to another cluster node.
-		Username:          username,
-		Password:          password,
-		TLSConfig:         tlsConfig,
-		// valkey-go defaults to data-plane sizes: up to 4 connections per
-		// client, each with 0.5 MiB buffers either way and a 1024-entry ring.
-		// Tuned to this controller's usage: one connection issuing a few
-		// commands with no concurrency, CLUSTER NODES the largest response and
-		// CLUSTER MIGRATESLOTS the largest request. Exceeding a buffer costs a
-		// flush, no error.
-		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
-		ReadBufferEachConn:  16 * 1024,
-		WriteBufferEachConn: 8 * 1024,
-		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
-	}
-	client, err := vclient.NewClient(opt)
+	client, err := dial(ctx, hostPort)
 	if err != nil {
-		if !strings.Contains(err.Error(), "WRONGPASS") {
-			log.Error(err, "failed to create Valkey client")
-			return nil
-		}
-		// fallback to unauthenticated
-		log.Info("fall back to unauthenticated default user on WRONGPASS error")
-		opt.Username = ""
-		opt.Password = ""
-		client, err = vclient.NewClient(opt)
-		if err != nil {
-			log.Error(err, "failed to create Valkey client")
-			return nil
-		}
+		log.Error(err, "failed to create Valkey client")
+		return nil
 	}
 
 	node := NodeState{Client: client,
@@ -558,6 +590,17 @@ func getNodeState(ctx context.Context, address string, port int, username string
 		client.B().ClusterInfo().Build(),
 		client.B().ClusterNodes().Build(),
 	)
+
+	// The round trip can fail without a dial error: a pooled client may point
+	// at a server that went away since its last use, or the caller's context
+	// may have expired, as when an earlier node used up the role poller's pass
+	// budget. All five commands share one wire, so a transport-level failure
+	// on the first result means the whole round trip failed, not just one
+	// command.
+	if len(results) > 0 && results[0].NonValkeyError() != nil {
+		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
+		return nil
+	}
 
 	if len(results) == 5 {
 		id, err := results[0].ToString()

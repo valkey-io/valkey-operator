@@ -58,6 +58,7 @@ Common reasons when `Ready=False`:
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
+  - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
@@ -135,6 +136,8 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
+- `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
+- `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -376,6 +379,7 @@ These events are emitted during cluster maintenance operations.
 |---|---|---|
 | `StaleNodeForgotten` | Normal | Stale node is forgotten from the cluster |
 | `NodeForgetFailed` | Warning | Forgetting a node fails |
+| `SupersededPodDeleted` | Normal | A pod that was not ready and left on a revision its StatefulSet had already superseded was deleted, so the corrected pod template could take effect |
 
 ### Status events
 

@@ -70,6 +70,17 @@ var _ = Describe("When creating a cluster", Label("userconfig"), func() {
 		Expect(cfgWithPersist).To(ContainSubstring("dir " + dataMountPath))
 		Expect(cfgWithPersist).To(ContainSubstring("cluster-config-file " + dataMountPath + "/nodes.conf"))
 	})
+
+	// cluster-node-timeout was set by operator initially. See issue #434.
+	It("should let spec.config own cluster-node-timeout", func() {
+		By("verifying the operator sets no default")
+		Expect(buildServerConfig(getSampleCluster())).NotTo(ContainSubstring("cluster-node-timeout"))
+
+		By("verifying a user value survives the base config")
+		cluster := getSampleCluster()
+		cluster.Spec.Config["cluster-node-timeout"] = "5000"
+		Expect(buildServerConfig(cluster)).To(ContainSubstring("cluster-node-timeout 5000"))
+	})
 })
 
 var _ = Describe("TLS client auth admission rules", Label("tls", "cel"), func() {

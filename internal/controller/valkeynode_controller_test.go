@@ -288,6 +288,126 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(got.OwnerReferences).To(BeEmpty())
 		})
 
+		It("should apply live config and ACL when the Service name is taken and the pod is up", func() {
+			const aclSecret = "taken-service-acl"
+			const aclFile = "user alice on #aaa ~* +@all\n"
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName: aclSecret,
+				Config:             map[string]string{"maxmemory-policy": "allkeys-lru"},
+			})
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
+				Data:       map[string][]byte{aclFilename: []byte(aclFile)},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			foreign := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": "mine"},
+					Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + "-pod",
+					Namespace: "default",
+					Labels:    valkeyNodeLabels(node),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+			pod.Status.PodIP = "10.0.0.8"
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			fake := &fakeConfigClient{aclOnLoad: map[string][]string{"alice": {"aaa"}}}
+			r := &ValkeyNodeReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+				resolveRoleFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) string {
+					return RolePrimary
+				},
+				newConfigClient: func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+					return fake, nil
+				},
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			Expect(fake.aclLoads).To(Equal(1))
+			Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal("ServiceError"))
+			aclCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+			Expect(aclCond).NotTo(BeNil())
+			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should not apply live config or ACL when the Service name is taken and the pod is not up", func() {
+			const aclSecret = "taken-service-acl-down"
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName: aclSecret,
+				Config:             map[string]string{"maxmemory-policy": "allkeys-lru"},
+			})
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
+				Data:       map[string][]byte{aclFilename: []byte("user alice on #aaa ~* +@all\n")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			foreign := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": "mine"},
+					Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+			called := false
+			r := &ValkeyNodeReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+				newConfigClient: func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+					called = true
+					return &fakeConfigClient{}, nil
+				},
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			Expect(called).To(BeFalse())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal("ServiceError"))
+		})
+
 		It("should surface pending PVC status before the pod is ready when persistence is enabled", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,

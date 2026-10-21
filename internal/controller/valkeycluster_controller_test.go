@@ -191,10 +191,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
 			}()
 			reconciler := &ValkeyClusterReconciler{
-				Client:    k8sClient,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  events.NewFakeRecorder(100),
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      events.NewFakeRecorder(100),
+				ValkeyClients: testValkeyClients(k8sClient),
 			}
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
@@ -244,10 +245,11 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
 			}()
 			reconciler := &ValkeyClusterReconciler{
-				Client:    k8sClient,
-				APIReader: k8sClient,
-				Scheme:    k8sClient.Scheme(),
-				Recorder:  events.NewFakeRecorder(100),
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      events.NewFakeRecorder(100),
+				ValkeyClients: testValkeyClients(k8sClient),
 			}
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())

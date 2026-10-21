@@ -207,6 +207,16 @@ func TestForCluster(t *testing.T) {
 		assert.Empty(t, got)
 	})
 
+	t.Run("password secret without the operator key is an error", func(t *testing.T) {
+		var got []vclient.ClientOption
+		secret := operatorPasswordSecret()
+		secret.Data = map[string][]byte{"_exporter": []byte("other")}
+		dial, err := newTestProvider(providerTestClient(t, secret), &got).ForCluster(ctx, newCluster(nil))
+		require.ErrorContains(t, err, "has no _operator key")
+		assert.Nil(t, dial)
+		assert.Empty(t, got)
+	})
+
 	t.Run("reuses the client across scrapes", func(t *testing.T) {
 		var got []vclient.ClientOption
 		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t)), &got)
@@ -262,33 +272,31 @@ func TestForNode(t *testing.T) {
 		assert.Nil(t, got[0].TLSConfig)
 	})
 
-	t.Run("node outside a cluster dials as the default user", func(t *testing.T) {
+	t.Run("node without a cluster label is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
-		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", nil, nil))
-		require.NoError(t, err)
-		require.Len(t, got, 1)
-		assert.Empty(t, got[0].Username)
-		assert.Empty(t, got[0].Password)
+		c, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", nil, nil))
+		require.ErrorContains(t, err, "no "+LabelCluster+" label")
+		assert.Nil(t, c)
+		assert.Empty(t, got)
 	})
 
-	t.Run("missing password secret dials as the default user", func(t *testing.T) {
+	t.Run("missing password secret is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
-		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
-		require.NoError(t, err)
-		require.Len(t, got, 1)
-		assert.Empty(t, got[0].Username)
-		assert.Empty(t, got[0].Password)
+		c, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		require.Error(t, err)
+		assert.True(t, apierrors.IsNotFound(err))
+		assert.Nil(t, c)
+		assert.Empty(t, got)
 	})
 
-	t.Run("password secret without the operator key dials as the default user", func(t *testing.T) {
+	t.Run("password secret without the operator key is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
 		secret := operatorPasswordSecret()
 		secret.Data = map[string][]byte{"_exporter": []byte("other")}
-		_, err := newTestProvider(providerTestClient(t, secret), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
-		require.NoError(t, err)
-		require.Len(t, got, 1)
-		assert.Empty(t, got[0].Username)
-		assert.Empty(t, got[0].Password)
+		c, err := newTestProvider(providerTestClient(t, secret), &got).ForNode(ctx, newNode("10.0.0.5", inCluster, nil))
+		require.ErrorContains(t, err, "has no _operator key")
+		assert.Nil(t, c)
+		assert.Empty(t, got)
 	})
 
 	t.Run("other password lookup errors are returned", func(t *testing.T) {
@@ -362,24 +370,6 @@ func TestForNode(t *testing.T) {
 		require.NoError(t, err)
 		assert.Same(t, first, second)
 		assert.Len(t, got, 1)
-	})
-
-	t.Run("moves to operator credentials once the password secret exists", func(t *testing.T) {
-		var got []vclient.ClientOption
-		c := providerTestClient(t)
-		p := newTestProvider(c, &got)
-		node := newNode("10.0.0.5", inCluster, nil)
-		before, err := p.ForNode(ctx, node)
-		require.NoError(t, err)
-
-		require.NoError(t, c.Create(ctx, operatorPasswordSecret()))
-		after, err := p.ForNode(ctx, node)
-		require.NoError(t, err)
-
-		assert.NotSame(t, before, after)
-		require.Len(t, got, 2)
-		assert.Equal(t, operatorUser, got[1].Username)
-		assert.Equal(t, 1, before.(*stubClient).closed)
 	})
 }
 

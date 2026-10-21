@@ -552,7 +552,8 @@ func countShardsWithReadyPod(pods []corev1.Pod, desiredShards int32) int32 {
 }
 
 // refreshTopologyStatusFromPods sets readyShards from shards that have a Ready Pod.
-// A shard with no Ready Pod sets ClusterFormed and SlotsAssigned False.
+// ClusterFormed and SlotsAssigned stay as the last check against Valkey.
+// A restarting pod does not change who owns slots, and a new shard is not a lost one.
 func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) {
 	log := logf.FromContext(ctx)
 	pods := &corev1.PodList{}
@@ -560,12 +561,7 @@ func (r *ValkeyClusterReconciler) refreshTopologyStatusFromPods(ctx context.Cont
 		log.Error(err, "failed to list Valkey pods for topology status")
 		return
 	}
-	ready := countShardsWithReadyPod(pods.Items, cluster.Spec.Shards)
-	cluster.Status.ReadyShards = ready
-	if ready < cluster.Spec.Shards {
-		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonUpdatingNodes, "A shard has no Ready Pod", metav1.ConditionFalse)
-	}
+	cluster.Status.ReadyShards = countShardsWithReadyPod(pods.Items, cluster.Spec.Shards)
 }
 
 func headlessServiceName(clusterName string) string {

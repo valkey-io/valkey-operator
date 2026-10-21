@@ -907,7 +907,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 	}
 
-	It("sets readyShards and ClusterFormed from pods when a shard has no Ready Pod", func() {
+	It("lowers readyShards from pods without rewriting topology conditions", func() {
 		cluster, r := createCluster("roll-status-missing-primary")
 		DeferCleanup(func() { cleanupCluster(cluster) })
 
@@ -915,6 +915,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(err).NotTo(HaveOccurred())
 		markAllNodesReady(cluster.Name)
 		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
 		createClusterPod(cluster.Name, 1, 0, true)
 		createClusterPod(cluster.Name, 2, 0, true)
 		bumpImage(cluster)
@@ -924,19 +925,20 @@ var _ = Describe("UpdatingNodes topology status", func() {
 
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
-		Expect(updated.Generation).To(BeNumerically(">=", int64(2)))
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
 		Expect(updated.Status.ReadyShards).To(Equal(int32(2)))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
 		Expect(formed).NotTo(BeNil())
-		Expect(formed.Status).To(Equal(metav1.ConditionFalse))
-		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
-		Expect(formed.ObservedGeneration).To(Equal(updated.Generation))
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
 
 		slots := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
 		Expect(slots).NotTo(BeNil())
-		Expect(slots.Status).To(Equal(metav1.ConditionFalse))
-		Expect(slots.ObservedGeneration).To(Equal(updated.Generation))
+		Expect(slots.Status).To(Equal(metav1.ConditionTrue))
+		Expect(slots.Reason).To(Equal(valkeyiov1alpha1.ReasonAllSlotsAssigned))
+		Expect(slots.ObservedGeneration).To(Equal(seededGen))
 
 		ready := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 		Expect(ready).NotTo(BeNil())
@@ -1010,6 +1012,42 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("keeps SlotsAssigned when a scale-out shard has no Ready Pod", func() {
+		cluster, r := createCluster("roll-status-scale-out")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		createClusterPod(cluster.Name, 0, 0, true)
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Shards = 4
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		// The first pass creates the new ValkeyNode and can record MissingShards.
+		// The second pass finds that node not Ready and must not replace SlotsAssigned.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+
+		slots := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
+		Expect(slots).NotTo(BeNil())
+		Expect(slots.Status).To(Equal(metav1.ConditionTrue))
+		Expect(slots.Reason).To(Equal(valkeyiov1alpha1.ReasonAllSlotsAssigned))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Reason).NotTo(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
 	})
 
 	It("does not move ClusterFormed to the new generation when a replica pod is not Ready", func() {

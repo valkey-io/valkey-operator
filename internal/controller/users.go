@@ -205,8 +205,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
 		if err != nil {
-			var unresolved *userSecretUnresolvedError
-			if errors.As(err, &unresolved) {
+			if _, ok := errors.AsType[*userSecretUnresolvedError](err); ok {
 				return err // already names the user
 			}
 			return fmt.Errorf("user %s: %w", user.Name, err)

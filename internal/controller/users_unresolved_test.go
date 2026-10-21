@@ -57,7 +57,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 	}
 	newReconciler := func() (*ValkeyClusterReconciler, *events.FakeRecorder) {
 		recorder := events.NewFakeRecorder(100)
-		return &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}, recorder
+		return &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder, ValkeyClients: testValkeyClients(k8sClient)}, recorder
 	}
 	reconcileOnce := func(r *ValkeyClusterReconciler, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})

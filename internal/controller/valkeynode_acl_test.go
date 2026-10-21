@@ -201,3 +201,15 @@ func TestLiveApplyFailure(t *testing.T) {
 	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, reason)
 	assert.Equal(t, "ERR Error in ACL SETUSER modifier", message)
 }
+
+func TestLiveApplyResult(t *testing.T) {
+	failed := errors.New("boom")
+
+	result, err := liveApplyResult(valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, failed)
+	require.NoError(t, err, "a lockout retries on a fixed interval, not the error backoff")
+	assert.Equal(t, authRetryInterval, result.RequeueAfter)
+
+	result, err = liveApplyResult(valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, failed)
+	require.ErrorIs(t, err, failed)
+	assert.Zero(t, result.RequeueAfter)
+}

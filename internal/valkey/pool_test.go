@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -207,6 +208,15 @@ func TestPoolGetDialErrorStoresNothing(t *testing.T) {
 		assert.Equal(t, 2, d.dials())
 		assert.Zero(t, d.made[0].closes())
 	})
+}
+
+func TestIsWrongPass(t *testing.T) {
+	assert.True(t, IsWrongPass(errWrongPass))
+	assert.True(t, IsWrongPass(fmt.Errorf("ACL LOAD: %w", errWrongPass)))
+	assert.True(t, IsWrongPass(errors.Join(errors.New("other"), errWrongPass)))
+	assert.False(t, IsWrongPass(nil))
+	assert.False(t, IsWrongPass(errors.New("ERR user note mentions WRONGPASS")))
+	assert.False(t, IsWrongPass(fmt.Errorf("ACL LOAD: %v", errWrongPass)), "only wrapped errors are inspected")
 }
 
 func TestPoolGetWrongPassReturnsError(t *testing.T) {

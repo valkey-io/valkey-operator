@@ -409,7 +409,7 @@ var _ = Describe("pod scheduling issue handling", func() {
 			Recorder:  fakeRecorder,
 		}
 
-		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(handled).To(BeTrue())
 		Expect(result.RequeueAfter).To(Equal(10 * time.Second))
@@ -452,7 +452,7 @@ var _ = Describe("pod scheduling issue handling", func() {
 			Recorder:  events.NewFakeRecorder(100),
 		}
 
-		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(handled).To(BeFalse())
 		Expect(result).To(Equal(reconcile.Result{}))
@@ -1066,6 +1066,50 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
 		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
 		Expect(formed.ObservedGeneration).To(Equal(seededGen))
+	})
+
+	It("counts readyShards from the scrape when the rolled pod is unschedulable", func() {
+		cluster, r := createCluster("roll-status-unschedulable")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cluster.Name + "-pending",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    cluster.Name,
+					LabelShardIndex: "0",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "server",
+					Image: DefaultImage,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:    corev1.PodScheduled,
+			Status:  corev1.ConditionFalse,
+			Reason:  corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available",
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+		Expect(updated.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 	})
 })
 

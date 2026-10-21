@@ -210,6 +210,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				GinkgoHelper()
 				node := &valkeyiov1alpha1.ValkeyNode{}
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(resourceName, 0, 1), Namespace: "default"}, node)).To(Succeed())
+				node.Status.Ready = true
 				meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
 					Type: valkeyiov1alpha1.ValkeyNodeConditionACLApplied, Status: status, Reason: reason, Message: "test",
 				})
@@ -226,7 +227,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			Expect(degraded).NotTo(BeNil())
 			Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 			Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonOperatorAuthenticationFailed))
-			Expect(degraded.Message).To(ContainSubstring(valkeyNodeName(resourceName, 0, 1)))
+			Expect(degraded.Message).To(ContainSubstring(valkeyNodeName(resourceName, 0, 1) + " rejects the _operator password"))
 			Expect(degraded.Message).To(ContainSubstring(getSystemPasswordSecretName(resourceName)))
 			Expect(condition(valkeyiov1alpha1.ConditionReady).Reason).To(Equal(valkeyiov1alpha1.ReasonOperatorAuthenticationFailed))
 			Expect(condition(valkeyiov1alpha1.ConditionProgressing).Status).To(Equal(metav1.ConditionFalse))

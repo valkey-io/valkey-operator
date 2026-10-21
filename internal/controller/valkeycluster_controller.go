@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -226,7 +227,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// the steps below would act on a partial view and blame the topology.
 	if rejecting := nodesRejectingOperator(nodes); len(rejecting) > 0 {
 		r.reportOperatorLockout(cluster, rejecting)
-		_ = r.updateStatus(ctx, cluster, state)
+		// The partial scrape would zero the shard counts; keep the last ones.
+		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
@@ -1917,23 +1919,33 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// nodesRejectingOperator returns the names of nodes that reject the operator's
-// password, from their ACLApplied condition.
+// nodesRejectingOperator returns the sorted names of Ready nodes that reject
+// the operator's password, from their ACLApplied condition. A node that is not
+// Ready is left out: its node reconcile stops before re-checking the password,
+// so the condition may be stale, and the readiness checks already cover it.
 func nodesRejectingOperator(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	var rejecting []string
 	for i := range nodes.Items {
+		if !nodes.Items[i].Status.Ready {
+			continue
+		}
 		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
 		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed {
 			rejecting = append(rejecting, nodes.Items[i].Name)
 		}
 	}
+	slices.Sort(rejecting)
 	return rejecting
 }
 
 // reportOperatorLockout sets Degraded and Ready for nodes that reject the
 // operator's password, and emits a warning event when the lockout starts.
 func (r *ValkeyClusterReconciler) reportOperatorLockout(cluster *valkeyiov1alpha1.ValkeyCluster, rejecting []string) {
-	msg := fmt.Sprintf("%s rejects the %s password in Secret %s", strings.Join(rejecting, ", "), operatorUser, getSystemPasswordSecretName(cluster.Name))
+	verb := "rejects"
+	if len(rejecting) > 1 {
+		verb = "reject"
+	}
+	msg := fmt.Sprintf("%s %s the %s password in Secret %s", strings.Join(rejecting, ", "), verb, operatorUser, getSystemPasswordSecretName(cluster.Name))
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c == nil ||
 		c.Reason != valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed, "ReconcileCluster", "%s", msg)
@@ -1944,11 +1956,11 @@ func (r *ValkeyClusterReconciler) reportOperatorLockout(cluster *valkeyiov1alpha
 		"Waiting for every node to accept the operator password", metav1.ConditionFalse)
 }
 
-// nodesWithFailedACL returns the names of nodes whose ACL the operator tried to
-// apply and could not. PendingPropagation is deliberately not included: it is
-// the normal state after every ACL edit and clears itself once the mounted
-// aclfile catches up, so reporting it would take the cluster out of healthy on
-// every routine user change.
+// nodesWithFailedACL returns the sorted names of nodes whose ACL the operator
+// tried to apply and could not. PendingPropagation is deliberately not
+// included: it is the normal state after every ACL edit and clears itself once
+// the mounted aclfile catches up, so reporting it would take the cluster out of
+// healthy on every routine user change.
 func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	var failed []string
 	for i := range nodes.Items {
@@ -1957,5 +1969,6 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 			failed = append(failed, nodes.Items[i].Name)
 		}
 	}
+	slices.Sort(failed)
 	return failed
 }

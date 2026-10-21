@@ -97,7 +97,7 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
-- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
+- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 ---
 
@@ -244,10 +244,10 @@ Common reasons when `ACLApplied=True`:
 
 The node's running ACL no longer accepts the `_operator` password in `internal-<cluster>-system-passwords`. Which fix applies depends on which side changed:
 
-- The Secret changed, for example it was deleted and the operator generated new passwords. Write the previous `_operator` and `_replication` values back into the Secret. Running pods still hold them in the server container's `VALKEYCLI_AUTH` and `PRIMARY_AUTH` environment variables. The operator then rewrites the internal ACL Secret and every node reloads it.
+- The Secret changed, for example it was deleted and the operator generated new passwords. Write the previous values back into the Secret. Running pods still hold them: `_operator` in the server container's `VALKEYCLI_AUTH` environment variable, `_replication` in its `PRIMARY_AUTH`, and, when the exporter is enabled, `_exporter` in the exporter container's `REDIS_PASSWORD`. Restore `_exporter` too, or the exporter keeps its old password after the reload and reports `redis_up 0`. The operator then rewrites the internal ACL Secret and every node reloads it.
 - The server's password changed while the Secret did not, for example an `ACL SETUSER _operator` run by hand. Run `ACL LOAD` on the node to reload the mounted aclfile, or restart the pod.
 
-The node condition clears on its next reconcile, which can be up to a minute later while the node controller backs off. The cluster's `Degraded` condition clears on the cluster reconcile after that.
+The node controller retries a node that rejects the password every 10 seconds, so the node condition clears within about 10 seconds of the fix. The cluster's `Degraded` condition clears on the cluster reconcile after that.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

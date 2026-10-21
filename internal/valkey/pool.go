@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -86,10 +87,20 @@ func signatureOf(fields ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// IsWrongPass reports whether err is Valkey rejecting the client's username
-// or password.
+// IsWrongPass reports whether err, or an error it wraps, is Valkey rejecting
+// the client's username or password: a server error whose leading token is
+// WRONGPASS.
 func IsWrongPass(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "WRONGPASS")
+	for err != nil {
+		if msg := err.Error(); msg == "WRONGPASS" || strings.HasPrefix(msg, "WRONGPASS ") {
+			return true
+		}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			return slices.ContainsFunc(joined.Unwrap(), IsWrongPass)
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 // Get returns the pooled client for opt's single address, dialling a new one

@@ -786,22 +786,6 @@ var _ = Describe("updateStatus", func() {
 		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonInitializing))
 	})
 
-	It("writes readyShards from the in-memory cluster when Valkey state is nil", func() {
-		cluster.Status.ReadyShards = 2
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:   valkeyiov1alpha1.ConditionProgressing,
-			Status: metav1.ConditionTrue,
-			Reason: valkeyiov1alpha1.ReasonUpdatingNodes,
-		})
-
-		err := r.updateStatus(ctx, cluster, nil)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cluster.Status.ReadyShards).To(Equal(int32(2)))
-
-		stored := &valkeyiov1alpha1.ValkeyCluster{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), stored)).To(Succeed())
-		Expect(stored.Status.ReadyShards).To(Equal(int32(2)))
-	})
 })
 
 var _ = Describe("UpdatingNodes topology status", func() {
@@ -907,7 +891,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 	}
 
-	It("lowers readyShards from pods without rewriting topology conditions", func() {
+	It("counts readyShards from the scrape and leaves topology conditions", func() {
 		cluster, r := createCluster("roll-status-missing-primary")
 		DeferCleanup(func() { cleanupCluster(cluster) })
 
@@ -926,7 +910,8 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
 		Expect(updated.Generation).To(BeNumerically(">", seededGen))
-		Expect(updated.Status.ReadyShards).To(Equal(int32(2)))
+		// The pods would count as 2. The scrape has no shards, so the count is 0.
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
 		Expect(formed).NotTo(BeNil())
@@ -970,7 +955,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
-		Expect(updated.Status.ReadyShards).To(Equal(int32(3)))
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
 		Expect(updated.Generation).To(BeNumerically(">", seededGen))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
@@ -999,7 +984,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
-		Expect(updated.Status.ReadyShards).To(Equal(int32(3)))
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
 		Expect(updated.Generation).To(BeNumerically(">", seededGen))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
@@ -1074,7 +1059,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		updated := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
 		Expect(updated.Generation).To(BeNumerically(">", seededGen))
-		Expect(updated.Status.ReadyShards).To(Equal(int32(1)))
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
 
 		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
 		Expect(formed).NotTo(BeNil())

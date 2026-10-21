@@ -19,7 +19,7 @@ These top-level fields in `.status` provide a high-level, human-readable summary
 
 - **`shards`**: The number of shards currently detected in the Valkey cluster.
 
-- **`readyShards`**: The number of shards that are fully healthy, meaning they have a primary and the desired number of replicas. When Valkey cluster state is not available (for example during `UpdatingNodes`), this counts shards that have at least one Ready Pod.
+- **`readyShards`**: The number of shards that are fully healthy, meaning they have a primary and the desired number of replicas.
 
 ---
 
@@ -721,8 +721,6 @@ default     valkeycluster-sample   Ready          ClusterHealthy   3            
 
 - **Reconciling (UpdatingNodes)**
   - `Reason=UpdatingNodes` indicates a rolling update of ValkeyNode CRs is in progress (one node at a time, replicas before primaries).
-  - If a shard has no Ready Pod, `readyShards` is less than `spec.shards`.
-  - `ClusterFormed` and `SlotsAssigned` stay as the last check against Valkey.
 
 - **Ready (ClusterHealthy)**
   - Once `READYSHARDS` reaches the desired shard count and the cluster is healthy, the summary switches to `Ready / ClusterHealthy`.

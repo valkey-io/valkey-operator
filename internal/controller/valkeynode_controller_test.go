@@ -1532,7 +1532,7 @@ var _ = Describe("setLiveConfigCondition", func() {
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
 	})
 
-	It("does not write status when only the message changed for the same status and reason", func() {
+	It("does not write status when only the local port changes", func() {
 		By("setting LiveConfigApplied=False with a first failure message")
 		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
@@ -1544,7 +1544,30 @@ var _ = Describe("setLiveConfigCondition", func() {
 		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "a message-only change must not rewrite status, or every retry with a new local port requeues the node (#460)")
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
+	})
+
+	It("writes status when the message changes beyond the local address", func() {
+		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvBefore := updated.ResourceVersion
+
+		for _, message := range []string{
+			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
+			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
+		} {
+			Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
+			cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal(message))
+			rvBefore = updated.ResourceVersion
+		}
 	})
 })
 
@@ -1578,7 +1601,7 @@ var _ = Describe("setACLCondition", func() {
 		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
 	})
 
-	It("does not write status when only the message changed for the same status and reason", func() {
+	It("does not write status when only the local port changes", func() {
 		By("setting ACLApplied=False with a first failure message")
 		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
@@ -1590,7 +1613,30 @@ var _ = Describe("setACLCondition", func() {
 		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "a message-only change must not rewrite status, or every retry with a new local port requeues the node (#460)")
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
+	})
+
+	It("writes status when the message changes beyond the local address", func() {
+		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvBefore := updated.ResourceVersion
+
+		for _, message := range []string{
+			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
+			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
+		} {
+			Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
+			cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal(message))
+			rvBefore = updated.ResourceVersion
+		}
 	})
 
 	It("writes status when the reason changes", func() {

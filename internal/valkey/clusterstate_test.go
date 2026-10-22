@@ -1082,6 +1082,20 @@ func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
 	}
 }
 
+func TestGetClusterStateBracketsIPv6Addresses(t *testing.T) {
+	var dialled []string
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		dialled = append(dialled, address)
+		return nil, errors.New("connection refused")
+	}
+
+	GetClusterState(context.Background(), []string{"fd00::1", "10.0.0.2"}, 6379, dial)
+
+	if want := []string{"[fd00::1]:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
+		t.Fatalf("dialled %v, want %v", dialled, want)
+	}
+}
+
 // A pooled client can be stale: Get returns it without redialling, and the
 // server has gone away since it was last used. getNodeState must not turn
 // that into a ghost node with empty Id/Flags/ShardId.

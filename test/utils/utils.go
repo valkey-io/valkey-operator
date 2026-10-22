@@ -304,6 +304,47 @@ func valkeyCLIPrefix(opts ValkeyCLIOptions) (prologue, cli string) {
 	return prologue, cli
 }
 
+// WriteValkeyKeys writes count keys named <prefix>:<n> with value val:<n>
+// through a single valkey-cli in pod, following cluster redirects. It fails
+// unless every write is acknowledged, so a partial write is reported here rather
+// than leaving a later read to show a confusing count.
+func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf(
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | grep -c '^OK$'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return fmt.Errorf("writing %d keys to %s: %w (output: %s)", count, pod, err, out)
+	}
+	if got := strings.TrimSpace(out); got != fmt.Sprintf("%d", count) {
+		return fmt.Errorf("wrote %s of %d keys to %s", got, count, pod)
+	}
+	return nil
+}
+
+// CountValkeyKeys reads back the keys WriteValkeyKeys wrote and returns how many
+// held their expected value.
+func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int, error) {
+	prologue, cli := valkeyCLIPrefix(opts)
+	// Generate commands, execute them and verify replies (in non-interactive mode).
+	// Skip cluster-mode "-> Redirected" lines so replies stay aligned with GETs.
+	script := fmt.Sprintf(
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | awk -v v=val: '/^-> Redirected/{next} {n++; if ($0 == v n) ok++} END{print ok+0}'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return 0, fmt.Errorf("reading %d keys from %s: %w (output: %s)", count, pod, err, out)
+	}
+	var found int
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d", &found); err != nil {
+		return 0, fmt.Errorf("parsing key count from %q: %w", out, err)
+	}
+	return found, nil
+}
+
 // ValkeyCLI runs a valkey-cli command in pod's server container. The -e flag
 // makes valkey-cli exit non-zero on any error reply, which Run turns into an
 // error rather than leaving it to a confusing downstream assertion.
@@ -399,11 +440,11 @@ func CollectDebugInfo(namespace string) {
 }
 
 // CollectValkeyDebugInfo writes each of the cluster's Valkey servers' own view of
-// the cluster, its replication state and its recent log, including the log of a
-// server container that restarted in place. CollectDebugInfo covers what the
-// operator recorded; this covers what the servers themselves report, which is
-// where failure flags and election attempts show up. The pods are looked up in
-// the namespace the kubectl context selects, matching how the specs create them.
+// the cluster, its replication state and its recent log. CollectDebugInfo
+// covers what the operator recorded; this covers what the servers themselves
+// report, which is where failure flags and election attempts show up. The pods
+// are looked up in the namespace the kubectl context selects, matching how the
+// specs create them.
 func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 	podList, err := Run(exec.Command("kubectl", "get", "pods",
 		"-l", "valkey.io/cluster="+clusterName,
@@ -420,9 +461,6 @@ func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "%s from %s (err=%v):\n%s\n", command, pod, err, out)
 		}
 
-		if logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--previous", "--tail=100")); err == nil {
-			_, _ = fmt.Fprintf(GinkgoWriter, "Previous server container log for %s:\n%s\n", pod, logs)
-		}
 		logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--tail=100"))
 		if err != nil {
 			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get server log for %s: %s\n", pod, err)

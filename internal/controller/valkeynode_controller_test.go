@@ -378,6 +378,39 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts2.ResourceVersion).To(Equal(rvAfterFirst), "StatefulSet should not be updated when nothing changed")
 		})
 
+		It("should settle when serviceAccountName is set", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				ServiceAccountName: "my-sa",
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.DeprecatedServiceAccount).To(Equal("my-sa"),
+				"the API server mirrors serviceAccountName into the deprecated field")
+
+			By("matching the live template hash to the desired workload revision")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			desiredRev, err := computeWorkloadRevision(node)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(desiredRev))
+
+			By("leaving the StatefulSet alone on a no-op reconcile")
+			rvAfterFirst := sts.ResourceVersion
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(rvAfterFirst))
+		})
+
 		It("should create a PVC before reconciling the StatefulSet when persistence is enabled", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,

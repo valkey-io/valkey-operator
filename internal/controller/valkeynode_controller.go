@@ -1134,7 +1134,14 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	// settles it: a server container that is not running (crash-looping on a
 	// bad config, or never pulled) is not loading anything and stays eligible.
 	// A running container that will not answer is left alone and retried.
-	info, err := r.nodeInfo(ctx, node)
+	//
+	// nodeInfo dials node.Status.PodIP, which only updateStatus refreshes, and
+	// Reconcile returns before updateStatus when this function defers. A pod
+	// that came back at another IP would be probed at the stale one on every
+	// retry and never replaced. So the probe goes to the pod just read.
+	probe := node.DeepCopy()
+	probe.Status.PodIP = pod.Status.PodIP
+	info, err := r.nodeInfo(ctx, probe)
 	switch {
 	case err == nil && syncInProgress(info):
 		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)

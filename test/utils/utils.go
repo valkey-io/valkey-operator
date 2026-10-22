@@ -448,11 +448,11 @@ func CollectDebugInfo(namespace string) {
 }
 
 // CollectValkeyDebugInfo writes each of the cluster's Valkey servers' own view of
-// the cluster, its replication state and its recent log, including the log of a
-// server container that restarted in place. CollectDebugInfo covers what the
-// operator recorded; this covers what the servers themselves report, which is
-// where failure flags and election attempts show up. The pods are looked up in
-// the namespace the kubectl context selects, matching how the specs create them.
+// the cluster, its replication state and its recent log. CollectDebugInfo
+// covers what the operator recorded; this covers what the servers themselves
+// report, which is where failure flags and election attempts show up. The pods
+// are looked up in the namespace the kubectl context selects, matching how the
+// specs create them.
 func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 	podList, err := Run(exec.Command("kubectl", "get", "pods",
 		"-l", "valkey.io/cluster="+clusterName,
@@ -469,9 +469,6 @@ func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "%s from %s (err=%v):\n%s\n", command, pod, err, out)
 		}
 
-		if logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--previous", "--tail=100")); err == nil {
-			_, _ = fmt.Fprintf(GinkgoWriter, "Previous server container log for %s:\n%s\n", pod, logs)
-		}
 		logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--tail=100"))
 		if err != nil {
 			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to get server log for %s: %s\n", pod, err)

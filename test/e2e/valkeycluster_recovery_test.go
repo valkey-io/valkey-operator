@@ -127,6 +127,8 @@ var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), f
 		return total, strings.Join(other, "\n")
 	}
 
+	// dbSize returns the number of keys stored on pod itself, not across the
+	// cluster, as a string so a primary and its replica compare directly.
 	dbSize := func(g Gomega, pod string) string {
 		out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
 		g.Expect(err).NotTo(HaveOccurred(), out)

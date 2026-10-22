@@ -321,6 +321,47 @@ func ValkeyShell(pod, script string) (string, error) {
 	return Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", prologue+script))
 }
 
+// WriteValkeyKeys writes count keys named <prefix>:<n> with value val:<n>
+// through a single valkey-cli in pod, following cluster redirects. It fails
+// unless every write is acknowledged, so a partial write is reported here rather
+// than leaving a later read to show a confusing count.
+func WriteValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) error {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf(
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET %s:\"i\" val:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | grep -c '^OK$'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return fmt.Errorf("writing %d keys to %s: %w (output: %s)", count, pod, err, out)
+	}
+	if got := strings.TrimSpace(out); got != fmt.Sprintf("%d", count) {
+		return fmt.Errorf("wrote %s of %d keys to %s", got, count, pod)
+	}
+	return nil
+}
+
+// CountValkeyKeys reads back the keys WriteValkeyKeys wrote and returns how many
+// held their expected value.
+func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int, error) {
+	prologue, cli := valkeyCLIPrefix(opts)
+	// Generate commands, execute them and verify replies (in non-interactive mode).
+	// Skip cluster-mode "-> Redirected" lines so replies stay aligned with GETs.
+	script := fmt.Sprintf(
+		"%sreplies=$(awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET %s:\"i}' | %s) || exit $?; "+
+			"printf '%%s\\n' \"$replies\" | awk -v v=val: '/^-> Redirected/{next} {n++; if ($0 == v n) ok++} END{print ok+0}'",
+		prologue, count, prefix, cli)
+	out, err := Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+	if err != nil {
+		return 0, fmt.Errorf("reading %d keys from %s: %w (output: %s)", count, pod, err, out)
+	}
+	var found int
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d", &found); err != nil {
+		return 0, fmt.Errorf("parsing key count from %q: %w", out, err)
+	}
+	return found, nil
+}
+
 // GetEvents fetches and categorizes Kubernetes events for a given resource.
 func GetEvents(resourceName string) (map[string]bool, map[string]bool, error) {
 	cmd := exec.Command("kubectl", "get", "events", "--field-selector",

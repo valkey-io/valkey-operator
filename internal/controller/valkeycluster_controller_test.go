@@ -1209,7 +1209,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards:       2,
 				Replicas:     1,
-				Image:        "valkey/valkey:9.0.0",
+				Image:        "valkey/valkey:9.1.1",
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
@@ -1569,7 +1569,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards:       1,
 				Replicas:     0,
-				Image:        "valkey/valkey:9.0.0",
+				Image:        "valkey/valkey:9.1.1",
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}

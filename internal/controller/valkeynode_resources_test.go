@@ -58,7 +58,7 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 			Namespace: namespace,
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
-			Image:               "valkey/valkey:9.0.0",
+			Image:               "valkey/valkey:9.1.1",
 			ServerConfigMapName: "valkey-config",
 			// Off by default here so the exporter-agnostic cases assert on the
 			// server container alone. A nil Enabled means enabled.
@@ -96,7 +96,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, "server", c.Name)
 
 	// Image
-	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
+	assert.Equal(t, "valkey/valkey:9.1.1", c.Image)
 
 	// Command
 	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",

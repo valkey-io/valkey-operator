@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -311,10 +312,31 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// localAddr matches the local end of a net.OpError ("10.244.1.2:54034->"),
+// which changes on every redial.
+var localAddr = regexp.MustCompile(`\S+:\d+->`)
+
+// shouldSkipConditionUpdate reports whether a condition is unchanged after
+// ignoring the local address in network error messages. The local port can
+// change on every redial, and writing each change requeues the node without
+// backoff. Other message changes still update the condition. The full error
+// remains available in logs and events.
+func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) bool {
+	existing := meta.FindStatusCondition(conditions, conditionType)
+	return existing != nil &&
+		existing.Status == status &&
+		existing.Reason == reason &&
+		existing.ObservedGeneration == observedGeneration &&
+		localAddr.ReplaceAllString(existing.Message, "") == localAddr.ReplaceAllString(message, "")
+}
+
 func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, message, current.Generation) {
+		return nil
 	}
 	patchBase := current.DeepCopy()
 	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
@@ -338,6 +360,9 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, message, current.Generation) {
+		return nil
 	}
 	patchBase := current.DeepCopy()
 	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{

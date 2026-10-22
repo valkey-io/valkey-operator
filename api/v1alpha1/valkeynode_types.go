@@ -258,6 +258,12 @@ type ValkeyNodeStatus struct {
 	// +optional
 	Role string `json:"role,omitempty"`
 
+	// LiveConfigKeys are the keys of spec.config last applied to the server
+	// with CONFIG SET. A key that leaves spec.config is set back to its
+	// default once and dropped from the list.
+	// +optional
+	LiveConfigKeys []string `json:"liveConfigKeys,omitempty"`
+
 	// Conditions represent the current state of the ValkeyNode.
 	// +listType=map
 	// +listMapKey=type

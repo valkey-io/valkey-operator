@@ -3630,6 +3630,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              liveConfigKeys:
+                description: |-
+                  LiveConfigKeys are the keys of spec.config last applied to the server
+                  with CONFIG SET. A key that leaves spec.config is set back to its
+                  default once and dropped from the list.
+                items:
+                  type: string
+                type: array
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the controller.

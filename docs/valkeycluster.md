@@ -15,6 +15,7 @@
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
+- [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
@@ -162,6 +163,24 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 |---|---|
 | `Cluster` | Operator creates and owns a single cluster-wide PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
+
+### Pod metadata
+
+```yaml
+podMetadata:
+  labels:
+    team: data
+  annotations:
+    example.com/owner: data-platform
+```
+
+`podMetadata` adds labels and annotations to every Valkey pod, for example to select the pods from a `PodMonitor`, a `NetworkPolicy`, or a Service. They are set on each ValkeyNode pod template but kept out of the workload selector, so they can be changed at any time. Changing them rolls all pods.
+
+Keys the operator owns are rejected: any label or annotation key under `valkey.io/`, and the `app.kubernetes.io/` `name`, `instance`, `component`, `part-of` and `managed-by` labels. Other `app.kubernetes.io/` keys, such as `app.kubernetes.io/version`, are allowed.
+
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-hash` annotation (85 bytes). Each map holds at most 1024 entries.
+
+The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 
 ### Graceful shutdown
 
@@ -489,6 +508,8 @@ workloadType: StatefulSet  # default
 
 - Immutable after creation
 - `persistence` requires `workloadType: StatefulSet`
+- `metadata.name` is limited by the longest name derived from it. With `StatefulSet`, every ValkeyNode gets a StatefulSet named `valkey-<name>-<shard>-<node>`, and that name must stay within 52 characters: Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, label values are limited to 63 characters, and a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters; each extra digit in the highest shard index (`shards - 1`) or node index (`replicas`) takes one character away, so a scale-out that pushes an index into more digits is rejected as well. With `Deployment` there is no such label, and the limit is the headless Service `valkey-<name>`, a DNS label of at most 63 characters, so the name may have up to 56 characters. The ValkeyNode name `<name>-<shard>-<node>` is the `app.kubernetes.io/instance` label value of its pod with either workload type, so it must stay within 63 characters as well. The StatefulSet rule already keeps it there, and a `Deployment` cluster only reaches that limit with a long name and thousands of shards. All three rules are enforced at admission.
+- A cluster created before these rules whose name breaks them is frozen: the API server rejects every spec update until the cluster is scaled down to a size the rule accepts, or deleted. Both still work.
 
 ## Architecture
 

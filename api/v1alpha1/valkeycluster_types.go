@@ -398,6 +398,12 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// PodMetadata adds labels and annotations to every Valkey pod of the cluster.
+	// They are not part of the workload selector, so they can be changed at any
+	// time; a change rolls the pods. Keys the operator sets itself are rejected.
+	// +optional
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
@@ -738,12 +744,28 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+//
+// The name rules below keep the longest derived workload name within what
+// Kubernetes accepts. Every ValkeyNode gets a workload named
+// valkey-<name>-<shard>-<node>. With workloadType StatefulSet, Kubernetes
+// stamps each pod with a controller-revision-hash label of the StatefulSet
+// name plus an 11-character suffix, and label values stop at 63 characters,
+// so a StatefulSet name longer than 52 never gets a pod. The rule counts the
+// digits of the highest shard index (shards - 1) and node index (replicas),
+// so a scale-out that pushes an index into more digits is rejected too. A
+// Deployment carries no such label; there the headless Service valkey-<name>,
+// a DNS label of at most 63 characters, is the limit, until the indexes grow
+// enough for the ValkeyNode name <name>-<shard>-<node>, which every pod
+// carries as its app.kubernetes.io/instance label value, to reach 63 first.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

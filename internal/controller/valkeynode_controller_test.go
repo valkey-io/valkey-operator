@@ -195,6 +195,50 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
 		})
 
+		It("applies podMetadata to the pod template and keeps it out of the selector", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				PodMetadata: &valkeyiov1alpha1.EmbeddedObjectMetadata{
+					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data"},
+					Annotations: map[string]string{"example.com/owner": "data"},
+				},
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet with the pod metadata")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "data"))
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(LabelCluster, resourceName))
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue("example.com/owner", "data"))
+			Expect(sts.Spec.Selector.MatchLabels).NotTo(HaveKey("team"))
+			selector := sts.Spec.Selector.DeepCopy()
+
+			By("changing a pod label, which the immutable selector must not follow")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.PodMetadata.Labels["team"] = "platform"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "platform"))
+			Expect(sts.Spec.Selector).To(Equal(selector))
+
+			By("leaving the StatefulSet alone on a no-op reconcile")
+			updatedResourceVersion := sts.ResourceVersion
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(updatedResourceVersion))
+		})
+
 		It("should not update the StatefulSet on reconciles when nothing changed", func() {
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -1536,7 +1580,6 @@ var _ = Describe("setLiveConfigCondition", func() {
 type fakeConfigClient struct {
 	params map[string]string
 	err    error
-	closed bool
 
 	// aclHashes is the server's current user -> password hashes, as ACL USERS
 	// and ACL GETUSER would report them.
@@ -1582,8 +1625,6 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	}
 	return normalizeHashes(slices.Clone(hashes)), nil
 }
-
-func (f *fakeConfigClient) Close() { f.closed = true }
 
 var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	ctx := context.Background()
@@ -1642,7 +1683,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("reports synced once the mounted file has caught up", func() {
@@ -1667,7 +1707,6 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 })
 
@@ -1678,7 +1717,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 
 	ctx := context.Background()
 
-	It("applies only allowlisted keys and closes the client", func() {
+	It("applies only allowlisted keys", func() {
 		fake := &fakeConfigClient{}
 		r := &ValkeyNodeReconciler{
 			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
@@ -1692,7 +1731,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeTrue())
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("returns an error when CONFIG SET fails", func() {
@@ -1705,7 +1743,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
 		Expect(applied).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {

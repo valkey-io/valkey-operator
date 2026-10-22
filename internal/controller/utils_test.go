@@ -437,6 +437,25 @@ func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
 	assert.Equal(t, "", bare.Spec.ServiceAccountName)
 }
 
+func TestBuildClusterValkeyNodePodMetadata(t *testing.T) {
+	podMetadata := &valkeyv1.EmbeddedObjectMetadata{
+		Labels:      map[string]valkeyv1.LabelValue{"team": "data"},
+		Annotations: map[string]string{"example.com/scrape": "true"},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{PodMetadata: podMetadata},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, podMetadata, node.Spec.PodMetadata, "podMetadata should propagate cluster -> node")
+
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Nil(t, bare.Spec.PodMetadata)
+}
+
 func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "custom.example", tlsServerName("custom.example", "foo", "valkey", ""))
 	assert.Equal(t, "valkey-foo.valkey.svc.cluster.local", tlsServerName("", "foo", "valkey", ""))

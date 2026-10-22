@@ -570,7 +570,7 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 
 // Connect to a single Valkey node and scrapes its current state.
 func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
-	hostPort := fmt.Sprintf("%s:%d", address, port)
+	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
 	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
 	client, err := dial(ctx, hostPort)

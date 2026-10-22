@@ -262,6 +262,14 @@ func TestForNode(t *testing.T) {
 		assert.Nil(t, got[0].TLSConfig)
 	})
 
+	t.Run("IPv6 pod IP is bracketed", func(t *testing.T) {
+		var got []vclient.ClientOption
+		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("fd00::5", nil, nil))
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, []string{"[fd00::5]:6379"}, got[0].InitAddress)
+	})
+
 	t.Run("node outside a cluster dials as the default user", func(t *testing.T) {
 		var got []vclient.ClientOption
 		_, err := newTestProvider(providerTestClient(t), &got).ForNode(ctx, newNode("10.0.0.5", nil, nil))

@@ -176,4 +176,112 @@ spec:
 			}).Should(Succeed())
 		})
 	})
+
+	// Two of three primaries are lost one after another. Depending on timing,
+	// the second dies before or after the first shard is recovered, so quorum is
+	// either lost or already restored when it is detected. The replicas have
+	// native failover disabled, so every promotion is the operator's: a shard
+	// that recovered on its own once quorum returned would hide one the operator
+	// stranded.
+	Context("when primaries are lost one after another", Label("quorum-loss"), func() {
+		const clusterName = "valkeycluster-quorum-loss-e2e"
+		// Shards 0 and 1 lose their primaries; shard 2's stays up and reports
+		// the failures.
+		lostShards := []int{0, 1}
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		It("promotes the orphaned replicas and serves all slots again", func() {
+			By("creating a 3-shard cluster with 1 replica and no persistence (native failover disabled)")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  config:
+    cluster-replica-no-failover: "yes"
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("confirming the primaries are at node-index 0")
+			// The scenario deletes node-index 0 of each lost shard, so a primary
+			// that has moved would make the deletion target a replica instead.
+			for _, shard := range lostShards {
+				Eventually(func(g Gomega) {
+					role, err := roleOf(clusterName, shard, 0)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(role).To(Equal("primary"))
+				}).Should(Succeed())
+			}
+
+			By("stopping the primaries from handing off on SIGTERM")
+			// The operator sets shutdown-on-sigterm failover, so a terminating
+			// primary hands the shard to its replica. "now" skips that wait, and
+			// "nosave" suppresses any final RDB.
+			for _, shard := range lostShards {
+				_, err := utils.ValkeyCLI(podFor(clusterName, shard, 0), cliOpts,
+					"CONFIG", "SET", "shutdown-on-sigterm", `"nosave now"`)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			firstId, err := utils.ValkeyCLI(podFor(clusterName, lostShards[0], 0), cliOpts, "CLUSTER", "MYID")
+			Expect(err).NotTo(HaveOccurred())
+			firstId = strings.TrimSpace(firstId)
+
+			By("force-deleting the first primary pod")
+			forceDelete := func(pod string) {
+				GinkgoHelper()
+				_, err := utils.Run(exec.Command("kubectl", "delete", "pod", pod, "--force", "--grace-period=0"))
+				Expect(err).NotTo(HaveOccurred())
+			}
+			forceDelete(podFor(clusterName, lostShards[0], 0))
+
+			By("waiting until the first primary is failed or already replaced")
+			// Deleting the second primary only once the first is down makes the
+			// failures land in different scrapes. A promotion that restores
+			// quorum must then not strand the shard detected after it.
+			Eventually(func(g Gomega) {
+				if role, err := roleOf(clusterName, lostShards[0], 1); err == nil && role == "primary" {
+					return
+				}
+				out, err := utils.ValkeyCLI(podFor(clusterName, 2, 0), cliOpts, "CLUSTER", "NODES")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(MatchRegexp(`(?m)^`+firstId+` \S+ \S*fail`), "shard 2 does not report the first primary failed yet")
+			}).Should(Succeed())
+
+			By("force-deleting the second primary pod")
+			forceDelete(podFor(clusterName, lostShards[1], 0))
+
+			By("waiting for the orphaned replicas to be promoted")
+			// With native failover disabled, each shard recovers only through
+			// the operator's takeover, whether or not quorum holds at the time.
+			Eventually(func(g Gomega) {
+				for _, shard := range lostShards {
+					role, err := roleOf(clusterName, shard, 1)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(role).To(Equal("primary"),
+						"shard %d replica should be promoted", shard)
+				}
+			}).Should(Succeed())
+
+			By("waiting for the cluster to become Ready again")
+			waitForReady(clusterName)
+
+			By("verifying the whole keyspace is served")
+			// Data could be lost here (no persistence, and the primaries were
+			// killed without a hand-off), so slot coverage is what recovery means.
+			Eventually(func(g Gomega) {
+				out, err := utils.ValkeyCLI(podFor(clusterName, 2, 0), cliOpts, "CLUSTER", "INFO")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("cluster_state:ok"))
+				g.Expect(out).To(ContainSubstring("cluster_slots_ok:16384"))
+			}).Should(Succeed())
+		})
+	})
 })

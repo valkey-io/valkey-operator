@@ -53,6 +53,8 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
+`cluster-replica-no-failover` stops a replica from promoting itself. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (a `fail` flag, or `fail?` from a majority of the slot-owning primaries). If the cluster has lost failover quorum, no election can succeed, so the operator takes over regardless of this setting. With persistence enabled, recovery is left to Valkey.
+
 #### Version-gated config
 
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.

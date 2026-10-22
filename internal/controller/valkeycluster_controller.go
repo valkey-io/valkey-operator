@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1455,57 +1456,107 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	return nil
 }
 
-// promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
-// primary is dead and failover quorum is unreachable. With persistence enabled
-// the pod will return with the same node ID, so TAKEOVER is skipped.
-// Returns (result, true) if a promotion was made and reconcile should requeue.
+// promoteOrphanedReplicas recovers shards whose primary is dead. It prefers
+// Valkey's own coordinated failover, which is epoch-safe and cannot fragment
+// slots, and forces a CLUSTER FAILOVER TAKEOVER only when native failover
+// cannot proceed. orphansToTakeOver decides which shards those are.
+//
+// The candidates are tried in order until one TAKEOVER succeeds, so a replica
+// that keeps rejecting it does not hold back the other shards.
+//
+// With persistence enabled the pod returns with the same node ID, so recovery
+// is left entirely to Valkey.
+// Returns (result, true) if it acted and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+	if cluster.Spec.Persistence != nil {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	var promoted, attempted int
-	deadPrimaries := make(map[string]bool)
+	// The operator renders each node's config from spec.config, so that is
+	// where native failover is disabled. Valkey reads yes/no in any case.
+	noFailover := strings.EqualFold(cluster.Spec.Config["cluster-replica-no-failover"], "yes")
+	candidates := orphansToTakeOver(state, noFailover)
+	if len(candidates) == 0 {
+		return ctrl.Result{}, false
+	}
+	for _, c := range candidates {
+		log.Info("promoting orphaned replica via TAKEOVER", "node", c.replica.Address, "deadPrimary", c.primaryId)
+		if err := c.replica.Client.Do(ctx, c.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", c.replica.Address)
+			continue
+		}
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted orphaned replica via TAKEOVER for dead primary %s", c.primaryId)
+		break // one takeover per reconcile; requeue and re-evaluate
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+}
+
+// orphan is an orphaned replica and the ID of its dead primary.
+type orphan struct {
+	replica   *valkey.NodeState
+	primaryId string
+}
+
+// orphansToTakeOver returns, in a stable order, the orphaned replicas to
+// promote with TAKEOVER: for each qualifying dead primary, its most caught-up
+// replica. It returns none when native failover can or will recover every
+// dead primary.
+//
+// Native failover needs a majority of primaries to vote:
+//   - Without quorum (a majority of primaries dead at once), no election can
+//     complete, so every dead primary with a replica qualifies. One promotion
+//     restores a voting primary; the remaining shards then recover natively,
+//     or are taken over on a later reconcile if quorum is still short.
+//   - With quorum, Valkey elects a replacement on its own, unless spec.config
+//     sets cluster-replica-no-failover (noFailover). Such a primary qualifies
+//     once its failure is confirmed (fail, or fail? from a majority of the
+//     slot-owning primaries).
+//
+// A primary the operator itself reached in this scrape never qualifies: it
+// is alive, so a peer's failure flag for it is stale or one-sided, and a
+// takeover would force a needless failover that loses its unreplicated writes.
+// Nor does a dead primary whose shard already has a live primary owning slots:
+// a second takeover there would only move the slots again.
+//
+// Without persistence, a primary that is only partitioned can still be taken
+// over: the replica claims its slots at a higher epoch, and the old primary
+// demotes itself on reconnect, losing writes it accepted meanwhile.
+func orphansToTakeOver(state *valkey.ClusterState, noFailover bool) []orphan {
+	var deadPrimaries []string
 	for _, shard := range state.Shards {
+		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
+			// Already served, for example by a replica promoted on an earlier
+			// reconcile while its sibling replicas still name the old primary.
+			continue
+		}
 		for _, node := range shard.Nodes {
 			primaryId := node.PrimaryIdFromSelf()
 			if primaryId == "-" || primaryId == "" {
 				continue // node is a primary
 			}
-			if deadPrimaries[primaryId] {
-				continue
+			if slices.Contains(deadPrimaries, primaryId) || !state.IsNodeFailed(primaryId) {
+				continue // no viewer reports 'fail' (or 'fail?')
 			}
-			if !state.IsNodeFailed(primaryId) {
-				continue
+			if state.FindNodeById(primaryId) != nil {
+				continue // the operator reaches it, so it is not dead
 			}
-			// Note: we don't check if the pod still exists in k8s here.
-			// Without persistence, even if the primary is merely partitioned
-			// (not gone), the TAKEOVER'd replica will own the slots at a
-			// higher epoch. A returning primary will see the higher epoch
-			// and demote itself; no split-brain.
-			deadPrimaries[primaryId] = true
+			deadPrimaries = append(deadPrimaries, primaryId)
 		}
 	}
-	for primaryId := range deadPrimaries {
+	slices.Sort(deadPrimaries)
+
+	quorum := state.HasFailoverQuorum()
+	var orphans []orphan
+	for _, primaryId := range deadPrimaries {
 		replica := state.BestReplicaOf(primaryId)
 		if replica == nil {
 			continue
 		}
-		attempted++
-		log.Info("promoting orphaned replica via TAKEOVER", "node", replica.Address, "deadPrimary", primaryId)
-		if err := replica.Client.Do(ctx, replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
-		} else {
-			promoted++
+		if !quorum || (noFailover && state.IsNodeFailedByMajority(primaryId)) {
+			orphans = append(orphans, orphan{replica: replica, primaryId: primaryId})
 		}
 	}
-	if promoted > 0 || attempted > 0 {
-		if promoted > 0 {
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted %d orphaned replica(s) via TAKEOVER", promoted)
-		}
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-	}
-	return ctrl.Result{}, false
+	return orphans
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

@@ -78,10 +78,10 @@ falling out of ACL coverage.
 
 ## Prerequisites
 
-- Go v1.25.0+.
+- Go v1.26.0+.
 - Docker or Podman.
-- kubectl v1.32+.
-- Access to a Kubernetes v1.32+ cluster.
+- kubectl v1.31+.
+- Access to a Kubernetes v1.31+ cluster.
 
 ## Build and deploy from source
 

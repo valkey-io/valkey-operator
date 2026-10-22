@@ -73,3 +73,17 @@ jobs:
           make manifests
           make generate
           git diff --exit-code
+
+  copyright:
+    name: Check copyright headers
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check new files carry the current year
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: hack/check-copyright.sh "origin/${BASE_REF}"

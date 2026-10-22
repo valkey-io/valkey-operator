@@ -404,7 +404,7 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 	fsGroup := int64(56849)
 	psc := &corev1.PodSecurityContext{
 		FSGroup:      &fsGroup,
-		RunAsNonRoot: boolPtr(true),
+		RunAsNonRoot: new(true),
 	}
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
@@ -421,7 +421,40 @@ func TestBuildClusterValkeyNodePodSecurityContext(t *testing.T) {
 	assert.Nil(t, bare.Spec.PodSecurityContext)
 }
 
-func boolPtr(b bool) *bool { return &b }
+func TestBuildClusterValkeyNodeServiceAccountName(t *testing.T) {
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{ServiceAccountName: "custom-sa"},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, "custom-sa", node.Spec.ServiceAccountName, "serviceAccountName should propagate cluster -> node")
+
+	// Absent on the cluster -> absent on the node.
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Equal(t, "", bare.Spec.ServiceAccountName)
+}
+
+func TestBuildClusterValkeyNodePodMetadata(t *testing.T) {
+	podMetadata := &valkeyv1.EmbeddedObjectMetadata{
+		Labels:      map[string]valkeyv1.LabelValue{"team": "data"},
+		Annotations: map[string]string{"example.com/scrape": "true"},
+	}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       valkeyv1.ValkeyClusterSpec{PodMetadata: podMetadata},
+	}
+
+	node := buildClusterValkeyNode(cluster, 0, 0)
+	assert.Equal(t, podMetadata, node.Spec.PodMetadata, "podMetadata should propagate cluster -> node")
+
+	bare := buildClusterValkeyNode(&valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c2", Namespace: "default"},
+	}, 0, 0)
+	assert.Nil(t, bare.Spec.PodMetadata)
+}
 
 func TestTLSServerName(t *testing.T) {
 	assert.Equal(t, "custom.example", tlsServerName("custom.example", "foo", "valkey", ""))

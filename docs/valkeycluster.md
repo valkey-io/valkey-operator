@@ -214,7 +214,7 @@ scheduling:
 
 `scheduling.tolerations`, `scheduling.nodeSelector`, `scheduling.affinity`, and `scheduling.priorityClassName` are passed through to every pod in the cluster (`scheduling.nodeSelector` also carries the curated zone entry when [`zone.pinning`](#zone-axis-pinning) is set, see below). `priorityClassName` must reference an existing [PriorityClass](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) and protects the Valkey pods from eviction under resource pressure.
 
-For same-shard spread on a custom topology key, use `podAntiAffinity` with `matchLabelKeys`. The operator copies `scheduling.affinity` onto every pod; `matchLabelKeys` then pulls `valkey.io/shard-index` from that pod, so the term only counts other members of the same shard. Kubernetes 1.31+ is required: with `MatchLabelKeysInPodAffinity` off (the pre-1.31 default) the apiserver drops `matchLabelKeys` and this term silently becomes cluster-wide rack anti-affinity.
+For same-shard spread on a custom topology key, use `podAntiAffinity` with `matchLabelKeys`. The operator copies `scheduling.affinity` onto every pod; `matchLabelKeys` then pulls `valkey.io/shard-index` from that pod, so the term only counts other members of the same shard. `matchLabelKeys` needs the `MatchLabelKeysInPodAffinity` feature gate, which is on by default from Kubernetes 1.31, the operator's minimum. If the gate is off, the apiserver drops the field and the term applies to the whole cluster: one Valkey pod per rack, with the rest `Pending` and the cluster `Degraded` with reason `PodUnschedulable`.
 
 ```yaml
 scheduling:
@@ -228,6 +228,25 @@ scheduling:
           matchLabelKeys:
             - valkey.io/shard-index
 ```
+
+A required term needs at least `1 + replicas` racks, or the extra members of each shard stay `Pending`. With fewer racks, use the preferred form, which keeps a shard's members apart where it can:
+
+```yaml
+scheduling:
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: topology.example.com/rack
+            labelSelector:
+              matchLabels:
+                valkey.io/cluster: my-cluster
+            matchLabelKeys:
+              - valkey.io/shard-index
+```
+
+With the preferred form on the same setup (3 shards × 3 members on 2 racks), all 9 pods get scheduled and every shard has members on both racks.
 
 #### Topology spread constraints
 

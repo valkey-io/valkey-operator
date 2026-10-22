@@ -17,12 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -34,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -69,6 +72,29 @@ type ValkeyClusterReconciler struct {
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
+
+	// OrphanTakeoverGrace and OrphanTakeoverMaxWait bound how long a
+	// persistent primary that failed without quorum gets to come back before
+	// promoteOrphanedReplicas takes over its replica. Zero means the default.
+	OrphanTakeoverGrace   time.Duration
+	OrphanTakeoverMaxWait time.Duration
+
+	orphanMu     sync.Mutex
+	orphanTimers map[client.ObjectKey]*orphanTimers
+}
+
+// Defaults for the operator's --orphan-takeover-grace and
+// --orphan-takeover-max-wait flags.
+const (
+	DefaultOrphanTakeoverGrace   = 60 * time.Second
+	DefaultOrphanTakeoverMaxWait = 5 * time.Minute
+)
+
+// orphanTimers holds one cluster's FAIL times, keyed by primary node ID. The
+// UID tells a cluster recreated under the same name apart from the old one.
+type orphanTimers struct {
+	uid         types.UID
+	failedSince map[string]time.Time
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -128,7 +154,15 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
-func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
+func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) { //nolint:gocyclo
+	// A held orphan takeover is re-checked no later than it asks, whichever
+	// step below ends the reconcile.
+	var orphanWait time.Duration
+	defer func() {
+		if err == nil && orphanWait > 0 && (result.RequeueAfter == 0 || result.RequeueAfter > orphanWait) {
+			result.RequeueAfter = orphanWait
+		}
+	}()
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
 
@@ -136,6 +170,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			deleteClusterMetrics(req.Name, req.Namespace)
+			r.clearOrphanTimers(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -145,6 +180,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// collector removes dependents before the cluster itself) reconciling would
 	// recreate the very children being deleted and deadlock the delete
 	if !cluster.DeletionTimestamp.IsZero() {
+		r.clearOrphanTimers(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -268,11 +304,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
-	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+	orphanResult, handled := r.promoteOrphanedReplicas(ctx, cluster, state, nodes)
+	if handled {
 		// Reports via an event, not status, so persist any conditions set above.
 		_ = r.updateStatus(ctx, cluster, state)
-		return result, nil
+		return orphanResult, nil
 	}
+	orphanWait = orphanResult.RequeueAfter
 
 	// Re-introduce members whose addresses changed while every peer's
 	// nodes.conf still points at the old ones (full restart with
@@ -1457,26 +1495,57 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 
 // promoteOrphanedReplicas issues CLUSTER FAILOVER TAKEOVER to replicas whose
 // primary is dead and failover quorum is unreachable. With persistence enabled
-// the pod will return with the same node ID, so TAKEOVER is skipped.
+// it holds off while the primary may still come back with its data: for
+// OrphanTakeoverGrace, for as long as the primary is loading, and up to
+// OrphanTakeoverMaxWait while a pod of its shard is starting.
 // Returns (result, true) if a promotion was made and reconcile should requeue.
-func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil || state.HasFailoverQuorum() {
+// While holding off it returns false, with RequeueAfter set to when to look again.
+func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (ctrl.Result, bool) {
+	key := client.ObjectKeyFromObject(cluster)
+	r.orphanMu.Lock()
+	defer r.orphanMu.Unlock()
+	if state.HasFailoverQuorum() {
+		// Start a fresh grace period the next time quorum is lost.
+		delete(r.orphanTimers, key)
 		return ctrl.Result{}, false
 	}
+	persistent := cluster.Spec.Persistence != nil
+	var failedSince map[string]time.Time
+	if persistent {
+		failedSince = r.orphanFailTimes(cluster)
+	}
 	log := logf.FromContext(ctx)
+	now := time.Now()
+	var recheck time.Duration
 	var promoted, attempted int
 	deadPrimaries := make(map[string]bool)
+	checked := make(map[string]bool)
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
 			primaryId := node.PrimaryIdFromSelf()
 			if primaryId == "-" || primaryId == "" {
 				continue // node is a primary
 			}
-			if deadPrimaries[primaryId] {
+			if checked[primaryId] {
 				continue
 			}
+			checked[primaryId] = true
 			if !state.IsNodeFailed(primaryId) {
+				delete(failedSince, primaryId)
 				continue
+			}
+			if persistent {
+				first, ok := failedSince[primaryId]
+				if !ok {
+					first = now
+					failedSince[primaryId] = now
+				}
+				if hold := r.holdOrphanTakeover(ctx, cluster, state, nodes, primaryId, now.Sub(first)); hold > 0 {
+					if recheck == 0 || hold < recheck {
+						recheck = hold
+					}
+					continue
+				}
 			}
 			// Note: we don't check if the pod still exists in k8s here.
 			// Without persistence, even if the primary is merely partitioned
@@ -1497,6 +1566,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", replica.Address)
 		} else {
 			promoted++
+			delete(failedSince, primaryId)
 		}
 	}
 	if promoted > 0 || attempted > 0 {
@@ -1505,7 +1575,97 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
+	if recheck > 0 {
+		return ctrl.Result{RequeueAfter: max(recheck, 2*time.Second)}, false
+	}
 	return ctrl.Result{}, false
+}
+
+// orphanFailTimes returns when each of the cluster's primaries was first seen
+// FAIL, keyed by node ID. The caller holds orphanMu.
+func (r *ValkeyClusterReconciler) orphanFailTimes(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]time.Time {
+	if r.orphanTimers == nil {
+		r.orphanTimers = map[client.ObjectKey]*orphanTimers{}
+	}
+	key := client.ObjectKeyFromObject(cluster)
+	timers := r.orphanTimers[key]
+	if timers == nil || timers.uid != cluster.UID {
+		// A cluster recreated under the same name can bring back the old node
+		// IDs from retained PVCs; it must not inherit the old FAIL times.
+		timers = &orphanTimers{uid: cluster.UID, failedSince: map[string]time.Time{}}
+		r.orphanTimers[key] = timers
+	}
+	return timers.failedSince
+}
+
+// holdOrphanTakeover returns how long to hold off the takeover of a persistent
+// primary that has been FAIL for failedFor, or 0 to go ahead.
+//
+// A primary loading its RDB refuses cluster-bus connections, so it looks FAIL
+// even though it is alive. It is held for as long as it loads: taking it over
+// would discard data the replica may not have. A pod that is Pending, or
+// running but not answering, is never scraped, so only its Kubernetes state
+// shows it may be coming back. That is held only until maxWait, so a crash
+// loop or a pod that cannot schedule still gets the takeover.
+func (r *ValkeyClusterReconciler) holdOrphanTakeover(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, primaryId string, failedFor time.Duration) time.Duration {
+	log := logf.FromContext(ctx).WithValues("deadPrimary", primaryId)
+	grace := cmp.Or(r.OrphanTakeoverGrace, DefaultOrphanTakeoverGrace)
+	maxWait := max(cmp.Or(r.OrphanTakeoverMaxWait, DefaultOrphanTakeoverMaxWait), grace)
+	if failedFor < grace {
+		return grace - failedFor
+	}
+	if n := state.FindNodeById(primaryId); n != nil && n.Info["loading"] == "1" {
+		log.Info("orphaned primary is loading its dataset; holding TAKEOVER")
+		return 10 * time.Second
+	}
+	if failedFor >= maxWait {
+		return 0
+	}
+	pod, err := r.startingShardPod(ctx, cluster, state, nodes, primaryId)
+	if err != nil {
+		log.Error(err, "cannot check the shard's pods; holding TAKEOVER")
+		return maxWait - failedFor
+	}
+	if pod != nil {
+		log.Info("a pod of the orphaned primary's shard is starting; holding TAKEOVER", "pod", pod.Name, "phase", pod.Status.Phase)
+		return maxWait - failedFor
+	}
+	return 0
+}
+
+// startingShardPod returns a pod of the dead primary's shard that is Pending,
+// or running but not Ready, or nil if there is none. The primary's address in
+// CLUSTER NODES is stale once its pod is recreated, so the shard is found
+// through the replica that would take over; if that fails, every pod of the
+// cluster is checked.
+func (r *ValkeyClusterReconciler) startingShardPod(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, primaryId string) (*corev1.Pod, error) {
+	selector := client.MatchingLabels{LabelCluster: cluster.Name}
+	if replica := state.BestReplicaOf(primaryId); replica != nil {
+		if _, shard := nodeRoleAndShard(replica.Address, nodes); shard >= 0 {
+			selector[LabelShardIndex] = strconv.Itoa(shard)
+		}
+	}
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), selector); err != nil {
+		return nil, err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodPending || (pod.Status.Phase == corev1.PodRunning && !podReady(pod)) {
+			return pod, nil
+		}
+	}
+	return nil, nil
+}
+
+// clearOrphanTimers drops a cluster's FAIL times once it is being deleted or gone.
+func (r *ValkeyClusterReconciler) clearOrphanTimers(key client.ObjectKey) {
+	r.orphanMu.Lock()
+	defer r.orphanMu.Unlock()
+	delete(r.orphanTimers, key)
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

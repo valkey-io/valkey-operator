@@ -304,6 +304,23 @@ func valkeyCLIPrefix(opts ValkeyCLIOptions) (prologue, cli string) {
 	return prologue, cli
 }
 
+// ValkeyCLI runs a valkey-cli command in pod's server container. The -e flag
+// makes valkey-cli exit non-zero on any error reply, which Run turns into an
+// error rather than leaving it to a confusing downstream assertion.
+func ValkeyCLI(pod string, opts ValkeyCLIOptions, args ...string) (string, error) {
+	prologue, cli := valkeyCLIPrefix(opts)
+	script := fmt.Sprintf("%s%s %s", prologue, cli, strings.Join(args, " "))
+	return Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
+}
+
+// ValkeyShell runs a shell script in pod's server container with the same
+// prologue as ValkeyCLI, for work a single command cannot express, such as
+// piping many commands into one valkey-cli.
+func ValkeyShell(pod, script string) (string, error) {
+	prologue, _ := valkeyCLIPrefix(ValkeyCLIOptions{})
+	return Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", prologue+script))
+}
+
 // WriteValkeyKeys writes count keys named <prefix>:<n> with value val:<n>
 // through a single valkey-cli in pod, following cluster redirects. It fails
 // unless every write is acknowledged, so a partial write is reported here rather
@@ -343,15 +360,6 @@ func CountValkeyKeys(pod, prefix string, count int, opts ValkeyCLIOptions) (int,
 		return 0, fmt.Errorf("parsing key count from %q: %w", out, err)
 	}
 	return found, nil
-}
-
-// ValkeyCLI runs a valkey-cli command in pod's server container. The -e flag
-// makes valkey-cli exit non-zero on any error reply, which Run turns into an
-// error rather than leaving it to a confusing downstream assertion.
-func ValkeyCLI(pod string, opts ValkeyCLIOptions, args ...string) (string, error) {
-	prologue, cli := valkeyCLIPrefix(opts)
-	script := fmt.Sprintf("%s%s %s", prologue, cli, strings.Join(args, " "))
-	return Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c", script))
 }
 
 // GetEvents fetches and categorizes Kubernetes events for a given resource.
@@ -440,10 +448,11 @@ func CollectDebugInfo(namespace string) {
 }
 
 // CollectValkeyDebugInfo writes each of the cluster's Valkey servers' own view of
-// the cluster and its recent log. CollectDebugInfo covers what the operator
-// recorded; this covers what the servers themselves report, which is where
-// failure flags and election attempts show up. The pods are looked up in the
-// namespace the kubectl context selects, matching how the specs create them.
+// the cluster, its replication state and its recent log. CollectDebugInfo
+// covers what the operator recorded; this covers what the servers themselves
+// report, which is where failure flags and election attempts show up. The pods
+// are looked up in the namespace the kubectl context selects, matching how the
+// specs create them.
 func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 	podList, err := Run(exec.Command("kubectl", "get", "pods",
 		"-l", "valkey.io/cluster="+clusterName,
@@ -455,8 +464,10 @@ func CollectValkeyDebugInfo(clusterName string, opts ValkeyCLIOptions) {
 	for _, pod := range GetNonEmptyLines(podList) {
 		// Report the output even on error: an unreachable pod is itself a
 		// finding, and valkey-cli prints the reason.
-		out, err := ValkeyCLI(pod, opts, "CLUSTER", "NODES")
-		_, _ = fmt.Fprintf(GinkgoWriter, "CLUSTER NODES from %s (err=%v):\n%s\n", pod, err, out)
+		for _, command := range []string{"CLUSTER NODES", "INFO replication"} {
+			out, err := ValkeyCLI(pod, opts, command)
+			_, _ = fmt.Fprintf(GinkgoWriter, "%s from %s (err=%v):\n%s\n", command, pod, err, out)
+		}
 
 		logs, err := Run(exec.Command("kubectl", "logs", pod, "-c", "server", "--tail=100"))
 		if err != nil {

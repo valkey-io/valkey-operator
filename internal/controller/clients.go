@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
+	"strconv"
 
 	vclient "github.com/valkey-io/valkey-go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -158,5 +160,5 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 		}
 	}
 
-	return p.pool.Get(ctx, clientOption(fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort), cfg), token)
+	return p.pool.Get(ctx, clientOption(net.JoinHostPort(node.Status.PodIP, strconv.Itoa(DefaultPort)), cfg), token)
 }

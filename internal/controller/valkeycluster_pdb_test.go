@@ -43,9 +43,10 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		reconciler = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:        k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(k8sClient),
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{

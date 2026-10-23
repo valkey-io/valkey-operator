@@ -412,10 +412,11 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect((&ValkeyNodeReconciler{
-			Client:     mgr.GetClient(),
-			Scheme:     mgr.GetScheme(),
-			Recorder:   events.NewFakeRecorder(100),
-			RoleEvents: roleEvents,
+			Client:        mgr.GetClient(),
+			Scheme:        mgr.GetScheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(mgr.GetClient()),
+			RoleEvents:    roleEvents,
 			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
 				return liveRole.Load().(string)
 			},

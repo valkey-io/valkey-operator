@@ -1713,13 +1713,28 @@ func effectiveShards(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyN
 }
 
 // handleScaleIn drains excess shards and cleans up leftover ValkeyNodes.
+// The drain pass runs when the live shard count exceeds spec.shards, and also
+// when any live shard maps, through its ValkeyNode labels, to a shard index
+// the spec no longer keeps: a scale-out interrupted mid-flight can leave a
+// high-index shard owning slots while the live count already matches the
+// lowered spec, and deleting that shard without draining it first loses the
+// keys it owns (gh-491).
 // Returns (result, true) when work was done or an error occurred and the
 // caller should requeue instead of continuing to health checks.
 func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (ctrl.Result, bool) {
 	log := logf.FromContext(ctx)
 
-	if len(state.Shards) > int(cluster.Spec.Shards) {
-		drained, err := r.drainExcessShards(ctx, cluster, state, nodes)
+	countExceeded := len(state.Shards) > int(cluster.Spec.Shards)
+	if countExceeded || liveShardOutsideSpec(state, nodes, int(cluster.Spec.Shards)) {
+		// How a shard whose index the ValkeyNode labels cannot resolve is
+		// classified depends on the trigger: with more live shards than the
+		// spec keeps, an unresolvable shard may be one of the excess, so the
+		// drain pass empties it too (draining before deleteExcessValkeyNodes
+		// is what keeps a still-owning pod alive). When the count already
+		// matches the spec and only the labels reveal an out-of-spec shard,
+		// an unresolved shard is not provably excess: it stays a drain
+		// destination instead of having its slots churned on a guess.
+		drained, err := r.drainExcessShards(ctx, cluster, state, nodes, countExceeded)
 		if err != nil {
 			log.Error(err, "scale-in draining failed")
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
@@ -1738,6 +1753,18 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 
 	// Clean up leftover ValkeyNodes from a previous scale-in where drained
 	// primaries became replicas before their ValkeyNodes could be deleted.
+	// The labels alone cannot drive this while any live shard matches no
+	// ValkeyNode and still owns slots: that shard's serving pod cannot be
+	// identified, so no labeled candidate can be proven not to be it, and
+	// deleting a ValkeyNode deletes its StatefulSet and pod - which would
+	// undo the drain pass's protection of those slots (gh-491). Defer the
+	// cleanup until the address mapping heals instead.
+	if unresolvedShardOwnsSlots(state, nodes) {
+		log.Info("deferring excess ValkeyNode cleanup: a slot-owning shard matches no ValkeyNode")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ExcessValkeyNodeCleanupDeferred", "ScaleIn",
+			"Excess ValkeyNode cleanup deferred: a live shard that still owns slots matches no ValkeyNode")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	}
 	if deleted, err := r.deleteExcessValkeyNodes(ctx, cluster); err != nil {
 		log.Error(err, "failed to delete excess ValkeyNodes")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -1748,21 +1775,55 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 	return ctrl.Result{}, false
 }
 
+// unresolvedShardOwnsSlots reports whether any live shard that the ValkeyNode
+// labels cannot resolve still owns hash slots. Such a shard's serving pod is
+// unidentifiable, so a ValkeyNode that looks excess by label cannot be proven
+// not to be its node; deleting it would delete the pod while it still owns
+// slots.
+func unresolvedShardOwnsSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	if state == nil {
+		return false
+	}
+	for _, shard := range state.Shards {
+		if shardIndexFromState(shard, nodes) < 0 && shardSlotCount(shard) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // drainExcessShards handles scale-in by migrating slots away from shards
 // whose pod shard-index >= spec.Shards. Once a shard is fully drained (0
 // slots), its ValkeyNodes are deleted; forgetStaleNodes on the next reconcile
 // cleans up the Valkey topology.
+//
+// drainUnresolved selects how a shard whose index the ValkeyNode labels
+// cannot resolve (shardIndexFromState returns -1) is classified: true drains
+// it (the count-based pass - an unresolvable shard may be one of the excess,
+// and emptying it before deleteExcessValkeyNodes runs is what keeps a
+// still-owning pod alive), false classifies it into neither bucket (the
+// label-based pass - an unresolved index is not provably outside the spec,
+// so its slots must not be churned, and it is not provably in spec either,
+// so it must not be offered as a drain destination: deleteExcessValkeyNodes
+// goes by the ValkeyNode labels, which can place that shard's node outside
+// the spec and delete it after a migration onto it, losing the moved slots).
 // Returns true if any work was done (caller should requeue).
-func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (bool, error) {
+func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, drainUnresolved bool) (bool, error) {
 	log := logf.FromContext(ctx)
 	expectedShards := int(cluster.Spec.Shards)
 
 	var remaining, draining []*valkey.ShardState
 	for _, shard := range state.Shards {
 		shardIndex := shardIndexFromState(shard, nodes)
-		if shardIndex >= 0 && shardIndex < expectedShards {
+		switch {
+		case shardIndex < 0 && !drainUnresolved:
+			// Not provably excess (its slots must not be churned) and not
+			// provably in spec (unsafe as a drain destination - see the
+			// drainUnresolved comment above).
+			continue
+		case shardIndex >= 0 && shardIndex < expectedShards:
 			remaining = append(remaining, shard)
-		} else {
+		default:
 			draining = append(draining, shard)
 		}
 	}
@@ -1807,11 +1868,18 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return true, nil
 	}
 
-	// All draining shards have 0 slots — delete their ValkeyNodes.
+	// All draining shards have 0 slots — delete their ValkeyNodes. The
+	// zero-slot state is verified per shard rather than inferred from
+	// PlanDrainMove's nil: that nil also covers an empty destination list,
+	// which must not fall through to deleting a shard that still owns
+	// slots.
 	for _, shard := range draining {
 		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex < 0 {
 			continue
+		}
+		if n := shardSlotCount(shard); n > 0 {
+			return false, fmt.Errorf("draining shard %s still owns %d slots; refusing to delete its ValkeyNodes", shard.Id, n)
 		}
 		nodesPerShard := 1 + int(cluster.Spec.Replicas)
 		for nodeIndex := range nodesPerShard {
@@ -1870,6 +1938,15 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 	return deleted, nil
 }
 
+// shardSlotCount counts the hash slots a shard's state still owns.
+func shardSlotCount(shard *valkey.ShardState) int {
+	count := 0
+	for _, r := range shard.Slots {
+		count += r.End - r.Start + 1
+	}
+	return count
+}
+
 // shardIndexFromState determines the shard index for a given Valkey Cluster
 // shard by matching its node addresses to ValkeyNode shard-index labels. It checks
 // the primary first, falling back to any node if unavailable.
@@ -1887,6 +1964,25 @@ func shardIndexFromState(shard *valkey.ShardState, nodes *valkeyiov1alpha1.Valke
 		}
 	}
 	return -1
+}
+
+// liveShardOutsideSpec reports whether any shard of the live topology maps,
+// through its ValkeyNode labels, to a shard index at or beyond expectedShards.
+// A scale-out interrupted mid-flight can leave such a shard live while the
+// shard count already matches the lowered spec: high-index shards join one at
+// a time, so the live count can dip to (or below) the new spec before every
+// shard the spec no longer keeps has lost its slots. The count alone cannot
+// see it (gh-491); the labels can.
+func liveShardOutsideSpec(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, expectedShards int) bool {
+	if state == nil {
+		return false
+	}
+	for _, shard := range state.Shards {
+		if shardIndex := shardIndexFromState(shard, nodes); shardIndex >= expectedShards {
+			return true
+		}
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.

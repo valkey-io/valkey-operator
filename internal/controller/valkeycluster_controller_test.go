@@ -1434,6 +1434,51 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
 	})
 
+	It("does not copy perNodeServices to later nodes while one node is not ready", func() {
+		createAllNodes()
+		markAllReady()
+
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
+		}
+
+		requeue, err := reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+
+		serviceOf := func(name string) *valkeyiov1alpha1.ValkeyNodeServiceSpec {
+			GinkgoHelper()
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			return node.Spec.Service
+		}
+		Expect(serviceOf(node01)).NotTo(BeNil())
+		for _, name := range []string{node00, node10, node11} {
+			Expect(serviceOf(name)).To(BeNil(), name)
+		}
+
+		first := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: node01, Namespace: "default"}, first)).To(Succeed())
+		first.Status.Ready = false
+		first.Status.ObservedGeneration = first.Generation
+		meta.SetStatusCondition(&first.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             valkeyiov1alpha1.ValkeyNodeReasonServiceError,
+			Message:            "service name is taken",
+			ObservedGeneration: first.Generation,
+		})
+		Expect(k8sClient.Status().Update(testCtx, first)).To(Succeed())
+
+		requeue, err = reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+		Expect(serviceOf(node01)).NotTo(BeNil())
+		for _, name := range []string{node00, node10, node11} {
+			Expect(serviceOf(name)).To(BeNil(), name)
+		}
+	})
+
 	It("skips only the shard whose primary is unidentifiable", func() {
 		By("creating all nodes, marking them ready and publishing pod IPs")
 		createAllNodes()

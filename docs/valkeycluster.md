@@ -419,6 +419,16 @@ networking:
       certificateUser: Disabled  # Disabled (default) | CN | URI
 ```
 
+#### Per-node Services
+
+Set `networking.perNodeServices: {}` to create one ClusterIP Service per node. The cluster copies that onto each ValkeyNode, one node at a time. The ValkeyNode controller creates the Service and owns it. Removing it later clears the field on each node in turn, and that node deletes its Service. The ValkeyNodes stay.
+
+The Service name matches the node's StatefulSet: `valkey-<cluster>-<shard>-<node>`. It must be at most 63 characters. The API server rejects a create or update that sets `perNodeServices` when the longest name would be longer. A cluster with a longer name keeps running without the field, but it cannot turn the feature on. If a Service the node does not own already has that name, the operator leaves it as it is. That node reports `Ready=False` with reason `ServiceError` and still reconciles its workload. When that pod is Ready, the node still applies live config and ACL, then returns the Service error. The cluster does not copy the field to later nodes until that Service is removed. The same rule applies to the headless Service of another ValkeyCluster: whichever Service exists first keeps the name. The Service selects the one pod with that shard index and node index. The port is 6379.
+
+This does not change `CLUSTER SLOTS`. A client that follows redirects still uses the announced pod IP or hostname. The Service is a stable address for a client that dials that node directly. A client that dials the Service DNS name needs that name as a subject alternative name on the certificate.
+
+On scale-in the Service stays while that ValkeyNode exists. Kubernetes deletes the Service when the ValkeyNode is deleted.
+
 #### Discovery (in-cluster announce)
 
 `networking.discovery.preferredEndpointType` controls how nodes advertise themselves after `CLUSTER SLOTS`:

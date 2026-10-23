@@ -128,6 +128,42 @@ var _ = Describe("per-node Services", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
+	It("does not delete a replacement Service while the cache still shows the owned one", func() {
+		node := newServiceNode("stale-0-0")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, node) }()
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
+
+		owned := &corev1.Service{}
+		key := types.NamespacedName{Name: valkeyNodeResourceName(stored), Namespace: stored.Namespace}
+		Expect(k8sClient.Get(ctx, key, owned)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, owned)).To(Succeed())
+
+		replacement := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      key.Name,
+				Namespace: key.Namespace,
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "mine"},
+				Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort, TargetPort: intstr.FromInt32(DefaultPort)}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, replacement)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, replacement) }()
+
+		stored.Spec.Service = nil
+		r.Client = staleServiceClient{Client: k8sClient, stale: owned}
+		Expect(r.ensureNodeService(ctx, stored)).To(Succeed())
+
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.UID).To(Equal(replacement.UID))
+		Expect(got.OwnerReferences).To(BeEmpty())
+	})
+
 	It("does not delete a Service it does not own", func() {
 		node := newBareNode("foreign-0-0")
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -351,6 +387,21 @@ func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
 			},
 		},
 	}
+}
+
+// staleServiceClient serves one Service from a snapshot. Delete and every
+// other call go to the live client, so a UID precondition is checked there.
+type staleServiceClient struct {
+	client.Client
+	stale *corev1.Service
+}
+
+func (c staleServiceClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if svc, ok := obj.(*corev1.Service); ok && c.stale != nil && key == client.ObjectKeyFromObject(c.stale) {
+		c.stale.DeepCopyInto(svc)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 // cachedServiceClient returns NotFound for a Service without the operator

@@ -98,8 +98,14 @@ func (r *ValkeyNodeReconciler) deleteNodeService(ctx context.Context, node *valk
 	if !metav1.IsControlledBy(svc, node) {
 		return nil
 	}
-	if err := r.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
-		return err
+	// Get reads the cache. Delete addresses the Service by name, so a
+	// replacement created while that snapshot is stale would be removed.
+	// A UID mismatch fails the request instead.
+	if err := r.Delete(ctx, svc, client.Preconditions{UID: &svc.UID}); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return client.IgnoreNotFound(err)
 	}
 	return nil
 }

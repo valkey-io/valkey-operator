@@ -125,14 +125,14 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 
 // replicaHandoffSeconds returns the wait entrypoint.sh allows for the replica
 // hand-off on the node: six cluster-node-timeouts from spec.config, with the
-// Valkey default of 15s, capped at replicaHandoffMaxSeconds.
+// Valkey default of 15s, capped at replicaHandoffMaxSeconds. The timeout is
+// capped before the multiplication, so a huge value cannot overflow.
 func replicaHandoffSeconds(node *valkeyiov1alpha1.ValkeyNode) int32 {
 	timeoutMs := 15000
 	if v, err := strconv.Atoi(node.Spec.Config["cluster-node-timeout"]); err == nil && v > 0 {
-		timeoutMs = v
+		timeoutMs = min(v, replicaHandoffMaxSeconds*1000/6)
 	}
-	seconds := min(int32(timeoutMs*6/1000), replicaHandoffMaxSeconds)
-	return max(seconds, 1)
+	return int32(max(timeoutMs*6/1000, 1))
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe:

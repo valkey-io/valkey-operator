@@ -731,6 +731,7 @@ func TestStartupFailureThreshold(t *testing.T) {
 		{name: "default timeout of 15s", want: 38},
 		{name: "a 5s timeout adds six periods", timeout: "5000", want: 26},
 		{name: "the wait is capped at 600s", timeout: "200000", want: 140},
+		{name: "a value past the int32 range is capped, not wrapped", timeout: "9223372036854775807", want: 140},
 		{name: "a value that is not a number falls back to the default", timeout: "soon", want: 38},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

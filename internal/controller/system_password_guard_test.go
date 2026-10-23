@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Valkey Contributors.
+Copyright 2026 Valkey Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -56,10 +56,10 @@ func systemPasswordFixture(withSecret bool) (*valkeyiov1alpha1.ValkeyCluster, *c
 }
 
 // systemPasswordNode builds one ValkeyNode owned by the cluster.
-func systemPasswordNode(cluster *valkeyiov1alpha1.ValkeyCluster, name string) *valkeyiov1alpha1.ValkeyNode {
+func systemPasswordNode(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.ValkeyNode {
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      "h1-0-0",
 			Namespace: cluster.Namespace,
 			Labels:    map[string]string{LabelCluster: cluster.Name, LabelShardIndex: "0", LabelNodeIndex: "0"},
 		},
@@ -81,7 +81,7 @@ func systemPasswordReconciler(t *testing.T, objs []client.Object) (*ValkeyCluste
 // locked out (WRONGPASS on every call) until every pod restarts.
 func TestUpsertRefusesRegenerationOnRunningCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
-	node := systemPasswordNode(cluster, "h1-0-0")
+	node := systemPasswordNode(cluster)
 	objs = append(objs, node)
 	r, c := systemPasswordReconciler(t, objs)
 
@@ -132,7 +132,7 @@ func TestUpsertRegeneratesOnFreshCluster(t *testing.T) {
 func TestUpsertRegeneratesExporterKeyOnRunningCluster(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
 	delete(secret.Data, exporterUser)
-	node := systemPasswordNode(cluster, "h1-0-0")
+	node := systemPasswordNode(cluster)
 	objs = append(objs, node)
 	enabled := true
 	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
@@ -154,7 +154,7 @@ func TestUpsertRegeneratesExporterKeyOnRunningCluster(t *testing.T) {
 // SystemUsersACLError instead of freezing every node out of its ACL.
 func TestCreateSystemUsersAclRefusesOnRunningCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
-	node := systemPasswordNode(cluster, "h1-0-0")
+	node := systemPasswordNode(cluster)
 	objs = append(objs, node)
 	r, _ := systemPasswordReconciler(t, objs)
 
@@ -172,7 +172,7 @@ func TestCreateSystemUsersAclRefusesOnRunningCluster(t *testing.T) {
 func TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
 	delete(secret.Data, exporterUser)
-	node := systemPasswordNode(cluster, "h1-0-0")
+	node := systemPasswordNode(cluster)
 	enabled := true
 	node.Spec.Exporter.Enabled = &enabled
 	objs = append(objs, node)

@@ -411,7 +411,7 @@ func generatePassword(length int) ([]byte, error) {
 // not part of WorkloadRevision). On the disabled-to-enabled transition the
 // spec change rolls the pods first, so the regenerated key is adopted
 // together with the new sidecar.
-func systemPasswordKeysNeedingGeneration(secret *corev1.Secret, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
+func systemPasswordKeysNeedingGeneration(secret *corev1.Secret, nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	var missing []string
 	exporterRunning := exporterRunsOnAnyNode(nodes)
 	for _, user := range systemUsers {
@@ -526,23 +526,19 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		// so the guard fails closed.
 		nodes = nil
 	}
-	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret, cluster, nodes)
+	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret, nodes)
 	// Base the running-cluster decision on the same list the exporter
 	// check used. The previous shape listed twice, and a second
 	// successful empty list could read a failed first one as a fresh
 	// cluster and regenerate the passwords of a live cluster.
 	running := nodes == nil || len(nodes.Items) > 0
 	if len(missing) > 0 && running {
-		names := make([]string, 0, len(missing))
-		for _, user := range missing {
-			names = append(names, user)
-		}
 		err := fmt.Errorf(
 			"%w: %s is missing %s; restore the Secret to recover the cluster",
-			errSystemPasswordSecretMissing, secretName, strings.Join(names, ", "))
+			errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
 		log.Error(err, "refusing to regenerate system user passwords on a running cluster")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
-			"%s is missing %s on a running cluster; restore the Secret to recover the cluster", secretName, strings.Join(names, ", "))
+			"%s is missing %s on a running cluster; restore the Secret to recover the cluster", secretName, strings.Join(missing, ", "))
 		return nil, err
 	}
 

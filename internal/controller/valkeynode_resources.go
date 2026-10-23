@@ -299,11 +299,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				},
 			},
 			LivenessProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				PeriodSeconds:       5,
-				FailureThreshold:    5,
-				TimeoutSeconds:      5,
-				SuccessThreshold:    1,
+				PeriodSeconds:    5,
+				FailureThreshold: 5,
+				TimeoutSeconds:   5,
+				SuccessThreshold: 1,
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{
@@ -315,11 +314,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 				},
 			},
 			ReadinessProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				PeriodSeconds:       5,
-				FailureThreshold:    5,
-				TimeoutSeconds:      2,
-				SuccessThreshold:    1,
+				PeriodSeconds:    5,
+				FailureThreshold: 5,
+				TimeoutSeconds:   2,
+				SuccessThreshold: 1,
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{
 						Command: []string{

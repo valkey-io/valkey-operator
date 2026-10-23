@@ -242,7 +242,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	} else if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
 	} else if requeue {
 		// An unschedulable pod is reported first, whether the roll is under
@@ -251,7 +251,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// requeues before the walk reaches its primary.
 		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster, state); err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-			_ = r.updateStatus(ctx, cluster, nil)
+			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{}, err
 		} else if handled {
 			return result, nil

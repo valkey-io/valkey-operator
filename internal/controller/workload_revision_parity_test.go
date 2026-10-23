@@ -26,7 +26,7 @@ import (
 
 // The cluster controller hashes the node it builds before the owner reference
 // is set; the node controller hashes the stored node. Both must agree.
-func TestWorkloadRevisionParityWithEntrypoint(t *testing.T) {
+func TestWorkloadRevisionParityWithServerStartScript(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}, Spec: valkeyv1.ValkeyClusterSpec{Shards: 1}}
 	desired := buildClusterValkeyNode(cluster, 0, 0)
 	before, err := computeWorkloadRevision(desired)
@@ -37,5 +37,5 @@ func TestWorkloadRevisionParityWithEntrypoint(t *testing.T) {
 	after, err := computeWorkloadRevision(stored)
 	require.NoError(t, err)
 	require.Equal(t, before, after)
-	require.True(t, usesEntrypoint(desired), "a cluster node without persistence runs the entrypoint")
+	require.True(t, usesServerStartScript(desired), "a cluster node without persistence runs the start script")
 }

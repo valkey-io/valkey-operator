@@ -16,4 +16,4 @@
 # Re-include scripts
 !internal/controller/scripts/readiness-check.sh
 !internal/controller/scripts/liveness-check.sh
-!internal/controller/scripts/entrypoint.sh
+!internal/controller/scripts/server-start.sh

@@ -33,9 +33,9 @@ const (
 	otherID   = "67ed2db8d677e59ec4a4cefb06858cf2a1a89fa1"
 )
 
-// entrypointRun is one run of scripts/entrypoint.sh against a temporary data
+// scriptRun is one run of scripts/server-start.sh against a temporary data
 // dir, with stub valkey-server and valkey-cli binaries on PATH.
-type entrypointRun struct {
+type scriptRun struct {
 	out      string
 	nodeKept bool   // nodes.conf survived
 	dataDir  string // for further file checks
@@ -53,8 +53,8 @@ type stubCLI struct {
 	seedFiles     []string // extra files to create in the data dir
 }
 
-// runEntrypoint runs the script with the given nodes.conf and valkey.conf.
-func runEntrypoint(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) entrypointRun {
+// runStartScript runs the script with the given nodes.conf and valkey.conf.
+func runStartScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scriptRun {
 	t.Helper()
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
@@ -88,7 +88,7 @@ func runEntrypoint(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) entr
 		}
 	}
 
-	cmd := exec.Command(shellPath, "scripts/entrypoint.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
+	cmd := exec.Command(shellPath, "scripts/server-start.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
 	// TMPDIR points nowhere: the root filesystem of the server container may
 	// be read-only, so the script must not depend on a writable /tmp.
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "VALKEY_DATA_DIR="+dataDir, "TMPDIR=/nonexistent")
@@ -99,11 +99,11 @@ func runEntrypoint(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) entr
 	if b, err := os.ReadFile(calls); err == nil {
 		n, _ = strconv.Atoi(string(b[:len(b)-1]))
 	}
-	return entrypointRun{out: string(out), nodeKept: statErr == nil, dataDir: dataDir, cliCalls: n}
+	return scriptRun{out: string(out), nodeKept: statErr == nil, dataDir: dataDir, cliCalls: n}
 }
 
-// assertSnapshotKept checks the snapshot files seeded by runEntrypoint.
-func assertSnapshotKept(t *testing.T, r entrypointRun, kept bool) {
+// assertSnapshotKept checks the snapshot files seeded by runStartScript.
+func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 	t.Helper()
 	for _, f := range []string{"dump.rdb", "temp-42.rdb"} {
 		if kept {
@@ -119,25 +119,25 @@ func assertSnapshotKept(t *testing.T, r entrypointRun, kept bool) {
 	}
 }
 
-// The server command of a cluster node runs entrypointCommand, which falls
-// back to the server binary when the mounted ConfigMap has no entrypoint.sh,
+// The server command of a cluster node runs serverStartCommand, which falls
+// back to the server binary when the mounted ConfigMap has no server-start.sh,
 // as an external ConfigMap may not. The script path is absolute, so this
 // exercises the fallback on a machine without it.
-func TestEntrypointCommandFallsBackToServer(t *testing.T) {
-	if _, err := os.Stat("/scripts/" + entrypointScriptKey); err == nil {
-		t.Skip("/scripts/" + entrypointScriptKey + " exists on this machine")
+func TestServerStartCommandFallsBackToServer(t *testing.T) {
+	if _, err := os.Stat("/scripts/" + serverStartScriptKey); err == nil {
+		t.Skip("/scripts/" + serverStartScriptKey + " exists on this machine")
 	}
 	binDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
-	cmd := exec.Command(shellPath, "-c", entrypointCommand, "valkey-server", "/config/valkey.conf", "--port", "6379")
+	cmd := exec.Command(shellPath, "-c", serverStartCommand, "valkey-server", "/config/valkey.conf", "--port", "6379")
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	assert.Equal(t, "valkey-server /config/valkey.conf --port 6379\n", string(out))
 }
 
-func TestEntrypointScript(t *testing.T) {
+func TestServerStartScript(t *testing.T) {
 	const serverLine = "valkey-server"
 	// Valkey 9 address format, with an empty hostname and a tls-port of 0.
 	primary := primaryID + " 10.0.0.1:6379@16379,,tls-port=0,shard-id=abc myself,master - 0 1760000000000 1 connected 0-5460\n"
@@ -147,14 +147,14 @@ func TestEntrypointScript(t *testing.T) {
 	conf := "cluster-node-timeout 1000\n" // the hand-off wait caps at six timeouts: 6s
 
 	t.Run("no nodes.conf starts the server untouched", func(t *testing.T) {
-		r := runEntrypoint(t, "", conf, stubCLI{})
+		r := runStartScript(t, "", conf, stubCLI{})
 		assert.Contains(t, r.out, serverLine)
 		assert.False(t, r.nodeKept)
 		assert.Zero(t, r.cliCalls)
 	})
 
 	t.Run("a primary with a replica waits for its promotion and starts as a new node", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: 2})
+		r := runStartScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: 2})
 		assert.Contains(t, r.out, "Previous run was primary "+primaryID+" with a replica")
 		assert.Regexp(t, `Replica hand-off done after [0-9]+s; starting as a new node`, r.out)
 		assert.Contains(t, r.out, serverLine)
@@ -164,13 +164,13 @@ func TestEntrypointScript(t *testing.T) {
 	})
 
 	t.Run("a replica that follows another primary counts as moved on", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3"})
+		r := runStartScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3"})
 		assert.Contains(t, r.out, "starting as a new node")
 		assert.False(t, r.nodeKept)
 	})
 
 	t.Run("the identity is kept when the replica has not moved on by the cap", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+vars, conf, stubCLI{promotedAfter: -1})
+		r := runStartScript(t, primary+replica+vars, conf, stubCLI{promotedAfter: -1})
 		assert.Contains(t, r.out, "Replica 10.0.0.2:6379 still follows this node")
 		assert.Regexp(t, `Keeping the previous identity after [5-7]s`, r.out)
 		assert.Contains(t, r.out, serverLine)
@@ -179,7 +179,7 @@ func TestEntrypointScript(t *testing.T) {
 	})
 
 	t.Run("a replica that does not answer is bounded per call and keeps the identity", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{promotedAfter: -1, hang: true})
+		r := runStartScript(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{promotedAfter: -1, hang: true})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 		assert.LessOrEqual(t, r.cliCalls, 3, "each hung call is cut after the per-call timeout")
@@ -189,13 +189,13 @@ func TestEntrypointScript(t *testing.T) {
 		me := primaryID + " fd00::1:6379@16379,,tls-port=0,shard-id=abc myself,master - 0 1760000000000 1 connected 0-5460\n"
 		them := replicaID + " fd00::2:6379@16379,,tls-port=0,shard-id=abc slave " + primaryID + " 0 1760000000000 1 connected\n"
 		// The stub keeps following fd00::1, which must not pass as another primary.
-		r := runEntrypoint(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
+		r := runStartScript(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 	})
 
-	t.Run("the whole data dir is emptied, custom and hidden files included", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb", ".hidden"}})
+	t.Run("the whole data dir is emptied, custom snapshot names included", func(t *testing.T) {
+		r := runStartScript(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb"}})
 		assert.False(t, r.nodeKept)
 		entries, err := os.ReadDir(r.dataDir)
 		require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestEntrypointScript(t *testing.T) {
 
 	t.Run("a replica flagged fail does not count", func(t *testing.T) {
 		failed := replicaID + " 10.0.0.2:6379@16379,,tls-port=0,shard-id=abc slave,fail " + primaryID + " 0 1760000000000 1 connected\n"
-		r := runEntrypoint(t, primary+failed+other+vars, conf, stubCLI{})
+		r := runStartScript(t, primary+failed+other+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
@@ -214,7 +214,7 @@ func TestEntrypointScript(t *testing.T) {
 
 	t.Run("a replica flagged nofailover does not count", func(t *testing.T) {
 		nofailover := replicaID + " 10.0.0.2:6379@16379,,tls-port=0,shard-id=abc slave,nofailover " + primaryID + " 0 1760000000000 1 connected\n"
-		r := runEntrypoint(t, primary+nofailover+vars, conf, stubCLI{})
+		r := runStartScript(t, primary+nofailover+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.True(t, r.nodeKept)
 		assert.Zero(t, r.cliCalls)
@@ -222,7 +222,7 @@ func TestEntrypointScript(t *testing.T) {
 
 	t.Run("a primary without a replica keeps its identity", func(t *testing.T) {
 		otherReplica := replicaID + " 10.0.0.2:6379@16379,valkey-c-1-1-0 slave " + otherID + " 0 1760000000000 2 connected\n"
-		r := runEntrypoint(t, primary+other+otherReplica+vars, conf, stubCLI{})
+		r := runStartScript(t, primary+other+otherReplica+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
@@ -231,7 +231,7 @@ func TestEntrypointScript(t *testing.T) {
 	t.Run("a replica keeps its identity", func(t *testing.T) {
 		me := replicaID + " 10.0.0.2:6379@16379,valkey-c-0-1-0 myself,slave " + primaryID + " 0 1760000000000 1 connected\n"
 		them := primaryID + " 10.0.0.1:6379@16379,valkey-c-0-0-0 master - 0 1760000000000 1 connected 0-5460\n"
-		r := runEntrypoint(t, me+them+vars, conf, stubCLI{})
+		r := runStartScript(t, me+them+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)

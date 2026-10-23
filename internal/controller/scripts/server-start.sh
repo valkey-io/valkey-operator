@@ -1,9 +1,9 @@
 #!/bin/sh
 #
-# Entrypoint of the server container of a cluster node without persistence
+# Starts the server of a cluster node without persistence
 # (POSIX sh, works with bash, dash & busybox ash).
 #
-# Usage: entrypoint.sh <valkey.conf> <further valkey-server arguments>
+# Usage: server-start.sh <valkey.conf> <further valkey-server arguments>
 #
 # Without persistence /data is an emptyDir, which outlives a restart of the
 # server container while the dataset in memory does not. A primary whose
@@ -147,7 +147,7 @@ wait_for_handoff() {
 # drop_identity empties the data dir: nodes.conf, the snapshot and the
 # append-only dir, so the server starts as a new, empty node.
 drop_identity() {
-    rm -rf "${data_dir:?}"/* "${data_dir:?}"/.[!.]*
+    rm -rf "${data_dir:?}"/*
 }
 
 if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then

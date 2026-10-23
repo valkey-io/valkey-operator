@@ -546,7 +546,7 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
-	assert.Contains(t, cm.Data, "entrypoint.sh")
+	assert.Contains(t, cm.Data, serverStartScriptKey)
 }
 
 func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
@@ -695,12 +695,12 @@ func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
 	return node
 }
 
-func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughEntrypoint(t *testing.T) {
+func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughServerStartScript(t *testing.T) {
 	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
 	require.Len(t, containers, 1)
-	assert.Equal(t, []string{shellPath, "-c", entrypointCommand, "valkey-server", "/config/valkey.conf",
+	assert.Equal(t, []string{shellPath, "-c", serverStartCommand, "valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
@@ -712,13 +712,13 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughEntrypoint
 func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *testing.T) {
 	// A standalone ValkeyNode may carry the cluster label and mount an
 	// external ConfigMap without the script. It gets the same command, which
-	// falls back to the server at run time, see TestEntrypointCommandFallsBackToServer.
+	// falls back to the server at run time, see TestServerStartCommandFallsBackToServer.
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Labels = map[string]string{LabelCluster: "mynode"}
 	node.Spec.ServerConfigMapName = "my-own-config"
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
-	assert.Equal(t, []string{shellPath, "-c", entrypointCommand, "valkey-server"}, containers[0].Command[:4])
+	assert.Equal(t, []string{shellPath, "-c", serverStartCommand, "valkey-server"}, containers[0].Command[:4])
 	assert.Equal(t, int32(38), containers[0].StartupProbe.FailureThreshold)
 }
 

@@ -41,9 +41,9 @@ const (
 	configHashKey  = "valkey.io/config-hash"
 	configFileKey  = "valkey.conf"
 
-	readinessScriptKey  = "readiness-check.sh"
-	livenessScriptKey   = "liveness-check.sh"
-	entrypointScriptKey = "entrypoint.sh"
+	readinessScriptKey   = "readiness-check.sh"
+	livenessScriptKey    = "liveness-check.sh"
+	serverStartScriptKey = "server-start.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -320,10 +320,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
-	// Embed the server entrypoint script
-	entrypoint, err := scripts.ReadFile("scripts/entrypoint.sh")
+	// Embed the server start script
+	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
 	if err != nil {
-		return fmt.Errorf("reading embedded entrypoint.sh: %w", err)
+		return fmt.Errorf("reading embedded server-start.sh: %w", err)
 	}
 
 	// Get the new server config
@@ -358,10 +358,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			},
 		}
 		serverConfigMap.Data = map[string]string{
-			readinessScriptKey:  string(readiness),
-			livenessScriptKey:   string(liveness),
-			entrypointScriptKey: string(entrypoint),
-			configFileKey:       newServerConfig,
+			readinessScriptKey:   string(readiness),
+			livenessScriptKey:    string(liveness),
+			serverStartScriptKey: string(serverStart),
+			configFileKey:        newServerConfig,
 		}
 
 		// Register ownership of the configMap
@@ -387,10 +387,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, liveness and entrypoint scripts")
+		log.V(1).Info("updated readiness, liveness and server start scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
-		serverConfigMap.Data[entrypointScriptKey] = string(entrypoint)
+		serverConfigMap.Data[serverStartScriptKey] = string(serverStart)
 	}
 
 	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
@@ -443,12 +443,12 @@ func init() {
 		panic("failure reading embedded liveness-check.sh")
 	}
 
-	// Read the server entrypoint script
-	entrypoint, err := scripts.ReadFile("scripts/entrypoint.sh")
+	// Read the server start script
+	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
 	if err != nil {
-		panic("failure reading embedded entrypoint.sh")
+		panic("failure reading embedded server-start.sh")
 	}
 
 	// Calculate hash of all three files
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), entrypoint...)))
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), serverStart...)))
 }

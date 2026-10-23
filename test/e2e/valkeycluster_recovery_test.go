@@ -22,7 +22,9 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -173,6 +175,113 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).To(Equal(seedKeys),
 					"keys should survive the scale-down")
+			}).Should(Succeed())
+		})
+	})
+
+	// Without persistence the server container of a crashed primary restarts in
+	// place with its emptyDir, reloads nodes.conf and would come back as the
+	// same node with an empty dataset, and its replica would full-sync to
+	// nothing. The start script drops that identity instead, so the replica is
+	// promoted and keeps the shard's data, and the restarted node rejoins as its
+	// replica.
+	Context("when a primary's server crashes without persistence", Label("primary-crash"), func() {
+		const clusterName = "valkeycluster-primary-crash-e2e"
+		const keyPrefix = "e2e:crash"
+		const seedKeys = 60
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		// dbsizeOf reads the key count of one node.
+		dbsizeOf := func(g Gomega, pod string) int {
+			out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
+			g.Expect(err).NotTo(HaveOccurred())
+			n, err := strconv.Atoi(strings.TrimSpace(out))
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			return n
+		}
+
+		// restartsOf reads the restart count of the server container of a pod.
+		restartsOf := func(g Gomega, pod string) int {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o",
+				`jsonpath={.status.containerStatuses[?(@.name=="server")].restartCount}`))
+			g.Expect(err).NotTo(HaveOccurred())
+			n, err := strconv.Atoi(strings.TrimSpace(out))
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			return n
+		}
+
+		It("keeps the shard's data and rejoins the restarted node as a replica", func() {
+			primary := podFor(clusterName, 0, 0)
+			replica := podFor(clusterName, 0, 1)
+
+			By("creating a 3-shard cluster with 1 replica and no persistence")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicas: 1
+  config:
+    enable-debug-command: local
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("seeding keys across all shards")
+			// Few enough writes that no default save rule fires: a snapshot
+			// would mask the empty restart this test is about.
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(primary, keyPrefix, seedKeys, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("recording shard 0's key count once the replica has it")
+			var keysBefore, restartsBefore int
+			Eventually(func(g Gomega) {
+				keysBefore = dbsizeOf(g, primary)
+				g.Expect(keysBefore).To(BeNumerically(">", 0))
+				g.Expect(dbsizeOf(g, replica)).To(Equal(keysBefore))
+				restartsBefore = restartsOf(g, primary)
+			}).Should(Succeed())
+
+			By("crashing shard 0's primary server")
+			// The connection dies with the server, so the command itself fails.
+			_, _ = utils.ValkeyCLI(primary, cliOpts, "DEBUG", "SEGFAULT")
+
+			By("waiting for the server container to restart in place")
+			Eventually(func(g Gomega) {
+				g.Expect(restartsOf(g, primary)).To(BeNumerically(">", restartsBefore))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("waiting for the cluster to return to Ready")
+			waitForReady(clusterName)
+
+			By("verifying the former replica is the primary and kept every key")
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 1)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(Equal("primary"))
+				g.Expect(dbsizeOf(g, replica)).To(Equal(keysBefore))
+			}).Should(Succeed())
+
+			By("verifying the restarted node rejoined as its replica with the same keys")
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 0)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(Equal("replica"))
+				g.Expect(dbsizeOf(g, primary)).To(Equal(keysBefore))
+			}).Should(Succeed())
+
+			By("verifying no keys were lost")
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(podFor(clusterName, 1, 0), keyPrefix, seedKeys, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(seedKeys))
 			}).Should(Succeed())
 		})
 	})

@@ -27,6 +27,9 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
+// Deployment, because a StatefulSet name must stay within 52 characters.
+// That limit is tighter than the 63-character per-node Service limit, so on
+// a StatefulSet the Service rule is not the one that rejects these names.
 var _ = Describe("perNodeServices CEL validation", func() {
 	var ctx context.Context
 
@@ -38,7 +41,8 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 53), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards: 1,
+				Shards:       1,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -49,8 +53,9 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 52), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:       1,
+				Replicas:     0,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 				},
@@ -64,8 +69,9 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 53), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:       1,
+				Replicas:     0,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 				},
@@ -80,8 +86,9 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("b", 48), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   10,
-				Replicas: 2,
+				Shards:       10,
+				Replicas:     2,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 				},
@@ -95,8 +102,9 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("c", 52), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   11,
-				Replicas: 0,
+				Shards:       11,
+				Replicas:     0,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 				},
@@ -109,7 +117,7 @@ var _ = Describe("perNodeServices CEL validation", func() {
 	It("rejects turning perNodeServices on when the name is too long", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("e", 53), Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, cluster) }()

@@ -1464,7 +1464,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		meta.SetStatusCondition(&first.Status.Conditions, metav1.Condition{
 			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "ServiceError",
+			Reason:             valkeyiov1alpha1.ValkeyNodeReasonServiceError,
 			Message:            "service name is taken",
 			ObservedGeneration: first.Generation,
 		})

@@ -314,6 +314,8 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
+	ValkeyNodeReasonServiceError = "ServiceError"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

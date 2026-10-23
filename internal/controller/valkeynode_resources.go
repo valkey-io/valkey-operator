@@ -19,6 +19,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -84,42 +85,53 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 }
 
 // replicaHandoffMaxSeconds caps the wait of entrypoint.sh for the replicas of
-// a crashed primary to be promoted before the server starts. The startup probe
-// of a container that runs the script allows for it on top of its own budget.
-// Keep in sync with the cap in scripts/entrypoint.sh.
-const replicaHandoffMaxSeconds = 300
+// a crashed primary to be promoted before the server starts: six
+// cluster-node-timeouts, at most this. Keep in sync with scripts/entrypoint.sh.
+const replicaHandoffMaxSeconds = 600
+
+// entrypointCommand starts the server through /scripts/entrypoint.sh when the
+// mounted ConfigMap carries it, and directly otherwise, so a node that mounts
+// an external ConfigMap without the script still starts. $0 is the server
+// binary and $@ its arguments.
+const entrypointCommand = `if [ -f /scripts/` + entrypointScriptKey + ` ]; then exec /bin/sh /scripts/` +
+	entrypointScriptKey + ` "$@"; fi; exec "$0" "$@"`
 
 // usesEntrypoint reports whether the server container of the node starts
-// through entrypoint.sh: a node the cluster controller built, without
-// persistence. That is read from the shard and node index labels, which only
-// buildClusterValkeyNode sets, rather than from the owner reference: the
-// cluster controller computes the workload revision of a node it builds
-// before the reference is set, and both controllers must build the same
-// template or they roll the node against each other. The node must also
-// mount the cluster's own ConfigMap, which carries the script: a standalone
-// ValkeyNode may carry the labels and point at an external ConfigMap that
-// does not. /data is then
+// through entrypoint.sh: a cluster member without persistence. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
-// not, and the script drops the node identity in it when the previous run was
-// a primary with a replica, and holds the server back until the replica has
-// been promoted, so that the replica keeps the data instead of full-syncing
-// from a primary that came back empty.
+// not, and the script holds the server back until a crashed primary's replica
+// has been promoted, then drops the node identity, so that the replica keeps
+// the data instead of full-syncing from a primary that came back empty.
+//
+// Membership is read from the cluster label rather than the owner reference:
+// the cluster controller computes the workload revision of a node it builds
+// before the reference is set, and both controllers must build the same
+// template or they roll the node against each other.
 func usesEntrypoint(node *valkeyiov1alpha1.ValkeyNode) bool {
-	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != "" &&
-		node.Labels[LabelShardIndex] != "" && node.Labels[LabelNodeIndex] != "" &&
-		node.Spec.ServerConfigMapName == GetServerConfigMapName(node.Labels[LabelCluster])
+	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
 }
 
 // serverCommand returns the command of the server container.
 func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
-	args := make([]string, 0, 6+len(announceArgs))
-	args = append(args, "/config/valkey.conf")
-	args = append(args, announceArgs...)
-	args = append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
-	if !usesEntrypoint(node) {
-		return append([]string{"valkey-server"}, args...)
+	args := make([]string, 0, 9+len(announceArgs))
+	if usesEntrypoint(node) {
+		args = append(args, shellPath, "-c", entrypointCommand)
 	}
-	return append([]string{shellPath, "/scripts/" + entrypointScriptKey}, args...)
+	args = append(args, "valkey-server", "/config/valkey.conf")
+	args = append(args, announceArgs...)
+	return append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
+}
+
+// replicaHandoffSeconds returns the wait entrypoint.sh allows for the replica
+// hand-off on the node: six cluster-node-timeouts from spec.config, with the
+// Valkey default of 15s, capped at replicaHandoffMaxSeconds.
+func replicaHandoffSeconds(node *valkeyiov1alpha1.ValkeyNode) int32 {
+	timeoutMs := 15000
+	if v, err := strconv.Atoi(node.Spec.Config["cluster-node-timeout"]); err == nil && v > 0 {
+		timeoutMs = v
+	}
+	seconds := min(int32(timeoutMs*6/1000), replicaHandoffMaxSeconds)
+	return max(seconds, 1)
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe:
@@ -127,7 +139,7 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode, periodSeconds int32) int32 {
 	threshold := int32(20)
 	if usesEntrypoint(node) {
-		threshold += replicaHandoffMaxSeconds / periodSeconds
+		threshold += (replicaHandoffSeconds(node) + periodSeconds - 1) / periodSeconds
 	}
 	return threshold
 }

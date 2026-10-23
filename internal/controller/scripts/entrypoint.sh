@@ -9,41 +9,40 @@
 # server container while the dataset in memory does not. A primary whose
 # server crashed would reload nodes.conf and come back as the same node, with
 # the same slots and an empty dataset, and its replicas would full-sync to
-# nothing. So when the previous run was a primary with a reachable replica:
+# nothing. So when the previous run was a primary with a replica that can be
+# promoted, this script:
 #
-# 1. The server is held back until every such replica has been promoted or
-#    follows another primary. Replicas reconnect by address, and the restarted
-#    container keeps the pod address, so a wiped server that started at once
-#    would be resynced from before the failover. The wait is capped at six
-#    cluster-node-timeouts (90s by default) and at most 300s, which the
-#    startup probe of the container allows for.
-# 2. Once every replica has moved on, the node identity and any snapshot are
-#    dropped, so the server joins as a new, empty node, like a recreated pod,
-#    and the operator attaches it to the promoted primary. If a replica has
-#    not moved on by the cap, the identity and the snapshot are kept: an
-#    empty new node would leave the slots with a dead ID, while the old
-#    identity keeps the cluster serving.
+#   1. waits until every such replica is a primary or follows another node.
+#      Replicas reconnect by address, and the restarted container keeps the
+#      pod address, so a wiped server that started at once would be synced
+#      from before the failover. The wait is capped at six
+#      cluster-node-timeouts (at most 600s), which the startup probe allows
+#      for;
+#   2. then empties /data, so the server starts as a new, empty node, like a
+#      recreated pod, and the operator attaches it to the promoted primary.
+#      If a replica has not moved on by the cap, the identity and the
+#      snapshot are kept instead: an empty new node would leave the slots
+#      with a dead ID, while the old identity keeps the cluster serving.
 #
-# A primary without a reachable replica keeps its identity for the same
-# reason. A replica flagged fail, noaddr or nofailover does not count.
+# Any other node, a replica, a primary without such a replica, or a first
+# start, runs the server untouched.
 set -e
 
 conf=$1
 data_dir=${VALKEY_DATA_DIR:-/data}
-case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
 nodes_conf="$data_dir/nodes.conf"
-# Seconds a single ROLE call may take, connection and reply included.
-role_timeout=3
+role_timeout=3 # seconds one ROLE call may take, connection and reply included
 
-# config_value prints the last value of a directive in the rendered config,
-# or the given default.
+case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
+
+# config_value KEY DEFAULT prints the last value of KEY in the rendered config.
 config_value() {
     awk -v key="$1" -v def="$2" '$1 == key { v = $2 } END { print (v == "" ? def : v) }' "$conf" 2>/dev/null
 }
 
-# timeout_cmd runs a command with a DURATION (seconds) limit. Polls every
-# 0.1s; on timeout sends SIGTERM then SIGKILL. Returns the command's exit
-# code, or 124 on timeout.
+# timeout_cmd SECONDS COMMAND... runs the command with a time limit. It polls
+# every 0.1s and on timeout sends SIGTERM, then SIGKILL. Returns the command's
+# exit code, or 124 on timeout. Same as in the probe scripts.
 timeout_cmd() {
     duration=$1; shift
     "$@" &
@@ -65,83 +64,114 @@ timeout_cmd() {
     return 124
 }
 
-# replica_moved_on succeeds once the replica at $1:$2 reports itself a
-# primary, or a replica of a primary other than this node. The answer goes
-# through a file rather than a pipe, so a call that is cut short by the
-# timeout cannot hold the read open through a child of its own. The file
-# lives in the data dir: the root filesystem may be read-only.
+# nodes.conf has one line per node:
+#
+#   <id> <ip:port@cport[,hostname[,...]]> <flags> <primary-id> ... <slots>
+#
+# The flags of this node contain "myself". A replica carries "slave" and the
+# id of its primary in the fourth field. Valkey writes the legacy names.
+
+# previous_primary_id prints this node's id when the previous run was a
+# primary, and nothing otherwise.
+previous_primary_id() {
+    awk '$3 ~ /myself/ && $3 ~ /master/ { print $1 }' "$nodes_conf"
+}
+
+# own_address prints this node's ip and hostname, space separated. The port
+# sits after the last colon, so an IPv6 address keeps its own colons.
+own_address() {
+    awk '$3 ~ /myself/ {
+        split($2, parts, "@")                 # ip:port | cport,hostname,...
+        endpoint = parts[1]
+        sub(/:[0-9]+$/, "", endpoint)         # drop the port
+        n = split(parts[2], extra, ",")       # extra[2] is the hostname, if any
+        print endpoint, (n >= 2 ? extra[2] : "")
+    }' "$nodes_conf"
+}
+
+# promotable_replicas ID prints the replicas of primary ID that can take
+# over, as ip:port, one per line. A replica flagged fail or noaddr cannot be
+# reached, and one flagged nofailover will not promote itself.
+promotable_replicas() {
+    awk -v me="$1" '
+        $4 != me || $3 !~ /slave/ { next }
+        $3 ~ /(^|,)fail(,|$)/ || $3 ~ /noaddr/ || $3 ~ /nofailover/ { next }
+        {
+            split($2, parts, "@")
+            address = parts[1]                # ip:port
+            if (match($2, /tls-port=[0-9]+/)) {
+                tls_port = substr($2, RSTART + 9, RLENGTH - 9)
+                if (tls_port != "0") sub(/:[0-9]+$/, ":" tls_port, address)
+            }
+            print address
+        }' "$nodes_conf"
+}
+
+# replica_moved_on IP PORT succeeds once the replica reports itself a primary,
+# or a replica of a primary other than this node. The reply goes through a
+# file under the data dir, since the root filesystem may be read-only and a
+# call cut short by the timeout must not hold a pipe open.
 replica_moved_on() {
-    out_file="$data_dir/.role-reply"
-    if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$out_file" 2>/dev/null; then
-        rm -f "$out_file"
+    reply="$data_dir/.role-reply"
+    if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
+        rm -f "$reply"
         return 1
     fi
-    role=$(sed -n 1p "$out_file" | tr -d '\r')
-    primary=$(sed -n 2p "$out_file" | tr -d '\r')
-    rm -f "$out_file"
-    [ "$role" = "master" ] && return 0
-    [ "$role" = "slave" ] && [ -n "$primary" ] && [ "$primary" != "$my_ip" ] && [ "$primary" != "$my_hostname" ] && return 0
-    return 1
+    role=$(sed -n 1p "$reply" | tr -d '\r')
+    primary=$(sed -n 2p "$reply" | tr -d '\r')
+    rm -f "$reply"
+    case $role in
+        master) return 0 ;;
+        slave) [ -n "$primary" ] && [ "$primary" != "$my_ip" ] && [ "$primary" != "$my_hostname" ] ;;
+        *) return 1 ;;
+    esac
 }
 
-# drop_identity removes the node identity and any snapshot, so the server
-# starts as a new, empty node.
+# wait_for_handoff SECONDS waits until every replica in $replicas has moved
+# on. Succeeds when all did within the time, fails on the first that did not.
+wait_for_handoff() {
+    deadline=$(( $(date +%s) + $1 ))
+    for replica in $replicas; do
+        ip=${replica%:*}
+        port=${replica##*:}
+        until replica_moved_on "$ip" "$port"; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "Replica $ip:$port still follows this node" >&2
+                return 1
+            fi
+            sleep 1
+        done
+    done
+}
+
+# drop_identity empties the data dir: nodes.conf, the snapshot and the
+# append-only dir, so the server starts as a new, empty node.
 drop_identity() {
-    rm -f "$nodes_conf" "$data_dir/$(config_value dbfilename dump.rdb)" "$data_dir"/temp-*.rdb
-    rm -rf "$data_dir/$(config_value appenddirname appendonlydir)"
+    rm -rf "${data_dir:?}"/* "${data_dir:?}"/.[!.]*
 }
 
-if [ -f "$nodes_conf" ]; then
-    # nodes.conf lines: <id> <ip:port@cport[,hostname[,tls-port=N,...]]> <flags> <primary-id> ...
-    # The flags of this node contain "myself"; a replica's fourth field names its primary.
-    me=$(awk '$3 ~ /myself/ && $3 ~ /master/ { print $1 }' "$nodes_conf")
-    if [ -n "$me" ]; then
-        my_addr=$(awk '$3 ~ /myself/ { print $2 }' "$nodes_conf")
-        # ip:port is everything before the cluster bus port; the port sits
-        # after the last colon, so an IPv6 address keeps its own colons.
-        my_endpoint=${my_addr%%@*}
-        my_ip=${my_endpoint%:*}
-        my_hostname=""
-        case $my_addr in *@*,*) rest=${my_addr#*@}; rest=${rest#*,}; my_hostname=${rest%%,*} ;; esac
-        # Replicas of this node that can be promoted, as ip:port, one per
-        # line. A replica flagged fail or noaddr cannot be reached, and one
-        # flagged nofailover will not promote itself, so they do not count.
-        replicas=$(awk -v me="$me" '
-            $3 ~ /slave/ && $3 !~ /(^|,)fail(,|$)/ && $3 !~ /noaddr/ && $3 !~ /nofailover/ && $4 == me {
-                split($2, a, "@"); p = a[1]
-                if (match($2, /tls-port=[0-9]+/)) { tp = substr($2, RSTART + 9, RLENGTH - 9); if (tp != "0") sub(/:[0-9]+$/, ":" tp, p) }
-                print p
-            }' "$nodes_conf")
-        if [ -n "$replicas" ]; then
-            cap=$(( $(config_value cluster-node-timeout 15000) * 6 / 1000 ))
-            [ "$cap" -gt 300 ] && cap=300
-            [ "$cap" -lt 1 ] && cap=1
-            auth_args=""
-            if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-                auth_args="--user $VALKEY_USER"
-            fi
-            echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2
-            started=$(date +%s)
-            deadline=$((started + cap))
-            handoff_ok=true
-            for r in $replicas; do
-                ip=${r%:*}; port=${r##*:}
-                until replica_moved_on "$ip" "$port"; do
-                    if [ "$(date +%s)" -ge "$deadline" ]; then
-                        handoff_ok=false
-                        break
-                    fi
-                    sleep 1
-                done
-                [ "$handoff_ok" = true ] || break
-            done
-            waited=$(( $(date +%s) - started ))
-            if [ "$handoff_ok" = true ]; then
-                echo "Replica hand-off done after ${waited}s; starting as a new node" >&2
-                drop_identity
-            else
-                echo "Replica $ip:$port still follows this node after ${waited}s; keeping the previous identity" >&2
-            fi
+if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
+    replicas=$(promotable_replicas "$me")
+    if [ -n "$replicas" ]; then
+        address=$(own_address)
+        my_ip=${address%% *}
+        my_hostname=${address#* }
+        auth_args=""
+        if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
+            auth_args="--user $VALKEY_USER"
+        fi
+        # Six cluster-node-timeouts, at most 600s. The startup probe of the
+        # container allows for the same, see startupFailureThreshold.
+        cap=$(( $(config_value cluster-node-timeout 15000) * 6 / 1000 ))
+        [ "$cap" -gt 600 ] && cap=600
+        [ "$cap" -lt 1 ] && cap=1
+        echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2
+        started=$(date +%s)
+        if wait_for_handoff "$cap"; then
+            echo "Replica hand-off done after $(( $(date +%s) - started ))s; starting as a new node" >&2
+            drop_identity
+        else
+            echo "Keeping the previous identity after $(( $(date +%s) - started ))s" >&2
         fi
     fi
 fi

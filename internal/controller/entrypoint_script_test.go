@@ -119,6 +119,24 @@ func assertSnapshotKept(t *testing.T, r entrypointRun, kept bool) {
 	}
 }
 
+// The server command of a cluster node runs entrypointCommand, which falls
+// back to the server binary when the mounted ConfigMap has no entrypoint.sh,
+// as an external ConfigMap may not. The script path is absolute, so this
+// exercises the fallback on a machine without it.
+func TestEntrypointCommandFallsBackToServer(t *testing.T) {
+	if _, err := os.Stat("/scripts/" + entrypointScriptKey); err == nil {
+		t.Skip("/scripts/" + entrypointScriptKey + " exists on this machine")
+	}
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
+		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
+	cmd := exec.Command(shellPath, "-c", entrypointCommand, "valkey-server", "/config/valkey.conf", "--port", "6379")
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, "valkey-server /config/valkey.conf --port 6379\n", string(out))
+}
+
 func TestEntrypointScript(t *testing.T) {
 	const serverLine = "valkey-server"
 	// Valkey 9 address format, with an empty hostname and a tls-port of 0.
@@ -153,7 +171,8 @@ func TestEntrypointScript(t *testing.T) {
 
 	t.Run("the identity is kept when the replica has not moved on by the cap", func(t *testing.T) {
 		r := runEntrypoint(t, primary+replica+vars, conf, stubCLI{promotedAfter: -1})
-		assert.Regexp(t, `still follows this node after [5-7]s; keeping the previous identity`, r.out)
+		assert.Contains(t, r.out, "Replica 10.0.0.2:6379 still follows this node")
+		assert.Regexp(t, `Keeping the previous identity after [5-7]s`, r.out)
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
 		assertSnapshotKept(t, r, true)
@@ -161,7 +180,7 @@ func TestEntrypointScript(t *testing.T) {
 
 	t.Run("a replica that does not answer is bounded per call and keeps the identity", func(t *testing.T) {
 		r := runEntrypoint(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{promotedAfter: -1, hang: true})
-		assert.Contains(t, r.out, "keeping the previous identity")
+		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 		assert.LessOrEqual(t, r.cliCalls, 3, "each hung call is cut after the per-call timeout")
 	})
@@ -171,14 +190,16 @@ func TestEntrypointScript(t *testing.T) {
 		them := replicaID + " fd00::2:6379@16379,,tls-port=0,shard-id=abc slave " + primaryID + " 0 1760000000000 1 connected\n"
 		// The stub keeps following fd00::1, which must not pass as another primary.
 		r := runEntrypoint(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
-		assert.Contains(t, r.out, "keeping the previous identity")
+		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 	})
 
-	t.Run("a custom snapshot name from the config is removed", func(t *testing.T) {
-		r := runEntrypoint(t, primary+replica+vars, conf+"dbfilename custom.rdb\n", stubCLI{seedFiles: []string{"custom.rdb"}})
+	t.Run("the whole data dir is emptied, custom and hidden files included", func(t *testing.T) {
+		r := runEntrypoint(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb", ".hidden"}})
 		assert.False(t, r.nodeKept)
-		assert.NoFileExists(t, filepath.Join(r.dataDir, "custom.rdb"))
+		entries, err := os.ReadDir(r.dataDir)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
 	})
 
 	t.Run("a replica flagged fail does not count", func(t *testing.T) {

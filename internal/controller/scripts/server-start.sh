@@ -145,9 +145,10 @@ wait_for_handoff() {
 }
 
 # drop_identity empties the data dir: nodes.conf, the snapshot and the
-# append-only dir, so the server starts as a new, empty node.
+# append-only dir, hidden names included, so the server starts as a new,
+# empty node.
 drop_identity() {
-    rm -rf "${data_dir:?}"/*
+    find "${data_dir:?}" -mindepth 1 -delete
 }
 
 if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then

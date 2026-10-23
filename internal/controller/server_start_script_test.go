@@ -194,8 +194,8 @@ func TestServerStartScript(t *testing.T) {
 		assert.True(t, r.nodeKept)
 	})
 
-	t.Run("the whole data dir is emptied, custom snapshot names included", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb"}})
+	t.Run("the whole data dir is emptied, custom and hidden snapshot names included", func(t *testing.T) {
+		r := runStartScript(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb", ".snapshot.rdb"}})
 		assert.False(t, r.nodeKept)
 		entries, err := os.ReadDir(r.dataDir)
 		require.NoError(t, err)

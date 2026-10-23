@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -72,10 +73,10 @@ func systemPasswordReconciler(t *testing.T, objs []client.Object) (*ValkeyCluste
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return &ValkeyClusterReconciler{Client: c, Scheme: scheme, Recorder: events.NewFakeRecorder(64)}, c
+	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(64)}, c
 }
 
-// TestUpsertRefusesRegenerationOnRunningCluster is the gh-506 regression: a
+// TestUpsertRefusesRegenerationOnRunningCluster pins the reported regression: a
 // cluster with live nodes must not adopt new system passwords, because the
 // running servers still authorize the old ones and the operator would be
 // locked out (WRONGPASS on every call) until every pod restarts.
@@ -91,6 +92,8 @@ func TestUpsertRefusesRegenerationOnRunningCluster(t *testing.T) {
 	require.Contains(t, err.Error(), getSystemPasswordSecretName(cluster.Name))
 	require.Contains(t, err.Error(), "_operator")
 	require.Contains(t, err.Error(), "_replication")
+	require.Contains(t, err.Error(), "restore the Secret to recover the cluster",
+		"a confirmed running cluster must keep the restore instruction")
 
 	// No Secret may be created: a regenerated Secret would replace the only
 	// copy of the passwords the running nodes still accept.
@@ -151,7 +154,7 @@ func TestUpsertRegeneratesExporterKeyOnRunningCluster(t *testing.T) {
 
 // TestCreateSystemUsersAclRefusesOnRunningCluster pins the integration: the
 // guard must flow through createSystemUsersAcl, so the cluster surfaces
-// SystemUsersACLError instead of freezing every node out of its ACL.
+// UsersACLError instead of freezing every node out of its ACL.
 func TestCreateSystemUsersAclRefusesOnRunningCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	node := systemPasswordNode(cluster)
@@ -221,35 +224,62 @@ func TestUpsertRefusesWhenTheNodeListFails(t *testing.T) {
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "the upsert must refuse to regenerate when its node list cannot be read")
-}
+	require.Contains(t, err.Error(), "node state could not be checked",
+		"an unreadable node list must not be reported as a running cluster")
+	require.NotContains(t, err.Error(), "restore the Secret",
+		"a cluster whose Secret was never confirmed missing must not be told to restore one")
+	require.NotContains(t, err.Error(), "running cluster",
+		"an unreadable node list is not proof the cluster is running")
 
-// listOnceThenErrorClient fails only the first List call and delegates every
-// later one to the real client. A guard that lists twice could read the
-// successful empty second list as a fresh cluster and regenerate the
-// passwords of a live cluster whose first list failed; the single-list guard
-// must instead treat its one failed list as running and refuse.
-type listOnceThenErrorClient struct {
-	client.Client
-	failed bool
-}
-
-func (c *listOnceThenErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	if !c.failed {
-		c.failed = true
-		return fmt.Errorf("list nodes: transient api error")
+	// The warning event must carry the same distinction.
+	recorder := r.Recorder.(*events.FakeRecorder)
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, "SystemPasswordSecretMissing")
+		require.Contains(t, e, "node state could not be checked")
+		require.NotContains(t, e, "restore the Secret")
+	default:
+		t.Fatal("expected a SystemPasswordSecretMissing warning event")
 	}
-	return c.Client.List(ctx, list, opts...)
 }
 
-// TestUpsertRefusesWhenOnlyTheFirstNodeListFails pins that exact transient
-// shape: the guard's node list fails once, and even though every later list
-// would succeed and report no ValkeyNodes, the upsert must still refuse.
-func TestUpsertRefusesWhenOnlyTheFirstNodeListFails(t *testing.T) {
-	cluster, _, objs := systemPasswordFixture(false)
-	r, _ := systemPasswordReconciler(t, objs)
-	r.Client = &listOnceThenErrorClient{Client: r.Client}
+// cacheMissClient simulates the manager cache for the read-through: the
+// cache is configured to only hold Secrets carrying the
+// app.kubernetes.io/managed-by label, so a Secret that lost the label
+// reads as NotFound through the cached client even though the API server
+// still has it. Everything else, including writes, delegates to the real
+// client the way uncached reads and all writes go to the API server.
+type cacheMissClient struct {
+	client.Client
+}
 
-	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "a failed node list must read as running even when a retry would report no nodes")
+func (c cacheMissClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		return apierrors.NewNotFound(corev1.Resource("secret"), key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestUpsertAdoptsUnlabeledSecretThroughAPIReader pins the read-through
+// from the review: the manager cache only holds Secrets with the
+// managed-by label, so a Secret that lost the label reads as NotFound from
+// the cached client. The upsert must read through the API reader, adopt the
+// Secret (standard labels + controller reference) and keep its existing
+// passwords instead of failing with AlreadyExists on every reconcile or
+// generating fresh keys the running nodes do not know.
+func TestUpsertAdoptsUnlabeledSecretThroughAPIReader(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(true)
+	r, c := systemPasswordReconciler(t, objs)
+	r.Client = cacheMissClient{Client: c}
+	r.APIReader = c
+
+	updated, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	require.Equal(t, []byte("op-old"), updated.Data[operatorUser], "an adopted Secret keeps its passwords")
+	require.Equal(t, []byte("re-old"), updated.Data[replicationUser], "an adopted Secret keeps its passwords")
+
+	stored := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
+	require.Equal(t, "valkey-operator", stored.Labels["app.kubernetes.io/managed-by"], "adoption restores the label the cache selects on")
+	require.True(t, metav1.IsControlledBy(stored, cluster), "adoption restores the controller reference")
 }

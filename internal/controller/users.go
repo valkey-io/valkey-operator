@@ -98,15 +98,16 @@ var (
 	errUnknownSystemUser = errors.New("unknown system user")
 	errMissingSystemUser = errors.New("missing system user")
 
-	// errSystemPasswordSecretMissing marks a regenerate-on-live-cluster
-	// refusal: the system passwords Secret is gone (or lacks _operator /
-	// _replication) on a cluster whose nodes already run the old passwords.
+	// errSystemPasswordSecretMissing marks a refused regeneration: the
+	// system passwords Secret is gone (or lacks keys the running nodes
+	// depend on) on a cluster whose nodes already run the old passwords,
+	// or one whose node state could not be verified.
 	// Regenerating would push a new aclfile the running servers cannot load
 	// (the operator authenticates with the new _operator password while the
 	// nodes still hold the old hash), locking the operator out of every node
 	// until each pod restarts. The caller must surface this as a condition
 	// and stop, not regenerate.
-	errSystemPasswordSecretMissing = errors.New("system password secret missing on a running cluster")
+	errSystemPasswordSecretMissing = errors.New("system password secret missing")
 )
 
 func getInternalSecretName(clusterName string) string {
@@ -436,9 +437,10 @@ func systemPasswordKeysNeedingGeneration(secret *corev1.Secret, nodes *valkeyiov
 
 // exporterRunsOnAnyNode reports whether any of the cluster's ValkeyNodes
 // already runs the exporter sidecar. node.Spec.Exporter.Enabled is set by
-// the node controller only when the sidecar is in the applied pod template,
-// so a true value means the sidecar is deployed and its environment holds
-// the _exporter password read at pod start.
+// the parent controller (valkeycluster today), not by the node controller,
+// and only when the sidecar is in the applied pod template, so a true
+// value means the sidecar is deployed and its environment holds the
+// _exporter password read at pod start.
 func exporterRunsOnAnyNode(nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
 	if nodes == nil {
 		// A failed node list cannot prove the sidecar is absent; fail
@@ -481,6 +483,44 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 	return nil
 }
 
+// adoptSystemUsersSecret re-attaches a system passwords Secret the manager
+// cache cannot see (its app.kubernetes.io/managed-by label is missing, so
+// the cached read returned NotFound) to this cluster: the standard labels
+// are merged back in and the controller reference is restored, so the cache
+// picks the Secret up again and garbage collection keeps protecting it.
+// The existing keys are left untouched.
+func (r *ValkeyClusterReconciler) adoptSystemUsersSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
+	log := logf.FromContext(ctx)
+	needUpdate := false
+	if secret.Labels == nil {
+		secret.Labels = map[string]string{}
+	}
+	for key, value := range labels(cluster) {
+		if secret.Labels[key] != value {
+			secret.Labels[key] = value
+			needUpdate = true
+		}
+	}
+	if !metav1.IsControlledBy(secret, cluster) {
+		if err := controllerutil.SetControllerReference(cluster, secret, r.Scheme); err != nil {
+			log.Error(err, "Failed to grab ownership of system users secret")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
+			return err
+		}
+		needUpdate = true
+	}
+	if !needUpdate {
+		return nil
+	}
+	if err := r.Update(ctx, secret); err != nil {
+		log.Error(err, "Failed to adopt the system users secret")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to adopt the system users secret: %v", err)
+		return err
+	}
+	log.V(2).Info("adopted the system users secret found through the API reader", "secretName", secret.Name)
+	return nil
+}
+
 func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*corev1.Secret, error) {
 	log := logf.FromContext(ctx)
 	var createSecret bool
@@ -495,22 +535,47 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			log.Error(err, "failed to fetch system users secret")
 			return nil, err
 		}
-		log.V(2).Info("creating internal secret", "secretName", secretName)
+		// The manager cache only holds Secrets carrying the
+		// app.kubernetes.io/managed-by=valkey-operator label, so a
+		// NotFound from the cache is not proof the Secret is gone. When
+		// an API reader is wired (the manager wiring always sets one),
+		// read through it before generating fresh passwords over a
+		// Secret the running nodes may still authenticate with. A
+		// reconciler constructed without an API reader keeps the primary
+		// reader authoritative, which is how the direct-client harnesses
+		// use it.
+		foundThroughAPIReader := false
+		if r.APIReader != nil {
+			err := r.APIReader.Get(ctx, types.NamespacedName{
+				Name:      secretName,
+				Namespace: cluster.Namespace,
+			}, systemUsersSecret)
+			if err != nil && !apierrors.IsNotFound(err) {
+				log.Error(err, "failed to read the system users secret through the API reader")
+				return nil, err
+			}
+			foundThroughAPIReader = err == nil
+		}
+		if !foundThroughAPIReader {
+			log.V(2).Info("creating internal secret", "secretName", secretName)
 
-		systemUsersSecret.Type = AclSecretType
-		systemUsersSecret.ObjectMeta = metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: cluster.Namespace,
-			Labels:    labels(cluster),
+			systemUsersSecret.Type = AclSecretType
+			systemUsersSecret.ObjectMeta = metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: cluster.Namespace,
+				Labels:    labels(cluster),
+			}
+			systemUsersSecret.Data = make(map[string][]byte)
+			// Register ownership of the new internal Secret
+			if err := controllerutil.SetControllerReference(cluster, systemUsersSecret, r.Scheme); err != nil {
+				log.Error(err, "Failed to grab ownership of system users secret")
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
+				return systemUsersSecret, err
+			}
+			createSecret = true
+		} else if err := r.adoptSystemUsersSecret(ctx, cluster, systemUsersSecret); err != nil {
+			return nil, err
 		}
-		systemUsersSecret.Data = make(map[string][]byte)
-		// Register ownership of the new internal Secret
-		if err := controllerutil.SetControllerReference(cluster, systemUsersSecret, r.Scheme); err != nil {
-			log.Error(err, "Failed to grab ownership of system users secret")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InternalSecretsCreationFailed", "ReconcileUsers", "Failed to grab ownership of system users secret: %v", err)
-			return systemUsersSecret, err
-		}
-		createSecret = true
 	}
 
 	// Refuse to regenerate _operator or _replication on a cluster whose
@@ -519,26 +584,37 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	// aclfile a password those servers reject (WRONGPASS on every call,
 	// replicas unable to AUTH to their primary after a restart). Until the
 	// Secret is restored the cluster must surface the loss instead of
-	// silently locking the operator out (gh-506).
+	// silently locking the operator out.
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		// A list failure is not proof of a fresh cluster; treat it as running
-		// so the guard fails closed.
+		log.Error(err, "failed to list ValkeyNodes")
+		// A list failure is not proof of a fresh cluster; treat it as
+		// running so the guard fails closed.
 		nodes = nil
 	}
 	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret, nodes)
-	// Base the running-cluster decision on the same list the exporter
-	// check used. The previous shape listed twice, and a second
-	// successful empty list could read a failed first one as a fresh
-	// cluster and regenerate the passwords of a live cluster.
 	running := nodes == nil || len(nodes.Items) > 0
 	if len(missing) > 0 && running {
-		err := fmt.Errorf(
-			"%w: %s is missing %s; restore the Secret to recover the cluster",
-			errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
-		log.Error(err, "refusing to regenerate system user passwords on a running cluster")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
-			"%s is missing %s on a running cluster; restore the Secret to recover the cluster", secretName, strings.Join(missing, ", "))
+		var err error
+		if nodes == nil {
+			// Live nodes cannot be ruled out, so refuse as well, but say
+			// what actually happened instead of calling the cluster
+			// running: the restore instruction only fits a Secret the
+			// cluster actually had.
+			err = fmt.Errorf(
+				"%w: %s is missing %s and the node state could not be checked; not regenerating system user passwords until the node list can be read",
+				errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
+			log.Error(err, "refusing to regenerate system user passwords: node state could not be checked")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
+				"%s is missing %s but the node state could not be checked; not regenerating system user passwords until the node list can be read", secretName, strings.Join(missing, ", "))
+		} else {
+			err = fmt.Errorf(
+				"%w: %s is missing %s on a running cluster; restore the Secret to recover the cluster",
+				errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
+			log.Error(err, "refusing to regenerate system user passwords on a running cluster")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
+				"%s is missing %s on a running cluster; restore the Secret to recover the cluster", secretName, strings.Join(missing, ", "))
+		}
 		return nil, err
 	}
 

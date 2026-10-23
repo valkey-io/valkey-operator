@@ -45,6 +45,8 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 
 	node := newTestValkeyNode("c-0-0", "ns")
 	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	// The status IP is stale: the pod has come back at another one.
+	node.Status.PodIP = "10.0.0.1"
 
 	ctrl := true
 	sts := &appsv1.StatefulSet{
@@ -58,9 +60,10 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 			Name: "valkey-c-0-0-0", Namespace: "ns", UID: "pod-uid", Labels: labels,
 			OwnerReferences: []metav1.OwnerReference{{Kind: "StatefulSet", Name: sts.Name, UID: sts.UID, Controller: &ctrl}},
 		},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.2", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}},
 	}
 	require.True(t, podSupersededAndStuck(pod, sts), "fixture must be a superseded, stuck pod")
+	var probedIP string
 
 	// newReconciler seeds the fake API with the pod in a given server
 	// container state and answers INFO with the given result.
@@ -70,7 +73,10 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(p).Build()
 		return &ValkeyNodeReconciler{
 			Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(8),
-			nodeInfoFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) (string, error) { return info, infoErr },
+			nodeInfoFunc: func(_ context.Context, n *valkeyiov1alpha1.ValkeyNode) (string, error) {
+				probedIP = n.Status.PodIP
+				return info, infoErr
+			},
 		}, c
 	}
 	podExists := func(c client.Client) bool {
@@ -120,5 +126,15 @@ func TestReplaceSupersededPodWhileSyncing(t *testing.T) {
 		r, c := newReconciler("# Persistence\r\nloading:0\r\n", nil, running)
 		require.NoError(t, r.replaceSupersededPod(context.Background(), node, sts))
 		assert.False(t, podExists(c))
+	})
+
+	t.Run("INFO is read at the pod's current IP, not the stale status IP", func(t *testing.T) {
+		// Reconcile returns before updateStatus when the replacement is
+		// deferred, so Status.PodIP would stay stale on every retry.
+		r, _ := newReconciler("# Persistence\r\nloading:1\r\n", nil, running)
+		err := r.replaceSupersededPod(context.Background(), node, sts)
+		assert.ErrorIs(t, err, errTransientRequeue)
+		assert.Equal(t, "10.0.0.2", probedIP)
+		assert.Equal(t, "10.0.0.1", node.Status.PodIP, "the node itself is left untouched")
 	})
 }

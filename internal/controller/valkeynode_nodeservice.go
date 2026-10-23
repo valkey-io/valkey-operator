@@ -30,10 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-func nodeServiceName(clusterName string, shardIndex, nodeIndex int) string {
-	return resourcePrefix + valkeyNodeName(clusterName, shardIndex, nodeIndex)
-}
-
 // ensureNodeService creates or deletes this node's ClusterIP Service.
 // The ValkeyNode owns the Service, so scale-in removes it with the node.
 // A nil spec.Service deletes the Service this node owns.

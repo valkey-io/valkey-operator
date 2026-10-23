@@ -371,7 +371,7 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		c.Spec.Networking = &valkeyv1.NetworkingSpec{PerNodeServices: &valkeyv1.PerNodeServicesSpec{}}
 		n := buildClusterValkeyNode(c, 1, 2)
 		assert.NotNil(t, n.Spec.Service)
-		assert.Equal(t, "valkey-c-1-2", nodeServiceName(c.Name, 1, 2))
+		assert.Equal(t, "valkey-c-1-2", valkeyNodeResourceName(n))
 	})
 }
 

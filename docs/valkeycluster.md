@@ -91,6 +91,15 @@ containers:
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
 
+The operator defaults `securityContext.allowPrivilegeEscalation` to `false` for
+its `server` and `metrics-exporter` containers. Explicit values are preserved,
+and privileged containers are not given this default. User-added sidecars are
+unchanged. This keeps desired workload templates aligned with admission policies
+that supply the same hardening default, avoiding repeated drift-driven failovers.
+On clusters without that admission default, upgrading can cause a one-time Pod
+rollout to apply the new security setting. Existing custom images that require
+privilege escalation must explicitly opt in, subject to cluster policy.
+
 ### Service account
 
 ```yaml

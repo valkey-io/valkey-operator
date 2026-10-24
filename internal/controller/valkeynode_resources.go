@@ -29,6 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
+const serverContainerName = "server"
+
 // valkeyNodeResourceName returns the name used for resources
 // owned by the given ValkeyNode.
 func valkeyNodeResourceName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -249,7 +251,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 	containers := []corev1.Container{
 		{
-			Name:      "server",
+			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
 			Command: append([]string{
@@ -392,8 +394,29 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	if err != nil {
 		return nil, err
 	}
+	applyManagedContainerSecurityDefaults(merged)
 	applyContainerAPIDefaults(merged)
 	return merged, nil
+}
+
+// Match common admission hardening defaults in the rendered workload template.
+// Run after user patches so explicit settings (including privileged containers)
+// are respected, and leave user-added sidecars alone.
+func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		if c.Name != serverContainerName && c.Name != "metrics-exporter" {
+			continue
+		}
+		sc := c.SecurityContext.DeepCopy()
+		if sc == nil {
+			sc = &corev1.SecurityContext{}
+		}
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) {
+			sc.AllowPrivilegeEscalation = new(false)
+		}
+		c.SecurityContext = sc
+	}
 }
 
 // applyContainerAPIDefaults fills the container fields the API server would

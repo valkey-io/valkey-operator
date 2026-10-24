@@ -1738,10 +1738,12 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 
 	// Clean up leftover ValkeyNodes from a previous scale-in where drained
 	// primaries became replicas before their ValkeyNodes could be deleted.
-	if deleted, err := r.deleteExcessValkeyNodes(ctx, cluster); err != nil {
+	if deleted, deferred, err := r.deleteExcessValkeyNodes(ctx, cluster, state, nodes); err != nil {
 		log.Error(err, "failed to delete excess ValkeyNodes")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-	} else if deleted {
+	} else if deleted || deferred {
+		// A deferred deletion waits for a failover to hand the primary role
+		// over; requeue so a fresh scrape can confirm the new roles.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
 
@@ -1837,14 +1839,18 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired
 // spec: shard-index >= spec.Shards OR node-index >= 1 + spec.Replicas.
-func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
+//
+// A node outside the replica count can still be its shard's live primary,
+// so before deleting it the primary role is failed over to a synced replica
+// the new count keeps, and the deletion is deferred until that completes.
+func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted bool, deferred bool, err error) {
 	log := logf.FromContext(ctx)
 	allNodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.List(ctx, allNodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		return false, err
+		return false, false, err
 	}
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
-	deleted := false
+	deleted, deferred = false, false
 	for i := range allNodes.Items {
 		node := &allNodes.Items[i]
 		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
@@ -1856,9 +1862,26 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 			continue
 		}
 		if shardIndex >= int(cluster.Spec.Shards) || nodeIndex >= nodesPerShard {
+			// A shard that survives the scale-in still needs its primary.
+			// An excess node that carries the primary role must hand it
+			// over to a kept replica before its ValkeyNode is deleted.
+			if shardIndex < int(cluster.Spec.Shards) && nodeIndex >= nodesPerShard {
+				failedOver, deferErr := r.failoverExcessPrimary(ctx, cluster, state, nodes, node, shardIndex, nodeIndex)
+				if deferErr != nil {
+					return deleted, true, fmt.Errorf("failover excess ValkeyNode %s before deletion: %w", node.Name, deferErr)
+				}
+				if !failedOver {
+					// Deletion deferred: the node still holds the primary
+					// role, or the failover just completed and the next
+					// scrape must confirm it. Retried on the requeue the
+					// deferred return arranges, with fresh state.
+					deferred = true
+					continue
+				}
+			}
 			if err := r.Delete(ctx, node); err != nil {
 				if !apierrors.IsNotFound(err) {
-					return false, fmt.Errorf("delete excess ValkeyNode %s: %w", node.Name, err)
+					return deleted, deferred, fmt.Errorf("delete excess ValkeyNode %s: %w", node.Name, err)
 				}
 			} else {
 				log.V(1).Info("deleted excess ValkeyNode", "name", node.Name, "shard", shardIndex, "node", nodeIndex)
@@ -1867,7 +1890,70 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 			}
 		}
 	}
-	return deleted, nil
+	return deleted, deferred, nil
+}
+
+// failoverExcessPrimary hands the primary role of an excess ValkeyNode in a
+// kept shard over to a synced replica whose node-index survives the scale-in.
+// It returns true once the node no longer holds the primary role (it never
+// was the primary, or a completed failover has been confirmed by a fresh
+// scrape) and the caller may delete the ValkeyNode.
+func (r *ValkeyClusterReconciler) failoverExcessPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, node *valkeyiov1alpha1.ValkeyNode, shardIndex, nodeIndex int) (bool, error) {
+	log := logf.FromContext(ctx)
+	if node.Status.PodIP == "" {
+		// No address to look up in the topology; treat it as a leftover CR
+		// whose pod is already gone.
+		return true, nil
+	}
+	shard := state.FindShardForAddress(node.Status.PodIP)
+	if shard == nil {
+		// Not part of any live shard: a leftover CR, safe to delete.
+		return true, nil
+	}
+	primary := shard.GetPrimaryNode()
+	if primary == nil || primary.Address != node.Status.PodIP {
+		// Not the primary (any more): safe to delete.
+		return true, nil
+	}
+
+	// The node is a kept shard's primary outside the new replica count. Fail
+	// the role over to a synced replica the new count keeps before deleting.
+	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	kept := make([]*valkey.NodeState, 0, len(shard.Nodes))
+	for _, replica := range shard.GetSyncedReplicas(state) {
+		replicaIdx := nodeIndexForAddress(replica.Address, nodes)
+		if replicaIdx < 0 || replicaIdx >= nodesPerShard {
+			continue
+		}
+		kept = append(kept, replica)
+	}
+	if len(kept) == 0 {
+		log.Info("excess ValkeyNode is its shard's primary with no synced replica the new count keeps; deferring deletion",
+			"name", node.Name, "shard", shardIndex, "node", nodeIndex, "shardId", shard.Id)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ScaleInDeferred", "ScaleIn",
+			"Deferring deletion of %s: it is the primary of shard %d and no kept replica is synced yet", node.Name, shardIndex)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
+			fmt.Sprintf("Scale-in is waiting to fail over shard %d primary %s to a kept replica", shardIndex, node.Name), metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
+		return false, nil
+	}
+	log.Info("excess ValkeyNode is its shard's primary; failing over before deletion",
+		"name", node.Name, "shard", shardIndex, "node", nodeIndex, "shardId", shard.Id, "syncedKeptReplicas", len(kept))
+	if err := proactiveFailoverFn(ctx, r.Recorder, cluster, shard, kept); err != nil {
+		// Do not delete the primary while the failover has not completed.
+		// Retry on the next reconcile with fresh state, the way a deferred
+		// roll does.
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ScaleInDeferred", "ScaleIn",
+			"Deferring deletion of %s: failover did not complete: %v", node.Name, err)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
+			fmt.Sprintf("Scale-in is waiting to fail over shard %d primary %s to a kept replica", shardIndex, node.Name), metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
+		return false, err
+	}
+	// The failover reported completion, but the scrape this pass used is
+	// already stale; the next reconcile's fresh scrape must see the node as
+	// a replica before its ValkeyNode CR is deleted.
+	return false, nil
 }
 
 // shardIndexFromState determines the shard index for a given Valkey Cluster

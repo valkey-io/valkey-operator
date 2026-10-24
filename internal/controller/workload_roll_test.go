@@ -63,6 +63,22 @@ func TestPodTemplateWouldRoll(t *testing.T) {
 	assert.NotEqual(t, podTemplateRollHash(base), podTemplateRollHash(*changed))
 }
 
+// The API server mirrors serviceAccountName into the deprecated serviceAccount
+// field on read; a template built without it must still compare equal.
+func TestPodTemplateIgnoresDeprecatedServiceAccount(t *testing.T) {
+	desired := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "my-sa",
+			Containers:         []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}},
+		},
+	}
+	live := desired.DeepCopy()
+	live.Spec.DeprecatedServiceAccount = "my-sa"
+
+	assert.False(t, podTemplateWouldRoll(*live, desired))
+	assert.Equal(t, podTemplateRollHash(desired), podTemplateRollHash(*live))
+}
+
 func TestIsClusterOwned(t *testing.T) {
 	node := &valkeyiov1alpha1.ValkeyNode{}
 	assert.False(t, isClusterOwned(node))

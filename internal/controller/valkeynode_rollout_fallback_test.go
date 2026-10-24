@@ -33,10 +33,10 @@ import (
 	"github.com/stretchr/testify/require"
 	vclient "github.com/valkey-io/valkey-go"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -145,7 +145,7 @@ func TestGetTLSConfigWithFallback_OptionalBuildsFallback(t *testing.T) {
 	_, f := rolloutTestReconciler(t)
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
+	primary, fallback, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Empty(t, primary.Certificates, "primary config must not present a client certificate under Optional")
@@ -161,7 +161,7 @@ func TestGetTLSConfigWithFallback_RequiredNoFallback(t *testing.T) {
 	_, f := rolloutTestReconciler(t)
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", true, false)
+	primary, fallback, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", true, false)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Len(t, primary.Certificates, 1, "primary presents the certificate under Required")
@@ -179,27 +179,10 @@ func TestGetTLSConfigWithFallback_MissingCertKeepsPrimary(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(broken).Build()
 
-	primary, fallback, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
+	primary, fallback, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
 	require.NoError(t, err)
 	require.NotNil(t, primary)
 	assert.Nil(t, fallback, "fallback is best-effort: an unusable secret leaves the primary alone")
-}
-
-// countingReader wraps a client.Reader and counts Secret reads, so the
-// tests can pin how many API-server requests a TLS configuration build
-// issues. The production APIReader is uncached: every extra read is an
-// extra request on the dial path, which the cluster poller repeats
-// every few seconds.
-type countingReader struct {
-	client.Reader
-	secretGets int
-}
-
-func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*corev1.Secret); ok {
-		r.secretGets++
-	}
-	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 // TestForNodeClientAuthRollFallback pins the node side of the
@@ -214,27 +197,26 @@ func TestForNodeClientAuthRollFallback(t *testing.T) {
 		_, f := rolloutTestReconciler(t)
 		c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 		var got []vclient.ClientOption
-		p := &unpooledProvider{client: c, apiReader: c, newClient: recordNewClient(&got, &stubClient{}, certRefused)}
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
 
-		_, release, err := p.ForNode(ctx, rolloutDialNode(nil))
+		c1, err := p.ForNode(ctx, rolloutDialNode(nil))
 		require.NoError(t, err)
-		release()
 		require.Len(t, got, 2, "the refused primary dial must be retried with the fallback")
 		require.NotNil(t, got[0].TLSConfig)
 		assert.Empty(t, got[0].TLSConfig.Certificates, "Optional-mode primary must present no client certificate")
 		require.NotNil(t, got[1].TLSConfig)
 		assert.Len(t, got[1].TLSConfig.Certificates, 1, "the retry must present the node server certificate")
+		require.NotNil(t, c1)
 	})
 
 	t.Run("Required presents the certificate on the first dial", func(t *testing.T) {
 		_, f := rolloutTestReconciler(t)
 		c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 		var got []vclient.ClientOption
-		p := &unpooledProvider{client: c, apiReader: c, newClient: recordNewClient(&got, &stubClient{})}
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
 
-		_, release, err := p.ForNode(ctx, rolloutDialNode(&valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}))
+		_, err := p.ForNode(ctx, rolloutDialNode(&valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}))
 		require.NoError(t, err)
-		release()
 		require.Len(t, got, 1, "Required mode presents the certificate on the primary dial and needs no retry")
 		require.NotNil(t, got[0].TLSConfig)
 		assert.Len(t, got[0].TLSConfig.Certificates, 1)
@@ -245,14 +227,40 @@ func TestForNodeClientAuthRollFallback(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(f.secret).Build()
 		cr := &countingReader{Reader: c}
 		var got []vclient.ClientOption
-		p := &unpooledProvider{client: c, apiReader: cr, newClient: recordNewClient(&got, &stubClient{})}
+		p := NewClientProvider(c, cr, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
 
-		_, release, err := p.ForNode(ctx, rolloutDialNode(nil))
+		_, err := p.ForNode(ctx, rolloutDialNode(nil))
 		require.NoError(t, err)
-		release()
 		assert.Equal(t, 1, cr.secretGets, "node dials must build primary and fallback from a single secret read")
-		require.Len(t, got, 1)
+		require.NotEmpty(t, got)
+		require.NotNil(t, got[0].TLSConfig)
+		assert.Empty(t, got[0].TLSConfig.Certificates)
 	})
+}
+
+// TestClientCertificateRefused pins the refusal spellings that arm the
+// clientAuth-roll fallback: the TLS 1.3 "certificate required" alert and
+// the TLS 1.2 "handshake failure" form, and nothing else.
+func TestClientCertificateRefused(t *testing.T) {
+	cases := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{"tls13 certificate required", "remote error: tls: certificate required", true},
+		{"tls12 handshake failure", "remote error: tls: handshake failure", true},
+		{"wrongpass is not a cert refusal", "WRONGPASS invalid username-password pair", false},
+		{"dial refused is not a cert refusal", "dial tcp 127.0.0.1:6379: connect: connection refused", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := clientCertificateRefused(errors.New(tc.err)); got != tc.want {
+			t.Errorf("%s: clientCertificateRefused(%q) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+	if clientCertificateRefused(nil) {
+		t.Error("nil error must not be a cert refusal")
+	}
 }
 
 // TestGetTLSConfigWithFallback_FallbackReadFailureNotSilent: when the
@@ -270,6 +278,6 @@ func TestGetTLSConfigWithFallback_FallbackReadFailureNotSilent(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(rolloutTestScheme(t)).WithObjects(missing).Build()
 
-	_, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
+	_, _, _, err := getTLSConfigWithFallback(context.Background(), c, "c-server", "valkey-c.ns.svc.cluster.local", "ns", false, true)
 	require.Error(t, err, "a failed secret read must surface, not silently drop the fallback")
 }

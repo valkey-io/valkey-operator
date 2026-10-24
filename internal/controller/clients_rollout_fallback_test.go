@@ -37,8 +37,10 @@ import (
 	vclient "github.com/valkey-io/valkey-go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // rolloutTLSDialFixture holds a CA and a server certificate, plus a live TLS
@@ -186,170 +188,6 @@ func (f *rolloutTLSDialFixture) drainDialTrace(t *testing.T) {
 	}
 }
 
-func TestClientCertificateRefused(t *testing.T) {
-	cases := []struct {
-		name string
-		err  string
-		want bool
-	}{
-		{"tls13 certificate required", "remote error: tls: certificate required", true},
-		{"tls12 handshake failure", "remote error: tls: handshake failure", true},
-		{"wrongpass is not a cert refusal", "WRONGPASS invalid username-password pair", false},
-		{"dial refused is not a cert refusal", "dial tcp 127.0.0.1:6379: connect: connection refused", false},
-		{"empty", "", false},
-	}
-	for _, tc := range cases {
-		if got := clientCertificateRefused(errors.New(tc.err)); got != tc.want {
-			t.Errorf("%s: clientCertificateRefused(%q) = %v, want %v", tc.name, tc.err, got, tc.want)
-		}
-	}
-	if clientCertificateRefused(nil) {
-		t.Error("nil error must not be a cert refusal")
-	}
-}
-
-// TestDialValkey_CertificateRequiredFallbackRetry is the dial-level control
-// for the clientAuth rollout under TLS 1.3: the fixture's node still enforces
-// clientAuth.mode: Required (its handshake demands a client certificate),
-// while the primary TLS configuration -- following the desired Optional or
-// Disabled spec -- presents none. The primary dial fails with "certificate
-// required", and the fallback retry presenting the node's own server
-// certificate completes the handshake. Without the fallback in the config
-// this dial is never retried, which is what pristine main does.
-func TestDialValkey_CertificateRequiredFallbackRetry(t *testing.T) {
-	f := newRolloutTLSDialFixture(t)
-	defer f.drainDialTrace(t)
-
-	primary := &tls.Config{
-		RootCAs:    f.caPool,
-		ServerName: "localhost",
-		MinVersion: tls.VersionTLS12,
-	}
-	// The fallback presents the node's own server certificate as a client
-	// certificate.
-	fallback := primary.Clone()
-	fallback.Certificates = []tls.Certificate{f.cert}
-
-	// Sanity: the primary dial alone is refused with "certificate required".
-	// This pins the fixture itself; if the primary were accepted the test
-	// would prove nothing about the retry.
-	_, _, err := dialValkey(context.Background(), vclient.NewClient, f.addr, connConfig{tls: primary})
-	require.Error(t, err)
-	require.ErrorContains(t, err, "certificate required", "TLS 1.3 refusal must surface the certificate_required alert")
-	select {
-	case <-f.refused:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected the primary dial's handshake to be refused")
-	}
-
-	// The refused dial must be retried with the fallback and complete its
-	// handshake: the fixture speaks no RESP, so the client constructor
-	// cannot return a live node; the assertion is that the dial stopped
-	// failing with "certificate required" and the handshake completed.
-	_, _, _ = dialValkey(context.Background(), vclient.NewClient, f.addr, connConfig{tls: primary, clientCertFallback: fallback})
-	select {
-	case <-f.accepted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("fallback dial never completed its handshake")
-	}
-}
-
-// TestDialValkey_TLS12HandshakeFailureFallbackRetry pins the TLS 1.2 form of
-// the refusal. The certificate_required alert does not exist in TLS 1.2, so
-// a pod still enforcing clientAuth.mode: Required on a tls-protocols:
-// TLSv1.2 port refuses the primary dial with a generic "handshake failure"
-// instead. clientCertificateRefused must arm the fallback retry for that
-// spelling too, or a Required-to-Optional roll stalls on every TLS 1.2
-// cluster. The fixture speaks no RESP, so the assertion is the same as the
-// TLS 1.3 case: the primary dial is refused, the fallback retry completes
-// its handshake.
-func TestDialValkey_TLS12HandshakeFailureFallbackRetry(t *testing.T) {
-	f := newRolloutTLSDialFixture(t, tls.VersionTLS12)
-	defer f.drainDialTrace(t)
-
-	primary := &tls.Config{
-		RootCAs:    f.caPool,
-		ServerName: "localhost",
-		MinVersion: tls.VersionTLS12,
-		MaxVersion: tls.VersionTLS12,
-	}
-	fallback := primary.Clone()
-	fallback.Certificates = []tls.Certificate{f.cert}
-
-	// Sanity: the primary dial alone is refused, and on a TLS 1.2 port the
-	// refusal surfaces as the generic "handshake failure".
-	_, _, err := dialValkey(context.Background(), vclient.NewClient, f.addr, connConfig{tls: primary})
-	require.Error(t, err)
-	require.ErrorContains(t, err, "handshake failure", "TLS 1.2 refusal must surface the generic handshake-failure form")
-	select {
-	case <-f.refused:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected the primary dial's handshake to be refused")
-	}
-
-	_, _, _ = dialValkey(context.Background(), vclient.NewClient, f.addr, connConfig{tls: primary, clientCertFallback: fallback})
-	select {
-	case <-f.accepted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("fallback dial never completed its handshake")
-	}
-}
-
-func TestDialValkeyFallbackRetry(t *testing.T) {
-	ctx := context.Background()
-	primary := &tls.Config{ServerName: "valkey-vc.ns.svc.cluster.local"}
-	fallback := primary.Clone()
-	fallback.Certificates = []tls.Certificate{{}}
-	certRefused := errors.New("remote error: tls: certificate required")
-	cfg := connConfig{username: operatorUser, password: "pw", tls: primary, clientCertFallback: fallback}
-
-	t.Run("retries a refused dial with the fallback TLS config", func(t *testing.T) {
-		var got []vclient.ClientOption
-		stub := &stubClient{}
-		c, release, err := dialValkey(ctx, recordNewClient(&got, stub, certRefused), "10.0.0.1:6379", cfg)
-		require.NoError(t, err)
-		require.Len(t, got, 2)
-		assert.Same(t, primary, got[0].TLSConfig)
-		assert.Same(t, fallback, got[1].TLSConfig, "the retry must dial with the fallback configuration")
-		assert.Same(t, stub, c)
-		release()
-		assert.Equal(t, 1, stub.closed)
-	})
-
-	t.Run("returns the retry's error when the fallback dial also fails", func(t *testing.T) {
-		var got []vclient.ClientOption
-		other := errors.New("dial tcp 10.0.0.1:6379: connect: connection refused")
-		c, release, err := dialValkey(ctx, recordNewClient(&got, &stubClient{}, certRefused, other), "10.0.0.1:6379", cfg)
-		require.ErrorIs(t, err, other)
-		assert.Len(t, got, 2)
-		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
-	})
-
-	t.Run("does not retry when the error is not a refusal", func(t *testing.T) {
-		var got []vclient.ClientOption
-		refused := errors.New("dial tcp 10.0.0.1:6379: connect: connection refused")
-		c, release, err := dialValkey(ctx, recordNewClient(&got, &stubClient{}, refused), "10.0.0.1:6379", cfg)
-		require.ErrorIs(t, err, refused)
-		assert.Len(t, got, 1)
-		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
-	})
-
-	t.Run("does not retry without a fallback config", func(t *testing.T) {
-		var got []vclient.ClientOption
-		noFallback := connConfig{username: operatorUser, password: "pw", tls: primary}
-		c, release, err := dialValkey(ctx, recordNewClient(&got, &stubClient{}, certRefused), "10.0.0.1:6379", noFallback)
-		require.ErrorIs(t, err, certRefused)
-		assert.Len(t, got, 1)
-		assert.Nil(t, c)
-		require.NotNil(t, release)
-		release()
-	})
-}
-
 // rolloutDialClusterSecret returns the TLS secret holding the fixture's CA
 // and server certificate, named for a cluster that reads "vc-tls" in
 // namespace "ns".
@@ -386,6 +224,28 @@ func rolloutDialCluster(clientAuth *valkeyiov1alpha1.TLSClientAuthSpec) *valkeyi
 // live RequireAnyClientCert fixture: in Optional mode the primary dial is
 // refused and the fallback retry completes the handshake; in Required mode
 // the primary presents the certificate and is accepted on the first dial.
+
+// rolloutNewClientScript answers each dial by whether it presents a client
+// certificate: a dial presenting none is refused with certRefused -- the
+// posture of a pod still enforcing clientAuth.mode: Required from before a
+// clientAuth roll -- while a dial presenting the node's server certificate
+// is answered with stub. It records every option it sees.
+func rolloutNewClientScript(got *[]vclient.ClientOption, stub *stubClient, certRefused error) func(vclient.ClientOption) (vclient.Client, error) {
+	return func(opt vclient.ClientOption) (vclient.Client, error) {
+		*got = append(*got, opt)
+		if opt.TLSConfig == nil || len(opt.TLSConfig.Certificates) == 0 {
+			return nil, certRefused
+		}
+		return stub, nil
+	}
+}
+
+// TestForClusterClientAuthRollFallback drives a real provider backed by a
+// real client pool against the live RequireAnyClientCert fixture: in
+// Optional mode the primary dial is refused and the fallback retry
+// completes the handshake; in Required mode the primary presents the
+// certificate and is accepted on the first dial. Both configurations come
+// from a single secret read.
 func TestForClusterClientAuthRollFallback(t *testing.T) {
 	ctx := context.Background()
 
@@ -393,12 +253,12 @@ func TestForClusterClientAuthRollFallback(t *testing.T) {
 		f := newRolloutTLSDialFixture(t)
 		defer f.drainDialTrace(t)
 		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
-		p := &unpooledProvider{client: c, apiReader: c, newClient: vclient.NewClient}
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
 		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
 		require.NoError(t, err)
 		require.NotNil(t, dial)
 
-		_, _, _ = dial(ctx, f.addr)
+		_, _ = dial(ctx, f.addr)
 		select {
 		case <-f.accepted:
 		case <-time.After(3 * time.Second):
@@ -415,12 +275,12 @@ func TestForClusterClientAuthRollFallback(t *testing.T) {
 		f := newRolloutTLSDialFixture(t)
 		defer f.drainDialTrace(t)
 		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
-		p := &unpooledProvider{client: c, apiReader: c, newClient: vclient.NewClient}
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
 		dial, err := p.ForCluster(ctx, rolloutDialCluster(&valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}))
 		require.NoError(t, err)
 		require.NotNil(t, dial)
 
-		_, _, _ = dial(ctx, f.addr)
+		_, _ = dial(ctx, f.addr)
 		select {
 		case <-f.accepted:
 		case <-time.After(3 * time.Second):
@@ -438,17 +298,144 @@ func TestForClusterClientAuthRollFallback(t *testing.T) {
 		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
 		cr := &countingReader{Reader: c}
 		var got []vclient.ClientOption
-		p := &unpooledProvider{client: c, apiReader: cr, newClient: recordNewClient(&got, &stubClient{})}
+		p := NewClientProvider(c, cr, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, errors.New("remote error: tls: certificate required"))))
 		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
 		require.NoError(t, err)
+		assert.Equal(t, 1, cr.secretGets, "primary and fallback must be built from a single secret read")
 		require.NotNil(t, dial)
 
-		_, release, err := dial(ctx, "10.0.0.1:6379")
+		_, err = dial(ctx, "10.0.0.1:6379")
 		require.NoError(t, err)
-		release()
-		assert.Equal(t, 1, cr.secretGets, "primary and fallback must be built from a single secret read")
-		require.Len(t, got, 1)
-		assert.NotNil(t, got[0].TLSConfig)
+		require.NotEmpty(t, got)
+		require.NotNil(t, got[0].TLSConfig)
 		assert.Empty(t, got[0].TLSConfig.Certificates, "Optional-mode primary must present no certificate")
 	})
+}
+
+// TestForClusterTLS12HandshakeFailureFallback pins the TLS 1.2 form of the
+// refusal. The certificate_required alert does not exist in TLS 1.2, so a
+// pod still enforcing clientAuth.mode: Required on a tls-protocols:
+// TLSv1.2 port refuses the primary dial with a generic "handshake failure"
+// instead; the fallback must arm for that spelling too, or a
+// Required-to-Optional roll stalls on every TLS 1.2 cluster.
+func TestForClusterTLS12HandshakeFailureFallback(t *testing.T) {
+	ctx := context.Background()
+	f := newRolloutTLSDialFixture(t, tls.VersionTLS12)
+	defer f.drainDialTrace(t)
+	c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
+	p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient))
+	dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
+	require.NoError(t, err)
+
+	_, _ = dial(ctx, f.addr)
+	select {
+	case <-f.accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fallback dial never completed its handshake")
+	}
+}
+
+// TestForClusterFallbackRetrySemantics pins the retry rules at the pooled
+// provider: only a client-cert refusal retries, only once, and only when a
+// fallback was armed.
+func TestForClusterFallbackRetrySemantics(t *testing.T) {
+	ctx := context.Background()
+	certRefused := errors.New("remote error: tls: certificate required")
+	connRefused := errors.New("dial tcp 10.0.0.1:6379: connect: connection refused")
+
+	t.Run("retries a refused dial with the fallback TLS config", func(t *testing.T) {
+		f := newRolloutTLSDialFixture(t)
+		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
+		var got []vclient.ClientOption
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
+		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
+		require.NoError(t, err)
+
+		cl, err := dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 2, "the refused primary dial must be retried with the fallback")
+		require.NotNil(t, got[0].TLSConfig)
+		assert.Empty(t, got[0].TLSConfig.Certificates, "Optional-mode primary must present no client certificate")
+		require.NotNil(t, got[1].TLSConfig)
+		assert.Len(t, got[1].TLSConfig.Certificates, 1, "the retry must present the node server certificate")
+		require.NotNil(t, cl)
+	})
+
+	t.Run("does not retry when the error is not a client-cert refusal", func(t *testing.T) {
+		f := newRolloutTLSDialFixture(t)
+		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
+		var got []vclient.ClientOption
+		script := func(opt vclient.ClientOption) (vclient.Client, error) {
+			got = append(got, opt)
+			return nil, connRefused
+		}
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, script))
+		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
+		require.NoError(t, err)
+
+		cl, err := dial(ctx, "10.0.0.1:6379")
+		require.ErrorIs(t, err, connRefused)
+		assert.Len(t, got, 1)
+		assert.Nil(t, cl)
+	})
+
+	t.Run("does not retry without a fallback config", func(t *testing.T) {
+		// A secret without cert/key entries cannot arm a fallback, so the
+		// refusal surfaces unchanged.
+		f := newRolloutTLSDialFixture(t)
+		noCert := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "vc-tls", Namespace: "ns"},
+			Data:       map[string][]byte{tlsSecretKeyCA: f.caPEM},
+		}
+		c := providerTestClient(t, operatorPasswordSecret(), noCert)
+		var got []vclient.ClientOption
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
+		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
+		require.NoError(t, err)
+
+		cl, err := dial(ctx, "10.0.0.1:6379")
+		require.ErrorIs(t, err, certRefused)
+		assert.Len(t, got, 1, "without a fallback the refused dial must not be retried")
+		assert.Nil(t, cl)
+	})
+
+	t.Run("reuses the pooled fallback client on later dials", func(t *testing.T) {
+		f := newRolloutTLSDialFixture(t)
+		c := providerTestClient(t, operatorPasswordSecret(), rolloutDialClusterSecret(f))
+		var got []vclient.ClientOption
+		p := NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, rolloutNewClientScript(&got, &stubClient{}, certRefused)))
+		dial, err := p.ForCluster(ctx, rolloutDialCluster(nil))
+		require.NoError(t, err)
+
+		first, err := dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+
+		// The second dial repeats the refused primary handshake -- the pod
+		// has not restarted -- but must reuse the pooled fallback client
+		// instead of dialling one.
+		second, err := dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 3, "only the primary handshake repeats; the fallback client is reused")
+		assert.Same(t, first, second, "later dials must reuse the pooled fallback client")
+		require.NotNil(t, got[2].TLSConfig)
+		assert.Empty(t, got[2].TLSConfig.Certificates)
+	})
+}
+
+// countingReader wraps a client.Reader and counts Secret reads, so the
+// tests can pin how many API-server requests a TLS configuration build
+// issues. The production APIReader is uncached: every extra read is an
+// extra request on the dial path, which the cluster poller repeats
+// every few seconds.
+type countingReader struct {
+	client.Reader
+	secretGets int
+}
+
+func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		r.secretGets++
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }

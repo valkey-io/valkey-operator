@@ -1840,12 +1840,8 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired
 // spec: shard-index >= spec.Shards OR node-index >= 1 + spec.Replicas.
 //
-// A node outside the replica count can still be its shard's live primary
-// (CLUSTER FAILOVER, or an election, moved the role there, gh-459). Deleting
-// it in that state relies on Valkey's SIGTERM hand-off alone; if the pod is
-// SIGKILLed instead, a single-shard cluster has no other primary to vote and
-// the shard stays primary-less until an election is possible. So before
-// deleting such a node, the primary role is failed over to a synced replica
+// A node outside the replica count can still be its shard's live primary,
+// so before deleting it the primary role is failed over to a synced replica
 // the new count keeps, and the deletion is deferred until that completes.
 func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted bool, deferred bool, err error) {
 	log := logf.FromContext(ctx)
@@ -1904,11 +1900,6 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 // scrape) and the caller may delete the ValkeyNode.
 func (r *ValkeyClusterReconciler) failoverExcessPrimary(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, node *valkeyiov1alpha1.ValkeyNode, shardIndex, nodeIndex int) (bool, error) {
 	log := logf.FromContext(ctx)
-	if state == nil {
-		// No live topology: keep the historical behaviour and delete, the
-		// pod's SIGTERM hand-off is the safeguard.
-		return true, nil
-	}
 	if node.Status.PodIP == "" {
 		// No address to look up in the topology; treat it as a leftover CR
 		// whose pod is already gone.
@@ -1939,7 +1930,7 @@ func (r *ValkeyClusterReconciler) failoverExcessPrimary(ctx context.Context, clu
 	if len(kept) == 0 {
 		log.Info("excess ValkeyNode is its shard's primary with no synced replica the new count keeps; deferring deletion",
 			"name", node.Name, "shard", shardIndex, "node", nodeIndex, "shardId", shard.Id)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInDeferred", "ScaleIn",
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ScaleInDeferred", "ScaleIn",
 			"Deferring deletion of %s: it is the primary of shard %d and no kept replica is synced yet", node.Name, shardIndex)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
 			fmt.Sprintf("Scale-in is waiting to fail over shard %d primary %s to a kept replica", shardIndex, node.Name), metav1.ConditionTrue)
@@ -1952,7 +1943,7 @@ func (r *ValkeyClusterReconciler) failoverExcessPrimary(ctx context.Context, clu
 		// Do not delete the primary while the failover has not completed.
 		// Retry on the next reconcile with fresh state, the way a deferred
 		// roll does.
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInDeferred", "ScaleIn",
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ScaleInDeferred", "ScaleIn",
 			"Deferring deletion of %s: failover did not complete: %v", node.Name, err)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
 			fmt.Sprintf("Scale-in is waiting to fail over shard %d primary %s to a kept replica", shardIndex, node.Name), metav1.ConditionTrue)

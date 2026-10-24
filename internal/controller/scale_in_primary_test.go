@@ -34,19 +34,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
-// scaleInFixture builds the gh-459 shape: a three-node shard (node-index 0,
-// 1, 2) in a two-shard cluster where the primary role sits on node-index 2
-// and the replica link states are given per address.
-func scaleInFixture(t *testing.T, replicas int32, linkByAddress map[string]string) (*ValkeyClusterReconciler, *valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
+// scaleInFixture builds a three-node shard (node-index 0, 1, 2) in a
+// two-shard cluster where the primary role sits on node-index 2 and the
+// replica link states are given per address.
+func scaleInFixture(t *testing.T, linkByAddress map[string]string) (*ValkeyClusterReconciler, *valkeyv1.ValkeyCluster, *valkey.ClusterState, *valkeyv1.ValkeyNodeList) {
 	t.Helper()
 
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 2, Replicas: replicas},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 2, Replicas: 1},
 	}
 
 	mk := func(name string, shard, node int, ip string) *valkeyv1.ValkeyNode {
@@ -64,7 +63,7 @@ func scaleInFixture(t *testing.T, replicas int32, linkByAddress map[string]strin
 	n02 := mk("wedge-0-2", 0, 2, "10.0.0.3")
 	n10 := mk("wedge-1-0", 1, 0, "10.0.1.1")
 
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n10}}
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n10}}
 
 	shard0 := &valkey.ShardState{
 		Id:        "shard-0",
@@ -110,7 +109,7 @@ func TestDeleteExcessValkeyNodesDefersPrimaryDeletion(t *testing.T) {
 	failoverCalls, restore := stubFailoverCounter()
 	t.Cleanup(restore)
 
-	r, cluster, state, nodes := scaleInFixture(t, 1, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
 
 	deleted, deferred, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
@@ -154,7 +153,7 @@ func TestDeleteExcessValkeyNodesNoSyncedKeptReplicaDefers(t *testing.T) {
 	failoverCalls, restore := stubFailoverCounter()
 	t.Cleanup(restore)
 
-	r, cluster, state, nodes := scaleInFixture(t, 1, map[string]string{"10.0.0.1": "down", "10.0.0.2": "down"})
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "down", "10.0.0.2": "down"})
 
 	deleted, deferred, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
@@ -165,10 +164,10 @@ func TestDeleteExcessValkeyNodesNoSyncedKeptReplicaDefers(t *testing.T) {
 	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
 	require.NoError(t, err, "the excess primary ValkeyNode is not deleted")
 
-	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing)
 	require.NotNil(t, progressing)
 	assert.Contains(t, progressing.Message, "wedge-0-2")
-	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionReady)
 	require.NotNil(t, ready)
 	assert.NotEqual(t, metav1.ConditionTrue, ready.Status)
 }
@@ -178,7 +177,7 @@ func TestDeleteExcessValkeyNodesReplicaDeletedWithoutFailover(t *testing.T) {
 	failoverCalls, restore := stubFailoverCounter()
 	t.Cleanup(restore)
 
-	r, cluster, state, nodes := scaleInFixture(t, 1, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
 	// Fresh scrape reports the primary at node-index 0.
 	state.Shards[0].PrimaryId = "node-0-0"
 	state.Shards[0].Nodes[0].Flags = []string{"master"}
@@ -204,7 +203,7 @@ func TestDeleteExcessValkeyNodesFailoverErrorDefers(t *testing.T) {
 	}
 	t.Cleanup(func() { proactiveFailoverFn = orig })
 
-	r, cluster, state, nodes := scaleInFixture(t, 1, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
 
 	_, deferred, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.Error(t, err)
@@ -238,7 +237,7 @@ func TestDeleteExcessValkeyNodesHighShardFailoverDoesNotStall(t *testing.T) {
 	n20 := mk("wedge-2-0", 2, 0, "10.0.2.1")
 	n21 := mk("wedge-2-1", 2, 1, "10.0.2.2")
 	n22 := mk("wedge-2-2", 2, 2, "10.0.2.3")
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n20, *n21, *n22}}
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n20, *n21, *n22}}
 
 	shard2 := &valkey.ShardState{
 		Id:        "shard-2",
@@ -323,7 +322,7 @@ func TestDeleteExcessValkeyNodesNeverFailsOverToAnExcessReplica(t *testing.T) {
 	n02 := mk("wedge-0-2", 0, 2, "10.0.0.3")
 	n03 := mk("wedge-0-3", 0, 3, "10.0.0.4")
 	n10 := mk("wedge-1-0", 1, 0, "10.0.1.1")
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n03, *n10}}
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n03, *n10}}
 
 	shard0 := &valkey.ShardState{
 		Id:        "shard-0",

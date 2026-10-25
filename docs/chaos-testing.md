@@ -34,6 +34,7 @@ The `-i` flag ensures the log is fully written even if you Ctrl+C the test.
    - Logs cluster state and per-shard key counts
    - Injects the fault
    - Waits for recovery (Ready state, K8s resources, cluster health, and convergence)
+   - Checks that the operator container has not restarted
    - Verifies data integrity (unless the scenario is expected to lose data)
 5. On failure, collects controller logs, pod states, and CLUSTER NODES output
 
@@ -53,6 +54,7 @@ All configuration is via environment variables:
 | `CHAOS_NODE_TIMEOUT_MAX_MS` | `15000` | Upper bound for the randomized `cluster-node-timeout` (ms) |
 | `CHAOS_WORKLOAD_TYPE` | `StatefulSet` | `StatefulSet` or `Deployment` |
 | `CHAOS_PERSISTENCE` | `false` | Enable persistence (requires StatefulSet) |
+| `CHAOS_AOF` | `true` | With persistence, set `appendonly yes` in `spec.config` |
 | `CHAOS_SCENARIOS` | all except disabled | Comma-separated list of scenarios to run |
 | `CHAOS_SEED` | current time | Random seed for reproducibility |
 | `CHAOS_MODE` | `random` | `random` or `sequential` scenario selection |
@@ -73,8 +75,12 @@ Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, C
 
 | Scenario | Description |
 |----------|-------------|
-| `delete-primary-pod` | Deletes the primary pod of targeted shards |
-| `delete-replica-pod` | Deletes a replica pod of targeted shards |
+| `delete-primary-pod` | Force deletes the primary pod of targeted shards |
+| `delete-replica-pod` | Force deletes a replica pod of targeted shards |
+| `delete-primary-pod-graceful` | Deletes the primary pod of targeted shards with its grace period |
+| `delete-replica-pod-graceful` | Deletes a replica pod of targeted shards with its grace period |
+| `evict-primary-pod` | Evicts the primary pod of targeted shards, one at a time through the PodDisruptionBudget |
+| `evict-replica-pod` | Evicts a replica pod of targeted shards, one at a time through the PodDisruptionBudget |
 | `delete-shard-pods` | Deletes all pods in targeted shards |
 | `delete-primary-workload` | Deletes the primary's Deployment/StatefulSet |
 | `delete-replica-workload` | Deletes a replica's Deployment/StatefulSet |
@@ -86,27 +92,51 @@ Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, C
 | `delete-recreate-cluster` | Deletes and recreates the ValkeyCluster |
 | `delete-controller-pod` | Kills the operator controller pod |
 | `pause-worker-node` | Pauses the Kind worker node hosting the primary (disabled by default) |
+| `stop-worker-node` | Stops (kills) the Kind worker node hosting the primary and leaves it down; pair with `start-worker-node` in a compound (disabled by default) |
+| `start-worker-node` | Restarts the node(s) `stop-worker-node` stopped this iteration (disabled by default) |
 | `network-partition-primary` | Isolates the primary from the cluster (disabled by default) |
 | `network-partition-replica` | Isolates a replica from the cluster (disabled by default) |
+| `partition-worker-node` | Network-isolates the Kind worker node hosting the primary and leaves it cut off; pair with `heal-worker-node` in a compound (disabled by default) |
+| `heal-worker-node` | Heals the node(s) `partition-worker-node` isolated this iteration (disabled by default) |
 | `crash-primary` | Crashes the primary's server process (DEBUG SEGFAULT) (disabled by default) |
 | `crash-replica` | Crashes a replica's server process (DEBUG SEGFAULT) (disabled by default) |
 | `scale-shards+scale-shards` | Scales shards, then scales them again while the first change is in progress |
 | `scale-replicas+delete-primary-pod` | Scales replicas, then deletes the primary pod of targeted shards |
+| `scale-shards+delete-controller-pod` | Scales shards, then kills the operator controller pod while the change is in progress |
+| `scale-replicas+evict-primary-pod` | Scales replicas, then evicts the primary pod of targeted shards while new replicas sync |
 
 Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 
 Scenarios marked "disabled by default" are excluded unless explicitly listed in `CHAOS_SCENARIOS`.
 They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testing.
 
+`stop-worker-node` and `start-worker-node` are a pair: `stop-worker-node` leaves the node
+down so other scenarios run while it is gone, and `start-worker-node` restarts it. Use
+them as the ends of a compound, e.g.
+`stop-worker-node+scale-shards+delete-primary-pod+start-worker-node`. Run on its own,
+`stop-worker-node` leaves the node down and the iteration's recovery check fails.
+
+`partition-worker-node` and `heal-worker-node` are the same kind of pair for a network
+partition instead of a stop. The difference is what the node does while out: a stopped
+node reboots (new pod IPs, cold reload), a partitioned node keeps running and the same
+instance rejoins on heal. Both leave the node faulted until the paired step and fail the
+recovery check if run without their partner.
+
+All worker node faults skip the nodes hosting the controller-manager and the background
+writer, since losing either fails the operator restart or writer check. The writer is
+started on the controller-manager's node so that normally only one node is skipped.
+
 ### Fault Cleanup
 
 Each scenario reverts its own fault, rolling back the targets it already faulted if
-injection fails partway through.
+injection fails partway through. The exceptions are `stop-worker-node` and
+`partition-worker-node`, whose paired `start-worker-node` and `heal-worker-node` do the
+revert.
 
-Worker node faults (network partitions, node pauses, CPU throttling) are reverted in
-`AfterSuite` as well, since worker nodes are docker containers that outlive the suite
-and would carry the fault into the next run. Pod faults (container pauses) need no
-such cleanup: teardown deletes the ValkeyCluster and its pods go with it.
+Worker node faults (stopped nodes, network partitions, node pauses, CPU throttling) are
+reverted in `AfterSuite` as well, since worker nodes are docker containers that outlive
+the suite and would carry the fault into the next run. Pod faults (container pauses) need
+no such cleanup: teardown deletes the ValkeyCluster and its pods go with it.
 
 A run that fails or is interrupted deliberately keeps the Kind cluster for
 troubleshooting. Remove it with `kind delete cluster --name valkey-operator-test-chaos`.
@@ -207,6 +237,14 @@ CHAOS_CPU_PRESSURE=true make test-chaos
 # Test network partitions with pod evictions
 CHAOS_SCENARIOS=network-partition-primary,pause-worker-node \
   CHAOS_TOLERATION_SECONDS=10 make test-chaos
+
+# Run scenarios while a worker node is down (true node loss, then recovery)
+CHAOS_SCENARIOS=stop-worker-node+scale-shards+delete-primary-pod+start-worker-node \
+  CHAOS_TOLERATION_SECONDS=10 KIND_WORKERS=4 make test-chaos
+
+# Run scenarios while a worker node is network-partitioned, then heal it
+CHAOS_SCENARIOS=partition-worker-node+scale-shards+delete-primary-pod+heal-worker-node \
+  CHAOS_TOLERATION_SECONDS=10 KIND_WORKERS=4 make test-chaos
 
 # Large cluster with more workers
 CHAOS_SHARDS=7 CHAOS_REPLICAS=2 KIND_WORKERS=3 make test-chaos

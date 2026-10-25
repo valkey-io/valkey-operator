@@ -20,9 +20,12 @@ limitations under the License.
 package chaos
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,11 +34,80 @@ import (
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
-// DeletePod deletes a pod by name in the given namespace.
+// DeletePod deletes a pod by name in the given namespace. A pod that is already
+// gone counts as deleted.
 func deletePodByName(name, namespace string) error {
-	cmd := exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--grace-period=0", "--force")
+	cmd := exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--grace-period=0", "--force",
+		"--ignore-not-found")
 	_, err := utils.Run(cmd)
 	return err
+}
+
+// deletePodsGracefully deletes the pods with their termination grace period, so
+// the servers get SIGTERM, and waits until the pods are gone.
+func deletePodsGracefully(names []string, namespace string) error {
+	args := append([]string{"delete", "pod", "-n", namespace, "--ignore-not-found"}, names...)
+	_, err := utils.Run(exec.Command("kubectl", args...))
+	return err
+}
+
+// errEvictionBlocked means a PodDisruptionBudget does not allow the eviction yet.
+var errEvictionBlocked = errors.New("eviction blocked by a PodDisruptionBudget")
+
+// evictPod creates an Eviction for the pod, which deletes it with its grace
+// period unless a PodDisruptionBudget refuses it (HTTP 429). A pod that is
+// already gone counts as evicted.
+func evictPod(name, namespace string) error {
+	body := fmt.Sprintf(`{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":%q,"namespace":%q}}`,
+		name, namespace)
+	cmd := exec.Command("kubectl", "create", "--raw",
+		fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/eviction", namespace, name), "-f", "-")
+	cmd.Stdin = strings.NewReader(body)
+	_, err := utils.Run(cmd)
+	switch {
+	case err == nil:
+		return nil
+	case strings.Contains(err.Error(), "TooManyRequests"):
+		return errEvictionBlocked
+	case strings.Contains(err.Error(), "NotFound"):
+		return nil
+	}
+	return err
+}
+
+// getPodUID returns the UID of the named pod, or "" when it does not exist.
+func getPodUID(name, namespace string) (string, error) {
+	return utils.Run(exec.Command("kubectl", "get", "pod", name, "-n", namespace,
+		"--ignore-not-found", "-o", "jsonpath={.metadata.uid}"))
+}
+
+// controllerRestarts returns the restart count of the manager container of
+// each operator pod, by pod name.
+func controllerRestarts() (map[string]int, error) {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"-l", "control-plane=controller-manager", "-o", "jsonpath={range .items[*]}{.metadata.name}{\" \"}"+
+			`{.status.containerStatuses[?(@.name=="manager")].restartCount}{"\n"}{end}`))
+	if err != nil {
+		return nil, err
+	}
+	restarts := map[string]int{}
+	for _, line := range utils.GetNonEmptyLines(out) {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue // the container has no status yet
+		}
+		n, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("parsing restart count %q: %w", line, err)
+		}
+		restarts[fields[0]] = n
+	}
+	return restarts, nil
+}
+
+// getPreviousManagerLogs returns the logs of the manager container's previous run.
+func getPreviousManagerLogs(pod string) (string, error) {
+	return utils.Run(exec.Command("kubectl", "logs", pod, "-n", namespace, "-c", "manager", "--previous"))
 }
 
 // crashServer terminates the valkey-server process abnormally via DEBUG
@@ -96,25 +168,64 @@ func getPodNameByLabels(namespace string, labels map[string]string) (string, err
 	selector := labelsToSelector(labels)
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
 		"-l", selector,
-		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}`)
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{" "}{.spec.nodeName}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return "", err
 	}
-	var fallback string
+	// Prefer a ready pod on a Ready node: a pod on a stopped or partitioned node
+	// stays ready in the API but kubectl exec into it fails. Fall back to any ready
+	// pod, then any.
+	ready := readyNodeSet()
+	var readyPodFallback, anyFallback string
 	for _, line := range strings.Split(output, "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), " ", 2)
-		if len(parts) == 2 && parts[1] == "true" {
-			return parts[0], nil
+		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
+		if len(parts) < 1 || parts[0] == "" {
+			continue
 		}
-		if fallback == "" {
-			fallback = parts[0]
+		name := parts[0]
+		podReady := len(parts) >= 2 && parts[1] == "true"
+		node := ""
+		if len(parts) >= 3 {
+			node = parts[2]
+		}
+		if podReady && ready[node] {
+			return name, nil
+		}
+		if podReady && readyPodFallback == "" {
+			readyPodFallback = name
+		}
+		if anyFallback == "" {
+			anyFallback = name
 		}
 	}
-	if fallback != "" {
-		return fallback, nil
+	if readyPodFallback != "" {
+		return readyPodFallback, nil
+	}
+	if anyFallback != "" {
+		return anyFallback, nil
 	}
 	return "", fmt.Errorf("no pods found with labels %v", labels)
+}
+
+// readyNodeSet returns the set of node names whose Ready condition is True.
+// On query failure it returns nil, so callers treat no node as known-ready and
+// fall back to their next preference.
+func readyNodeSet() map[string]bool {
+	cmd := exec.Command("kubectl", "get", "nodes",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil
+	}
+	ready := map[string]bool{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == "True" {
+			ready[parts[0]] = true
+		}
+	}
+	return ready
 }
 
 // deleteWorkload deletes a StatefulSet or Deployment by name.
@@ -237,23 +348,31 @@ func getWorkloadForPod(podName, namespace, workloadType string) (string, error) 
 	return strings.TrimSpace(output), nil
 }
 
-// verifyClusterHealth checks that all pods report cluster_state:ok,
-// the topology has no stale nodes, correct node count, and no shard merges.
+// verifyClusterHealth checks that all pods report cluster_state:ok, the
+// topology has no stale nodes, correct node count, and no shard merges, and
+// that all nodes agree on every node's address and every slot's owner.
 func verifyClusterHealth(clusterName, namespace string, shards, replicas int) error {
 	expectedNodes := shards * (1 + replicas)
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
 		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
-		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.status.podIP}{\"\\n\"}{end}")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return err
 	}
 
-	pods := utils.GetNonEmptyLines(output)
+	var pods []string
+	podIPs := map[string]bool{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		name, ip, _ := strings.Cut(line, " ")
+		pods = append(pods, name)
+		podIPs[ip] = true
+	}
 	if len(pods) != expectedNodes {
 		return fmt.Errorf("expected %d pods, got %d", expectedNodes, len(pods))
 	}
 
+	views := map[string]string{}
 	for _, pod := range pods {
 		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
 			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER INFO")
@@ -276,6 +395,71 @@ func verifyClusterHealth(clusterName, namespace string, shards, replicas int) er
 		}
 		if err := verifyClusterNodesOutput(nodes, shards, replicas, pod); err != nil {
 			return err
+		}
+		views[pod] = nodes
+	}
+	return verifyClusterNodesAgree(views, podIPs)
+}
+
+// verifyClusterNodesAgree checks that the CLUSTER NODES outputs of all pods list
+// every node ID at the same address, that the address is a running pod's IP,
+// and that they agree on every slot's owner. A recreated pod with persistence
+// keeps its node ID but gets a new IP, which peers learn by gossip, so right
+// after recovery a node can still route clients to an address that is gone.
+func verifyClusterNodesAgree(views map[string]string, podIPs map[string]bool) error {
+	addrs := map[string]string{}    // node ID -> host
+	addrFrom := map[string]string{} // node ID -> pod whose view set addrs
+	var owners [16384]string
+	var ownersFrom string
+	for _, pod := range slices.Sorted(maps.Keys(views)) {
+		var viewOwners [16384]string
+		for _, line := range utils.GetNonEmptyLines(views[pod]) {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			id := fields[0]
+			hostPort, _, _ := strings.Cut(fields[1], "@")
+			host := hostPort
+			if i := strings.LastIndex(hostPort, ":"); i >= 0 {
+				host = hostPort[:i]
+			}
+			if !podIPs[host] {
+				return fmt.Errorf("[%s] node %s is at %s, which is no running pod's IP", pod, id, host)
+			}
+			if prev, ok := addrs[id]; !ok {
+				addrs[id], addrFrom[id] = host, pod
+			} else if prev != host {
+				return fmt.Errorf("node %s is at %s according to %s but at %s according to %s",
+					id, prev, addrFrom[id], host, pod)
+			}
+			for _, r := range fields[8:] {
+				if strings.HasPrefix(r, "[") {
+					continue // a slot being imported or migrated
+				}
+				lo, hi, found := strings.Cut(r, "-")
+				if !found {
+					hi = lo
+				}
+				start, err1 := strconv.Atoi(lo)
+				end, err2 := strconv.Atoi(hi)
+				if err1 != nil || err2 != nil || start < 0 || end >= len(viewOwners) {
+					return fmt.Errorf("[%s] cannot parse slot range %q", pod, r)
+				}
+				for s := start; s <= end; s++ {
+					viewOwners[s] = id
+				}
+			}
+		}
+		if ownersFrom == "" {
+			owners, ownersFrom = viewOwners, pod
+			continue
+		}
+		for s := range owners {
+			if owners[s] != viewOwners[s] {
+				return fmt.Errorf("slot %d is owned by %q according to %s but by %q according to %s",
+					s, owners[s], ownersFrom, viewOwners[s], pod)
+			}
 		}
 	}
 	return nil
@@ -606,6 +790,30 @@ func unpauseWorkerNode(worker string) error {
 	}
 }
 
+// startNodeContainer starts a stopped worker node. Already-running nodes are
+// skipped, so it is safe on a node that was never stopped.
+func startNodeContainer(worker string) error {
+	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Running}}", worker))
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker node %s: %w", worker, err)
+	}
+	if strings.TrimSpace(out) == "true" {
+		return nil
+	}
+	// Retry and confirm: a stopped worker would carry over to later runs.
+	for attempt := 1; ; attempt++ {
+		_, startErr := utils.Run(exec.Command("docker", "start", worker))
+		out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Running}}", worker))
+		if err == nil && strings.TrimSpace(out) == "true" {
+			return nil
+		}
+		if attempt == 3 {
+			return fmt.Errorf("worker node %s is still stopped after %d start attempts: %v", worker, attempt, startErr)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 // pauseContainer pauses the valkey container in a pod using ctr on the Kind node.
 func pauseContainer(podName, namespace string) error {
 	containerID, err := getContainerID(podName, namespace)
@@ -763,6 +971,11 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 		"--env=DATA_SIZE="+strconv.Itoa(dataSize),
 		"--env=RPS="+strconv.Itoa(rps),
 	)
+	// Run on the operator's node, which node faults already skip, so the writer
+	// costs no extra fault coverage.
+	if node := getControllerNodeName(); node != "" {
+		cmd.Args = append(cmd.Args, fmt.Sprintf(`--overrides={"apiVersion":"v1","spec":{"nodeName":%q}}`, node))
+	}
 	if _, err := utils.Run(cmd); err != nil {
 		return 0, err
 	}
@@ -809,6 +1022,46 @@ func stopBackgroundClient(namespace string) {
 	cmd = exec.Command("kubectl", "delete", "pod", backgroundClientPod,
 		"-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
 	_, _ = utils.Run(cmd)
+}
+
+// getBackgroundClientNodeName returns the node hosting the background writer, or
+// "" when it does not exist.
+func getBackgroundClientNodeName(namespace string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "-o", "jsonpath={.spec.nodeName}"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// backgroundClientWrites returns the client pod's phase and its latest cumulative
+// writes count (last "writes=N" log line). found is false when no stats line has
+// been logged yet (e.g. just after seeding), so the caller can retry rather than
+// read that as zero writes. A pod that is gone returns "" and an error.
+func backgroundClientWrites(namespace string) (phase string, writes int64, found bool, err error) {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "-o", "jsonpath={.status.phase}"))
+	if err != nil {
+		return "", 0, false, err
+	}
+	phase = strings.TrimSpace(out)
+	if phase == "" {
+		return "", 0, false, fmt.Errorf("background client pod %s not found", backgroundClientPod)
+	}
+	logs, err := utils.Run(exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=5"))
+	if err != nil {
+		return phase, 0, false, err
+	}
+	// Newest "writes=N" line wins; a tail without one leaves found false.
+	for _, line := range strings.Split(logs, "\n") {
+		if idx := strings.Index(line, "writes="); idx >= 0 {
+			if n, _ := fmt.Sscanf(line[idx:], "writes=%d", &writes); n == 1 {
+				found = true
+			}
+		}
+	}
+	return phase, writes, found, nil
 }
 
 // verifyClusterConverged checks that all ValkeyNodes have converged: no node is

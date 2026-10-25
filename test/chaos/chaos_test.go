@@ -23,6 +23,7 @@ package chaos
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -57,6 +58,10 @@ type ChaosContext struct {
 	TolerationSec    int
 	CompoundMaxDelay time.Duration
 	Rand             *rand.Rand
+	// StoppedNodes holds nodes stop-worker-node stopped, for start-worker-node to restart.
+	StoppedNodes []string
+	// PartitionedNodes holds nodes partition-worker-node isolated, for heal-worker-node to heal.
+	PartitionedNodes []string
 }
 
 // Scenario defines a named chaos scenario.
@@ -95,6 +100,10 @@ func (s Scenario) losesData(lowestReplicas int) bool {
 var allScenarios = []Scenario{
 	{Name: "delete-primary-pod", LosesDataIfNoReplica: true, Inject: deletePrimaryPod},
 	{Name: "delete-replica-pod", DestroysReplicas: true, Inject: deleteReplicaPod},
+	{Name: "delete-primary-pod-graceful", LosesDataIfNoReplica: true, Inject: deletePrimaryPodGraceful},
+	{Name: "delete-replica-pod-graceful", DestroysReplicas: true, Inject: deleteReplicaPodGraceful},
+	{Name: "evict-primary-pod", LosesDataIfNoReplica: true, Inject: evictPrimaryPod},
+	{Name: "evict-replica-pod", DestroysReplicas: true, Inject: evictReplicaPod},
 	{Name: "delete-shard-pods", LosesData: true, DestroysReplicas: true, Inject: deleteShardPods},
 	{Name: "delete-primary-workload", LosesDataIfNoReplica: true, Inject: deletePrimaryWorkload},
 	{Name: "delete-replica-workload", DestroysReplicas: true, Inject: deleteReplicaWorkload},
@@ -110,6 +119,10 @@ var allScenarios = []Scenario{
 	{Name: "network-partition-replica", DisabledByDefault: true, Inject: networkPartitionReplica},
 	{Name: "crash-primary", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: crashPrimary},
 	{Name: "crash-replica", DisabledByDefault: true, DestroysReplicas: true, Inject: crashReplica},
+	{Name: "stop-worker-node", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: stopWorkerNode},
+	{Name: "start-worker-node", DisabledByDefault: true, IgnoresTargets: true, Inject: startWorkerNode},
+	{Name: "partition-worker-node", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: partitionNode},
+	{Name: "heal-worker-node", DisabledByDefault: true, IgnoresTargets: true, Inject: healNode},
 }
 
 // defaultCompounds are the compound scenarios run, alongside the single ones,
@@ -119,7 +132,11 @@ var defaultCompounds = []struct {
 	maxDelay time.Duration
 }{
 	{name: "scale-shards+scale-shards", maxDelay: 2 * time.Minute},
+	{name: "scale-shards+delete-controller-pod", maxDelay: 2 * time.Minute},
 	{name: "scale-replicas+delete-primary-pod"},
+	{name: "scale-replicas+evict-primary-pod"},
+	// Enable once deleting a primary mid-shard-scale no longer loses data.
+	// {name: "scale-shards+delete-primary-pod"},
 }
 
 // defaultCompoundDelay is the longest random delay between compound steps.
@@ -130,6 +147,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		clusterName     = "chaos-test-cluster"
 		workloadType    string
 		persistence     bool
+		aof             bool
 		shards          int
 		minShards       int
 		maxShards       int
@@ -138,6 +156,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		numKeys         int
 		dataSize        int
 		seededKeys      int
+		lastWrites      int64
 		recoveryTimeout time.Duration
 		tolerationSec   int
 		targetShards    string
@@ -161,6 +180,7 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		// Parse configuration from environment
 		workloadType = envOneOf("CHAOS_WORKLOAD_TYPE", "StatefulSet", []string{"StatefulSet", "Deployment"})
 		persistence = envBool("CHAOS_PERSISTENCE", false)
+		aof = persistence && envBool("CHAOS_AOF", true)
 		shards = envIntOrDefault("CHAOS_SHARDS", 3, 1 /* min */)
 		minShards = envIntOrDefault("CHAOS_MIN_SHARDS", shards, 1 /* min */)
 		maxShards = envIntOrDefault("CHAOS_MAX_SHARDS", shards+3, minShards /* min */)
@@ -207,9 +227,10 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		// Log configuration
 		_, _ = fmt.Fprintf(GinkgoWriter, "=== Chaos Test Configuration ===\n")
 		_, _ = fmt.Fprintf(GinkgoWriter, "  WorkloadType:     %s\n", workloadType)
-		_, _ = fmt.Fprintf(GinkgoWriter, "  Persistence:      %v\n", persistence)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Shards:           %d (min=%d, max=%d)\n", shards, minShards, maxShards)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Replicas:         %d (max=%d)\n", replicas, maxReplicas)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Persistence:      %v\n", persistence)
+		_, _ = fmt.Fprintf(GinkgoWriter, "  AOF:              %v\n", aof)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  NumKeys:          %d\n", numKeys)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  DataSize:         %d\n", dataSize)
 		_, _ = fmt.Fprintf(GinkgoWriter, "  TargetShards:     %s\n", targetShards)
@@ -264,6 +285,9 @@ spec:
     enable-debug-command: local
     cluster-node-timeout: "%d"
 `, clusterName, shards, replicas, workloadType, nodeTimeoutMs)
+		if aof {
+			manifest += "    appendonly: \"yes\"\n"
+		}
 
 		if tolerationSec > 0 {
 			manifest += fmt.Sprintf(`  scheduling:
@@ -303,6 +327,7 @@ spec:
 			err = verifyClusterHealth(clusterName, "default", shards, replicas)
 			g.Expect(err).NotTo(HaveOccurred())
 		}, recoveryTimeout, 5*time.Second).Should(Succeed())
+		expectNoControllerRestarts("while the cluster was created")
 
 		By("seeding test data")
 		seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
@@ -359,6 +384,7 @@ spec:
 
 			// Controller logs and K8s events
 			utils.CollectDebugInfo(namespace)
+			logPreviousControllerLogs()
 		}
 	})
 
@@ -367,6 +393,21 @@ spec:
 		By("cleaning up chaos cluster")
 		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "-n", "default", "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
+
+		// With persistence, ValkeyNodes carry a finalizer that only the operator
+		// removes. Wait for them while it runs, or undeploy hangs on the CRD.
+		selector := "valkey.io/cluster=" + clusterName
+		cmd = exec.Command("kubectl", "wait", "--for=delete", "valkeynodes", "-l", selector,
+			"-n", "default", "--timeout=2m")
+		_, _ = utils.Run(cmd)
+		cmd = exec.Command("kubectl", "get", "valkeynodes", "-l", selector, "-n", "default", "-o", "name")
+		out, _ := utils.Run(cmd)
+		for _, node := range utils.GetNonEmptyLines(out) {
+			_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: %s still exists, removing its finalizers\n", node)
+			cmd = exec.Command("kubectl", "patch", node, "-n", "default", "--type=merge",
+				"-p", `{"metadata":{"finalizers":null}}`)
+			_, _ = utils.Run(cmd)
+		}
 	})
 
 	It("runs fault injection until failure", func() {
@@ -530,6 +571,26 @@ spec:
 
 			// Log cluster state after recovery
 			logClusterState(clusterName, "default", "after")
+			expectNoControllerRestarts(fmt.Sprintf("in iteration %d", iteration))
+
+			// A --restart=Never writer evicted by a long fault is not replaced, and
+			// the seeded data still verifies, so the iteration would PASS with no
+			// write traffic. Require the writer alive and still advancing writes.
+			if writeRPS > 0 {
+				By(fmt.Sprintf("Iteration %d: verifying background writer still writing", iteration))
+				var writes int64
+				Eventually(func(g Gomega) {
+					var phase string
+					var found bool
+					var err error
+					phase, writes, found, err = backgroundClientWrites("default")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(phase).To(Equal("Running"), "writer pod is %s", phase)
+					g.Expect(found).To(BeTrue(), "writer logged no stats line yet")
+					g.Expect(writes).To(BeNumerically(">", lastWrites), "writer made no progress (writes=%d)", writes)
+				}, 30*time.Second, 2*time.Second).Should(Succeed(), "background writer stopped in iteration %d", iteration)
+				lastWrites = writes
+			}
 
 			if !scenario.losesData(ctx.LowestReplicas) {
 				By(fmt.Sprintf("Iteration %d: verifying test data integrity", iteration))
@@ -543,10 +604,13 @@ spec:
 					_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: data lost (expected): %s\n", err)
 				}
 				By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
-				err := flushAll(clusterName, "default")
-				Expect(err).NotTo(HaveOccurred(), "Failed to flush data")
+				Eventually(func() error {
+					return flushAll(clusterName, "default")
+				}, 60*time.Second, 2*time.Second).Should(Succeed(), "Failed to flush data")
+				var err error
 				seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
 				Expect(err).NotTo(HaveOccurred(), "Failed to re-seed test data")
+				lastWrites = 0 // a fresh client restarts its writes counter at 0
 				_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 			}
 
@@ -596,6 +660,100 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 		if err := deletePodByName(pod, ctx.Namespace); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// deletePrimaryPodGraceful deletes the primary pod of every targeted shard with
+// its grace period, as kubectl delete pod does by default.
+func deletePrimaryPodGraceful(ctx *ChaosContext) error {
+	var pods []string
+	for _, shard := range ctx.TargetShards {
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Gracefully deleting primary pod: %s\n", pod)
+		pods = append(pods, pod)
+	}
+	return deletePodsGracefully(pods, ctx.Namespace)
+}
+
+// deleteReplicaPodGraceful deletes one replica pod of every targeted shard with
+// its grace period, as kubectl delete pod does by default.
+func deleteReplicaPodGraceful(ctx *ChaosContext) error {
+	if ctx.Replicas == 0 {
+		return fmt.Errorf("skip: no replicas configured")
+	}
+	var pods []string
+	for _, shard := range ctx.TargetShards {
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		if err != nil {
+			return fmt.Errorf("skip: deleting replica pod for shard %d: %w", shard, err)
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Gracefully deleting replica pod: %s\n", pod)
+		pods = append(pods, pod)
+	}
+	return deletePodsGracefully(pods, ctx.Namespace)
+}
+
+// evictPrimaryPod evicts the primary pod of every targeted shard.
+func evictPrimaryPod(ctx *ChaosContext) error {
+	var pods []string
+	for _, shard := range ctx.TargetShards {
+		pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, shard)
+		if err != nil {
+			return err
+		}
+		pods = append(pods, pod)
+	}
+	return evictPods(pods, ctx.Namespace)
+}
+
+// evictReplicaPod evicts one replica pod of every targeted shard.
+func evictReplicaPod(ctx *ChaosContext) error {
+	if ctx.Replicas == 0 {
+		return fmt.Errorf("skip: no replicas configured")
+	}
+	var pods []string
+	for _, shard := range ctx.TargetShards {
+		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
+		if err != nil {
+			return fmt.Errorf("skip: evicting replica pod for shard %d: %w", shard, err)
+		}
+		pods = append(pods, pod)
+	}
+	return evictPods(pods, ctx.Namespace)
+}
+
+// evictPods evicts the pods one at a time, as kubectl drain does, waiting for
+// each to be gone. An eviction the PodDisruptionBudget refuses is retried, and
+// the pod is left running if it is still refused after two minutes.
+func evictPods(pods []string, namespace string) error {
+	for _, pod := range pods {
+		uid, err := getPodUID(pod, namespace)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Evicting pod: %s\n", pod)
+		deadline := time.Now().Add(2 * time.Minute)
+		for err = evictPod(pod, namespace); errors.Is(err, errEvictionBlocked); err = evictPod(pod, namespace) {
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(5 * time.Second)
+		}
+		if errors.Is(err, errEvictionBlocked) {
+			_, _ = fmt.Fprintf(GinkgoWriter, "    eviction of %s still blocked by the PodDisruptionBudget, leaving it\n", pod)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		// The StatefulSet recreates the pod under the same name, so wait for the UID to change.
+		Eventually(func() (string, error) {
+			return getPodUID(pod, namespace)
+		}, 2*time.Minute, time.Second).ShouldNot(Equal(uid), "evicted pod %s was not deleted", pod)
 	}
 	return nil
 }
@@ -755,9 +913,16 @@ func networkPartitionPrimary(ctx *ChaosContext) error {
 		if slices.Contains(nodes, nodeName) {
 			continue
 		}
+		if isProtectedNode(nodeName, ctx.Namespace) {
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"  Skipping node %s (shard %d): hosts the controller-manager or background writer\n", nodeName, shard)
+			continue
+		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Will partition node %s (primary pod: %s, shard %d)\n", nodeName, pod, shard)
-		logIfControllerNode(nodeName)
 		nodes = append(nodes, nodeName)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("skip: all targeted primaries are on the controller-manager or background writer node")
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	var partitioned []string
@@ -799,9 +964,16 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 		if slices.Contains(nodes, nodeName) {
 			continue
 		}
+		if isProtectedNode(nodeName, ctx.Namespace) {
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"  Skipping node %s (shard %d): hosts the controller-manager or background writer\n", nodeName, shard)
+			continue
+		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Will partition node %s (replica pod: %s, shard %d)\n", nodeName, pod, shard)
-		logIfControllerNode(nodeName)
 		nodes = append(nodes, nodeName)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("skip: all targeted replicas are on the controller-manager or background writer node")
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning %d node(s) for %s\n", len(nodes), duration.Truncate(time.Millisecond))
 	var partitioned []string
@@ -904,9 +1076,16 @@ func pauseWorkerNode(ctx *ChaosContext) error {
 		if slices.Contains(nodes, nodeName) {
 			continue
 		}
+		if isProtectedNode(nodeName, ctx.Namespace) {
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"  Skipping node %s (shard %d): hosts the controller-manager or background writer\n", nodeName, shard)
+			continue
+		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Will pause Kind node %s (primary pod: %s, shard %d)\n", nodeName, pod, shard)
-		logIfControllerNode(nodeName)
 		nodes = append(nodes, nodeName)
+	}
+	if len(nodes) == 0 {
+		return fmt.Errorf("skip: all targeted primaries are on the controller-manager or background writer node")
 	}
 	_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing %d node(s) for %s\n", len(nodes), duration.Truncate(time.Second))
 	var paused []string
@@ -933,6 +1112,105 @@ func unpauseWorkerNodes(workers []string) error {
 		}
 	}
 	return firstErr
+}
+
+// stopWorkerNode stops one Kind node (hosting the first targeted shard's primary)
+// and records it on ctx.StoppedNodes without restarting it; start-worker-node does
+// that. Pair them as the ends of a compound, e.g.
+// stop-worker-node+scale-shards+start-worker-node, to run scenarios while a node is
+// down. Only one node is stopped, to keep quorum. Unlike pause (a transient stall,
+// same instance resumes), a stop reboots the node: containers get new IPs and Valkey
+// reloads cold. Alone it leaves the node down and the recovery check fails.
+func stopWorkerNode(ctx *ChaosContext) error {
+	pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, ctx.TargetShards[0])
+	if err != nil {
+		return err
+	}
+	nodeName, err := getPodNodeName(pod, ctx.Namespace)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(ctx.StoppedNodes, nodeName) {
+		return fmt.Errorf("skip: node %s already stopped", nodeName)
+	}
+	// Stopping the operator's or writer's node fails the restart or writer check.
+	if isProtectedNode(nodeName, ctx.Namespace) {
+		return fmt.Errorf("skip: node %s hosts the controller-manager or background writer", nodeName)
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "  Stopping Kind node %s (primary pod: %s, shard %d)\n", nodeName, pod, ctx.TargetShards[0])
+	// -t 0: kill at once so the kubelet stops heartbeating immediately.
+	if _, err := utils.Run(exec.Command("docker", "stop", "-t", "0", nodeName)); err != nil {
+		return err
+	}
+	ctx.StoppedNodes = append(ctx.StoppedNodes, nodeName)
+	return nil
+}
+
+// startWorkerNode restarts the nodes stop-worker-node stopped (ctx.StoppedNodes)
+// and clears the list. No-op when no node is stopped.
+func startWorkerNode(ctx *ChaosContext) error {
+	if len(ctx.StoppedNodes) == 0 {
+		return fmt.Errorf("skip: no stopped worker node to start")
+	}
+	err := startWorkerNodes(ctx.StoppedNodes)
+	ctx.StoppedNodes = nil
+	return err
+}
+
+// startWorkerNodes starts every given worker node, continuing past failures so
+// one error cannot leave the rest stopped. Returns the first error.
+func startWorkerNodes(workers []string) error {
+	var firstErr error
+	for _, worker := range workers {
+		_, _ = fmt.Fprintf(GinkgoWriter, "  Starting Kind node %s\n", worker)
+		if err := startNodeContainer(worker); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// partitionNode network-isolates one Kind node (hosting the first targeted
+// shard's primary) and records it on ctx.PartitionedNodes without healing it;
+// heal-worker-node does that. Pair them as the ends of a compound, e.g.
+// partition-worker-node+scale-shards+heal-worker-node, to run scenarios while a
+// node is cut off. Unlike stop, the node and its server keep running: the same
+// instance rejoins on heal, demoting itself if its slots were failed over. Skips
+// the controller and writer nodes. Alone it leaves the node partitioned and the
+// recovery check fails.
+func partitionNode(ctx *ChaosContext) error {
+	pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, ctx.TargetShards[0])
+	if err != nil {
+		return err
+	}
+	nodeName, err := getPodNodeName(pod, ctx.Namespace)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(ctx.PartitionedNodes, nodeName) {
+		return fmt.Errorf("skip: node %s already partitioned", nodeName)
+	}
+	if isProtectedNode(nodeName, ctx.Namespace) {
+		return fmt.Errorf("skip: node %s hosts the controller-manager or background writer", nodeName)
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "  Partitioning Kind node %s (primary pod: %s, shard %d)\n", nodeName, pod, ctx.TargetShards[0])
+	if err := partitionWorkerNode(nodeName); err != nil {
+		_ = healWorkerNode(nodeName)
+		return err
+	}
+	ctx.PartitionedNodes = append(ctx.PartitionedNodes, nodeName)
+	return nil
+}
+
+// healNode heals the nodes partition-worker-node isolated (ctx.PartitionedNodes)
+// and clears the list. No-op when no node is partitioned.
+func healNode(ctx *ChaosContext) error {
+	if len(ctx.PartitionedNodes) == 0 {
+		return fmt.Errorf("skip: no partitioned worker node to heal")
+	}
+	err := healWorkerNodes(ctx.PartitionedNodes)
+	ctx.PartitionedNodes = nil
+	return err
 }
 
 // scaleShards patches spec.shards to a new count within the configured range.
@@ -1098,6 +1376,34 @@ func deleteControllerPod(_ *ChaosContext) error {
 
 //----------------------------------------------------------
 
+// expectNoControllerRestarts fails when an operator manager container has
+// restarted. A replaced operator pod starts again from zero, so
+// delete-controller-pod does not count.
+func expectNoControllerRestarts(when string) {
+	restarts, err := controllerRestarts()
+	Expect(err).NotTo(HaveOccurred(), "Failed to get the operator restart count")
+	for pod, n := range restarts {
+		Expect(n).To(BeZero(), "operator container in pod %s restarted %s", pod, when)
+	}
+}
+
+// logPreviousControllerLogs logs the previous run of every operator container
+// that has restarted.
+func logPreviousControllerLogs() {
+	restarts, err := controllerRestarts()
+	if err != nil {
+		return
+	}
+	for pod, n := range restarts {
+		if n == 0 {
+			continue
+		}
+		if logs, err := getPreviousManagerLogs(pod); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Previous controller logs of %s (%d restarts):\n%s\n", pod, n, logs)
+		}
+	}
+}
+
 // logClusterState logs pod placement and CLUSTER NODES with a label (e.g. "before" or "after").
 func logClusterState(clusterName, namespace, label string) {
 	if output, err := getPodsWide(clusterName, namespace); err == nil {
@@ -1127,11 +1433,12 @@ func getControllerNodeName() string {
 	return strings.TrimSpace(out)
 }
 
-// logIfControllerNode emits a warning if the target node hosts the controller-manager.
-func logIfControllerNode(nodeName string) {
-	if nodeName == getControllerNodeName() {
-		_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: target node %s hosts the controller-manager; operator will be disrupted\n", nodeName)
-	}
+// isProtectedNode reports whether nodeName hosts the controller-manager or the
+// background writer, which node faults skip: losing either fails the restart or
+// writer check. The writer starts on the operator's node, but the operator can
+// move (delete-controller-pod), so both are looked up live.
+func isProtectedNode(nodeName, namespace string) bool {
+	return nodeName == getControllerNodeName() || nodeName == getBackgroundClientNodeName(namespace)
 }
 
 // Helper functions for configuration parsing

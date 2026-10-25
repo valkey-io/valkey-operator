@@ -62,6 +62,26 @@ func TestManagedContainerSecurityDefaults(t *testing.T) {
 	}
 }
 
+func TestDisabledExporterLeavesUserNamedExporterUnchanged(t *testing.T) {
+	for _, enabled := range []*bool{nil, new(false)} {
+		for _, sc := range []*corev1.SecurityContext{nil, {RunAsNonRoot: new(true)}} {
+			node := newTestValkeyNode("cache-0-0", "default")
+			node.Spec.Exporter.Enabled = enabled
+			node.Spec.Containers = []corev1.Container{{
+				Name: "metrics-exporter", Image: "example/custom-exporter:latest", SecurityContext: sc,
+			}}
+			before := node.DeepCopy()
+			containers, err := buildContainersDef(node)
+			require.NoError(t, err)
+			require.Len(t, containers, 2)
+			require.NotNil(t, containers[0].SecurityContext)
+			assert.Equal(t, new(false), containers[0].SecurityContext.AllowPrivilegeEscalation)
+			assert.Equal(t, sc, containers[1].SecurityContext, "a user-added metrics-exporter is not operator-owned")
+			assert.Equal(t, before, node, "do not mutate caller-owned configuration")
+		}
+	}
+}
+
 func TestAdmissionHardeningDoesNotTriggerFailover(t *testing.T) {
 	node := newTestValkeyNode("cache-0-0", "default")
 	node.Spec.Exporter.Enabled = new(true)

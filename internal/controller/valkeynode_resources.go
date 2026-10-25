@@ -394,7 +394,10 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	if err != nil {
 		return nil, err
 	}
-	applyManagedContainerSecurityDefaults(merged)
+	// Generated containers remain first; user-only sidecars are appended by
+	// mergePatchContainers. Default only that generated prefix, even if a
+	// user-only sidecar reuses the name of the disabled exporter.
+	applyManagedContainerSecurityDefaults(merged[:len(containers)])
 	applyContainerAPIDefaults(merged)
 	return merged, nil
 }
@@ -405,9 +408,6 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
 	for i := range containers {
 		c := &containers[i]
-		if c.Name != serverContainerName && c.Name != "metrics-exporter" {
-			continue
-		}
 		sc := c.SecurityContext.DeepCopy()
 		if sc == nil {
 			sc = &corev1.SecurityContext{}

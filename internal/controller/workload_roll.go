@@ -56,6 +56,8 @@ func normalizePodTemplate(tmpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
 		Labels:      out.Labels,
 		Annotations: out.Annotations,
 	}
+	// The API server mirrors serviceAccountName into this field on read.
+	out.Spec.DeprecatedServiceAccount = ""
 	return *out
 }
 

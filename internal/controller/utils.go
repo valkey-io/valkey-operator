@@ -64,8 +64,9 @@ const (
 // Valkey may promote a replica to primary, making node 0 a replica. The
 // reconciler detects this via shardExistsInTopology: if the shard already
 // has members in the cluster topology, the replacement node-index=0 pod
-// joins as a replica instead of trying to claim slots. The labels themselves are not
-// updated — the live role is always read from CLUSTER NODES.
+// joins as a replica instead of trying to claim slots. The shard and node index
+// labels are not updated: the live role is always read from CLUSTER NODES and
+// published separately as LabelRole.
 //
 // Names and labels are set by valkeyNodeName when creating ValkeyNode CRs.
 const (
@@ -77,6 +78,11 @@ const (
 	// Node 0 is the initial primary; nodes 1+ are replicas. Together with
 	// LabelShardIndex this forms a unique selector per Deployment.
 	LabelNodeIndex = "valkey.io/node-index"
+	// LabelRole is the pod's last observed role (RolePrimary or RoleReplica).
+	// The ValkeyNode controller patches it onto the live pod, never the
+	// template, and only while the pod is ready. It is never removed, so an
+	// unready primary keeps counting as one.
+	LabelRole = "valkey.io/role"
 )
 
 const (

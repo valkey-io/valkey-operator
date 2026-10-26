@@ -399,6 +399,14 @@ These events are emitted during live configuration application on ValkeyNode res
 |---|---|---|
 | `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
 
+### Role label events
+
+These events are emitted on ValkeyNode resources when the operator updates the pod's [`valkey.io/role` label](valkeycluster.md#role-label).
+
+| Event Type | Type | Description |
+|---|---|---|
+| `RoleLabelFailed` | Warning | Patching the pod's `valkey.io/role` label failed, for example because the operator lacks `patch` on pods; the rest of the reconcile still runs and the patch is retried on the next reconcile, which runs after 10s instead of the usual 30s, except while the node waits on a workload roll |
+
 ### Users/ACL events
 
 These events are emitted during ACL user management.

@@ -174,7 +174,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -220,7 +220,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	roleResolveFailed, err := r.updateStatus(ctx, node)
+	retrySoon, err := r.updateStatus(ctx, node)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -303,9 +303,10 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	log.V(1).Info("ValkeyNode reconciliation complete")
 	// Backstop requeue: a self-heal net, not the primary mechanism (events do
-	// the real work). Retry sooner when a ready pod's role could not be resolved.
+	// the real work). Retry sooner when a ready pod's role could not be resolved
+	// or its role label could not be written.
 	requeueAfter := 30 * time.Second
-	if roleResolveFailed {
+	if retrySoon {
 		requeueAfter = 10 * time.Second
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -802,7 +803,7 @@ func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkey
 }
 
 // updateStatus updates the ValkeyNode status based on workload and Pod state.
-func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (roleResolveFailed bool, err error) {
+func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (retrySoon bool, err error) {
 	log := logf.FromContext(ctx)
 
 	current := &valkeyiov1alpha1.ValkeyNode{}
@@ -897,7 +898,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				// Transient INFO failure on a ready pod: keep the last-known
 				// role rather than blanking a healthy node, and signal a short
 				// requeue so we retry sooner than the backstop.
-				roleResolveFailed = true
+				retrySoon = true
 			}
 		} else {
 			current.Status.Role = ""
@@ -940,12 +941,24 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		log.V(2).Info("status unchanged, skipping update")
 	}
 
+	// Labelled after the status patch, and a failure only shortens the requeue,
+	// so a missing pods/patch permission never blocks status, config or ACL.
+	// An unready pod keeps its last label: an unready primary must still count
+	// as a disrupted primary to anything selecting on the label.
+	if pod != nil && podReady(pod) {
+		if err := r.syncRoleLabel(ctx, pod, current.Status.Role); err != nil {
+			log.Error(err, "failed to label pod with role", "pod", pod.Name, "role", current.Status.Role)
+			r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "RoleLabelFailed", "LabelPod", "Failed to label pod %s with role %s: %v", pod.Name, current.Status.Role, err)
+			retrySoon = true
+		}
+	}
+
 	// Sync status fields back to the caller's object so Reconcile uses the
 	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
 	node.Status.Ready = current.Status.Ready
 	node.Status.PodIP = current.Status.PodIP
 
-	return roleResolveFailed, nil
+	return retrySoon, nil
 }
 
 // isWorkloadRolledOut returns true if the workload (StatefulSet or Deployment)
@@ -1022,6 +1035,21 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 		return &podList.Items[0], nil
 	}
 	return nil, nil
+}
+
+// syncRoleLabel patches the pod's LabelRole to role. The live pod is patched,
+// not the template, so a role change never rolls the workload. An empty role
+// leaves the label as it is.
+func (r *ValkeyNodeReconciler) syncRoleLabel(ctx context.Context, pod *corev1.Pod, role string) error {
+	if role == "" || pod.Labels[LabelRole] == role {
+		return nil
+	}
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[LabelRole] = role
+	return r.Patch(ctx, pod, patch)
 }
 
 // podSupersededAndStuck reports whether a pod can no longer be replaced by its

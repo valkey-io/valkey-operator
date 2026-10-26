@@ -17,6 +17,7 @@
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
+- [Role label](#role-label)
 - [Scheduling](#scheduling)
 - [TLS](#tls)
 - [Users](#users)
@@ -181,6 +182,12 @@ Keys the operator owns are rejected: any label or annotation key under `valkey.i
 Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-hash` annotation (85 bytes). Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
+
+### Role label
+
+Each Valkey pod carries `valkey.io/role: primary` or `valkey.io/role: replica`, the role the operator last observed on that node. The operator updates it on the live pod, so a failover relabels pods without rolling them.
+
+The label follows the live role with a short delay: after a failover, pods are relabelled within a few seconds. It is not removed while a pod is unready, so a crashed primary keeps `primary` until it is Ready again and reports its new role. A new pod has no role label until it is Ready.
 
 ### Graceful shutdown
 

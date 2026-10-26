@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -86,7 +87,6 @@ func main() {
 	var pprofAddr string
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces []string
-	var printDefaultImages, printVersion bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -110,13 +110,7 @@ func main() {
 		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
 			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
 			"bind it to localhost and do not add it to a Service.")
-	flag.StringVar(&controller.DefaultImage, "default-valkey-image", controller.DefaultImage,
-		"Valkey image for a ValkeyCluster or ValkeyNode whose spec does not set one.")
-	flag.StringVar(&controller.DefaultExporterImage, "default-exporter-image", controller.DefaultExporterImage,
-		"Metrics exporter image for a cluster whose exporter spec does not set one.")
-	flag.BoolVar(&printDefaultImages, "print-default-images", false,
-		"Print the default images as JSON, after any override from the flags above, and exit.")
-	flag.BoolVar(&printVersion, "version", false, "Print the version and exit.")
+	printDefaultImages, printVersion := imageFlags(flag.CommandLine)
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -139,29 +133,14 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	controller.DefaultImage = strings.TrimSpace(controller.DefaultImage)
-	controller.DefaultExporterImage = strings.TrimSpace(controller.DefaultExporterImage)
-	for name, value := range map[string]string{
-		"default-valkey-image":   controller.DefaultImage,
-		"default-exporter-image": controller.DefaultExporterImage,
-	} {
-		if value == "" {
-			fmt.Fprintf(os.Stderr, "--%s must not be empty\n", name)
-			os.Exit(1)
-		}
+	if err := validateDefaultImages(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	if printVersion {
-		fmt.Println(version.Print("valkey-operator"))
-	}
-	if printDefaultImages {
-		out, err := defaultImagesJSON()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(string(out))
-	}
-	if printVersion || printDefaultImages {
+	if done, err := printRequested(*printVersion, *printDefaultImages, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	} else if done {
 		os.Exit(0)
 	}
 
@@ -354,6 +333,56 @@ func main() {
 		setupLog.Error(startErr, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// imageFlags registers the default image flags on fs, bound to the variables
+// in controller, and returns the two print switches.
+func imageFlags(fs *flag.FlagSet) (printDefaultImages, printVersion *bool) {
+	fs.StringVar(&controller.DefaultImage, "default-valkey-image", controller.DefaultImage,
+		"Valkey image for a ValkeyCluster or ValkeyNode whose spec does not set one.")
+	fs.StringVar(&controller.DefaultExporterImage, "default-exporter-image", controller.DefaultExporterImage,
+		"Metrics exporter image for a cluster whose exporter spec does not set one.")
+	printDefaultImages = fs.Bool("print-default-images", false,
+		"Print the default images as JSON, after any override from the flags above, and exit.")
+	printVersion = fs.Bool("version", false, "Print the version and exit.")
+	return printDefaultImages, printVersion
+}
+
+// validateDefaultImages trims the default images and rejects an empty one,
+// naming its flag.
+func validateDefaultImages() error {
+	controller.DefaultImage = strings.TrimSpace(controller.DefaultImage)
+	controller.DefaultExporterImage = strings.TrimSpace(controller.DefaultExporterImage)
+	for name, value := range map[string]string{
+		"default-valkey-image":   controller.DefaultImage,
+		"default-exporter-image": controller.DefaultExporterImage,
+	} {
+		if value == "" {
+			return fmt.Errorf("--%s must not be empty", name)
+		}
+	}
+	return nil
+}
+
+// printRequested writes what --version and --print-default-images ask for to
+// out, in that order, and reports whether the manager should exit instead of
+// starting.
+func printRequested(printVersion, printDefaultImages bool, out io.Writer) (bool, error) {
+	if printVersion {
+		if _, err := fmt.Fprintln(out, version.Print("valkey-operator")); err != nil {
+			return true, err
+		}
+	}
+	if printDefaultImages {
+		images, err := defaultImagesJSON()
+		if err != nil {
+			return true, err
+		}
+		if _, err := fmt.Fprintln(out, string(images)); err != nil {
+			return true, err
+		}
+	}
+	return printVersion || printDefaultImages, nil
 }
 
 // defaultImages is the output of --print-default-images.

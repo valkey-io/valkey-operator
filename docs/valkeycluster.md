@@ -233,15 +233,49 @@ scheduling:
 
 `scheduling.tolerations`, `scheduling.nodeSelector`, `scheduling.affinity`, and `scheduling.priorityClassName` are passed through to every pod in the cluster (`scheduling.nodeSelector` also carries the curated zone entry when [`zone.pinning`](#zone-axis-pinning) is set, see below). `priorityClassName` must reference an existing [PriorityClass](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) and protects the Valkey pods from eviction under resource pressure.
 
+For same-shard spread on a custom topology key, use `podAntiAffinity` with `matchLabelKeys`. The operator copies `scheduling.affinity` onto every pod; `matchLabelKeys` then pulls `valkey.io/shard-index` from that pod, so the term only counts other members of the same shard. `matchLabelKeys` needs the `MatchLabelKeysInPodAffinity` feature gate, which is on by default from Kubernetes 1.31, the operator's minimum. If the gate is off, the apiserver drops the field and the term applies to the whole cluster: one Valkey pod per rack, with the rest `Pending` and the cluster `Degraded` with reason `PodUnschedulable`.
+
+```yaml
+scheduling:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: topology.example.com/rack
+          labelSelector:
+            matchLabels:
+              valkey.io/cluster: my-cluster
+          matchLabelKeys:
+            - valkey.io/shard-index
+```
+
+A required term needs at least `1 + replicas` racks, or the extra members of each shard stay `Pending`. With fewer racks, use the preferred form, which keeps a shard's members apart where it can:
+
+```yaml
+scheduling:
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: topology.example.com/rack
+            labelSelector:
+              matchLabels:
+                valkey.io/cluster: my-cluster
+            matchLabelKeys:
+              - valkey.io/shard-index
+```
+
+With the preferred form on the same setup (3 shards × 3 members on 2 racks), all 9 pods get scheduled and every shard has members on both racks.
+
 #### Topology spread constraints
 
 `topologySpreadConstraints` is a raw escape hatch: whatever you set is rendered **verbatim** onto every Valkey pod in the cluster. The operator does not scope, augment, or shard-index it, and adds no constraints of its own by default.
 
 > **You must supply your own `labelSelector`.** A topology spread constraint with no `labelSelector` matches *nothing* — Kubernetes counts zero pods and the constraint enforces nothing (a silent no-op).
 >
-> Set a `labelSelector` that selects the pods you want counted; `valkey.io/cluster: <cluster-name>` selects every pod in the cluster.
+> Set a `labelSelector` that selects the pods you want counted; `valkey.io/cluster: my-cluster` selects every pod in the cluster.
 
-For the common intents such as keep a shard's pods on different nodes, spread each shard's primary across nodes, or spread all pods across nodes — prefer [`scheduling.node.spread`](#node-axis-spread) below, and for the zone equivalents prefer [`scheduling.zone.spread`](#zone-axis-spread) or, to pin each pod to a specific zone rather than balance it, [`scheduling.zone.pinning`](#zone-axis-pinning). These fill in the correct label selectors for you and guarantee the constraints they emit don't collide. Reach for `topologySpreadConstraints` only when you need something neither axis expresses, such as a topology key other than `kubernetes.io/hostname` or `topology.kubernetes.io/zone`.
+For the common intents such as keep a shard's pods on different nodes, spread each shard's primary across nodes, or spread all pods across nodes — prefer [`scheduling.node.spread`](#node-axis-spread) below, and for the zone equivalents prefer [`scheduling.zone.spread`](#zone-axis-spread) or, to pin each pod to a specific zone rather than balance it, [`scheduling.zone.pinning`](#zone-axis-pinning). These fill in the correct label selectors for you and guarantee the constraints they emit don't collide. For same-shard separation on a topology key other than hostname or zone, use the `podAntiAffinity` + `matchLabelKeys` recipe above. Reach for `topologySpreadConstraints` only when you need something neither axis expresses, such as cluster-wide balancing on a custom topology key.
 
 > **Do not overlap a hostname or zone constraint with `node.spread`/`zone.spread`.**
 >

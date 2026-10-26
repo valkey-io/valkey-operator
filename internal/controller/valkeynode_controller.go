@@ -242,10 +242,17 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
+		reason, message := liveApplyFailure(node, err)
+		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 		}
-		return ctrl.Result{}, err
+		// The ACL step below is not reached, so report the lockout here.
+		if reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed && node.Spec.UsersACLSecretName != "" {
+			if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
+				log.Error(condErr, "failed to set ACLApplied condition")
+			}
+		}
+		return liveApplyResult(reason, err)
 	}
 	if applied {
 		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, "Live config applied"); condErr != nil {
@@ -271,10 +278,11 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
+		reason, message := liveApplyFailure(node, err)
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
 			log.Error(condErr, "failed to set ACLApplied condition")
 		}
-		return ctrl.Result{}, err
+		return liveApplyResult(reason, err)
 	}
 	if !aclSynced {
 		// The reload ran, but the mounted aclfile had not caught up with the
@@ -330,6 +338,32 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
+}
+
+// liveApplyFailure is the reason and message for a failed live config or ACL
+// apply: AuthenticationFailed, naming the password Secret, when the node
+// rejected the operator's password, and ApplyFailed otherwise.
+func liveApplyFailure(node *valkeyiov1alpha1.ValkeyNode, err error) (string, string) {
+	if valkey.IsWrongPass(err) {
+		return valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed,
+			fmt.Sprintf("%v (the node rejects the %s password in Secret %s)", err, operatorUser, getSystemPasswordSecretName(node.Labels[LabelCluster]))
+	}
+	return valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()
+}
+
+// authRetryInterval is how often a node that rejects the operator's password
+// is retried.
+const authRetryInterval = 10 * time.Second
+
+// liveApplyResult is the reconcile result for a failed live apply. A rejected
+// password retries on a fixed interval: the fix is often a manual ACL LOAD,
+// which no watch sees, and the cluster waits on this node's condition.
+// Anything else returns err for the usual backoff.
+func liveApplyResult(reason string, err error) (ctrl.Result, error) {
+	if reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed {
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
+	}
+	return ctrl.Result{}, err
 }
 
 // setACLCondition sets the ACLApplied condition, reporting whether the ACL the

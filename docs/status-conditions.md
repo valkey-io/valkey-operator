@@ -52,6 +52,7 @@ Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
 - `UsersACLError` – failed to reconcile ACL users/secrets
+- `OperatorAuthenticationFailed` – one or more nodes reject the operator's `_operator` password. See [`Degraded`](#degraded)
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
@@ -80,6 +81,7 @@ Common reasons:
 - `AddingNodes` – adding nodes to the cluster
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
+- `OperatorAuthenticationFailed` – one or more nodes reject the operator's password, so the controller makes no topology changes (`status=False`)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -95,6 +97,7 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 ---
 
@@ -210,6 +213,7 @@ This condition is only set when the node is ready and there are allowlisted conf
 
 Common reasons when `LiveConfigApplied=False`:
 - `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the exact error.
+- `AuthenticationFailed` – the node rejected the operator's `_operator` password (`WRONGPASS`), so no `CONFIG SET` was sent. The node controller also sets `ACLApplied` to this reason. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 Common reasons when `LiveConfigApplied=True`:
 - `Applied` – Live config applied successfully.
@@ -217,7 +221,7 @@ Common reasons when `LiveConfigApplied=True`:
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 #### `ACLApplied`
-Indicates whether the ACL the cluster controller wrote for `spec.users` is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
+Indicates whether the ACL the cluster controller wrote, covering `spec.users` and the operator's system users, is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
 
 This condition is set once the node is ready and mounts an ACL Secret. An edit reads `False` until the mounted aclfile refreshes (the projected Secret volume is updated lazily by kubelet) and the server loads it.
 
@@ -229,11 +233,21 @@ This condition is set once the node is ready and mounts an ACL Secret. An edit r
 Common reasons when `ACLApplied=False`:
 - `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
 - `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the exact error.
+- `AuthenticationFailed` – the node rejected the operator's `_operator` password (`WRONGPASS`), so the operator can neither apply nor check the ACL. The message names the system passwords Secret. The operator connects as `_operator` only and does not change the password itself; the condition clears on the next node reconcile after the node accepts the password again. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
 
-> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff. `AuthenticationFailed` is carried up as `Degraded` with reason `OperatorAuthenticationFailed` instead.
+
+##### Recovering from `AuthenticationFailed`
+
+The node's running ACL no longer accepts the `_operator` password in `internal-<cluster>-system-passwords`. Which fix applies depends on which side changed:
+
+- The Secret changed, for example it was deleted and the operator generated new passwords. Write the previous values back into the Secret. Running pods still hold them: `_operator` in the server container's `VALKEYCLI_AUTH` environment variable, `_replication` in its `PRIMARY_AUTH`, and, when the exporter is enabled, `_exporter` in the exporter container's `REDIS_PASSWORD`. Restore `_exporter` too, or the exporter keeps its old password after the reload and reports `redis_up 0`. The operator then rewrites the internal ACL Secret and every node reloads it.
+- The server's password changed while the Secret did not, for example an `ACL SETUSER _operator` run by hand. Run `ACL LOAD` on the node to reload the mounted aclfile, or restart the pod.
+
+The node controller retries a node that rejects the password every 10 seconds, so the node condition clears within about 10 seconds of the fix. The cluster's `Degraded` condition clears on the cluster reconcile after that.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
@@ -390,6 +404,7 @@ These events provide high-level status information about the cluster.
 | `WaitingForShards` | Normal | Waiting for shards to be created |
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
+| `OperatorAuthenticationFailed` | Warning | One or more nodes reject the operator's `_operator` password; emitted when the lockout starts |
 
 ### Live config events
 

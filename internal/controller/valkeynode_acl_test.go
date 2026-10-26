@@ -18,10 +18,14 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 func TestDesiredUserPasswordHashes(t *testing.T) {
@@ -181,4 +185,31 @@ func TestACLObservablyInSync(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, inSync, "a server without the revision user must not read as in sync")
 	})
+}
+
+func TestLiveApplyFailure(t *testing.T) {
+	node := &valkeyiov1alpha1.ValkeyNode{}
+	node.Labels = map[string]string{LabelCluster: "vc"}
+	wrongPass := errors.New("WRONGPASS invalid username-password pair or user is disabled.")
+
+	reason, message := liveApplyFailure(node, fmt.Errorf("load ACL: %w", wrongPass))
+	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, reason)
+	assert.Contains(t, message, "WRONGPASS")
+	assert.Contains(t, message, getSystemPasswordSecretName("vc"))
+
+	reason, message = liveApplyFailure(node, errors.New("ERR Error in ACL SETUSER modifier"))
+	assert.Equal(t, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, reason)
+	assert.Equal(t, "ERR Error in ACL SETUSER modifier", message)
+}
+
+func TestLiveApplyResult(t *testing.T) {
+	failed := errors.New("boom")
+
+	result, err := liveApplyResult(valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, failed)
+	require.NoError(t, err, "a lockout retries on a fixed interval, not the error backoff")
+	assert.Equal(t, authRetryInterval, result.RequeueAfter)
+
+	result, err = liveApplyResult(valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, failed)
+	require.ErrorIs(t, err, failed)
+	assert.Zero(t, result.RequeueAfter)
 }

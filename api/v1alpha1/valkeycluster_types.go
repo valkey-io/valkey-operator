@@ -740,6 +740,9 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonOperatorAuthenticationFailed is used with ConditionDegraded, Ready
+	// and Progressing when a node rejects the operator's _operator password.
+	ReasonOperatorAuthenticationFailed = "OperatorAuthenticationFailed"
 )
 
 // +kubebuilder:object:root=true

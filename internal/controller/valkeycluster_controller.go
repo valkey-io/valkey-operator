@@ -1655,6 +1655,21 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 
 const rebalanceSlotBatchSize = 400
 
+// slotMigrationFailedError marks an error surfaced for a slot migration
+// that failed asynchronously after CLUSTER MIGRATESLOTS accepted it.
+// Callers that report drain or rebalance failures can use it to keep
+// this failure class distinguishable from other errors.
+type slotMigrationFailedError struct{ err error }
+
+func (e *slotMigrationFailedError) Error() string { return e.err.Error() }
+func (e *slotMigrationFailedError) Unwrap() error { return e.err }
+
+// asyncSlotMigrationFailed builds the surfaced error for a migration the
+// operator issued earlier that failed asynchronously.
+func asyncSlotMigrationFailed(src, dst, message string) error {
+	return &slotMigrationFailedError{err: fmt.Errorf("slot migration from %s to %s failed: %s", src, dst, message)}
+}
+
 func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shards []*valkey.ShardState) (bool, error) {
 	move, err := valkey.PlanRebalanceMove(shards, int(cluster.Spec.Shards), rebalanceSlotBatchSize)
 	if err != nil {
@@ -1665,13 +1680,20 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
-	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id, nil)
 	if err != nil {
 		return false, err
 	}
 	if inProgress {
 		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
 		return true, nil
+	}
+	if failed != nil {
+		// A migration the operator issued earlier failed asynchronously,
+		// after CLUSTER MIGRATESLOTS accepted it. Surface it through the
+		// same Degraded/Warning path as a synchronous MIGRATESLOTS error
+		// instead of silently re-issuing the same move every reconcile.
+		return false, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
@@ -1722,7 +1744,16 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		drained, err := r.drainExcessShards(ctx, cluster, state, nodes)
 		if err != nil {
 			log.Error(err, "scale-in draining failed")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
+			// A migration that failed asynchronously after MIGRATESLOTS
+			// accepted it is the same failure class as the rebalance
+			// path's, so surface it with the same event; other drain
+			// errors keep the DrainFailed event.
+			var migrationFailed *slotMigrationFailedError
+			if errors.As(err, &migrationFailed) {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "ScaleIn", "Slot migration failed while draining excess shards: %v", err)
+			} else {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
+			}
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed, err.Error(), metav1.ConditionTrue)
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
@@ -1779,13 +1810,18 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 			continue
 		}
 
-		inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+		inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id, nil)
 		if err != nil {
 			return false, err
 		}
 		if inProgress {
 			log.V(1).Info("drain migration in progress", "src", move.Src.Address)
 			return true, nil
+		}
+		if failed != nil {
+			// Same as the rebalance path: surface an asynchronous
+			// migration failure instead of re-issuing the drain move.
+			return false, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
 		}
 
 		if !move.Src.KnowsNode(move.Dst.Id) {

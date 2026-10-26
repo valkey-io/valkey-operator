@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,11 +216,8 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainer(t *testing.T) {
 	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
 	assert.Equal(t, corev1.TerminationMessagePathDefault, ic.TerminationMessagePath)
 	assert.Equal(t, corev1.TerminationMessageReadFile, ic.TerminationMessagePolicy)
-	assert.Equal(t, []corev1.VolumeMount{
-		{Name: "scripts", MountPath: "/scripts"},
-		{Name: "valkey-conf", MountPath: "/config", ReadOnly: true},
-		{Name: initVolumeName, MountPath: initMountPath},
-	}, ic.VolumeMounts)
+	assert.Equal(t, pts.Spec.Containers[0].VolumeMounts, ic.VolumeMounts)
+	assert.Equal(t, pts.Spec.Containers[0].Env, ic.Env)
 
 	var initVol *corev1.Volume
 	for i := range pts.Spec.Volumes {
@@ -259,6 +257,39 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainerFollowsServerPatches(t *tes
 	assert.Equal(t, corev1.PullAlways, ic.ImagePullPolicy)
 	assert.Equal(t, node.Spec.Resources, ic.Resources, "matching the server keeps the pod's QoS class")
 	assert.Equal(t, securityContext, ic.SecurityContext, "restricted PSA checks init containers too")
+}
+
+// TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts
+// covers the env and mounts added after the base container is built. A later
+// init.sh that needs one of them must not have to change the pod template.
+func TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.UsersACLSecretName = "users-acl-secret"
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
+	}
+	node.Spec.Containers = []corev1.Container{
+		{Name: "server", Env: []corev1.EnvVar{{Name: "MY_VAR", Value: "example"}}},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	server := pts.Spec.Containers[0]
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, server.Env, ic.Env)
+	assert.Equal(t, server.EnvFrom, ic.EnvFrom)
+	assert.Equal(t, server.VolumeMounts, ic.VolumeMounts)
+	for _, path := range []string{dataMountPath, tlsCertMountPath, "/config/users", initMountPath} {
+		assert.True(t, slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == path }),
+			"init container must mount %s", path)
+	}
+	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ENABLED", "VALKEYCLI_AUTH"} {
+		assert.True(t, hasEnvVar(ic.Env, name), "init container must have env %s", name)
+	}
 }
 
 func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {

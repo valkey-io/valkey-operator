@@ -526,22 +526,22 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 // buildInitContainer returns the init container that runs init.sh from the
 // scripts ConfigMap, when present, before the server starts. The script lives in the
 // ConfigMap so changing it never changes the pod template. The container takes
-// the server's image, pull policy, resources and security context after
-// spec.containers patches: matching resources keeps the pod's QoS class, and
-// Pod Security admission checks init containers as well.
+// the server's image, pull policy, resources, security context, env and volume
+// mounts after spec.containers patches: matching resources keeps the pod's QoS
+// class, Pod Security admission checks init containers as well, and a later
+// init.sh can use anything the server sees without a pod template change.
 func buildInitContainer(server corev1.Container) corev1.Container {
+	s := server.DeepCopy()
 	c := []corev1.Container{{
 		Name:            "server-init",
-		Image:           server.Image,
-		ImagePullPolicy: server.ImagePullPolicy,
+		Image:           s.Image,
+		ImagePullPolicy: s.ImagePullPolicy,
 		Command:         initContainerCommand(scriptsMountPath + "/" + initScriptKey),
-		Resources:       *server.Resources.DeepCopy(),
-		SecurityContext: server.SecurityContext.DeepCopy(),
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
-			{Name: configVolumeName, MountPath: configMountPath, ReadOnly: true},
-			{Name: initVolumeName, MountPath: initMountPath},
-		},
+		Env:             s.Env,
+		EnvFrom:         s.EnvFrom,
+		Resources:       s.Resources,
+		SecurityContext: s.SecurityContext,
+		VolumeMounts:    s.VolumeMounts,
 	}}
 	applyContainerAPIDefaults(c)
 	return c[0]
@@ -572,7 +572,6 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	podSpec := corev1.PodSpec{
-		InitContainers:                []corev1.Container{buildInitContainer(containers[0])},
 		Containers:                    containers,
 		ImagePullSecrets:              node.Spec.ImagePullSecrets,
 		NodeSelector:                  node.Spec.NodeSelector,
@@ -666,6 +665,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		Name:         initVolumeName,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
+
+	// Built last so it picks up every mount added to the server above.
+	podSpec.InitContainers = []corev1.Container{buildInitContainer(podSpec.Containers[0])}
 
 	// Mirror the remaining API-server defaults (see the comment on the struct
 	// literal above): a nil here is not "unset" once stored, it is a diff.

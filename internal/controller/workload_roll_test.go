@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -126,6 +127,39 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 	h3, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, h1, h3)
+}
+
+// TestComputeWorkloadRevisionIgnoresScripts guards the reason the scripts
+// live in a ConfigMap: changing one must not roll pods.
+func TestComputeWorkloadRevisionIgnoresScripts(t *testing.T) {
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "n", Namespace: "ns"},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image:        "valkey/valkey:9.0.0",
+			WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+		},
+	}
+	before, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+
+	original := scriptsHash
+	t.Cleanup(func() { scriptsHash = original })
+	scriptsHash = "changed"
+	after, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a scripts hash change must not change the pod template")
+
+	tmpl, err := buildNodePodTemplate(node)
+	require.NoError(t, err)
+	data, err := json.Marshal(tmpl)
+	require.NoError(t, err)
+	entries, err := scripts.ReadDir("scripts")
+	require.NoError(t, err)
+	for _, e := range entries {
+		body, err := scripts.ReadFile("scripts/" + e.Name())
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), string(body), "%s contents must stay out of the pod template", e.Name())
+	}
 }
 
 func TestPodSupersededAndStuck(t *testing.T) {

@@ -22,10 +22,13 @@ package e2e
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/test/utils"
@@ -173,6 +176,128 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).To(Equal(seedKeys),
 					"keys should survive the scale-down")
+			}).Should(Succeed())
+		})
+	})
+
+	// A primary drained to zero slots stays a primary and keeps its replica,
+	// since the operator sets cluster-allow-replica-migration no. A scale-in
+	// reverted right after its drain leaves such a shard behind. The operator
+	// treats it as an empty shard: the status names it, and the rebalancer
+	// moves slots onto it as it does for a new shard.
+	Context("when a shard's primary owns no slots but keeps its replica", Label("empty-shard"), func() {
+		const clusterName = "valkeycluster-empty-shard-e2e"
+		const keyPrefix = "e2e:emptyshard"
+		const seedKeys = 300
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		// shell runs a script in the server container of pod with the probe
+		// credentials unset, so valkey-cli uses the default user.
+		shell := func(pod, script string) (string, error) {
+			return utils.Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--",
+				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
+		}
+
+		// ownedSlots counts the slots the node owns, from its own line of
+		// CLUSTER NODES. Migration markers in brackets are not owned slots.
+		ownedSlots := func(g Gomega, pod string) int {
+			out, err := shell(pod, "valkey-cli CLUSTER NODES")
+			g.Expect(err).NotTo(HaveOccurred())
+			for _, line := range strings.Split(out, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 8 || !strings.Contains(fields[2], "myself") {
+					continue
+				}
+				n := 0
+				for _, r := range fields[8:] {
+					if strings.HasPrefix(r, "[") {
+						continue
+					}
+					lo, hi, ok := strings.Cut(r, "-")
+					if !ok {
+						hi = lo
+					}
+					a, err := strconv.Atoi(lo)
+					g.Expect(err).NotTo(HaveOccurred(), r)
+					b, err := strconv.Atoi(hi)
+					g.Expect(err).NotTo(HaveOccurred(), r)
+					n += b - a + 1
+				}
+				return n
+			}
+			g.Expect(out).To(ContainSubstring("myself"), "no own line in CLUSTER NODES of %s", pod)
+			return 0
+		}
+
+		It("names the shard and rebalances slots back onto it", func() {
+			primary := podFor(clusterName, 3, 0)
+			replica := podFor(clusterName, 3, 1)
+
+			By("creating a 4-shard cluster with 1 replica")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 4
+  replicas: 1
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("seeding keys across all shards")
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(podFor(clusterName, 0, 0), keyPrefix, seedKeys, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("draining shard 3's primary by hand while the operator is paused")
+			withOperatorPaused(func() {
+				id, err := shell(primary, "valkey-cli CLUSTER MYID")
+				Expect(err).NotTo(HaveOccurred())
+				// Weight 0 moves every slot off the node. It stays a primary,
+				// with its replica attached, as after the operator's own drain.
+				out, err := shell(primary, "valkey-cli --cluster rebalance 127.0.0.1:6379 --cluster-weight "+strings.TrimSpace(id)+"=0")
+				Expect(err).NotTo(HaveOccurred(), out)
+				Eventually(func(g Gomega) {
+					g.Expect(ownedSlots(g, primary)).To(BeZero())
+					info, err := shell(primary, "valkey-cli INFO replication")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(info).To(ContainSubstring("role:master"))
+					g.Expect(info).To(ContainSubstring("connected_slaves:1"))
+					info, err = shell(replica, "valkey-cli INFO replication")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(info).To(ContainSubstring("master_link_status:up"))
+				}).Should(Succeed())
+			})
+
+			By("waiting for the status to name the shard being refilled")
+			// The message holds for the whole rebalance, since shard 3 stays
+			// the destination until it has its share of the slots.
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				ready := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Message).To(ContainSubstring("Rebalancing slots onto shard 3"))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("waiting for the cluster to return to Ready with slots back on shard 3")
+			waitForReady(clusterName)
+			Eventually(func(g Gomega) {
+				g.Expect(ownedSlots(g, primary)).To(BeNumerically(">=", 4095))
+			}).Should(Succeed())
+
+			By("verifying no keys were lost")
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(podFor(clusterName, 0, 0), keyPrefix, seedKeys, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(seedKeys))
 			}).Should(Succeed())
 		})
 	})

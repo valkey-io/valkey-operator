@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -412,7 +413,9 @@ func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
 		if sc == nil {
 			sc = &corev1.SecurityContext{}
 		}
-		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) {
+		// Kubernetes treats SYS_ADMIN like privileged mode for privilege escalation.
+		hasSysAdmin := sc.Capabilities != nil && slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) && !hasSysAdmin {
 			sc.AllowPrivilegeEscalation = new(false)
 		}
 		c.SecurityContext = sc

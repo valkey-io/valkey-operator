@@ -93,8 +93,9 @@ containers:
 
 The operator defaults `securityContext.allowPrivilegeEscalation` to `false` for
 its `server` and `metrics-exporter` containers. Explicit values are preserved,
-and privileged containers are not given this default. User-added sidecars are
-unchanged. This keeps desired workload templates aligned with admission policies
+and containers using privileged mode or explicitly adding `SYS_ADMIN` are not
+given this default. User-added sidecars are unchanged. This keeps desired
+workload templates aligned with admission policies
 that supply the same hardening default, avoiding repeated drift-driven failovers.
 On clusters without that admission default, upgrading can cause a one-time Pod
 rollout to apply the new security setting. Existing custom images that require

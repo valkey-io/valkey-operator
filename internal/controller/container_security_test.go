@@ -36,6 +36,12 @@ func TestManagedContainerSecurityDefaults(t *testing.T) {
 		{name: "explicit false", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(false)}, want: new(false)},
 		{name: "explicit true", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(true)}, want: new(true)},
 		{name: "privileged", sc: &corev1.SecurityContext{Privileged: new(true)}, want: nil},
+		{name: "empty capabilities", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{}}, want: new(false)},
+		{name: "other capability", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_BIND_SERVICE"}}}, want: new(false)},
+		{name: "SYS_ADMIN", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}}, want: nil},
+		{name: "SYS_ADMIN among capabilities", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_BIND_SERVICE", "SYS_ADMIN"}, Drop: []corev1.Capability{"ALL"}}}, want: nil},
+		{name: "SYS_ADMIN explicit false", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}}, want: new(false)},
+		{name: "SYS_ADMIN explicit true", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(true), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}}, want: new(true)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := newTestValkeyNode("cache-0-0", "default")
@@ -54,6 +60,7 @@ func TestManagedContainerSecurityDefaults(t *testing.T) {
 				if tc.sc != nil {
 					assert.Equal(t, tc.sc.RunAsNonRoot, c.SecurityContext.RunAsNonRoot)
 					assert.Equal(t, tc.sc.Privileged, c.SecurityContext.Privileged)
+					assert.Equal(t, tc.sc.Capabilities, c.SecurityContext.Capabilities)
 				}
 			}
 			assert.Nil(t, containers[2].SecurityContext, "do not change user-added sidecars")

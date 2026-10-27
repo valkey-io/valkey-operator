@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"strconv"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -85,11 +84,6 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	}, nil
 }
 
-// replicaHandoffMaxSeconds caps the wait of server-start.sh for the replicas of
-// a crashed primary to be promoted before the server starts: six
-// cluster-node-timeouts, at most this. Keep in sync with scripts/server-start.sh.
-const replicaHandoffMaxSeconds = 600
-
 // serverStartCommand starts the server through /scripts/server-start.sh when the
 // mounted ConfigMap carries it, and directly otherwise, so a node that mounts
 // an external ConfigMap without the script still starts. $0 is the server
@@ -123,26 +117,16 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 	return append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
 }
 
-// replicaHandoffSeconds returns the wait server-start.sh allows for the replica
-// hand-off on the node: six cluster-node-timeouts from spec.config, with the
-// Valkey default of 15s, capped at replicaHandoffMaxSeconds. The timeout is
-// capped before the multiplication, so a huge value cannot overflow.
-func replicaHandoffSeconds(node *valkeyiov1alpha1.ValkeyNode) int32 {
-	timeoutMs := 15000
-	if v, err := strconv.Atoi(node.Spec.Config["cluster-node-timeout"]); err == nil && v > 0 {
-		timeoutMs = min(v, replicaHandoffMaxSeconds*1000/6)
-	}
-	return int32(max(timeoutMs*6/1000, 1))
-}
-
-// startupFailureThreshold returns the failure threshold of the startup probe:
-// 20 periods, plus the replica hand-off wait of server-start.sh where it runs.
-func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode, periodSeconds int32) int32 {
-	threshold := int32(20)
+// startupFailureThreshold returns the failure threshold of the startup probe,
+// in periods of 5s: about 100s, or about 300s where server-start.sh runs, since
+// the script may hold the server back for up to 300s for a replica hand-off.
+// The value is fixed so that a change of cluster-node-timeout, which the script
+// reads from the config, never rolls the pod.
+func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode) int32 {
 	if usesServerStartScript(node) {
-		threshold += (replicaHandoffSeconds(node) + periodSeconds - 1) / periodSeconds
+		return 80
 	}
-	return threshold
+	return 20
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -344,7 +328,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			StartupProbe: &corev1.Probe{
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
-				FailureThreshold:    startupFailureThreshold(node, 5),
+				FailureThreshold:    startupFailureThreshold(node),
 				TimeoutSeconds:      5,
 				SuccessThreshold:    1,
 				ProbeHandler: corev1.ProbeHandler{

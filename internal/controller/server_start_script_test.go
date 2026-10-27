@@ -21,7 +21,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,14 +59,31 @@ type stubCLI struct {
 // runStartScript runs the script with the given nodes.conf and valkey.conf.
 func runStartScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scriptRun {
 	t.Helper()
+	cmd, dataDir, calls := startScriptCommand(t, nodesConf, valkeyConf, cli)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	_, statErr := os.Stat(filepath.Join(dataDir, "nodes.conf"))
+	n := 0
+	if b, err := os.ReadFile(calls); err == nil {
+		n, _ = strconv.Atoi(string(b[:len(b)-1]))
+	}
+	return scriptRun{out: string(out), nodeKept: statErr == nil, dataDir: dataDir, cliCalls: n}
+}
+
+// startScriptCommand prepares the script run: a data dir with the given
+// nodes.conf and snapshot files, stub binaries on PATH, and the command. It
+// returns the command unstarted, the data dir and the file counting the ROLE
+// calls the stub answered.
+func startScriptCommand(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) (cmd *exec.Cmd, dataDir, calls string) {
+	t.Helper()
 	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "data")
+	dataDir = filepath.Join(dir, "data")
 	binDir := filepath.Join(dir, "bin")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
-	calls := filepath.Join(dir, "calls")
+	calls = filepath.Join(dir, "calls")
 	primaryHost := cli.primaryHost
 	if primaryHost == "" {
 		primaryHost = "10.0.0.1"
@@ -88,18 +108,11 @@ func runStartScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scr
 		}
 	}
 
-	cmd := exec.Command(shellPath, "scripts/server-start.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
+	cmd = exec.Command(shellPath, "scripts/server-start.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
 	// TMPDIR points nowhere: the root filesystem of the server container may
 	// be read-only, so the script must not depend on a writable /tmp.
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "VALKEY_DATA_DIR="+dataDir, "TMPDIR=/nonexistent")
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	_, statErr := os.Stat(filepath.Join(dataDir, "nodes.conf"))
-	n := 0
-	if b, err := os.ReadFile(calls); err == nil {
-		n, _ = strconv.Atoi(string(b[:len(b)-1]))
-	}
-	return scriptRun{out: string(out), nodeKept: statErr == nil, dataDir: dataDir, cliCalls: n}
+	return cmd, dataDir, calls
 }
 
 // assertSnapshotKept checks the snapshot files seeded by runStartScript.
@@ -176,6 +189,34 @@ func TestServerStartScript(t *testing.T) {
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
 		assertSnapshotKept(t, r, true)
+	})
+
+	t.Run("SIGTERM ends the wait with exit status 143", func(t *testing.T) {
+		// The script is PID 1 in the container, where a shell ignores SIGTERM
+		// unless it traps it, and the kubelet would wait out the grace period.
+		cmd, dataDir, _ := startScriptCommand(t, primary+replica+vars, "cluster-node-timeout 50000\n", stubCLI{promotedAfter: -1})
+		log, err := os.Create(filepath.Join(filepath.Dir(dataDir), "log"))
+		require.NoError(t, err)
+		defer func() { _ = log.Close() }()
+		cmd.Stdout, cmd.Stderr = log, log
+		require.NoError(t, cmd.Start())
+		require.Eventually(t, func() bool {
+			b, _ := os.ReadFile(log.Name())
+			return strings.Contains(string(b), "waiting up to 300s")
+		}, 10*time.Second, 50*time.Millisecond)
+		require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err := <-done:
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, 143, exitErr.ExitCode())
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			t.Fatal("the script did not exit on SIGTERM")
+		}
+		assert.FileExists(t, filepath.Join(dataDir, "nodes.conf"), "the identity is kept on an interrupted wait")
 	})
 
 	t.Run("a replica that does not answer is bounded per call and keeps the identity", func(t *testing.T) {

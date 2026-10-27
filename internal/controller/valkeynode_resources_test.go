@@ -704,9 +704,8 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughServerStar
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
 		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
-	// The startup probe allows for the replica hand-off wait: 20 periods plus
-	// six default cluster-node-timeouts of 15s, 90s, in periods of 5s.
-	assert.Equal(t, int32(38), containers[0].StartupProbe.FailureThreshold)
+	// The startup probe allows for the replica hand-off wait of up to 300s.
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *testing.T) {
@@ -719,29 +718,17 @@ func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *test
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
 	assert.Equal(t, []string{shellPath, "-c", serverStartCommand, "valkey-server"}, containers[0].Command[:4])
-	assert.Equal(t, int32(38), containers[0].StartupProbe.FailureThreshold)
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestStartupFailureThreshold(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		timeout string
-		want    int32
-	}{
-		{name: "default timeout of 15s", want: 38},
-		{name: "a 5s timeout adds six periods", timeout: "5000", want: 26},
-		{name: "the wait is capped at 600s", timeout: "200000", want: 140},
-		{name: "a value past the int32 range is capped, not wrapped", timeout: "9223372036854775807", want: 140},
-		{name: "a value that is not a number falls back to the default", timeout: "soon", want: 38},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
-			if tc.timeout != "" {
-				node.Spec.Config = map[string]string{"cluster-node-timeout": tc.timeout}
-			}
-			assert.Equal(t, tc.want, startupFailureThreshold(node, 5))
-		})
-	}
+	// A cluster-node-timeout in the config must not change the probe, since
+	// that would roll the pod on a change of the value.
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
+	assert.Equal(t, int32(80), startupFailureThreshold(node))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	assert.Equal(t, int32(20), startupFailureThreshold(node))
 }
 
 func TestBuildContainersDef_PersistentClusterNodeStartsServerDirectly(t *testing.T) {

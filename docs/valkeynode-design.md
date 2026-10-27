@@ -82,7 +82,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `ready` — whether the pod is running and Valkey is responding
 - `role` - current reported replication role from node
 - `podIP` — used by the parent to connect and issue Valkey commands
-- `terminatingPodIP` — the IP of a pod being deleted while its replacement already runs (a Deployment creates the replacement at once); the parent keeps that pod in the cluster topology until it exits, since a terminating primary serves and holds its slots until then
+- `terminatingPodIPs` — the IPs of pods being deleted while a replacement already runs (a Deployment creates the replacement at once), newest first; the parent keeps those pods in the cluster topology until they exit, since a terminating primary serves and holds its slots until then
 - `podName` — name of the managed pod
 - `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`
 

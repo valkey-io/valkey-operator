@@ -200,12 +200,33 @@ func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	return nodeIndex
 }
 
-// hasNodeWithPodIP reports whether any ValkeyNode answers at podIP, through
-// its pod or its terminating pod. An empty podIP never matches.
+// hasNodeWithPodIP reports whether any ValkeyNode has podIP as its pod IP.
+// An empty podIP never matches, including against a ValkeyNode that has no pod
+// IP yet: two empty addresses do not identify the same node.
 func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
+	if podIP == "" {
+		return false
+	}
 	return slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
-		return nodeHasAddress(&n, podIP)
+		return n.Status.PodIP == podIP
 	})
+}
+
+// hasNodeWithTerminatingPodIP reports whether any ValkeyNode has podIP among
+// its terminating pods. An empty podIP never matches.
+func hasNodeWithTerminatingPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
+	return podIP != "" && slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
+		return slices.Contains(n.Status.TerminatingPodIPs, podIP)
+	})
+}
+
+// isMemberAddress reports whether a failing entry at host still belongs to a
+// member, so that forgetStaleNodes leaves it alone: a node's pod, which may
+// come back, or a terminating pod of a node that still answered the scrape.
+// A terminating pod that no longer answers is forgotten like any other dead
+// node, even while its pod object lingers.
+func isMemberAddress(nodes []valkeyv1.ValkeyNode, state *valkey.ClusterState, host string) bool {
+	return hasNodeWithPodIP(nodes, host) || (hasNodeWithTerminatingPodIP(nodes, host) && state.HasAddress(host))
 }
 
 // nodeRoleAndShard finds the ValkeyNode that answers at address and reads its

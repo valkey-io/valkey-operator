@@ -1571,7 +1571,7 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 			for _, failing := range node.GetFailingNodes() {
 				// A noaddr entry has no address to match on, so it falls
 				// through to the node ID checks below.
-				if hasNodeWithPodIP(nodes.Items, failing.Host) {
+				if isMemberAddress(nodes.Items, state, failing.Host) {
 					continue
 				}
 				// The address match above misses a live member whose pod IP

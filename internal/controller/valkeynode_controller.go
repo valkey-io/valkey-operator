@@ -1042,7 +1042,7 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 // getPods lists the pods that carry the node's labels and sorts them out.
 // current is the pod the node runs on: the newest pod that is not being
 // deleted, or, when every pod is, the newest of those. terminating are the
-// other pods that are being deleted and still have an IP, newest first. A
+// other pods that are being deleted and still answer, newest first. A
 // Deployment creates the replacement before the old pod is gone, so for the
 // length of the old pod's termination both exist, and the old one keeps
 // serving, with the shard's slots if it is the primary. A replacement
@@ -1055,12 +1055,18 @@ func (r *ValkeyNodeReconciler) getPods(ctx context.Context, node *valkeyiov1alph
 		client.MatchingLabels(valkeyNodeLabels(node))); err != nil {
 		return nil, nil, fmt.Errorf("listing pods for ValkeyNode %s: %w", node.Name, err)
 	}
-	current, terminating = pickPods(podList.Items)
+	current, terminating = pickPods(podList.Items, time.Now())
 	return current, terminating, nil
 }
 
-// pickPods implements getPods on a listed set of pods.
-func pickPods(pods []corev1.Pod) (current *corev1.Pod, terminating []corev1.Pod) {
+// terminatingPodSlack is how long past its deletion deadline a terminating pod
+// still counts. The kubelet kills the containers at that deadline, so a pod
+// object that outlives it by more belongs to a kubelet that no longer acts on
+// it. The backstop requeue applies the cutoff once it passes.
+const terminatingPodSlack = 30 * time.Second
+
+// pickPods implements getPods on a listed set of pods at time now.
+func pickPods(pods []corev1.Pod, now time.Time) (current *corev1.Pod, terminating []corev1.Pod) {
 	// Newest first, by name within the same second, so the choice is stable
 	// across reconciles whatever order the list came in.
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
@@ -1078,10 +1084,30 @@ func pickPods(pods []corev1.Pod) (current *corev1.Pod, terminating []corev1.Pod)
 	if current == nil && len(pods) > 0 {
 		current = &pods[0]
 	}
+	// A terminating pod counts only while its server still answers. The
+	// kubelet keeps running the readiness probe of the server container
+	// through its preStop and the shutdown wait, and PING answers through
+	// both. The pod's own Ready condition is no use for that: a sidecar
+	// without a preStop, the exporter by default, exits at once and takes it
+	// to False. A pod whose kubelet is gone is the other case. The node
+	// lifecycle controller marks the pods of a node that stopped heartbeating
+	// not Ready long before the taint eviction deletes them, and such a pod
+	// then stays Terminating with its old IP and stale container statuses
+	// until the Node object is gone, which can take hours, so the kubelet's
+	// own view cannot be trusted any more. Without these checks every
+	// reconcile would wait out a dial timeout on that IP for as long. The
+	// reverse case, a probe that fails while the old primary still owns its
+	// slots, falls back to the behaviour without this list: the replacements
+	// wait on the primary instead of being attached to it.
 	for i := range pods {
-		if &pods[i] != current && !pods[i].DeletionTimestamp.IsZero() && pods[i].Status.PodIP != "" {
-			terminating = append(terminating, pods[i])
+		p := &pods[i]
+		if p == current || p.DeletionTimestamp.IsZero() || p.Status.PodIP == "" {
+			continue
 		}
+		if !serverContainerReady(p) || markedNotReadyByNode(p) || now.After(p.DeletionTimestamp.Add(terminatingPodSlack)) {
+			continue
+		}
+		terminating = append(terminating, *p)
 	}
 	return current, terminating
 }
@@ -1161,6 +1187,42 @@ func syncInProgress(info string) bool {
 		}
 	}
 	return false
+}
+
+// serverContainerReady reports whether the kubelet has the pod's server
+// container passing its readiness probe. A missing status counts as not
+// ready.
+func serverContainerReady(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == serverContainerName {
+			return cs.Ready
+		}
+	}
+	return false
+}
+
+// podReasonReadinessGatesNotReady is the reason the kubelet gives a pod that
+// is not Ready only because a readiness gate is not satisfied.
+const podReasonReadinessGatesNotReady = "ReadinessGatesNotReady"
+
+// markedNotReadyByNode reports whether the pod's Ready condition was set to
+// False by someone other than its kubelet. The node lifecycle controller does
+// that for the pods of a node that stopped heartbeating: it flips Ready alone
+// and leaves the kubelet's ContainersReady condition and container statuses
+// as they were. The kubelet sets Ready to False only together with
+// ContainersReady, or for a readiness gate.
+func markedNotReadyByNode(pod *corev1.Pod) bool {
+	var ready, containersReady *corev1.PodCondition
+	for i := range pod.Status.Conditions {
+		switch pod.Status.Conditions[i].Type {
+		case corev1.PodReady:
+			ready = &pod.Status.Conditions[i]
+		case corev1.ContainersReady:
+			containersReady = &pod.Status.Conditions[i]
+		}
+	}
+	return ready != nil && ready.Status == corev1.ConditionFalse && ready.Reason != podReasonReadinessGatesNotReady &&
+		containersReady != nil && containersReady.Status == corev1.ConditionTrue
 }
 
 // serverContainerRunning reports whether the kubelet has the pod's server

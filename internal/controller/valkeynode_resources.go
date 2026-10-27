@@ -414,7 +414,9 @@ func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
 			sc = &corev1.SecurityContext{}
 		}
 		// Kubernetes treats SYS_ADMIN like privileged mode for privilege escalation.
-		hasSysAdmin := sc.Capabilities != nil && slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN"))
+		hasSysAdmin := sc.Capabilities != nil &&
+			(slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN")) ||
+				slices.Contains(sc.Capabilities.Add, corev1.Capability("CAP_SYS_ADMIN")))
 		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) && !hasSysAdmin {
 			sc.AllowPrivilegeEscalation = new(false)
 		}

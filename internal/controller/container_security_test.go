@@ -42,6 +42,9 @@ func TestManagedContainerSecurityDefaults(t *testing.T) {
 		{name: "SYS_ADMIN among capabilities", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_BIND_SERVICE", "SYS_ADMIN"}, Drop: []corev1.Capability{"ALL"}}}, want: nil},
 		{name: "SYS_ADMIN explicit false", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}}, want: new(false)},
 		{name: "SYS_ADMIN explicit true", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(true), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}}, want: new(true)},
+		{name: "CAP_SYS_ADMIN", sc: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"CAP_SYS_ADMIN"}}}, want: nil},
+		{name: "CAP_SYS_ADMIN explicit false", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(false), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"CAP_SYS_ADMIN"}}}, want: new(false)},
+		{name: "CAP_SYS_ADMIN explicit true", sc: &corev1.SecurityContext{AllowPrivilegeEscalation: new(true), Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"CAP_SYS_ADMIN"}}}, want: new(true)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := newTestValkeyNode("cache-0-0", "default")

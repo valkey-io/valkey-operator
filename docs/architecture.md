@@ -26,7 +26,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 2. Ensures a PVC (if persistence is configured)
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
 4. Deletes config revision keys that nothing uses any more
-5. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+5. Updates `status.ready`, `status.podIP`, `status.terminatingPodIP`, `status.role`, and `status.observedGeneration`
 6. Once the pod is ready, applies live config with CONFIG SET and records it in `status.appliedLiveConfig`
 
 #### Role resolution

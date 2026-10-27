@@ -187,6 +187,11 @@ func TestPickPods(t *testing.T) {
 		assert.Empty(t, terminating)
 	})
 
+	t.Run("no terminating pod gives a nil list, as the API returns it", func(t *testing.T) {
+		_, terminating := pickPods([]corev1.Pod{podAt("new", 200, "10.0.0.2", false)}, testNow)
+		assert.Nil(t, terminatingPodIPs(terminating))
+	})
+
 	t.Run("no pod", func(t *testing.T) {
 		current, terminating := pickPods(nil, testNow)
 		assert.Nil(t, current)

@@ -3710,6 +3710,14 @@ spec:
                 description: Role is the Valkey replication role of this node (primary
                   or replica).
                 type: string
+              terminatingPodIP:
+                description: |-
+                  TerminatingPodIP is the IP of a pod of this node that is being deleted
+                  while its replacement already runs, which a Deployment creates before
+                  the old pod is gone. The old pod keeps serving, and may still hold the
+                  shard's slots, until it exits, so the cluster controller keeps it in
+                  the topology until then. Empty when no such pod exists.
+                type: string
             type: object
         required:
         - spec

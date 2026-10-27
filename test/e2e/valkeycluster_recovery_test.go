@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
@@ -413,6 +414,164 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(ContainSubstring("cluster_state:ok"))
 				g.Expect(out).To(ContainSubstring("cluster_slots_ok:16384"))
+			}).Should(Succeed())
+		})
+	})
+
+	// A Deployment creates the replacement of a deleted pod at once, while the
+	// old pod runs its preStop hook and shutdown. For that time two pods carry
+	// the node's labels, and the old primary still serves with all the slots.
+	// The operator keeps it in the topology until it exits, attaches the
+	// replacements to it, and lets the shutdown failover hand the slots and
+	// the data to a synced replacement.
+	Context("when a Deployment replaces pods that are still terminating", Label("terminating-pods"), func() {
+		const clusterName = "valkeycluster-terminating-pods-e2e"
+		const keyPrefix = "e2e:terminating"
+		const seedKeys = 300
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		type pod struct {
+			name, ip    string
+			terminating bool
+		}
+		// podsAt lists the pods of a (shard, node) position.
+		podsAt := func(g Gomega, shard, node int) []pod {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
+				"-l", fmt.Sprintf("%s=%s,%s=%d,%s=%d", controller.LabelCluster, clusterName, controller.LabelShardIndex, shard, controller.LabelNodeIndex, node),
+				"-o", `jsonpath={range .items[*]}{.metadata.name} {.status.podIP} {.metadata.deletionTimestamp}{"\n"}{end}`))
+			g.Expect(err).NotTo(HaveOccurred())
+			var pods []pod
+			for _, line := range utils.GetNonEmptyLines(out) {
+				fields := strings.Fields(line)
+				p := pod{name: fields[0], terminating: len(fields) > 2}
+				if len(fields) > 1 {
+					p.ip = fields[1]
+				}
+				pods = append(pods, p)
+			}
+			return pods
+		}
+		// livePod returns the one pod of a position that is not terminating.
+		livePod := func(g Gomega, shard, node int) pod {
+			var live []pod
+			for _, p := range podsAt(g, shard, node) {
+				if !p.terminating {
+					live = append(live, p)
+				}
+			}
+			g.Expect(live).To(HaveLen(1))
+			return live[0]
+		}
+		podReady := func(g Gomega, name string) bool {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pod", name,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`))
+			g.Expect(err).NotTo(HaveOccurred())
+			return strings.TrimSpace(out) == "True"
+		}
+		deletePod := func(name string) {
+			GinkgoHelper()
+			_, err := utils.Run(exec.Command("kubectl", "delete", "pod", name, "--wait=false"))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		replication := func(g Gomega, podName string) string {
+			out, err := utils.ValkeyCLI(podName, cliOpts, "INFO", "replication")
+			g.Expect(err).NotTo(HaveOccurred())
+			return out
+		}
+
+		It("attaches the replacements to the terminating primary and keeps the data", func() {
+			By("creating a one-shard Deployment cluster whose pods take a minute to terminate")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  workloadType: Deployment
+  terminationGracePeriodSeconds: 90
+  containers:
+    - name: server
+      lifecycle:
+        preStop:
+          exec:
+            command: ["sleep", "60"]
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+			var primaryPos, replicaPos int
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 0)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(BeElementOf("primary", "replica"))
+				if role == "primary" {
+					primaryPos, replicaPos = 0, 1
+				} else {
+					primaryPos, replicaPos = 1, 0
+				}
+			}).Should(Succeed())
+			var primary, replica pod
+			Eventually(func(g Gomega) {
+				primary = livePod(g, 0, primaryPos)
+				replica = livePod(g, 0, replicaPos)
+				g.Expect(replication(g, replica.name)).To(ContainSubstring("master_link_status:up"))
+			}).Should(Succeed())
+
+			By("seeding keys")
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(primary.name, keyPrefix, seedKeys, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("deleting the replica pod and waiting for its replacement to answer")
+			deletePod(replica.name)
+			var newReplica pod
+			Eventually(func(g Gomega) {
+				newReplica = livePod(g, 0, replicaPos)
+				g.Expect(newReplica.name).NotTo(Equal(replica.name))
+				g.Expect(podReady(g, newReplica.name)).To(BeTrue())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("deleting the primary pod while the old one keeps serving through its preStop")
+			deletePod(primary.name)
+			var newPrimaryPod pod
+			Eventually(func(g Gomega) {
+				newPrimaryPod = livePod(g, 0, primaryPos)
+				g.Expect(newPrimaryPod.name).NotTo(Equal(primary.name))
+			}).Should(Succeed())
+
+			By("verifying the node status keeps the terminating primary and both replacements follow it")
+			Eventually(func(g Gomega) {
+				n, err := utils.GetValkeyNodeStatus(fmt.Sprintf("%s-0-%d", clusterName, primaryPos))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(n.Status.PodIP).To(Equal(newPrimaryPod.ip))
+				g.Expect(n.Status.TerminatingPodIP).To(Equal(primary.ip))
+				for _, p := range []pod{newReplica, newPrimaryPod} {
+					info := replication(g, p.name)
+					g.Expect(info).To(ContainSubstring("role:slave"))
+					g.Expect(info).To(ContainSubstring("master_host:" + primary.ip))
+				}
+			}, time.Minute).Should(Succeed())
+
+			By("waiting for the old pods to exit and the cluster to return to Ready")
+			Eventually(func(g Gomega) {
+				for _, pos := range []int{0, 1} {
+					for _, p := range podsAt(g, 0, pos) {
+						g.Expect(p.terminating).To(BeFalse(), "%s is still terminating", p.name)
+					}
+				}
+			}, 4*time.Minute).Should(Succeed())
+			waitForReady(clusterName)
+
+			By("verifying the slots and the keys stayed in the shard")
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(newReplica.name, keyPrefix, seedKeys, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(seedKeys))
 			}).Should(Succeed())
 		})
 	})

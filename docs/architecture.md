@@ -25,7 +25,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 1. Ensures a ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
 2. Ensures a PVC (if persistence is configured)
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
-4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+4. Updates `status.ready`, `status.podIP`, `status.terminatingPodIP`, `status.role`, and `status.observedGeneration`
 
 #### Role resolution
 

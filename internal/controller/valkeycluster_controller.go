@@ -1095,15 +1095,15 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 	}
 }
 
-// nodeAddresses returns the pod IPs of every node that has one. Nodes still
-// waiting for an IP are skipped: there is nothing to dial.
+// nodeAddresses returns the pod IPs of every node that has one, including a
+// terminating pod that still serves beside its replacement: a terminating
+// primary keeps its slots until it exits, and dropping it would leave the
+// replacements unattached and its slots up for assignment to an empty node.
+// Nodes still waiting for an IP are skipped: there is nothing to dial.
 func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
-	ips := []string{}
-	for _, node := range nodes.Items {
-		if node.Status.PodIP == "" {
-			continue
-		}
-		ips = append(ips, node.Status.PodIP)
+	ips := make([]string, 0, 2*len(nodes.Items))
+	for i := range nodes.Items {
+		ips = append(ips, nodeAddressesOf(&nodes.Items[i])...)
 	}
 	return ips
 }

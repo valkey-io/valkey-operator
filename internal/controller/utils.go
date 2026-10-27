@@ -166,12 +166,31 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	return true
 }
 
-// nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address
-// and returns its node index from the LabelNodeIndex label.
+// nodeAddressesOf returns the pod IPs a ValkeyNode answers at: its pod's,
+// and its terminating pod's while that pod serves on beside the replacement.
+func nodeAddressesOf(n *valkeyv1.ValkeyNode) []string {
+	addresses := make([]string, 0, 2)
+	for _, ip := range []string{n.Status.PodIP, n.Status.TerminatingPodIP} {
+		if ip != "" {
+			addresses = append(addresses, ip)
+		}
+	}
+	return addresses
+}
+
+// nodeHasAddress reports whether address is one of the node's pod IPs. An
+// empty address never matches, including against a node that has no pod IP
+// yet: two empty addresses do not identify the same node.
+func nodeHasAddress(n *valkeyv1.ValkeyNode, address string) bool {
+	return address != "" && slices.Contains(nodeAddressesOf(n), address)
+}
+
+// nodeIndexForAddress finds the ValkeyNode that answers at address and
+// returns its node index from the LabelNodeIndex label.
 // Returns -1 if the node is not found or the label is missing or invalid.
 func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
-		return n.Status.PodIP == address
+		return nodeHasAddress(&n, address)
 	})
 	if idx == -1 {
 		return -1
@@ -183,26 +202,22 @@ func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	return nodeIndex
 }
 
-// hasNodeWithPodIP reports whether any ValkeyNode has podIP as its pod IP.
-// An empty podIP never matches, including against a ValkeyNode that has no pod
-// IP yet: two empty addresses do not identify the same node.
+// hasNodeWithPodIP reports whether any ValkeyNode answers at podIP, through
+// its pod or its terminating pod. An empty podIP never matches.
 func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
-	if podIP == "" {
-		return false
-	}
 	return slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
-		return n.Status.PodIP == podIP
+		return nodeHasAddress(&n, podIP)
 	})
 }
 
-// nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
-// and reads its CR labels to determine the intended role and shard index.
+// nodeRoleAndShard finds the ValkeyNode that answers at address and reads its
+// CR labels to determine the intended role and shard index.
 //
 // The role is derived from valkey.io/node-index: node 0 is the initial
 // primary, nodes 1+ are replicas. Returns ("", -1) if not found or labels missing.
 func nodeRoleAndShard(address string, nodes *valkeyv1.ValkeyNodeList) (string, int) {
 	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
-		return n.Status.PodIP == address
+		return nodeHasAddress(&n, address)
 	})
 	if idx == -1 {
 		return "", -1
@@ -238,12 +253,12 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *va
 	si := strconv.Itoa(shardIndex)
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+		if n.Labels[LabelShardIndex] != si {
 			continue
 		}
 		for _, shard := range state.Shards {
 			for _, node := range shard.Nodes {
-				if node.Address == n.Status.PodIP {
+				if nodeHasAddress(n, node.Address) {
 					return true
 				}
 			}
@@ -261,7 +276,7 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv
 	si := strconv.Itoa(shardIndex)
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+		if n.Labels[LabelShardIndex] != si {
 			continue
 		}
 		for _, shard := range state.Shards {
@@ -269,8 +284,8 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv
 				continue
 			}
 			primary := shard.GetPrimaryNode()
-			if primary != nil && primary.Address == n.Status.PodIP {
-				return primary.Id, n.Status.PodIP
+			if primary != nil && nodeHasAddress(n, primary.Address) {
+				return primary.Id, primary.Address
 			}
 		}
 	}

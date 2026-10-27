@@ -82,6 +82,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `ready` — whether the pod is running and Valkey is responding
 - `role` - current reported replication role from node
 - `podIP` — used by the parent to connect and issue Valkey commands
+- `terminatingPodIP` — the IP of a pod being deleted while its replacement already runs (a Deployment creates the replacement at once); the parent keeps that pod in the cluster topology until it exits, since a terminating primary serves and holds its slots until then
 - `podName` — name of the managed pod
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.

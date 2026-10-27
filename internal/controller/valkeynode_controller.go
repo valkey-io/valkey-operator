@@ -320,7 +320,7 @@ var localAddr = regexp.MustCompile(`\S+:\d+->`)
 // ignoring the local address in network error messages. The local port can
 // change on every redial, and writing each change requeues the node without
 // backoff. Other message changes still update the condition. The full error
-// remains available in logs and events.
+// remains available in the operator log.
 func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) bool {
 	existing := meta.FindStatusCondition(conditions, conditionType)
 	return existing != nil &&
@@ -339,15 +339,13 @@ func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node 
 		return nil
 	}
 	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
+	})
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
@@ -365,15 +363,13 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 		return nil
 	}
 	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
+	})
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch ACLApplied condition: %w", err)
 	}

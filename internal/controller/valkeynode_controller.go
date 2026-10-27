@@ -1112,8 +1112,13 @@ func pickPods(pods []corev1.Pod, now time.Time) (current *corev1.Pod, terminatin
 	return current, terminating
 }
 
-// terminatingPodIPs returns the IPs of the pods in the order given.
+// terminatingPodIPs returns the IPs of the pods in the order given, nil for
+// none, so that a status without terminating pods compares equal to the one
+// read back from the API, where the empty field is omitted.
 func terminatingPodIPs(pods []corev1.Pod) []string {
+	if len(pods) == 0 {
+		return nil
+	}
 	ips := make([]string, 0, len(pods))
 	for i := range pods {
 		ips = append(ips, pods[i].Status.PodIP)

@@ -164,6 +164,14 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 		got = status()
 		Expect(got.PodIP).To(Equal("10.0.0.3"))
 		Expect(got.TerminatingPodIPs).To(BeEmpty())
+
+		By("reconciling again with nothing changed")
+		before := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), before)).To(Succeed())
+		status()
+		after := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), after)).To(Succeed())
+		Expect(after.ResourceVersion).To(Equal(before.ResourceVersion), "no status write when nothing changed")
 	})
 
 	It("stays on a terminating pod while it is the only one", func() {

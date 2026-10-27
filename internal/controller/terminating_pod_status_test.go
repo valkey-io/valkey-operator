@@ -33,7 +33,8 @@ import (
 // A Deployment creates the replacement of a deleted pod at once, so for the
 // length of the old pod's termination two pods carry the node's labels. The
 // status follows the replacement and keeps the old pod's IP in
-// terminatingPodIP while it exists.
+// terminatingPodIPs while it exists, along with any replacement deleted in
+// its turn.
 var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 	const holdFinalizer = "valkey.io/test-hold"
 	var (
@@ -109,26 +110,35 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
 	})
 
-	It("follows the replacement and keeps the terminating pod's IP until it is gone", func() {
+	It("follows the replacement and keeps the terminating pods' IPs until they are gone", func() {
 		old := createPod(node.Name+"-old", "10.0.0.1", true)
 		Expect(status().PodIP).To(Equal("10.0.0.1"))
 
 		By("adding the replacement and deleting the old pod, which a finalizer keeps terminating")
-		createPod(node.Name+"-new", "10.0.0.2", false)
+		first := createPod(node.Name+"-first", "10.0.0.2", true)
 		Expect(k8sClient.Delete(ctx, old)).To(Succeed())
 		got := status()
-		Expect(got.PodName).To(Equal(node.Name + "-new"))
+		Expect(got.PodName).To(Equal(node.Name + "-first"))
 		Expect(got.PodIP).To(Equal("10.0.0.2"))
-		Expect(got.TerminatingPodIP).To(Equal("10.0.0.1"))
+		Expect(got.TerminatingPodIPs).To(Equal([]string{"10.0.0.1"}))
 
-		By("letting the old pod go")
+		By("deleting the replacement in its turn and adding a second one")
+		createPod(node.Name+"-second", "10.0.0.3", false)
+		Expect(k8sClient.Delete(ctx, first)).To(Succeed())
+		got = status()
+		Expect(got.PodIP).To(Equal("10.0.0.3"))
+		Expect(got.TerminatingPodIPs).To(ConsistOf("10.0.0.2", "10.0.0.1"), "the old pod stays visible behind the newer one")
+
+		By("letting the old pods go")
 		release(old)
+		release(first)
 		Eventually(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(old), &corev1.Pod{})).NotTo(Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(first), &corev1.Pod{})).NotTo(Succeed())
 		}).Should(Succeed())
 		got = status()
-		Expect(got.PodIP).To(Equal("10.0.0.2"))
-		Expect(got.TerminatingPodIP).To(BeEmpty())
+		Expect(got.PodIP).To(Equal("10.0.0.3"))
+		Expect(got.TerminatingPodIPs).To(BeEmpty())
 	})
 
 	It("stays on a terminating pod while it is the only one", func() {
@@ -136,6 +146,6 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 		Expect(k8sClient.Delete(ctx, old)).To(Succeed())
 		got := status()
 		Expect(got.PodIP).To(Equal("10.0.0.1"))
-		Expect(got.TerminatingPodIP).To(BeEmpty())
+		Expect(got.TerminatingPodIPs).To(BeEmpty())
 	})
 })

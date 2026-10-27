@@ -56,7 +56,11 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 		pod.Status.PodIP = ip
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "server", Ready: true}}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 		return pod
 	}
@@ -128,6 +132,27 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 		got = status()
 		Expect(got.PodIP).To(Equal("10.0.0.3"))
 		Expect(got.TerminatingPodIPs).To(ConsistOf("10.0.0.2", "10.0.0.1"), "the old pod stays visible behind the newer one")
+
+		By("letting a sidecar of the first replacement exit, which takes the pod's Ready condition down while the server still answers")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(first), first)).To(Succeed())
+		first.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+		}
+		first.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "server", Ready: true}, {Name: "metrics-exporter", Ready: false}}
+		Expect(k8sClient.Status().Update(ctx, first)).To(Succeed())
+		got = status()
+		Expect(got.TerminatingPodIPs).To(ConsistOf("10.0.0.2", "10.0.0.1"), "a pod whose server answers stays listed")
+
+		By("marking the old pod not Ready, as the node lifecycle controller does when its node goes away")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(old), old)).To(Succeed())
+		old.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
+		Expect(k8sClient.Status().Update(ctx, old)).To(Succeed())
+		got = status()
+		Expect(got.TerminatingPodIPs).To(Equal([]string{"10.0.0.2"}), "a terminating pod on a lost node is dropped while its object lingers")
 
 		By("letting the old pods go")
 		release(old)

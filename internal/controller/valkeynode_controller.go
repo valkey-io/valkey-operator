@@ -870,10 +870,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		return false, err
 	}
 
-	current.Status.TerminatingPodIP = ""
-	if terminating != nil {
-		current.Status.TerminatingPodIP = terminating.Status.PodIP
-	}
+	current.Status.TerminatingPodIPs = terminatingPodIPs(terminating)
 	if pod == nil {
 		current.Status.Ready = false
 		current.Status.PodName = ""
@@ -969,7 +966,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
 	node.Status.Ready = current.Status.Ready
 	node.Status.PodIP = current.Status.PodIP
-	node.Status.TerminatingPodIP = current.Status.TerminatingPodIP
+	node.Status.TerminatingPodIPs = current.Status.TerminatingPodIPs
 
 	return roleResolveFailed, nil
 }
@@ -1044,23 +1041,26 @@ func (r *ValkeyNodeReconciler) getPod(ctx context.Context, node *valkeyiov1alpha
 
 // getPods lists the pods that carry the node's labels and sorts them out.
 // current is the pod the node runs on: the newest pod that is not being
-// deleted, or, when every pod is, the newest of those. terminating is the
-// newest other pod that is being deleted and still has an IP. A Deployment
-// creates the replacement before the old pod is gone, so for the length of
-// the old pod's termination both exist, and the old one keeps serving, with
-// the shard's slots if it is the primary. Both are nil when there is no pod.
-func (r *ValkeyNodeReconciler) getPods(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (current, terminating *corev1.Pod, err error) {
+// deleted, or, when every pod is, the newest of those. terminating are the
+// other pods that are being deleted and still have an IP, newest first. A
+// Deployment creates the replacement before the old pod is gone, so for the
+// length of the old pod's termination both exist, and the old one keeps
+// serving, with the shard's slots if it is the primary. A replacement
+// deleted in its turn adds a pod to the list rather than displacing the old
+// one. current is nil when there is no pod.
+func (r *ValkeyNodeReconciler) getPods(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (current *corev1.Pod, terminating []corev1.Pod, err error) {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(node.Namespace),
 		client.MatchingLabels(valkeyNodeLabels(node))); err != nil {
 		return nil, nil, fmt.Errorf("listing pods for ValkeyNode %s: %w", node.Name, err)
 	}
-	return pickPods(podList.Items)
+	current, terminating = pickPods(podList.Items)
+	return current, terminating, nil
 }
 
 // pickPods implements getPods on a listed set of pods.
-func pickPods(pods []corev1.Pod) (current, terminating *corev1.Pod, err error) {
+func pickPods(pods []corev1.Pod) (current *corev1.Pod, terminating []corev1.Pod) {
 	// Newest first, by name within the same second, so the choice is stable
 	// across reconciles whatever order the list came in.
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
@@ -1080,11 +1080,19 @@ func pickPods(pods []corev1.Pod) (current, terminating *corev1.Pod, err error) {
 	}
 	for i := range pods {
 		if &pods[i] != current && !pods[i].DeletionTimestamp.IsZero() && pods[i].Status.PodIP != "" {
-			terminating = &pods[i]
-			break
+			terminating = append(terminating, pods[i])
 		}
 	}
-	return current, terminating, nil
+	return current, terminating
+}
+
+// terminatingPodIPs returns the IPs of the pods in the order given.
+func terminatingPodIPs(pods []corev1.Pod) []string {
+	ips := make([]string, 0, len(pods))
+	for i := range pods {
+		ips = append(ips, pods[i].Status.PodIP)
+	}
+	return ips
 }
 
 // podSupersededAndStuck reports whether a pod can no longer be replaced by its

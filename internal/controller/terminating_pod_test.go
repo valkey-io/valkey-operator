@@ -48,42 +48,47 @@ func TestPickPods(t *testing.T) {
 			{podAt("old", 100, "10.0.0.1", true), podAt("new", 200, "10.0.0.2", false)},
 			{podAt("new", 200, "10.0.0.2", false), podAt("old", 100, "10.0.0.1", true)},
 		} {
-			current, terminating, err := pickPods(pods)
-			require.NoError(t, err)
+			current, terminating := pickPods(pods)
 			require.NotNil(t, current)
 			assert.Equal(t, "new", current.Name)
-			require.NotNil(t, terminating)
-			assert.Equal(t, "old", terminating.Name)
+			assert.Equal(t, []string{"10.0.0.1"}, terminatingPodIPs(terminating))
 		}
 	})
 
+	t.Run("a replacement deleted in its turn joins the terminating pods, newest first", func(t *testing.T) {
+		// The original primary keeps serving through its preStop while the
+		// first replacement is deleted too and a second one starts. Both
+		// terminating pods stay visible, so the primary is still scraped.
+		current, terminating := pickPods([]corev1.Pod{
+			podAt("old", 100, "10.0.0.1", true), podAt("first", 200, "10.0.0.2", true), podAt("second", 300, "10.0.0.3", false),
+		})
+		assert.Equal(t, "second", current.Name)
+		assert.Equal(t, []string{"10.0.0.2", "10.0.0.1"}, terminatingPodIPs(terminating))
+	})
+
 	t.Run("a terminating pod on its own is current", func(t *testing.T) {
-		current, terminating, err := pickPods([]corev1.Pod{podAt("old", 100, "10.0.0.1", true)})
-		require.NoError(t, err)
+		current, terminating := pickPods([]corev1.Pod{podAt("old", 100, "10.0.0.1", true)})
 		require.NotNil(t, current)
 		assert.Equal(t, "old", current.Name)
-		assert.Nil(t, terminating)
+		assert.Empty(t, terminating)
 	})
 
 	t.Run("the newest of two live pods is current and the other is not terminating", func(t *testing.T) {
-		current, terminating, err := pickPods([]corev1.Pod{podAt("a", 100, "10.0.0.1", false), podAt("b", 200, "10.0.0.2", false)})
-		require.NoError(t, err)
+		current, terminating := pickPods([]corev1.Pod{podAt("a", 100, "10.0.0.1", false), podAt("b", 200, "10.0.0.2", false)})
 		assert.Equal(t, "b", current.Name)
-		assert.Nil(t, terminating)
+		assert.Empty(t, terminating)
 	})
 
 	t.Run("a terminating pod without an IP is nothing to dial", func(t *testing.T) {
-		current, terminating, err := pickPods([]corev1.Pod{podAt("old", 100, "", true), podAt("new", 200, "10.0.0.2", false)})
-		require.NoError(t, err)
+		current, terminating := pickPods([]corev1.Pod{podAt("old", 100, "", true), podAt("new", 200, "10.0.0.2", false)})
 		assert.Equal(t, "new", current.Name)
-		assert.Nil(t, terminating)
+		assert.Empty(t, terminating)
 	})
 
 	t.Run("no pod", func(t *testing.T) {
-		current, terminating, err := pickPods(nil)
-		require.NoError(t, err)
+		current, terminating := pickPods(nil)
 		assert.Nil(t, current)
-		assert.Nil(t, terminating)
+		assert.Empty(t, terminating)
 	})
 }
 
@@ -93,7 +98,7 @@ func TestPickPods(t *testing.T) {
 func TestTerminatingPodIsStillTheShardPrimary(t *testing.T) {
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
 		{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "0"}},
-			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.11", TerminatingPodIP: "10.0.0.1"}},
+			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.11", TerminatingPodIPs: []string{"10.0.0.21", "10.0.0.1"}}},
 		{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "1"}},
 			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.12"}},
 	}}
@@ -106,11 +111,11 @@ func TestTerminatingPodIsStillTheShardPrimary(t *testing.T) {
 		},
 	}
 
-	assert.ElementsMatch(t, []string{"10.0.0.11", "10.0.0.1", "10.0.0.12"}, nodeAddresses(nodes))
+	assert.ElementsMatch(t, []string{"10.0.0.11", "10.0.0.21", "10.0.0.1", "10.0.0.12"}, nodeAddresses(nodes))
 
 	id, ip := findShardPrimary(state, 0, nodes)
 	assert.Equal(t, "p0", id)
-	assert.Equal(t, "10.0.0.1", ip, "the address to reach the primary at is the terminating pod's")
+	assert.Equal(t, "10.0.0.1", ip, "the address to reach the primary at is the terminating pod's, even behind a newer one")
 	assert.True(t, shardExistsInTopology(state, 0, nodes))
 	assert.Equal(t, 0, nodeIndexForAddress("10.0.0.1", nodes))
 	role, shard := nodeRoleAndShard("10.0.0.1", nodes)

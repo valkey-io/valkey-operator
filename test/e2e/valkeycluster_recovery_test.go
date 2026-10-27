@@ -542,6 +542,7 @@ spec:
 			Eventually(func(g Gomega) {
 				newPrimaryPod = livePod(g, 0, primaryPos)
 				g.Expect(newPrimaryPod.name).NotTo(Equal(primary.name))
+				g.Expect(newPrimaryPod.ip).NotTo(BeEmpty())
 			}).Should(Succeed())
 
 			By("verifying the node status keeps the terminating primary and both replacements follow it")
@@ -549,7 +550,7 @@ spec:
 				n, err := utils.GetValkeyNodeStatus(fmt.Sprintf("%s-0-%d", clusterName, primaryPos))
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(n.Status.PodIP).To(Equal(newPrimaryPod.ip))
-				g.Expect(n.Status.TerminatingPodIP).To(Equal(primary.ip))
+				g.Expect(n.Status.TerminatingPodIPs).To(ConsistOf(primary.ip))
 				for _, p := range []pod{newReplica, newPrimaryPod} {
 					info := replication(g, p.name)
 					g.Expect(info).To(ContainSubstring("role:slave"))

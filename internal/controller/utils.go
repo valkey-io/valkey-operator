@@ -166,16 +166,14 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	return true
 }
 
-// nodeAddressesOf returns the pod IPs a ValkeyNode answers at: its pod's,
-// and its terminating pod's while that pod serves on beside the replacement.
+// nodeAddressesOf returns the pod IPs a ValkeyNode answers at: its pod's, and
+// those of its terminating pods while they serve on beside the replacement.
 func nodeAddressesOf(n *valkeyv1.ValkeyNode) []string {
-	addresses := make([]string, 0, 2)
-	for _, ip := range []string{n.Status.PodIP, n.Status.TerminatingPodIP} {
-		if ip != "" {
-			addresses = append(addresses, ip)
-		}
+	addresses := make([]string, 0, 1+len(n.Status.TerminatingPodIPs))
+	if n.Status.PodIP != "" {
+		addresses = append(addresses, n.Status.PodIP)
 	}
-	return addresses
+	return append(addresses, n.Status.TerminatingPodIPs...)
 }
 
 // nodeHasAddress reports whether address is one of the node's pod IPs. An

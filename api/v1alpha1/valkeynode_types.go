@@ -259,13 +259,15 @@ type ValkeyNodeStatus struct {
 	// +optional
 	PodIP string `json:"podIP,omitempty"`
 
-	// TerminatingPodIP is the IP of a pod of this node that is being deleted
-	// while its replacement already runs, which a Deployment creates before
-	// the old pod is gone. The old pod keeps serving, and may still hold the
-	// shard's slots, until it exits, so the cluster controller keeps it in
-	// the topology until then. Empty when no such pod exists.
+	// TerminatingPodIPs are the IPs of the pods of this node that are being
+	// deleted while a replacement already runs, which a Deployment creates
+	// before the old pod is gone, newest first. An old pod keeps serving, and
+	// may still hold the shard's slots, until it exits, so the cluster
+	// controller keeps it in the topology until then. Empty when no such pod
+	// exists.
 	// +optional
-	TerminatingPodIP string `json:"terminatingPodIP,omitempty"`
+	// +listType=set
+	TerminatingPodIPs []string `json:"terminatingPodIPs,omitempty"`
 
 	// Role is the Valkey replication role of this node (primary or replica).
 	// +optional

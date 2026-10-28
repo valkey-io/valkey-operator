@@ -255,11 +255,21 @@ func TestExporterUserAllowsCommandLogMetrics(t *testing.T) {
 	assert.Greater(t, index("-command"), -1)
 }
 
+func TestBuildUserAclUnknownStateIsOff(t *testing.T) {
+	user := valkeyiov1alpha1.ACLUserSpec{
+		Name:     "alice",
+		State:    "Paused",
+		Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+	}
+
+	assert.Equal(t, "user alice off nopass", strings.TrimSpace(buildUserAcl(user, nil)))
+}
+
 func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	legacy := []valkeyiov1alpha1.UserAclSpec{{Name: "bob", Enabled: true, NoPassword: true}}
 
 	warnings := deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
-		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy}, //nolint:staticcheck // legacy spec.users
 	})
 	if assert.Len(t, warnings, 1) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
@@ -273,6 +283,6 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 		},
 	}))
 	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
-		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}}, //nolint:staticcheck // legacy spec.users
 	}))
 }

@@ -268,7 +268,7 @@ type ZonePinning struct {
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users"
+// +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
@@ -354,13 +354,15 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
-	// Users, and ACL-related configuration; see valkeyacls_types.go
+	// Valkey users managed by the operator.
+	//
 	// Deprecated: use spec.acl.users; removed in v1beta1.
+	//
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
 
-	// ACL configuration; see valkeyacls_types.go
+	// ACL configures the Valkey access control the operator manages.
 	// +optional
 	ACL *ACLSpec `json:"acl,omitempty"`
 
@@ -669,7 +671,7 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 	}
 	users := make([]ACLUserSpec, 0, len(s.Users))
 	for _, u := range s.Users {
-		users = append(users, u.DeepCopy().ToACLUser())
+		users = append(users, u.ToACLUser())
 	}
 	return users
 }

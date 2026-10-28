@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -109,7 +110,7 @@ var _ = Describe("spec.acl validation", func() {
 
 	It("accepts legacy spec.users alone", func() {
 		_, err := create(func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
-			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser}
+			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser} //nolint:staticcheck // legacy spec.users
 		})
 		Expect(err).NotTo(HaveOccurred())
 	})
@@ -139,13 +140,14 @@ var _ = Describe("spec.acl validation", func() {
 
 	It("rejects spec.users combined with spec.acl.users", func() {
 		_, err := create(func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
-			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser}
+			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser} //nolint:staticcheck // legacy spec.users
 			aclUsers(valkeyiov1alpha1.ACLUserSpec{
 				Name:     "alice",
 				Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
 			})(s)
 		})
 		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.acl.users: Forbidden"))
 		Expect(err.Error()).To(ContainSubstring("cannot be combined with spec.acl.users"))
 	})
 
@@ -177,6 +179,51 @@ var _ = Describe("spec.acl validation", func() {
 	It("rejects an unknown state", func() {
 		_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: "alice", State: "Off"}))
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("rejects an empty username", func() {
+		_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: ""}))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].name"))
+	})
+
+	It("rejects whitespace in a username", func() {
+		for _, name := range []string{"bad name", "eve\nuser _injected on nopass +@all ~*", "tab\tname"} {
+			_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: name}))
+			Expect(err).To(HaveOccurred(), "name %q", name)
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].name"))
+		}
+	})
+
+	It("limits a username to 128 characters", func() {
+		_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: strings.Repeat("a", 128)}))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: strings.Repeat("a", 129)}))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].name"))
+	})
+
+	It("rejects a newline in permissions", func() {
+		_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{
+			Name:           "alice",
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+ping\nuser _injected on nopass +@all"},
+		}))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].permissions"))
+	})
+
+	It("rejects whitespace in key and channel patterns", func() {
+		bad := []string{"app:* +@all"}
+		for field, perms := range map[string]valkeyiov1alpha1.ACLPermissions{
+			"keys.readWrite":    {Keys: valkeyiov1alpha1.KeysAclSpec{ReadWrite: bad}},
+			"keys.readOnly":     {Keys: valkeyiov1alpha1.KeysAclSpec{ReadOnly: bad}},
+			"keys.writeOnly":    {Keys: valkeyiov1alpha1.KeysAclSpec{WriteOnly: bad}},
+			"channels.patterns": {Channels: valkeyiov1alpha1.ChannelsAclSpec{Patterns: bad}},
+		} {
+			_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{Name: "alice", ACLPermissions: perms}))
+			Expect(err).To(HaveOccurred(), field)
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0]."+field+"[0]"), field)
+		}
 	})
 
 	It("rejects a username starting with _", func() {

@@ -79,6 +79,19 @@ func TestUserAclSpecToACLUserCopiesPasswordSecret(t *testing.T) {
 	assert.Equal(t, "old", legacy.PasswordSecret.Keys[0], "conversion must not alias the legacy keys")
 }
 
+func TestUserAclSpecToACLUserCopiesPermissions(t *testing.T) {
+	legacy := UserAclSpec{
+		Name:           "bob",
+		Enabled:        true,
+		ACLPermissions: ACLPermissions{Commands: CommandsAclSpec{Allow: []string{"@read"}}},
+	}
+
+	got := legacy.ToACLUser()
+	got.Commands.Allow[0] = "@all"
+
+	assert.Equal(t, "@read", legacy.Commands.Allow[0], "conversion must not alias the legacy permissions")
+}
+
 func TestUserAclSpecToACLUserDropsUnusedPasswordSecret(t *testing.T) {
 	secret := PasswordSecretSpec{Name: "users", Keys: []string{"bob"}}
 	for _, legacy := range []UserAclSpec{

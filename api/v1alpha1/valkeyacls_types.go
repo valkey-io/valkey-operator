@@ -26,6 +26,7 @@ type ACLSpec struct {
 }
 
 // ACLUserState selects whether a user can authenticate.
+// Values may be added in future versions.
 // +kubebuilder:validation:Enum=Enabled;Disabled
 type ACLUserState string
 
@@ -37,6 +38,7 @@ const (
 )
 
 // ACLPasswordType selects how a user authenticates with a password.
+// Values may be added in future versions.
 // +kubebuilder:validation:Enum=Secret;Any;Disabled
 type ACLPasswordType string
 
@@ -51,7 +53,7 @@ const (
 )
 
 // ACLUserPassword configures password authentication for a user.
-// +kubebuilder:validation:XValidation:message="secret is only used when type is Secret",rule="!has(self.secret) || self.type == 'Secret'"
+// +kubebuilder:validation:XValidation:message="secret is only used when type is Secret",rule="!has(self.secret) || !has(self.type) || self.type == 'Secret'"
 type ACLUserPassword struct {
 	// How the user authenticates with a password
 	// +kubebuilder:default=Secret
@@ -78,6 +80,7 @@ type ACLPermissions struct {
 	Channels ChannelsAclSpec `json:"channels,omitempty"`
 
 	// Raw ACL for (additional) permissions. Appended to anything generated.
+	// +kubebuilder:validation:Pattern=`^[^\r\n]*$`
 	// +optional
 	RawAcl string `json:"permissions,omitempty"`
 }
@@ -85,7 +88,10 @@ type ACLPermissions struct {
 // ACLUserSpec defines a Valkey ACL user.
 type ACLUserSpec struct {
 	// Username
-	// +kubebuilder:required:message=A username is required
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[^\s]+$`
 	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
 	Name string `json:"name"`
 
@@ -145,7 +151,7 @@ func (u UserAclSpec) ToACLUser() ACLUserSpec {
 		Name:           u.Name,
 		State:          ACLUserStateEnabled,
 		Password:       &ACLUserPassword{Type: ACLPasswordTypeSecret},
-		ACLPermissions: u.ACLPermissions,
+		ACLPermissions: *u.ACLPermissions.DeepCopy(),
 	}
 	if !u.Enabled {
 		out.State = ACLUserStateDisabled
@@ -193,14 +199,17 @@ type CommandsAclSpec struct {
 type KeysAclSpec struct {
 
 	// Keys on which this user can read, and write; maps to Valkey: ~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	ReadWrite []string `json:"readWrite,omitempty"`
 
 	// Keys restricted to read-only; maps to Valkey: %R~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	ReadOnly []string `json:"readOnly,omitempty"`
 
 	// Keys restricted to write-only; maps to Valkey: %W~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	WriteOnly []string `json:"writeOnly,omitempty"`
 }
@@ -208,6 +217,7 @@ type KeysAclSpec struct {
 type ChannelsAclSpec struct {
 
 	// Pub/Sub channel patterns - maps to Valkey: &pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	Patterns []string `json:"patterns,omitempty"`
 }

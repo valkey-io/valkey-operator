@@ -482,7 +482,7 @@ spec:
 			Eventually(verifyClusterSlotsIP, 1*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
-		It("rejects a cluster that sets both spec.users and spec.acl.users", func() {
+		It("rejects a cluster that sets both spec.users and spec.acl.users", Label("acl-users"), func() {
 			manifest := `apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
 metadata:
@@ -506,7 +506,7 @@ spec:
 			Expect(err.Error()).To(ContainSubstring("cannot be combined with spec.acl.users"))
 		})
 
-		It("creates a cluster with custom users", func() {
+		It("creates a cluster with custom users", Label("acl-users"), func() {
 			const withUserClusterName = "cluster-sample-with-users"
 			const withUserSampleFile = "config/samples/v1alpha1_valkeycluster-with-user.yaml"
 

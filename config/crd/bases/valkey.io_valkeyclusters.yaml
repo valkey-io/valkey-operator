@@ -58,7 +58,8 @@ spec:
             description: spec defines the desired state of ValkeyCluster
             properties:
               acl:
-                description: ACL configuration; see valkeyacls_types.go
+                description: ACL configures the Valkey access control the operator
+                  manages.
                 properties:
                   users:
                     description: Users managed by the operator
@@ -72,6 +73,7 @@ spec:
                               description: 'Pub/Sub channel patterns - maps to Valkey:
                                 &pattern'
                               items:
+                                pattern: ^[^\s]+$
                                 type: string
                               type: array
                           type: object
@@ -99,23 +101,29 @@ spec:
                               description: 'Keys restricted to read-only; maps to
                                 Valkey: %R~pattern'
                               items:
+                                pattern: ^[^\s]+$
                                 type: string
                               type: array
                             readWrite:
                               description: 'Keys on which this user can read, and
                                 write; maps to Valkey: ~pattern'
                               items:
+                                pattern: ^[^\s]+$
                                 type: string
                               type: array
                             writeOnly:
                               description: 'Keys restricted to write-only; maps to
                                 Valkey: %W~pattern'
                               items:
+                                pattern: ^[^\s]+$
                                 type: string
                               type: array
                           type: object
                         name:
                           description: Username
+                          maxLength: 128
+                          minLength: 1
+                          pattern: ^[^\s]+$
                           type: string
                           x-kubernetes-validations:
                           - message: Username cannot start with '_'
@@ -152,10 +160,12 @@ spec:
                           type: object
                           x-kubernetes-validations:
                           - message: secret is only used when type is Secret
-                            rule: '!has(self.secret) || self.type == ''Secret'''
+                            rule: '!has(self.secret) || !has(self.type) || self.type
+                              == ''Secret'''
                         permissions:
                           description: Raw ACL for (additional) permissions. Appended
                             to anything generated.
+                          pattern: ^[^\r\n]*$
                           type: string
                         state:
                           default: Enabled
@@ -3910,7 +3920,8 @@ spec:
                 type: integer
               users:
                 description: |-
-                  Users, and ACL-related configuration; see valkeyacls_types.go
+                  Valkey users managed by the operator.
+
                   Deprecated: use spec.acl.users; removed in v1beta1.
                 items:
                   description: |-
@@ -3924,6 +3935,7 @@ spec:
                           description: 'Pub/Sub channel patterns - maps to Valkey:
                             &pattern'
                           items:
+                            pattern: ^[^\s]+$
                             type: string
                           type: array
                       type: object
@@ -3955,18 +3967,21 @@ spec:
                           description: 'Keys restricted to read-only; maps to Valkey:
                             %R~pattern'
                           items:
+                            pattern: ^[^\s]+$
                             type: string
                           type: array
                         readWrite:
                           description: 'Keys on which this user can read, and write;
                             maps to Valkey: ~pattern'
                           items:
+                            pattern: ^[^\s]+$
                             type: string
                           type: array
                         writeOnly:
                           description: 'Keys restricted to write-only; maps to Valkey:
                             %W~pattern'
                           items:
+                            pattern: ^[^\s]+$
                             type: string
                           type: array
                       type: object
@@ -3999,6 +4014,7 @@ spec:
                     permissions:
                       description: Raw ACL for (additional) permissions. Appended
                         to anything generated.
+                      pattern: ^[^\r\n]*$
                       type: string
                     resetpass:
                       default: false
@@ -4028,8 +4044,10 @@ spec:
             x-kubernetes-validations:
             - message: persistence requires workloadType StatefulSet
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
-            - message: 'spec.users is deprecated and cannot be combined with spec.acl.users:
+            - fieldPath: .acl.users
+              message: 'spec.users is deprecated and cannot be combined with spec.acl.users:
                 move every user to spec.acl.users'
+              reason: FieldValueForbidden
               rule: '!(has(self.users) && size(self.users) > 0 && has(self.acl) &&
                 has(self.acl.users) && size(self.acl.users) > 0)'
             - message: persistence cannot be removed once set

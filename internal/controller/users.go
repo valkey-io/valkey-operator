@@ -238,7 +238,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 
 // deprecatedFieldConfigWarnings flags spec.users, which spec.acl.users replaces.
 func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	if len(cluster.Spec.Users) == 0 {
+	if len(cluster.Spec.Users) == 0 { //nolint:staticcheck // legacy spec.users
 		return nil
 	}
 	return []configWarning{{
@@ -263,11 +263,12 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 	// Initial acl
 	fmt.Fprintf(&acl, "user %s ", user.Name)
 
-	// Is the user enabled?
-	if user.State == valkeyiov1alpha1.ACLUserStateDisabled {
-		acl.WriteString("off")
-	} else {
+	// Unknown states fail closed
+	switch user.State {
+	case valkeyiov1alpha1.ACLUserStateEnabled, "":
 		acl.WriteString("on")
+	default:
+		acl.WriteString("off")
 	}
 
 	// Password(s) should already be prefix-hashed. A fresh aclfile user has no
@@ -307,7 +308,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 	log := logf.FromContext(ctx)
 
 	// Only enabled users authenticating with Secret passwords need them
-	if user.State == valkeyiov1alpha1.ACLUserStateDisabled || user.PasswordType() != valkeyiov1alpha1.ACLPasswordTypeSecret {
+	enabled := user.State == valkeyiov1alpha1.ACLUserStateEnabled || user.State == ""
+	if !enabled || user.PasswordType() != valkeyiov1alpha1.ACLPasswordTypeSecret {
 		return []string{}, nil
 	}
 	passwordSecret := valkeyiov1alpha1.PasswordSecretSpec{}

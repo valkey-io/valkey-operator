@@ -701,7 +701,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:    "testuser",
 							Enabled: true,
@@ -738,7 +738,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:       "testuser",
 							Enabled:    true,
@@ -828,7 +828,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: "acl-parity-legacy", Namespace: "default"},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards: 1,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{Name: "carol", Enabled: true, ResetPass: true, ACLPermissions: perms},
 						{Name: "bob", Enabled: true, NoPassword: true, ACLPermissions: perms},
 					},

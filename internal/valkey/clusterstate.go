@@ -601,46 +601,76 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
 		return nil
 	}
-
-	if len(results) == 5 {
-		id, err := results[0].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYID")
-		}
-		node.Id = id
-
-		shardid, err := results[1].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYSHARDID")
-		}
-		node.ShardId = shardid
-
-		info, err := results[2].ToString()
-		if err != nil {
-			log.Error(err, "command failed: INFO")
-		}
-		node.Info = infoStringToMap(info)
-
-		cinfo, err := results[3].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER INFO")
-		}
-		node.ClusterInfo = infoStringToMap(cinfo)
-
-		cnodes, err := results[4].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER NODES")
-		}
-		// Remove the encoding string included in a verbatim string.
-		node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
-	} else {
+	if len(results) != 5 {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
+		return nil
 	}
 
-	if myself := node.Myself(); myself != nil {
-		node.Flags = myself.Flags
+	// Identity and topology have to come back whole. An empty id, shard id,
+	// or node table is not a node we can place: GetClusterState would group
+	// every such node into one shard, skip isolation, and may hand it slots.
+	// A Valkey error (BUSY, NOPERM, a renamed command) is that case. Drop the
+	// node for this pass, the same as a dial failure. Callers already requeue
+	// when a member is missing.
+	id, err := requiredScrapeString(results[0])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYID")
+		return nil
 	}
+	node.Id = id
+
+	shardid, err := requiredScrapeString(results[1])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYSHARDID")
+		return nil
+	}
+	node.ShardId = shardid
+
+	// INFO is different. A replica with no master_link_status counts as out
+	// of sync, and a primary's role comes from CLUSTER NODES, not from INFO.
+	// Keep the node and leave replication fields unknown.
+	info, err := results[2].ToString()
+	if err != nil {
+		log.Error(err, "command failed: INFO")
+	} else {
+		node.Info = infoStringToMap(info)
+	}
+
+	cinfo, err := requiredScrapeString(results[3])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER INFO")
+		return nil
+	}
+	node.ClusterInfo = infoStringToMap(cinfo)
+
+	cnodes, err := requiredScrapeString(results[4])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER NODES")
+		return nil
+	}
+	// Remove the encoding string included in a verbatim string.
+	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	myself := node.Myself()
+	if myself == nil {
+		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")
+		return nil
+	}
+	node.Flags = myself.Flags
 	return &node
+}
+
+// requiredScrapeString returns the reply of one scrape command. A Valkey
+// error and an empty reply are both failures: either one leaves a field the
+// caller would otherwise treat as known.
+func requiredScrapeString(res vclient.ValkeyResult) (string, error) {
+	s, err := res.ToString()
+	if err != nil {
+		return "", err
+	}
+	if s == "" {
+		return "", fmt.Errorf("empty reply")
+	}
+	return s, nil
 }
 
 // Convert a string containing INFO elements to a map.

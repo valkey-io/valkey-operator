@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -357,12 +356,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	// Build the effective shard list: state.Shards plus the pending primaries
-	// that lead a shard. GetClusterState places every slot-less primary in
-	// PendingNodes, since it cannot tell a scale-out leader or a drained
-	// primary from an unreplicated replica. effectiveShards sorts them out
-	// and includes the leaders as empty shards for health checks and
-	// rebalancing.
+	// Build the effective shard list: state.Shards plus any pending primaries
+	// that are scale-out leaders. During scale-out, GetClusterState places
+	// new slot-less primaries in PendingNodes because it can't distinguish
+	// them from unreplicated replicas. We use pod labels to identify them
+	// and include them as empty shards for health checks and rebalancing.
 	allShards := effectiveShards(state, nodes)
 
 	// Handle scale-in: drain excess shards and clean up leftover ValkeyNodes.
@@ -1637,7 +1635,9 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 	var readyCount int32 = 0
 	requiredNodes := 1 + int(cluster.Spec.Replicas)
 	for _, shard := range state.Shards {
-		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
+		// A shard whose primary owns no slots, drained or not yet filled,
+		// serves nothing.
+		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil || len(shard.Slots) == 0 {
 			continue
 		}
 		// Check if all nodes in this shard are healthy and in sync. Health is
@@ -1705,28 +1705,11 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	return move, nil
 }
 
-// effectiveShards returns state.Shards plus the pending primaries that lead a
-// shard. A slot-less primary whose shard is in state.Shards without a primary,
-// because a replica still follows it, is the primary of an empty shard: a
-// scale-in reverted right after its drain leaves one behind, since a drained
-// primary keeps its replica and stays a primary. It joins that shard rather
-// than counting as a shard of its own, so the rebalancer sees the expected
-// number of shards and moves slots onto it as it does for a new shard. Any
-// other slot-less primary labeled as RolePrimary is a scale-out leader and
-// forms a new shard, as does a stray that shares its shard id with a shard
-// that has a primary, which Phase 3 attaches as a replica.
+// effectiveShards returns state.Shards plus any pending primaries that are
+// scale-out leaders (slot-less Valkey primaries labeled as RolePrimary).
 func effectiveShards(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) []*valkey.ShardState {
 	shards := append([]*valkey.ShardState(nil), state.Shards...)
 	for _, node := range state.PendingNodes {
-		if i := slices.IndexFunc(shards, func(s *valkey.ShardState) bool {
-			return node.ShardId != "" && s.Id == node.ShardId
-		}); i >= 0 && shards[i].GetPrimaryNode() == nil {
-			merged := *shards[i]
-			merged.Nodes = append(append([]*valkey.NodeState(nil), shards[i].Nodes...), node)
-			merged.PrimaryId = node.Id
-			shards[i] = &merged
-			continue
-		}
 		role, _ := nodeRoleAndShard(node.Address, nodes)
 		if role == RolePrimary {
 			shards = append(shards, &valkey.ShardState{

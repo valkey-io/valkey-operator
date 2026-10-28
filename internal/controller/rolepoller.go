@@ -328,6 +328,11 @@ func liveRoleForAddress(state *valkey.ClusterState, address string) string {
 		return ""
 	}
 	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
+		// A primary without slots is not serving yet, as when it was a
+		// pending node: report no role.
+		if len(shard.Slots) == 0 {
+			return ""
+		}
 		return RolePrimary
 	}
 	return RoleReplica

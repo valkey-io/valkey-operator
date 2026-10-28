@@ -1223,6 +1223,143 @@ func TestGetClusterStateSkipsNodeWhenScrapeCommandFails(t *testing.T) {
 	}
 }
 
+func dialScrapeByAddress(t *testing.T, byAddr map[string][]vclient.ValkeyResult) DialFunc {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	return func(_ context.Context, address string) (vclient.Client, error) {
+		results, ok := byAddr[address]
+		if !ok {
+			t.Fatalf("unexpected dial %s", address)
+		}
+		c := vmock.NewClient(ctrl)
+		c.EXPECT().
+			DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(results)
+		return c, nil
+	}
+}
+
+// A reachable primary that fails CLUSTER MYID is dropped, but its replica's
+// CLUSTER NODES still lists the ranges that primary owns. Those ranges must
+// not come back as free, and the missing primary must not be invented as a
+// node we can migrate from.
+func TestGetClusterStateKeepsSlotsOwnedByAnUnscrapedPrimary(t *testing.T) {
+	primary := healthyScrape()
+	primary[0] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	replicaNodes := "abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n" +
+		"def 10.0.0.2:6379@16379 myself,slave abc 0 0 1 connected\n"
+	replica := []vclient.ValkeyResult{
+		blobResult("def"),
+		blobResult("shard-1"),
+		blobResult("role:slave\r\nmaster_link_status:up\r\n"),
+		blobResult("cluster_known_nodes:2\r\ncluster_current_epoch:3\r\ncluster_size:1\r\n"),
+		blobResult(replicaNodes),
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": primary,
+		"10.0.0.2:6379": replica,
+	}))
+
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("slots owned by the busy primary were reported unassigned: %v", got)
+	}
+	if len(state.Shards) != 1 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected one replica shard, got %d shards and %d pending", len(state.Shards), len(state.PendingNodes))
+	}
+	shard := state.Shards[0]
+	if shard.GetPrimaryNode() != nil {
+		t.Fatal("busy primary must not be invented as a scraped node")
+	}
+	if shard.PrimaryId != "" {
+		t.Fatalf("primary id %q would point at a node this pass did not scrape", shard.PrimaryId)
+	}
+	if !reflect.DeepEqual(shard.Slots, []SlotsRange{{0, 16383}}) {
+		t.Fatalf("shard slots = %v, want 0-16383 from the replica's peer table", shard.Slots)
+	}
+	if !state.PrimaryUnscrapedButServing(shard) {
+		t.Fatal("scale-in must requeue: the shard still serves slots and has no scraped primary")
+	}
+	if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+	}
+}
+
+// Gossip from another shard must hold the busy primary's ranges without
+// writing them onto the viewer's shard.
+func TestGetClusterStateHoldsSlotsReportedByAnotherShard(t *testing.T) {
+	viewerNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 8192-16383\n"
+	viewer := healthyScrape()
+	viewer[4] = blobResult(viewerNodes)
+
+	busy := healthyScrape()
+	busy[0] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.3:6379": busy,
+	}))
+
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("slots owned by the busy primary were reported unassigned: %v", got)
+	}
+	if len(state.Shards) != 1 {
+		t.Fatalf("expected only the viewer's shard, got %d", len(state.Shards))
+	}
+	if !reflect.DeepEqual(state.Shards[0].Slots, []SlotsRange{{0, 8191}}) {
+		t.Fatalf("viewer shard absorbed another primary's slots: %v", state.Shards[0].Slots)
+	}
+	if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+	}
+}
+
+// A primary that answered and owns nothing is drained. A replica whose table
+// is behind must not put those ranges back.
+func TestGetClusterStateTrustsAScrapedPrimaryWithNoSlots(t *testing.T) {
+	primaryNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n" +
+		"def 10.0.0.2:6379@16379 slave abc 0 0 1 connected\n"
+	primary := healthyScrape()
+	primary[4] = blobResult(primaryNodes)
+
+	replicaNodes := "abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n" +
+		"def 10.0.0.2:6379@16379 myself,slave abc 0 0 1 connected\n"
+	replica := []vclient.ValkeyResult{
+		blobResult("def"),
+		blobResult("shard-1"),
+		blobResult("role:slave\r\nmaster_link_status:up\r\n"),
+		blobResult("cluster_known_nodes:2\r\ncluster_current_epoch:3\r\n"),
+		blobResult(replicaNodes),
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": primary,
+		"10.0.0.2:6379": replica,
+	}))
+
+	if len(state.PendingNodes) != 1 || state.PendingNodes[0].Id != "abc" {
+		t.Fatalf("expected the slotless primary to be pending, got %+v", state.PendingNodes)
+	}
+	if len(state.Shards) != 1 {
+		t.Fatalf("expected the replica shard, got %d shards", len(state.Shards))
+	}
+	shard := state.Shards[0]
+	if slotCount(shard.Slots) != 0 {
+		t.Fatalf("stale replica view restored slots: %v", shard.Slots)
+	}
+	if state.PrimaryUnscrapedButServing(shard) {
+		t.Fatal("a scraped primary that owns nothing is drained, not still serving")
+	}
+	if hosts := state.UnscrapedSlotOwnerHosts(); len(hosts) != 0 {
+		t.Fatalf("scraped primary reported as unscraped owner: %v", hosts)
+	}
+	if got := state.GetUnassignedSlots(); !reflect.DeepEqual(got, []SlotsRange{{0, 16383}}) {
+		t.Fatalf("unassigned = %v, want the full range", got)
+	}
+}
+
 func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 	results := healthyScrape()
 	results[2] = valkeyErrorResult("BUSY Valkey is busy running a script")

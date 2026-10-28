@@ -1736,6 +1736,19 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		}
 	}
 
+	// A primary that failed the scrape leaves no shard behind when nothing in
+	// its shard answered (replicas: 0, or every member failed). Peer tables
+	// on the nodes that did answer still list its slots. Deleting that
+	// ValkeyNode now drops a live primary without a drain. With no scraped
+	// peer at all there is nothing to consult; that case matches a dial
+	// failure and still falls through.
+	if excessNodesStillServing(cluster, nodes, state) {
+		log.V(1).Info("excess shard primary did not answer but peers still show it owning slots; will retry")
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Waiting for a shard primary that did not answer before deleting it", metav1.ConditionTrue)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+
 	// Clean up leftover ValkeyNodes from a previous scale-in where drained
 	// primaries became replicas before their ValkeyNodes could be deleted.
 	if deleted, err := r.deleteExcessValkeyNodes(ctx, cluster); err != nil {
@@ -1771,6 +1784,16 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	}
 
 	for _, shard := range draining {
+		// PlanDrainMove returns nil when the shard lists no slots, and the
+		// loop below treats that as drained. A primary that did not answer
+		// also lists no slots until noteUnscrapedSlotOwnership copies them
+		// from a replica. Either way, do not delete it: requeue and try the
+		// scrape again. A primary that answered with an empty range is not
+		// in this set, so a finished drain still deletes.
+		if state.PrimaryUnscrapedButServing(shard) {
+			log.V(1).Info("draining shard has no scraped primary but peers still assign it slots; will retry", "shard", shard.Id)
+			return true, nil
+		}
 		move, err := valkey.PlanDrainMove(shard, remaining, rebalanceSlotBatchSize)
 		if err != nil {
 			return false, err
@@ -1833,6 +1856,36 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		}
 	}
 	return true, nil
+}
+
+// excessNodesStillServing reports whether a ValkeyNode past spec.Shards is a
+// primary that this scrape missed but that some peer table still shows
+// owning slots. Its pod IP is the host CLUSTER NODES announced.
+func excessNodesStillServing(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState) bool {
+	if state == nil || nodes == nil {
+		return false
+	}
+	hosts := make(map[string]struct{})
+	for _, host := range state.UnscrapedSlotOwnerHosts() {
+		hosts[host] = struct{}{}
+	}
+	if len(hosts) == 0 {
+		return false
+	}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
+		if err != nil || shardIndex < int(cluster.Spec.Shards) {
+			continue
+		}
+		if node.Status.PodIP == "" {
+			continue
+		}
+		if _, ok := hosts[node.Status.PodIP]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired

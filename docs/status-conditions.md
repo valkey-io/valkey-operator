@@ -62,6 +62,7 @@ Common reasons when `Ready=False`:
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
+- `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy
@@ -80,6 +81,7 @@ Common reasons:
 - `AddingNodes` – adding nodes to the cluster
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
+- `ScaleInBlocked` – scale-in is waiting; see [`Ready`](#ready)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -351,7 +353,7 @@ These events are emitted during scale-in operations.
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain slots from excess shards |
-| `ScaleInBlocked` | Warning | An excess ValkeyNode still owns slots, so it is kept until they are drained |
+| `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, an excess ValkeyNode still owns slots, or an unreachable excess primary is kept while some slots are unassigned |
 
 ### Proactive failover events
 

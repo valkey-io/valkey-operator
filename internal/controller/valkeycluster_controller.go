@@ -190,6 +190,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
 
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
+	configWarnings = append(configWarnings, deprecatedFieldConfigWarnings(cluster)...)
 	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
 
 	// Soft guard: TLS with IP announce (including default IP). Non-blocking.

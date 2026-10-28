@@ -30,6 +30,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -197,7 +198,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			// Valkey's own `default`, which the aclfile does not manage. The node
 			// must still reach ACLApplied=True: aclObservablyInSync has to ignore
 			// the unmanaged `default` rather than loop forever waiting for it to
-			// match a spec.users entry that does not exist.
+			// match a user entry that does not exist.
 			verifyACLApplied := func(g Gomega) {
 				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
 					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
@@ -481,6 +482,30 @@ spec:
 			Eventually(verifyClusterSlotsIP, 1*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
+		It("rejects a cluster that sets both spec.users and spec.acl.users", func() {
+			manifest := `apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: users-and-acl-users
+spec:
+  shards: 1
+  users:
+    - name: bob
+      nopass: true
+  acl:
+    users:
+      - name: alice
+        password:
+          type: Any
+`
+			// Server dry-run runs admission without storing the object.
+			cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			out, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "apply must be rejected, got: %s", out)
+			Expect(err.Error()).To(ContainSubstring("cannot be combined with spec.acl.users"))
+		})
+
 		It("creates a cluster with custom users", func() {
 			const withUserClusterName = "cluster-sample-with-users"
 			const withUserSampleFile = "config/samples/v1alpha1_valkeycluster-with-user.yaml"
@@ -560,13 +585,20 @@ spec:
 					ContainSubstring("user bob on nopass"),
 					// user david is created with 2 passwords
 					MatchRegexp("user david on .* %s %s", passwordHashRegexp, passwordHashRegexp),
-					// user edward is created with resetpass flag, so its ACL entry should not contain a '#' character
+					// user edward has password.type Disabled, so its ACL entry should not contain a '#' character
 					MatchRegexp("user edward on [^#]+"),
 					ContainSubstring("user _exporter on"),
 					ContainSubstring("user _operator on"),
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
+
+			By("verifying spec.acl.users raises no deprecation warning")
+			cr, err := utils.GetValkeyClusterStatus(withUserClusterName)
+			Expect(err).NotTo(HaveOccurred())
+			if cond := meta.FindStatusCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning); cond != nil {
+				Expect(cond.Message).NotTo(ContainSubstring("spec.users is deprecated"))
+			}
 
 			By("verifying allowed commands succeed for operator user")
 			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
@@ -1155,13 +1187,14 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  users:
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: %[1]s-users
-        keys: [defaultpw]
+  acl:
+    users:
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          secret:
+            name: %[1]s-users
+            keys: [defaultpw]
 `, failoverClusterName, base64.StdEncoding.EncodeToString([]byte(failoverDefaultPassword)))
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-failover.yaml")
@@ -2109,16 +2142,16 @@ spec:
 			frankSecret, frankUser := "", ""
 			if withFrank {
 				frankSecret = "  frankpw: " + frankPassword + "\n"
-				frankUser = `    - name: frank
-      enabled: true
-      passwordSecret:
-        name: ` + usersSecret + `
-        keys: [frankpw]
-      commands:
-        allow: ["@read", "@connection"]
-      keys:
-        readOnly: ["frank:*"]
-      permissions: "+ping"
+				frankUser = `      - name: frank
+        password:
+          secret:
+            name: ` + usersSecret + `
+            keys: [frankpw]
+        commands:
+          allow: ["@read", "@connection"]
+        keys:
+          readOnly: ["frank:*"]
+        permissions: "+ping"
 `
 			}
 			return fmt.Sprintf(`apiVersion: v1
@@ -2144,22 +2177,23 @@ spec:
     limits:
       cpu: "500m"
       memory: "512Mi"
-  users:
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: %s
-        keys: [defaultpw]
-    - name: alice
-      enabled: true
-      passwordSecret:
-        name: %s
-        keys: [alicepw]
-      commands:
-        allow: ["@read", "@write", "@connection"]
-      keys:
-        readWrite: ["app:*"]
+  acl:
+    users:
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          secret:
+            name: %s
+            keys: [defaultpw]
+      - name: alice
+        password:
+          secret:
+            name: %s
+            keys: [alicepw]
+        commands:
+          allow: ["@read", "@write", "@connection"]
+        keys:
+          readWrite: ["app:*"]
 %s`, usersSecret, defaultPassword, alicePassword, frankSecret, clusterName, usersSecret, usersSecret, frankUser)
 		}
 
@@ -2372,6 +2406,19 @@ spec:
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
 
+			By("reporting the deprecated spec.users field")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := meta.FindStatusCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Message).To(ContainSubstring("spec.users is deprecated"))
+				_, warningEvents, err := utils.GetEvents(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(warningEvents[valkeyiov1alpha1.ReasonDeprecatedField]).To(BeTrue())
+			}).Should(Succeed())
+
 			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
 			// Operator versions before live ACL stamped the ACL hash on the pod
 			// template. Reproduce that pre-upgrade state and assert the current
@@ -2514,7 +2561,7 @@ spec:
 // ---------------------------------------------------------------------------
 
 // failoverDefaultPassword is the password configured for the default user of
-// the failover test cluster (via a passwordSecret, following the pattern
+// the failover test cluster (via password.secret, following the pattern
 // introduced in #292), so valkey-cli commands run authenticated.
 const failoverDefaultPassword = "e2eFailoverPassw0rd"
 

@@ -268,6 +268,7 @@ type ZonePinning struct {
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
+// +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
@@ -354,9 +355,14 @@ type ValkeyClusterSpec struct {
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// Users, and ACL-related configuration; see valkeyacls_types.go
+	// Deprecated: use spec.acl.users; removed in v1beta1.
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
+
+	// ACL configuration; see valkeyacls_types.go
+	// +optional
+	ACL *ACLSpec `json:"acl,omitempty"`
 
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
 	// +optional
@@ -651,6 +657,23 @@ func (s ValkeyClusterSpec) ExporterEnabled() bool {
 	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
 }
 
+// ACLUsers returns spec.acl.users when set, otherwise the converted
+// spec.users. The result is a deep copy and can be modified freely.
+func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
+	if s.ACL != nil && len(s.ACL.Users) > 0 {
+		users := make([]ACLUserSpec, 0, len(s.ACL.Users))
+		for _, u := range s.ACL.Users {
+			users = append(users, *u.DeepCopy())
+		}
+		return users
+	}
+	users := make([]ACLUserSpec, 0, len(s.Users))
+	for _, u := range s.Users {
+		users = append(users, u.DeepCopy().ToACLUser())
+	}
+	return users
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -735,8 +758,11 @@ const (
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
-	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
-	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	// ReasonDeprecatedField is used with ConditionConfigurationWarning when the
+	// spec uses a field that still works but is scheduled for removal.
+	ReasonDeprecatedField            = "DeprecatedField"
+	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

@@ -34,36 +34,95 @@ func TestOperatorUserPasswordSecret(t *testing.T) {
 	assert.True(t, *sel.Optional)
 }
 
-func TestBuildAclFileContents(t *testing.T) {
+var buildAclPasswords = map[string][]string{
+	"alice": {"a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"},
+	"david": {
+		"7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1",
+		"4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b",
+	},
+	"frank": {"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
+}
 
-	passwords := map[string][]string{
-		"alice":   {"a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"},
-		"bob":     {},
-		"charlie": {},
-		"david": {
-			"7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1",
-			"4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b",
+var buildAclExpected = map[string]string{
+	"alice":   "user alice on #a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137 ~app:* ~cache:* %R~shared:* %R~config:* %W~logs:* %W~metrics:* resetchannels &notifications:* &events:* +@read +@write +@connection -@admin -@dangerous +client|setname +debug",
+	"bob":     "user bob on nopass +@all -@admin ~* &*",
+	"charlie": "user charlie off nopass +@admin",
+	"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
+	"edward":  "user edward on +@admin",
+	"frank":   "user frank on #9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 +@read",
+}
+
+func TestBuildAclFileContents(t *testing.T) {
+	adminOnly := valkeyiov1alpha1.ACLPermissions{
+		Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@admin"}},
+	}
+	users := []valkeyiov1alpha1.ACLUserSpec{
+		{
+			Name:  "alice",
+			State: valkeyiov1alpha1.ACLUserStateEnabled,
+			Password: &valkeyiov1alpha1.ACLUserPassword{
+				Type:   valkeyiov1alpha1.ACLPasswordTypeSecret,
+				Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "alice-secret", Keys: []string{"alice"}},
+			},
+			ACLPermissions: legacyBuildAclUsers[0].ACLPermissions,
+		},
+		{
+			Name:           "bob",
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@all -@admin ~* &*"},
+		},
+		{
+			Name:           "charlie",
+			State:          valkeyiov1alpha1.ACLUserStateDisabled,
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+			ACLPermissions: adminOnly,
+		},
+		{
+			Name: "david",
+			Password: &valkeyiov1alpha1.ACLUserPassword{
+				Secret: &valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"davidold", "davidnew"}},
+			},
+			ACLPermissions: adminOnly,
+		},
+		{
+			Name:           "edward",
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+			ACLPermissions: adminOnly,
+		},
+		{
+			// No state or password block behaves as Enabled and Secret.
+			Name: "frank",
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@read"}},
+			},
 		},
 	}
 
-	expecteds := map[string]string{
-		"alice":   "user alice on #a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137 ~app:* ~cache:* %R~shared:* %R~config:* %W~logs:* %W~metrics:* resetchannels &notifications:* &events:* +@read +@write +@connection -@admin -@dangerous +client|setname +debug",
-		"bob":     "user bob on nopass +@all -@admin ~* &*",
-		"charlie": "user charlie off nopass +@admin",
-		"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
-		"edward":  "user edward on +@admin",
+	for _, user := range users {
+		acl := buildUserAcl(user, buildAclPasswords[user.Name])
+		assert.Equal(t, buildAclExpected[user.Name], strings.TrimSpace(acl), user.Name)
 	}
+}
 
-	// UsersAcl
-	users := []valkeyiov1alpha1.UserAclSpec{
-		{
-			Name:    "alice",
-			Enabled: true,
-			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-				Name: "alice-secret",
-				Keys: []string{"alice"},
-			},
-			NoPassword: false,
+// Converted legacy users must render the same lines they did before
+// spec.acl.users existed, so moving users between the fields changes nothing.
+func TestBuildUserAclLegacyParity(t *testing.T) {
+	for _, legacy := range legacyBuildAclUsers {
+		acl := buildUserAcl(legacy.ToACLUser(), buildAclPasswords[legacy.Name])
+		assert.Equal(t, buildAclExpected[legacy.Name], strings.TrimSpace(acl), legacy.Name)
+	}
+}
+
+var legacyBuildAclUsers = []valkeyiov1alpha1.UserAclSpec{
+	{
+		Name:    "alice",
+		Enabled: true,
+		PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+			Name: "alice-secret",
+			Keys: []string{"alice"},
+		},
+		NoPassword: false,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@read", "@write", "@connection"},
 				Deny:  []string{"@admin", "@dangerous"},
@@ -78,52 +137,48 @@ func TestBuildAclFileContents(t *testing.T) {
 			},
 			RawAcl: "+client|setname +debug",
 		},
-		{
-			Name:       "bob",
-			Enabled:    true,
-			NoPassword: true,
-			RawAcl:     "+@all -@admin ~* &*",
+	},
+	{
+		Name:       "bob",
+		Enabled:    true,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+			RawAcl: "+@all -@admin ~* &*",
 		},
-		{
-			Name:       "charlie",
-			Enabled:    false,
-			NoPassword: true,
+	},
+	{
+		Name:       "charlie",
+		Enabled:    false,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-		{
-			Name:    "david",
-			Enabled: true,
-			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-				Keys: []string{"davidold", "davidnew"},
-			},
+	},
+	{
+		Name:    "david",
+		Enabled: true,
+		PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+			Keys: []string{"davidold", "davidnew"},
+		},
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-		{
-			Name:       "edward",
-			Enabled:    true,
-			ResetPass:  true,
-			NoPassword: true,
+	},
+	{
+		Name:       "edward",
+		Enabled:    true,
+		ResetPass:  true,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-	}
-
-	// iterate over the users
-	for _, user := range users {
-
-		userName := user.Name
-		acl := buildUserAcl(user, passwords[userName])
-		expected := expecteds[userName]
-
-		if strings.TrimSpace(acl) != expected {
-			t.Errorf("%s ACL Failed. Expected '%s'; got '%s'", userName, expected, acl)
-		}
-	}
+	},
 }
 
 func TestValidateSystemUserPasswordSecret(t *testing.T) {
@@ -198,4 +253,26 @@ func TestExporterUserAllowsCommandLogMetrics(t *testing.T) {
 	// ACL rules apply left to right, so the grant must follow the blanket -command.
 	assert.Greater(t, index("+command|info"), index("-command"))
 	assert.Greater(t, index("-command"), -1)
+}
+
+func TestDeprecatedFieldConfigWarnings(t *testing.T) {
+	legacy := []valkeyiov1alpha1.UserAclSpec{{Name: "bob", Enabled: true, NoPassword: true}}
+
+	warnings := deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy},
+	})
+	if assert.Len(t, warnings, 1) {
+		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
+		assert.Contains(t, warnings[0].message, "spec.users is deprecated")
+		assert.Contains(t, warnings[0].message, "spec.acl.users")
+	}
+
+	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "bob"}}},
+		},
+	}))
+	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}},
+	}))
 }

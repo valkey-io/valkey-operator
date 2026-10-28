@@ -85,8 +85,8 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 	}
 	serverUsers := slices.Sorted(slices.Values(actualUsers))
 	// Valkey always keeps a `default` user of its own, and ACL LOAD cannot
-	// remove it. When the aclfile does not manage `default` (it is absent from
-	// spec.users), ignore the server's copy; otherwise the sets never match and
+	// remove it. When the aclfile does not manage `default` (no cluster user is
+	// named `default`), ignore the server's copy; otherwise the sets never match and
 	// the node loops forever reporting the ACL as not yet live.
 	if _, managed := desired["default"]; !managed {
 		serverUsers = slices.DeleteFunc(serverUsers, func(u string) bool { return u == "default" })

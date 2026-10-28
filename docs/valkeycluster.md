@@ -496,31 +496,41 @@ For certificate-based client authentication and certificate-to-ACL-user mapping,
 ### Users
 
 ```yaml
-users:
-  - name: alice
-    passwordSecret:
-      name: my-users-secret
-      keys: [alicepw]
-    commands:
-      allow: ["@read", "@write", "@connection"]
-      deny: ["@admin", "@dangerous"]
-    keys:
-      readWrite: ["app:*"]
-      readOnly: ["shared:*"]
-    channels:
-      patterns: ["notifications:*"]
-  - name: bob
-    nopass: true
-    permissions: "+@all ~* &*"
+acl:
+  users:
+    - name: alice
+      password:
+        secret:
+          name: my-users-secret
+          keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+        deny: ["@admin", "@dangerous"]
+      keys:
+        readWrite: ["app:*"]
+        readOnly: ["shared:*"]
+      channels:
+        patterns: ["notifications:*"]
+    - name: bob
+      password:
+        type: Any
+      permissions: "+@all ~* &*"
+    - name: charlie
+      state: Disabled
 ```
 
-`users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
+`acl.users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
 
-- `passwordSecret` — one or more password keys from a Secret (multiple keys supported for rotation)
-- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
-- `keys` — key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
-- `channels` — pub/sub channel patterns
-- `permissions` — raw ACL string appended after any generated rules
+- `state`: `Enabled` (default) or `Disabled`. A disabled user is rendered `off`: new connections cannot authenticate as it, and connections already authenticated keep working
+- `password.type`: how the user authenticates with a password:
+  - `Secret` (default): the passwords referenced by `password.secret`
+  - `Any`: any password authenticates (Valkey `nopass`)
+  - `Disabled`: no password authenticates. The user can still authenticate with a TLS client certificate; see [mTLS](mtls.md)
+- `password.secret`: one or more password keys from a Secret (multiple keys supported for rotation). Defaults to the Secret `<cluster>-users` and the username as key. Only valid with `type: Secret`
+- `commands`: command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
+- `keys`: key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
+- `channels`: pub/sub channel patterns
+- `permissions`: raw ACL string appended after any generated rules
 
 ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.
 
@@ -529,6 +539,25 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)
+- `spec.users` and `spec.acl.users` cannot both be set
+- `password.secret` is only valid with `password.type: Secret`
+
+#### Migrating from `spec.users`
+
+`spec.users` is deprecated and will be removed in `v1beta1`. It still works in this release, and a cluster that uses it reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event.
+
+Move the list under `spec.acl.users`, replace the booleans and nest `passwordSecret` under `password`:
+
+| `spec.users` | `spec.acl.users` |
+|---|---|
+| `enabled: true` | `state: Enabled` (default; can be omitted) |
+| `enabled: false` | `state: Disabled` |
+| `resetpass: true` | `password.type: Disabled` (takes precedence over `nopass`, as before) |
+| `nopass: true` | `password.type: Any` |
+| `resetpass` and `nopass` both unset or `false` | `password.type: Secret` (default; can be omitted) |
+| `passwordSecret: {name, keys}` | `password.secret: {name, keys}` |
+
+Drop `passwordSecret` from users whose `password.type` is not `Secret`. The permission fields (`commands`, `keys`, `channels`, `permissions`) keep their names. The generated ACL is the same for both fields, so moving users changes nothing on the running nodes.
 
 ### Workload type
 

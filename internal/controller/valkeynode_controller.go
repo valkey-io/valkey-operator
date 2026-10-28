@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"maps"
@@ -76,7 +75,6 @@ type valkeyConfigClient interface {
 	// rather than an error, so a user that has not been loaded yet reads as out
 	// of sync.
 	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
-	Close()
 }
 
 // realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
@@ -132,11 +130,9 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	return normalizeHashes(hashes), nil
 }
 
-func (rc *realValkeyConfigClient) Close() { rc.client.Close() }
-
-// realConfigClient opens a real Valkey connection to the node's pod.
+// realConfigClient returns the pooled client for the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return nil, err
 	}
@@ -149,9 +145,13 @@ type ValkeyNodeReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
-	// newConfigClient opens a Valkey client to a node's pod for live config
-	// application. SetupWithManager defaults it to realConfigClient; tests
-	// override it with a fake.
+	// ValkeyClients hands out pooled Valkey clients. SetupWithManager
+	// requires it.
+	ValkeyClients ClientProvider
+
+	// newConfigClient returns the pooled client for a node's pod, for live
+	// config application. SetupWithManager defaults it to realConfigClient;
+	// tests override it with a fake.
 	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
 	// RoleEvents carries reconcile triggers from the RolePoller, which detects
 	// role changes that produce no Kubernetes event (a failover between two
@@ -433,8 +433,9 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 }
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
-// template, and therefore the ones that feed the WorkloadRevision roll hash.
-// Only the server-config hash lives here: a config change that is not
+// template, and therefore the ones that feed the WorkloadRevision roll hash:
+// the user's spec.podMetadata.annotations plus the server-config hash. The
+// config hash is needed because a config change that is not
 // live-settable still needs a rolling restart to take effect, and the config
 // itself lives in a ConfigMap whose content changes never alter the pod
 // template. The hash is derived from the node spec (Config minus live-settable
@@ -449,6 +450,9 @@ func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]s
 	annotations := map[string]string{}
 	if node.Spec.ServerConfigMapName != "" {
 		annotations[configHashKey] = nodeServerConfigRollHash(node)
+	}
+	if node.Spec.PodMetadata != nil {
+		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)
 	}
 	return annotations
 }
@@ -1088,11 +1092,10 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return "", err
 	}
-	defer c.Close()
 	return c.Do(ctx, c.B().Info().Build()).ToString()
 }
 
@@ -1152,7 +1155,14 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	// settles it: a server container that is not running (crash-looping on a
 	// bad config, or never pulled) is not loading anything and stays eligible.
 	// A running container that will not answer is left alone and retried.
-	info, err := r.nodeInfo(ctx, node)
+	//
+	// nodeInfo dials node.Status.PodIP, which only updateStatus refreshes, and
+	// Reconcile returns before updateStatus when this function defers. A pod
+	// that came back at another IP would be probed at the stale one on every
+	// retry and never replaced. So the probe goes to the pod just read.
+	probe := node.DeepCopy()
+	probe.Status.PodIP = pod.Status.PodIP
+	info, err := r.nodeInfo(ctx, probe)
 	switch {
 	case err == nil && syncInProgress(info):
 		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)
@@ -1180,48 +1190,6 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	return nil
 }
 
-// buildNodeClientOption builds the valkey-go client option for connecting to a
-// node's pod, on a best-effort basis (TLS and operator credentials are applied
-// when available). Shared by resolveRole and the live-config client.
-func (r *ValkeyNodeReconciler) buildNodeClientOption(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) vclient.ClientOption {
-	var tlsConfig *tls.Config
-	if node.Spec.TLS != nil && node.Spec.TLS.Certificates.Server.SecretName != "" {
-		secretName := node.Spec.TLS.Certificates.Server.SecretName
-		cfg, err := getTLSConfig(ctx, r.APIReader, secretName, nodeTLSServerName(node), node.Namespace, node.Spec.TLS.RequiresClientCertificate())
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "failed to build TLS config for node client, falling back to plaintext",
-				"secretName", secretName)
-		} else {
-			tlsConfig = cfg
-		}
-	}
-
-	var username, operatorPassword string
-	if clusterName, ok := node.Labels[LabelCluster]; ok {
-		operatorPassword, _ = fetchSystemUserPassword(ctx, operatorUser, r.Client, clusterName, node.Namespace)
-		if operatorPassword != "" {
-			username = operatorUser
-		}
-	}
-
-	return vclient.ClientOption{
-		InitAddress:       []string{fmt.Sprintf("%s:%d", node.Status.PodIP, DefaultPort)},
-		ForceSingleClient: true,
-		TLSConfig:         tlsConfig,
-		Username:          username,
-		Password:          operatorPassword,
-		// valkey-go defaults to data-plane sizes: up to 4 connections per
-		// client, each with 0.5 MiB buffers either way and a 1024-entry ring.
-		// Tuned to this controller's usage: one connection issuing a few
-		// commands with no concurrency, none returning large responses.
-		// Exceeding a buffer costs a flush, no error.
-		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
-		ReadBufferEachConn:  16 * 1024,
-		WriteBufferEachConn: 8 * 1024,
-		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
-	}
-}
-
 // resolveRole returns the node's live replication role ("primary" or "replica"),
 // or "" if it cannot be determined. Tests inject resolveRoleFunc to bypass the
 // live Valkey connection (envtest has no running Valkey server).
@@ -1237,12 +1205,11 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, err := vclient.NewClient(r.buildNodeClientOption(ctx, node))
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""
 	}
-	defer c.Close()
 
 	info, err := c.Do(ctx, c.B().Info().Build()).ToString()
 	if err != nil {
@@ -1275,7 +1242,6 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
 
 	if err := c.SetConfig(ctx, params); err != nil {
 		return false, err
@@ -1398,6 +1364,9 @@ func valkeyPodPredicate() predicate.Predicate {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.ValkeyClients == nil {
+		return errors.New("ValkeyNode reconciler has no ClientProvider")
+	}
 	r.APIReader = mgr.GetAPIReader()
 	if r.newConfigClient == nil {
 		r.newConfigClient = realConfigClient

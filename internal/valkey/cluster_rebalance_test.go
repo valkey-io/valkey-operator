@@ -34,6 +34,7 @@ func TestPlanRebalanceMove_ScaleOut(t *testing.T) {
 	}
 	if move == nil {
 		t.Fatalf("expected move, got nil")
+		return
 	}
 	if move.Src.Address != "10.0.0.1" || move.Dst.Address != "10.0.0.3" {
 		t.Fatalf("unexpected src/dst: %s -> %s", move.Src.Address, move.Dst.Address)
@@ -135,6 +136,7 @@ func TestPlanDrainMove_Basic(t *testing.T) {
 	}
 	if move == nil {
 		t.Fatal("expected move, got nil")
+		return
 	}
 	if move.Src.Address != "10.0.0.3" {
 		t.Fatalf("expected src 10.0.0.3, got %s", move.Src.Address)

@@ -45,7 +45,7 @@ const (
 	ACLPasswordTypeSecret ACLPasswordType = "Secret"
 	// ACLPasswordTypeAny accepts any password (Valkey nopass).
 	ACLPasswordTypeAny ACLPasswordType = "Any"
-	// ACLPasswordTypeDisabled accepts no password. The user can still
+	// ACLPasswordTypeDisabled accepts no password (Valkey resetpass). The user can still
 	// authenticate with a TLS client certificate (tls-auth-clients-user).
 	ACLPasswordTypeDisabled ACLPasswordType = "Disabled"
 )

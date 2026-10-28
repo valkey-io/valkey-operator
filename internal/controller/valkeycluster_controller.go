@@ -1736,12 +1736,9 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		}
 	}
 
-	// A primary that failed the scrape leaves no shard behind when nothing in
-	// its shard answered (replicas: 0, or every member failed). Peer tables
-	// on the nodes that did answer still list its slots. Deleting that
-	// ValkeyNode now drops a live primary without a drain. With no scraped
-	// peer at all there is nothing to consult; that case matches a dial
-	// failure and still falls through.
+	// An excess primary that did not answer can still own slots according to
+	// a peer that did. Leave it until a scrape shows otherwise. With no peer
+	// table at all this falls through, as a dial failure does.
 	if excessNodesStillServing(cluster, nodes, state) {
 		log.V(1).Info("excess shard primary did not answer but peers still show it owning slots; will retry")
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
@@ -1784,12 +1781,9 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	}
 
 	for _, shard := range draining {
-		// PlanDrainMove returns nil when the shard lists no slots, and the
-		// loop below treats that as drained. A primary that did not answer
-		// also lists no slots until noteUnscrapedSlotOwnership copies them
-		// from a replica. Either way, do not delete it: requeue and try the
-		// scrape again. A primary that answered with an empty range is not
-		// in this set, so a finished drain still deletes.
+		// An empty range is drained only when the primary itself answered.
+		// Peer-copied slots, or a member still replicating an unscraped
+		// owner, mean the primary is up and this pass must not delete it.
 		if state.PrimaryUnscrapedButServing(shard) {
 			log.V(1).Info("draining shard has no scraped primary but peers still assign it slots; will retry", "shard", shard.Id)
 			return true, nil
@@ -1858,9 +1852,8 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	return true, nil
 }
 
-// excessNodesStillServing reports whether a ValkeyNode past spec.Shards is a
-// primary that this scrape missed but that some peer table still shows
-// owning slots. Its pod IP is the host CLUSTER NODES announced.
+// excessNodesStillServing reports whether a ValkeyNode past spec.Shards has
+// the pod IP of a primary a peer table still shows owning slots.
 func excessNodesStillServing(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState) bool {
 	if state == nil || nodes == nil {
 		return false

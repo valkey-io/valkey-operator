@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -184,36 +185,68 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 
 // noteUnscrapedSlotOwnership keeps ranges that a scraped CLUSTER NODES table
 // still assigns to a primary this pass did not reach. The process can be up
-// and serving those slots. A replica of that primary copies the ranges onto
-// its own shard so scale-in can see the shard is not empty. Another shard's
-// table only marks the ranges assigned. The missing primary is not added as
-// a NodeState: a migration needs a client, and GetPrimaryNode stays nil
-// while PrimaryId is unset.
+// and serving those slots. Every peer's ranges for that id are unioned: one
+// table can still show the old range while another shows slots it just
+// received. A replica of that primary copies the union onto its own shard so
+// scale-in can see the shard is not empty. Another shard's table only marks
+// the ranges assigned. The missing primary is not added as a NodeState.
 func (s *ClusterState) noteUnscrapedSlotOwnership() {
 	scraped := s.scrapedIDs()
-	copied := make(map[string]int)
-	seen := make(map[string]struct{})
+	type held struct {
+		slots []SlotsRange
+		shard *ShardState
+	}
+	owners := make(map[string]*held)
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
 			if !entryOwnsUnscrapedSlots(entry, scraped) {
 				continue
 			}
-			if node.PrimaryIdFromSelf() == entry.Id {
-				if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
-					if n := slotCount(entry.Slots); n > copied[entry.Id] {
-						copied[entry.Id] = n
-						shard.Slots = append([]SlotsRange(nil), entry.Slots...)
-					}
-					continue
-				}
+			h := owners[entry.Id]
+			if h == nil {
+				h = &held{}
+				owners[entry.Id] = h
 			}
-			if _, ok := seen[entry.Id]; ok {
+			h.slots = unionSlots(h.slots, entry.Slots)
+			if node.PrimaryIdFromSelf() != entry.Id {
 				continue
 			}
-			seen[entry.Id] = struct{}{}
-			s.unscrapedSlots = append(s.unscrapedSlots, entry.Slots...)
+			if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
+				h.shard = shard
+			}
 		}
 	}
+	for _, h := range owners {
+		if h.shard != nil {
+			h.shard.Slots = unionSlots(h.shard.Slots, h.slots)
+			continue
+		}
+		s.unscrapedSlots = unionSlots(s.unscrapedSlots, h.slots)
+	}
+}
+
+// unionSlots returns a sorted, merged copy of both range lists. Overlapping
+// and adjacent ranges become one range.
+func unionSlots(a, b []SlotsRange) []SlotsRange {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make([]SlotsRange, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
+	merged := []SlotsRange{out[0]}
+	for _, r := range out[1:] {
+		last := &merged[len(merged)-1]
+		if r.Start <= last.End+1 {
+			if r.End > last.End {
+				last.End = r.End
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
 }
 
 func (s *ClusterState) scrapedIDs() map[string]struct{} {

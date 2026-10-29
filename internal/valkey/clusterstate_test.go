@@ -1316,6 +1316,96 @@ func TestGetClusterStateHoldsSlotsReportedByAnotherShard(t *testing.T) {
 	}
 }
 
+// Two peers can disagree after a migration: one still lists the old range and
+// another lists slots the primary just received. Both have to stay assigned.
+func TestGetClusterStateUnionsDisjointReportsOfAnUnscrapedPrimary(t *testing.T) {
+	busy := healthyScrape()
+	busy[0] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	t.Run("other shards", func(t *testing.T) {
+		first := []vclient.ValkeyResult{
+			blobResult("aaa"),
+			blobResult("shard-a"),
+			blobResult("role:master\r\n"),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\n"),
+			blobResult("aaa 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-99\n" +
+				"bbb 10.0.0.2:6379@16379 master - 0 0 1 connected 151-300\n" +
+				"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 100-150\n"),
+		}
+		second := []vclient.ValkeyResult{
+			blobResult("bbb"),
+			blobResult("shard-b"),
+			blobResult("role:master\r\n"),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\n"),
+			blobResult("aaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-99\n" +
+				"bbb 10.0.0.2:6379@16379 myself,master - 0 0 1 connected 151-300\n" +
+				"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 400-500\n"),
+		}
+		state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+			"10.0.0.1:6379": first,
+			"10.0.0.2:6379": second,
+			"10.0.0.3:6379": busy,
+		}))
+		free := state.GetUnassignedSlots()
+		for _, slot := range []int{100, 150, 400, 500} {
+			if slotsContain(free, slot) {
+				t.Fatalf("slot %d reported free: %v", slot, free)
+			}
+		}
+		for _, shard := range state.Shards {
+			if slotsContain(shard.Slots, 100) || slotsContain(shard.Slots, 400) {
+				t.Fatalf("viewer shard absorbed the missing primary's slots: %v", shard.Slots)
+			}
+		}
+	})
+
+	t.Run("replicas", func(t *testing.T) {
+		older := []vclient.ValkeyResult{
+			blobResult("def"),
+			blobResult("shard-1"),
+			blobResult("role:slave\r\nmaster_link_status:up\r\n"),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\n"),
+			blobResult("ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 100-150\n" +
+				"def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n"),
+		}
+		newer := []vclient.ValkeyResult{
+			blobResult("jkl"),
+			blobResult("shard-1"),
+			blobResult("role:slave\r\nmaster_link_status:up\r\n"),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\n"),
+			blobResult("ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 400-500\n" +
+				"jkl 10.0.0.4:6379@16379 myself,slave ghi 0 0 2 connected\n"),
+		}
+		state := GetClusterState(context.Background(), []string{"10.0.0.2", "10.0.0.4", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+			"10.0.0.2:6379": older,
+			"10.0.0.4:6379": newer,
+			"10.0.0.3:6379": busy,
+		}))
+		if len(state.Shards) != 1 {
+			t.Fatalf("expected one replica shard, got %d", len(state.Shards))
+		}
+		want := []SlotsRange{{100, 150}, {400, 500}}
+		if !reflect.DeepEqual(state.Shards[0].Slots, want) {
+			t.Fatalf("shard slots = %v, want union %v", state.Shards[0].Slots, want)
+		}
+		free := state.GetUnassignedSlots()
+		for _, slot := range []int{100, 150, 400, 500} {
+			if slotsContain(free, slot) {
+				t.Fatalf("slot %d reported free: %v", slot, free)
+			}
+		}
+	})
+}
+
+func slotsContain(ranges []SlotsRange, slot int) bool {
+	for _, r := range ranges {
+		if slot >= r.Start && slot <= r.End {
+			return true
+		}
+	}
+	return false
+}
+
 // A primary that answered and owns nothing is drained. A replica whose table
 // is behind must not put those ranges back.
 func TestGetClusterStateTrustsAScrapedPrimaryWithNoSlots(t *testing.T) {

@@ -51,6 +51,9 @@ func TestExcessNodesStillServing(t *testing.T) {
 			Slots:     []valkey.SlotsRange{{Start: 0, End: 8191}},
 		}},
 	}
+	// The excess pod was a scrape target and did not answer. A hand-built
+	// state has to say so; GetClusterState records the addresses it dials.
+	state.SetTargetsForTesting("10.0.0.1", "10.0.0.3")
 
 	if !excessNodesStillServing(cluster, nodes, state) {
 		t.Fatal("expected the excess primary to still be serving slots")

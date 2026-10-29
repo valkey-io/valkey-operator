@@ -1330,6 +1330,87 @@ func TestGetClusterStateReleasesSlotsOfAReplacedPrimary(t *testing.T) {
 	}
 }
 
+// A live replica still follows a primary whose pod is gone, or whose address
+// now answers as a new id. The ranges stay on the replica's shard. Releasing
+// them makes that shard look empty, and scale-in deletes the replica without
+// moving its data. Persistence does not promote the replica either.
+func TestGetClusterStateKeepsSlotsWhileAReplicaFollowsAMissingPrimary(t *testing.T) {
+	scrape := func(id, shard, info, nodes string) []vclient.ValkeyResult {
+		return []vclient.ValkeyResult{
+			blobResult(id),
+			blobResult(shard),
+			blobResult(info),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\ncluster_size:2\r\n"),
+			blobResult(nodes),
+		}
+	}
+	survivorNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+		"ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n" +
+		"def 10.0.0.2:6379@16379 slave ghi 0 0 2 connected\n"
+	replicaNodes := "ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n" +
+		"def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n"
+	survivor := scrape("abc", "shard-abc", "role:master\r\n", survivorNodes)
+	replica := scrape("def", "shard-ghi", "role:slave\r\nmaster_link_status:up\r\n", replicaNodes)
+
+	for _, tc := range []struct {
+		name      string
+		addresses []string
+		replies   map[string][]vclient.ValkeyResult
+	}{
+		{
+			name:      "pod gone",
+			addresses: []string{"10.0.0.1", "10.0.0.2"},
+			replies: map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": survivor,
+				"10.0.0.2:6379": replica,
+			},
+		},
+		{
+			name:      "address reused",
+			addresses: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			replies: map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": survivor,
+				"10.0.0.2:6379": replica,
+				"10.0.0.3:6379": scrape("jkl", "shard-new", "role:master\r\n",
+					"jkl 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n"+
+						"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n"+
+						"ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n"+
+						"def 10.0.0.2:6379@16379 slave ghi 0 0 2 connected\n"),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := GetClusterState(context.Background(), tc.addresses, 6379, dialScrapeByAddress(t, tc.replies))
+
+			var replicaShard *ShardState
+			for _, shard := range state.Shards {
+				if shard.Id == "shard-ghi" {
+					replicaShard = shard
+				}
+			}
+			if replicaShard == nil {
+				t.Fatal("replica shard missing")
+			}
+			if !reflect.DeepEqual(replicaShard.Slots, []SlotsRange{{8192, 16383}}) {
+				t.Fatalf("replica shard slots = %v, want 8192-16383", replicaShard.Slots)
+			}
+			if replicaShard.GetPrimaryNode() != nil {
+				t.Fatal("missing primary must not be invented as a scraped node")
+			}
+			if !state.PrimaryUnscrapedButServing(replicaShard) {
+				t.Fatal("scale-in must requeue: a live replica still holds the missing primary's slots")
+			}
+			if got := state.GetUnassignedSlots(); len(got) != 0 {
+				t.Fatalf("slots held by the replica were reported unassigned: %v", got)
+			}
+			if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // A primary that is only unreachable this pass keeps its slots, whatever its
 // peers currently flag it, as long as its address is still a pod.
 func TestGetClusterStateKeepsSlotsOfAPrimaryItsPeersMerelySuspect(t *testing.T) {

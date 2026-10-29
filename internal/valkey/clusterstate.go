@@ -112,8 +112,8 @@ type ClusterState struct {
 	unscrapedSlots []SlotsRange
 
 	// targets are the addresses this pass set out to scrape: the current pod
-	// IPs. A peer-table primary at any other address is not a pod any more,
-	// so its ranges are not held for it.
+	// IPs. A peer-table primary at any other address is not a pod any more.
+	// Its ranges are not held for it unless a scraped replica still follows it.
 	targets map[string]struct{}
 }
 
@@ -278,21 +278,30 @@ func (s *ClusterState) shardByID(id string) *ShardState {
 // entryOwnsUnscrapedSlots reports a primary this pass did not scrape whose
 // line still lists owned ranges. A migration marker is not an owned range.
 //
-// The ranges are held only while the entry's address is still a pod this pass
-// set out to scrape and no scraped node answered at that address under another
-// id. A primary that is merely slow or briefly unreachable keeps its slots,
-// whatever flags its peers put on it. A primary whose pod is gone, or whose
-// address now belongs to a pod with a new id, is not coming back: its ranges
-// return to the free set so the replacement can take them. Holding them would
-// strand the slots whenever fail? cannot become fail, which is every cluster
-// with replicas: 0 and two shards, where the one surviving primary cannot form
-// a failure majority.
+// A scraped replica that still follows this primary keeps the ranges even
+// when the primary's address is gone or now answers under another id. Scale-in
+// treats a shard with no recorded slots as drained and deletes its nodes.
+// Persistence does not promote that replica, so releasing the ranges deletes
+// the remaining copy before a slot move.
+//
+// With no such replica, the ranges are held only while the entry's address is
+// still a pod this pass set out to scrape and no scraped node answered there
+// under another id. A primary that is merely slow or briefly unreachable keeps
+// its slots, whatever flags its peers put on it. A primary whose pod is gone,
+// or whose address now belongs to a pod with a new id, is not coming back: its
+// ranges return to the free set so the replacement can take them. Holding them
+// would strand the slots whenever fail? cannot become fail, which is every
+// cluster with replicas: 0 and two shards, where the one surviving primary
+// cannot form a failure majority.
 func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}, liveByAddress map[string]string) bool {
 	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 || entry.Host == "" {
 		return false
 	}
 	if _, found := scraped[entry.Id]; found {
 		return false
+	}
+	if s.HasReplicaOf(entry.Id) {
+		return true
 	}
 	if _, isPod := s.targets[entry.Host]; !isPod {
 		return false
@@ -459,6 +468,16 @@ func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 // its peers, and nothing else should.
 func (n *NodeState) SetClusterNodesForTesting(raw string) {
 	n.nodes = ParseClusterNodes(raw)
+}
+
+// SetTargetsForTesting records the addresses a hand-built state set out to
+// scrape. GetClusterState fills this from the pod IPs it dials. Tests in
+// other packages use this, and nothing else should.
+func (s *ClusterState) SetTargetsForTesting(addresses ...string) {
+	s.targets = make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		s.targets[address] = struct{}{}
+	}
 }
 
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or

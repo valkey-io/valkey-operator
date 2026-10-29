@@ -14,7 +14,7 @@ env:
 
 jobs:
   prepare:
-    name: Prepare e2e matrix
+    name: Build image and prepare e2e matrix
     runs-on: ubuntu-latest
     outputs:
       buckets: ${{ steps.set.outputs.buckets }}
@@ -42,9 +42,7 @@ jobs:
             go-build-e2e-${{ runner.os }}-${{ hashFiles('.go-version', '**/go.sum') }}-
             go-build-e2e-${{ runner.os }}-
 
-      # A test can match two buckets via its own or inherited Describe/Context
-      # labels; fail if a test would run twice across the matrix.
-      - name: Verify no test is in two buckets
+      - name: Verify every e2e test runs in exactly one job
         run: make test-e2e-verify-buckets
 
       - name: Generate matrix buckets

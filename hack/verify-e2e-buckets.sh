@@ -1,77 +1,102 @@
 #!/usr/bin/env bash
-# Verify that no e2e test maps to more than one CI matrix bucket.
+# Verify that every e2e test runs in exactly one CI matrix job.
 #
-# A test matching two buckets (via its own or inherited Describe/Context labels)
-# would run twice across the matrix; this fails with the offending file:line.
-# A test matching no named bucket is covered by the CI catch-all job, so the
-# catch-all count is printed only as a diagnostic.
+# Each matrix job selects its tests with a Ginkgo --label-filter, so this asks
+# Ginkgo which tests each filter selects (via dry-run reports) rather than
+# matching labels itself. Ginkgo label matching is case-insensitive, so a plain
+# string comparison would miss a test labelled e.g. "valkeycluster" that the
+# "ValkeyCluster" job also runs.
 #
-# Usage: verify-e2e-buckets.sh <bucket>...
+# Fails if a bucket selects no tests, if a test is selected by two jobs (it
+# would run twice), or if a test is selected by no job (it would never run).
+#
+# Usage: verify-e2e-buckets.sh <catch-all label filter> <bucket>...
 set -euo pipefail
 
+if [ "$#" -lt 2 ]; then
+	echo "usage: $0 <catch-all label filter> <bucket>..." >&2
+	exit 2
+fi
+catchall=$1
+shift
 buckets=("$@")
-# Same derivation as E2E_CATCHALL in the Makefile; for display only.
-catchall_label="!( $(sed 's/ / || /g' <<<"${buckets[*]}") )"
 
-report=$(mktemp)
-dryrun_log=$(mktemp)
-trap 'rm -f "$report" "$dryrun_log"' EXIT
+cd "$(dirname "$0")/.."
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 echo ">> checking e2e label buckets"
 
-# Enumerate every spec and its labels without running anything. A Ginkgo
-# dry-run exits 197 (GINKGO_FOCUS_EXIT_CODE) if a stray FIt/FDescribe is present,
-# even though it succeeds and writes the report; so we ignore the exit code and
-# instead fail if no report was produced.
-go test -tags=e2e ./test/e2e/ -ginkgo.dry-run --ginkgo.json-report="$report" >"$dryrun_log" 2>&1 || true
-if [ ! -s "$report" ]; then
-	echo "FAIL: e2e dry-run produced no report:"
-	cat "$dryrun_log"
+if ! go test -tags=e2e -c ./test/e2e/ -o "$work/e2e.test" >"$work/build.log" 2>&1; then
+	echo "FAIL: could not build the e2e test binary:"
+	cat "$work/build.log"
 	exit 1
 fi
 
-# Emit one line per spec: "<file>:<line>\t<label>,<label>,..." with the spec's own
-# labels merged with all inherited container labels.
-spec_labels=$(jq -r '
-	.[].SpecReports[]
-	| select(.LeafNodeType=="It")
-	| "\(.LeafNodeLocation.FileName):\(.LeafNodeLocation.LineNumber)\t\((((.LeafNodeLabels // []) + [.ContainerHierarchyLabels[]?[]?]) | unique) | join(","))"
-' "$report")
+# select_specs <name> [ginkgo flags...] writes the sorted file:line of each
+# selected test to "$work/<name>.txt". A dry-run exits 197 when a FIt/FDescribe
+# is present but still writes the report, so only a missing report fails.
+select_specs() {
+	local name=$1
+	shift
+	local report="$work/$name.json"
+	"$work/e2e.test" -ginkgo.dry-run -ginkgo.json-report="$report" "$@" >"$work/$name.log" 2>&1 || true
+	if [ ! -s "$report" ]; then
+		echo "FAIL: e2e dry-run produced no report for $name:"
+		cat "$work/$name.log"
+		exit 1
+	fi
+	jq -r --arg root "$PWD/" '.[].SpecReports[]
+		| select(.LeafNodeType == "It" and .State != "skipped" and .State != "pending")
+		| "\(.LeafNodeLocation.FileName | ltrimstr($root)):\(.LeafNodeLocation.LineNumber)"' \
+		"$report" | sort >"$work/$name.txt"
+}
 
-# Collect the file:line of every spec that matches each bucket. A spec matching
-# two buckets therefore appears twice across all buckets, which we detect below.
-bucket_hits=""
+select_specs all
+
+# jobs.tsv gets one "file:line<TAB>job" row for every test each job selects.
 empty_buckets=""
-for b in "${buckets[@]}"; do
-	hits=$(awk -F'\t' -v b="$b" '{split($2,a,","); for(i in a) if(a[i]==b){print $1; break}}' <<<"$spec_labels")
-	n=$(grep -c . <<<"$hits" || true)
+for i in "${!buckets[@]}"; do
+	b=${buckets[$i]}
+	select_specs "bucket-$i" -ginkgo.label-filter="$b"
+	n=$(wc -l <"$work/bucket-$i.txt")
 	printf '  %3d  %s\n' "$n" "$b"
 	if [ "$n" -eq 0 ]; then
 		empty_buckets+=" $b"
 	fi
-	bucket_hits+="${hits}"$'\n'
+	awk -v job="$b" '{print $0 "\t" job}' "$work/bucket-$i.txt" >>"$work/jobs.tsv"
 done
 
-# Catch-all count (diagnostic only): specs matching none of the buckets.
-catchall_n=$(awk -F'\t' -v bl="${buckets[*]}" '
-	BEGIN{split(bl,bk," ")}
-	{hit=0; split($2,a,","); for(i in a) for(j in bk) if(a[i]==bk[j]) hit=1; if(!hit) c++}
-	END{print c+0}
-' <<<"$spec_labels")
-printf '  %3d  %s\n' "$catchall_n" "$catchall_label"
+# The catch-all may legitimately be empty once every test is labelled.
+select_specs catchall -ginkgo.label-filter="$catchall"
+printf '  %3d  %s\n' "$(wc -l <"$work/catchall.txt")" "$catchall"
+awk '{print $0 "\tcatch-all"}' "$work/catchall.txt" >>"$work/jobs.tsv"
+printf '  %3d  total\n' "$(wc -l <"$work/all.txt")"
 
-# Verify every named bucket matches at least one spec.
+failed=0
+
 if [ -n "$empty_buckets" ]; then
 	echo "FAIL: bucket(s) match no tests (check E2E_BUCKETS):$empty_buckets"
-	exit 1
+	failed=1
 fi
 
-# Verify no spec is in more than one bucket (it would otherwise run twice).
-overlap=$(grep . <<<"$bucket_hits" | sort | uniq -d || true)
+overlap=$(awk -F'\t' '{jobs[$1] = jobs[$1] " " $2; n[$1]++}
+	END {for (s in n) if (n[s] > 1) print "  OVERLAP " s " (" substr(jobs[s], 2) ")"}' "$work/jobs.tsv" | sort)
 if [ -n "$overlap" ]; then
-	echo "FAIL: test(s) in more than one bucket:"
-	sed 's/^/  OVERLAP /' <<<"$overlap"
-	exit 1
+	echo "FAIL: test(s) selected by more than one job (would run twice):"
+	echo "$overlap"
+	failed=1
 fi
 
-echo "OK: every e2e test is in exactly one bucket"
+missing=$(cut -f1 "$work/jobs.tsv" | sort -u | comm -23 "$work/all.txt" -)
+if [ -n "$missing" ]; then
+	echo "FAIL: test(s) selected by no job (would never run):"
+	while IFS= read -r s; do echo "  MISSING $s"; done <<<"$missing"
+	failed=1
+fi
+
+if [ "$failed" -ne 0 ]; then
+	exit 1
+fi
+echo "OK: every e2e test is in exactly one job"

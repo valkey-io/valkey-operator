@@ -124,8 +124,8 @@ test-e2e-matrix: ## Emit the e2e matrix as JSON objects {name, filter} for the C
 		--args $(E2E_BUCKETS)
 
 .PHONY: test-e2e-verify-buckets
-test-e2e-verify-buckets: ## Verify no e2e test matches two buckets (would run twice in the matrix)
-	@hack/verify-e2e-buckets.sh $(E2E_BUCKETS)
+test-e2e-verify-buckets: ## Verify every e2e test runs in exactly one matrix job
+	@hack/verify-e2e-buckets.sh '$(E2E_CATCHALL)' $(E2E_BUCKETS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

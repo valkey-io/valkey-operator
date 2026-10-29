@@ -1794,6 +1794,59 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		}
 	})
 
+	It("creates missing ValkeyNodes before waiting on a not-ready replica", func() {
+		By("creating every node, then dropping shard 1 as if create was interrupted")
+		createAllNodes()
+		markAllReady()
+		for _, name := range []string{node10, node11} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			Expect(k8sClient.Delete(testCtx, node)).To(Succeed())
+		}
+		setNotReady(node01)
+
+		rvShard0 := map[string]string{
+			node00: getResourceVersion(node00),
+			node01: getResourceVersion(node01),
+		}
+
+		By("pausing on shard 0's unready replica must still create shard 1")
+		requeue, err := reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the unready replica still pauses the roll")
+		for _, name := range []string{node10, node11} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			Expect(node.Spec.Image).To(Equal(cluster.Spec.Image))
+		}
+		for name, rv := range rvShard0 {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be updated while %s is not ready", name, node01)
+		}
+	})
+
+	It("re-introduces stale peers while a not-ready pod holds the roll", func() {
+		By("creating every node and dropping one replica")
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		healed := 0
+		orig := healStaleAddressPeersFn
+		healStaleAddressPeersFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+			healed++
+			Expect(state).NotTo(BeNil())
+			return 1
+		}
+		defer func() { healStaleAddressPeersFn = orig }()
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the not-ready replica still pauses the roll")
+		Expect(healed).To(Equal(1), "address repair runs on the pause, before Reconcile would reach it")
+		Expect(filterEvents(collectEvents(fakeRecorder), "StaleAddressesHealed")).To(HaveLen(1))
+	})
+
 	It("leaves a slotless scale-out shard for rebalance", func() {
 		By("creating every node, with shard 1 up but not in the topology")
 		createAllNodes()

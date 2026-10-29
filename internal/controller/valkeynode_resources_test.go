@@ -139,7 +139,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(5), c.ReadinessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.FailureThreshold)
-	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
+	assert.Equal(t, int32(5), c.ReadinessProbe.TimeoutSeconds)
 	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
 
 	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence)

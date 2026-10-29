@@ -278,7 +278,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// nodes.conf still points at the old ones (full restart with
 	// persistence — #275). Must run before forgetStaleNodes: those same
 	// entries look failing, and CLUSTER FORGET would ban the live node
-	// from rejoining for a minute.
+	// from rejoining for a minute. A paused roll returns above, before
+	// this point, and calls healStaleAddressPeersFn on its own: a replica
+	// whose peer addresses are stale stays unready until the MEET lands.
 	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
@@ -611,6 +613,11 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // can still join the cluster. Tests swap it for a stub.
 var attachPendingNodesFn = (*ValkeyClusterReconciler).attachPendingNodes
 
+// healStaleAddressPeersFn is what a paused roll calls so peers that came back
+// at a new pod IP are re-introduced before the walk returns. Tests swap it
+// for a stub. Reconcile also calls healStaleAddressPeers once the walk completes.
+var healStaleAddressPeersFn = (*ValkeyClusterReconciler).healStaleAddressPeers
+
 // attachPendingNodes MEETs isolated nodes, assigns slots to new primaries, and
 // REPLICATEs pending replicas. A nil state does nothing.
 //
@@ -632,6 +639,41 @@ func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluste
 	}
 }
 
+// createMissingValkeyNodes creates every ValkeyNode the spec calls for that
+// does not exist yet. It does not update a node that already exists.
+//
+// The walk returns on the first node that is not Ready, and slot assignment
+// waits until every later primary exists. Nodes that the walk has not reached
+// have to be created on that return, or a partial create never finishes.
+func (r *ValkeyClusterReconciler) createMissingValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string) error {
+	log := logf.FromContext(ctx)
+	created := 0
+	for shardIndex := range int(cluster.Spec.Shards) {
+		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
+			name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
+			current := &valkeyiov1alpha1.ValkeyNode{}
+			err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, current)
+			if err == nil {
+				continue
+			}
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+			if err != nil {
+				return err
+			}
+			if result == nodeCreated {
+				created++
+			}
+		}
+	}
+	if created > 0 {
+		log.V(1).Info("created missing ValkeyNodes while a roll is paused", "count", created)
+	}
+	return nil
+}
+
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
@@ -643,8 +685,10 @@ func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluste
 // shard, using live cluster state to identify the actual primary. At most one spec update is issued per reconcile.
 // Once a node is updated or found not-ready after a prior update,
 // the function returns (true, nil) so the caller requeues before advancing to the next node.
-// Before that return it still MEETs, assigns slots, and REPLICATEs, because replica
-// readiness waits until the pod holds its primary's data (#552).
+// Before that return it creates any missing ValkeyNode, re-introduces peers whose
+// addresses changed, and still MEETs, assigns slots, and REPLICATEs. Replica
+// readiness waits until the pod holds its primary's data (#552), and this return
+// happens before Reconcile reaches healStaleAddressPeers (#275).
 // A shard that is not in the topology and has no free slots is left for
 // rebalanceSlots: pausing on it would keep that rebalance from ever running.
 //
@@ -734,8 +778,16 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			}
 			switch result {
 			case nodeDeferred, nodeRequeued:
-				// Pause the roll, but still attach. A replacement replica is
-				// not Ready until it has caught up (#552).
+				// Pause the roll. A replacement replica is not Ready until it
+				// has caught up (#552), and this return is before Reconcile
+				// reaches the later phases. Create what the walk has not
+				// reached, repair stale peer addresses, then attach.
+				if err := r.createMissingValkeyNodes(ctx, cluster, nodesPerShard, nodes, clusterState, liveHashes); err != nil {
+					return false, err
+				}
+				if healed := healStaleAddressPeersFn(r, ctx, cluster, clusterState); healed > 0 {
+					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
+				}
 				attachPendingNodesFn(r, ctx, cluster, clusterState, nodes)
 				if result == nodeDeferred {
 					return true, deferred
@@ -1184,6 +1236,9 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // Returns the number of MEETs issued; failures are logged and skipped (and
 // don't count as met) so one unreachable node doesn't block healing the rest.
 func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+	if state == nil {
+		return 0
+	}
 	log := logf.FromContext(ctx)
 	healed := 0
 	met := map[string]bool{}

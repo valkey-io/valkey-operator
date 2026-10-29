@@ -1700,6 +1700,48 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 			"a serving pod's role must survive its workload rolling")
 	})
 
+	It("does not move Ready LastTransitionTime when the Service error stays", func() {
+		seedReadyWorkload(node)
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) string {
+				return RolePrimary
+			},
+		}
+		serviceErr := fmt.Errorf("service default/valkey-role-test exists and is not owned by ValkeyNode role-test")
+
+		_, err := r.updateStatus(ctx, node, serviceErr)
+		Expect(err).NotTo(HaveOccurred())
+
+		stored := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+		readyCond := testutils.FindCondition(stored.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+		readyCond.LastTransitionTime = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+		Expect(k8sClient.Status().Update(ctx, stored)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), stored)).To(Succeed())
+		readyCond = testutils.FindCondition(stored.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		transitionTime := readyCond.LastTransitionTime
+		resourceVersion := stored.ResourceVersion
+
+		_, err = r.updateStatus(ctx, node, serviceErr)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Ready).To(BeFalse())
+		Expect(updated.Status.Role).To(Equal(RolePrimary))
+		updatedCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(updatedCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(updatedCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+		Expect(updatedCond.LastTransitionTime.Time).To(BeTemporally("==", transitionTime.Time))
+		Expect(updated.ResourceVersion).To(Equal(resourceVersion))
+	})
+
 	It("keeps the last-known Role and signals failure when the resolver returns empty on a ready pod", func() {
 		seedReadyWorkload(node)
 

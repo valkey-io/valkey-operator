@@ -949,7 +949,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			rolledOut = rolled
 		}
 
-		current.Status.Ready = ready && rolledOut
+		// A Service error keeps Ready false. Setting it true here and then
+		// false below changes LastTransitionTime, so the status patch runs
+		// on every reconcile while the Service name stays taken.
+		current.Status.Ready = ready && rolledOut && serviceErr == nil
 
 		// Role follows the pod, not the rollout: a pod that is serving has a
 		// resolvable role even while its workload rolls, and blanking it there

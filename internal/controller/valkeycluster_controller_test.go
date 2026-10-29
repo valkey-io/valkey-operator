@@ -1770,9 +1770,10 @@ var _ = Describe("reconcileValkeyNodes", func() {
 
 		attached := 0
 		orig := attachPendingNodesFn
-		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) {
+		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
 			attached++
 			Expect(state).NotTo(BeNil())
+			return nil
 		}
 		defer func() { attachPendingNodesFn = orig }()
 
@@ -1847,6 +1848,27 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(filterEvents(collectEvents(fakeRecorder), "StaleAddressesHealed")).To(HaveLen(1))
 	})
 
+	It("marks the cluster degraded when attaching during a pause fails", func() {
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		orig := attachPendingNodesFn
+		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+			return stderrors.New("meet failed")
+		}
+		defer func() { attachPendingNodesFn = orig }()
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the roll still requeues")
+		degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed))
+		Expect(degraded.Message).To(Equal("meet failed"))
+	})
+
 	It("leaves a slotless scale-out shard for rebalance", func() {
 		By("creating every node, with shard 1 up but not in the topology")
 		createAllNodes()
@@ -1860,8 +1882,9 @@ var _ = Describe("reconcileValkeyNodes", func() {
 
 		attached := 0
 		orig := attachPendingNodesFn
-		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) {
+		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
 			attached++
+			return nil
 		}
 		defer func() { attachPendingNodesFn = orig }()
 

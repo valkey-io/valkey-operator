@@ -623,20 +623,30 @@ var healStaleAddressPeersFn = (*ValkeyClusterReconciler).healStaleAddressPeers
 //
 // Replica readiness stays false until the pod has the primary's data (#552),
 // so these steps have to run while the walk is paused or the pod never becomes Ready.
-func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
+// All three steps run. The return is the first error.
+func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) error {
 	if state == nil {
-		return
+		return nil
 	}
 	log := logf.FromContext(ctx)
+	var attachErr error
 	if _, err := r.meetIsolatedNodes(ctx, cluster, state); err != nil {
 		log.Error(err, "meetIsolatedNodes failed while a roll is paused")
+		attachErr = err
 	}
 	if _, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes); err != nil {
 		log.Error(err, "assignSlotsToPendingPrimaries failed while a roll is paused")
+		if attachErr == nil {
+			attachErr = err
+		}
 	}
 	if _, err := r.replicatePendingReplicas(ctx, cluster, state, nodes); err != nil {
 		log.Error(err, "replicatePendingReplicas failed while a roll is paused")
+		if attachErr == nil {
+			attachErr = err
+		}
 	}
+	return attachErr
 }
 
 // createMissingValkeyNodes creates every ValkeyNode the spec calls for that
@@ -788,7 +798,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				if healed := healStaleAddressPeersFn(r, ctx, cluster, clusterState); healed > 0 {
 					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
 				}
-				attachPendingNodesFn(r, ctx, cluster, clusterState, nodes)
+				if err := attachPendingNodesFn(r, ctx, cluster, clusterState, nodes); err != nil {
+					setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+				}
 				if result == nodeDeferred {
 					return true, deferred
 				}

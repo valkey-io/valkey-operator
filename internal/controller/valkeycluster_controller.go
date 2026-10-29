@@ -242,16 +242,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	} else if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
 	} else if requeue {
 		// An unschedulable pod is reported first, whether the roll is under
 		// way or held. The pod it reports belongs to a later shard or sits
 		// outside the shard loop: a shard's own replica that is not Ready
 		// requeues before the walk reaches its primary.
-		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster, state); err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-			_ = r.updateStatus(ctx, cluster, nil)
+			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{}, err
 		} else if handled {
 			return result, nil
@@ -262,7 +262,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, nil)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
@@ -372,7 +372,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return result, nil
 	}
 
-	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster, state); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
@@ -503,7 +503,7 @@ type podSchedulingIssue struct {
 	message string
 }
 
-func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (ctrl.Result, bool, error) {
+func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool, error) {
 	issue, err := r.findPodSchedulingIssue(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, false, err
@@ -522,7 +522,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
-	if err := r.updateStatus(ctx, cluster, nil); err != nil {
+	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		return ctrl.Result{}, false, err
 	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, true, nil
@@ -1586,7 +1586,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	patchBase := current.DeepCopy()
 	patch := client.MergeFrom(patchBase)
 
-	// Update shard counts
+	// Update shard counts. A nil state leaves the stored counts in place.
 	if state != nil {
 		current.Status.ReadyShards = r.countReadyShards(state, cluster)
 		current.Status.Shards = int32(len(state.Shards))

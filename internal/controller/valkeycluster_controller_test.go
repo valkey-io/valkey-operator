@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	stderrors "errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -622,7 +623,7 @@ var _ = Describe("pod scheduling issue handling", func() {
 			Recorder:  fakeRecorder,
 		}
 
-		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(handled).To(BeTrue())
 		Expect(result.RequeueAfter).To(Equal(10 * time.Second))
@@ -665,7 +666,7 @@ var _ = Describe("pod scheduling issue handling", func() {
 			Recorder:  events.NewFakeRecorder(100),
 		}
 
-		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster)
+		result, handled, err := reconciler.handlePodSchedulingIssues(ctx, cluster, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(handled).To(BeFalse())
 		Expect(result).To(Equal(reconcile.Result{}))
@@ -997,6 +998,333 @@ var _ = Describe("updateStatus", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReconciling))
 		Expect(cluster.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonInitializing))
+	})
+
+})
+
+var _ = Describe("UpdatingNodes topology status", func() {
+	ctx := context.Background()
+
+	createCluster := func(name string) (*valkeyiov1alpha1.ValkeyCluster, *ValkeyClusterReconciler) {
+		GinkgoHelper()
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:   3,
+				Replicas: 0,
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		r := &ValkeyClusterReconciler{
+			Client:        k8sClient,
+			APIReader:     k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(k8sClient),
+		}
+		return cluster, r
+	}
+
+	cleanupCluster := func(cluster *valkeyiov1alpha1.ValkeyCluster) {
+		GinkgoHelper()
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		_ = k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})
+		for i := range nodeList.Items {
+			_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+		}
+		podList := &corev1.PodList{}
+		_ = k8sClient.List(ctx, podList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})
+		for i := range podList.Items {
+			_ = k8sClient.Delete(ctx, &podList.Items[i])
+		}
+		_ = k8sClient.Delete(ctx, cluster)
+		_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: headlessServiceName(cluster.Name), Namespace: "default"}})
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(cluster.Name), Namespace: "default"}})
+		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(cluster.Name), Namespace: "default"}})
+	}
+
+	createClusterPod := func(clusterName string, shard, node int, ready bool) {
+		GinkgoHelper()
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-%d-%d", clusterName, shard, node),
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    clusterName,
+					LabelShardIndex: strconv.Itoa(shard),
+					LabelNodeIndex:  strconv.Itoa(node),
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "server",
+					Image: DefaultImage,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		if !ready {
+			return
+		}
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	}
+
+	markAllNodesReady := func(clusterName string) {
+		GinkgoHelper()
+		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
+		Expect(nodeList.Items).NotTo(BeEmpty())
+		for i := range nodeList.Items {
+			node := &nodeList.Items[i]
+			node.Status.Ready = true
+			node.Status.ObservedGeneration = node.Generation
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		}
+	}
+
+	seedStaleHealthyStatus := func(cluster *valkeyiov1alpha1.ValkeyCluster) {
+		GinkgoHelper()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Status.ReadyShards = 3
+		cluster.Status.Shards = 3
+		setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
+		Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
+	}
+
+	bumpImage := func(cluster *valkeyiov1alpha1.ValkeyCluster) {
+		GinkgoHelper()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Image = "valkey/valkey:9.1.0"
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+	}
+
+	It("counts readyShards from the scrape and leaves topology conditions", func() {
+		cluster, r := createCluster("roll-status-missing-primary")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
+		// The pods would count as 2. The scrape has no shards, so the count is 0.
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
+
+		slots := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
+		Expect(slots).NotTo(BeNil())
+		Expect(slots.Status).To(Equal(metav1.ConditionTrue))
+		Expect(slots.Reason).To(Equal(valkeyiov1alpha1.ReasonAllSlotsAssigned))
+		Expect(slots.ObservedGeneration).To(Equal(seededGen))
+
+		ready := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+
+		progressing := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+		Expect(progressing).NotTo(BeNil())
+		Expect(progressing.Status).To(Equal(metav1.ConditionTrue))
+		Expect(progressing.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("keeps ClusterFormed True when a replica Pod is Ready after failover", func() {
+		cluster, r := createCluster("roll-status-replica-ready")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
+		createClusterPod(cluster.Name, 0, 1, true)
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
+	})
+
+	It("keeps ClusterFormed True when every primary Pod is Ready during a roll", func() {
+		cluster, r := createCluster("roll-status-primaries-ready")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
+		createClusterPod(cluster.Name, 0, 0, true)
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
+
+		ready := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("keeps SlotsAssigned when a scale-out shard has no Ready Pod", func() {
+		cluster, r := createCluster("roll-status-scale-out")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		createClusterPod(cluster.Name, 0, 0, true)
+		createClusterPod(cluster.Name, 1, 0, true)
+		createClusterPod(cluster.Name, 2, 0, true)
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Shards = 4
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		// The first pass creates the new ValkeyNode and can record MissingShards.
+		// The second pass finds that node not Ready and must not replace SlotsAssigned.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+
+		slots := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionSlotsAssigned)
+		Expect(slots).NotTo(BeNil())
+		Expect(slots.Status).To(Equal(metav1.ConditionTrue))
+		Expect(slots.Reason).To(Equal(valkeyiov1alpha1.ReasonAllSlotsAssigned))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Reason).NotTo(Equal(valkeyiov1alpha1.ReasonUpdatingNodes))
+	})
+
+	It("does not move ClusterFormed to the new generation when a replica pod is not Ready", func() {
+		cluster, r := createCluster("roll-status-replica-down")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Spec.Shards = 1
+		cluster.Spec.Replicas = 1
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+		seededGen := cluster.Generation
+		createClusterPod(cluster.Name, 0, 0, true)
+		createClusterPod(cluster.Name, 0, 1, false)
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Generation).To(BeNumerically(">", seededGen))
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+
+		formed := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)
+		Expect(formed).NotTo(BeNil())
+		Expect(formed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(formed.Reason).To(Equal(valkeyiov1alpha1.ReasonTopologyComplete))
+		Expect(formed.ObservedGeneration).To(Equal(seededGen))
+	})
+
+	It("counts readyShards from the scrape when the rolled pod is unschedulable", func() {
+		cluster, r := createCluster("roll-status-unschedulable")
+		DeferCleanup(func() { cleanupCluster(cluster) })
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+		markAllNodesReady(cluster.Name)
+		seedStaleHealthyStatus(cluster)
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cluster.Name + "-pending",
+				Namespace: "default",
+				Labels: map[string]string{
+					LabelCluster:    cluster.Name,
+					LabelShardIndex: "0",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "server",
+					Image: DefaultImage,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:    corev1.PodScheduled,
+			Status:  corev1.ConditionFalse,
+			Reason:  corev1.PodReasonUnschedulable,
+			Message: "0/1 nodes are available",
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		bumpImage(cluster)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), updated)).To(Succeed())
+		Expect(updated.Status.ReadyShards).To(Equal(int32(0)))
+		Expect(updated.Status.Reason).To(Equal(valkeyiov1alpha1.ReasonPodUnschedulable))
 	})
 })
 

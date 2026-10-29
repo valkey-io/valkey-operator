@@ -114,7 +114,7 @@ jobs:
         env:
           E2E_SKIP_IMAGE_BUILD: "true"
           E2E_MANAGER_IMAGE: ${{ env.MANAGER_IMAGE }}
-        run: make test-e2e TEST_LABELS="${{ matrix.bucket.filter }}"
+        run: make test-e2e-run TEST_LABELS="${{ matrix.bucket.filter }}"
 
   e2e-result:
     name: Final e2e result

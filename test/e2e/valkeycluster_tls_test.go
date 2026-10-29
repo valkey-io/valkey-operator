@@ -40,7 +40,7 @@ const (
 	preGateImage = "valkey/valkey:9.0.0"
 )
 
-var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS"), func() {
+var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS", "security"), func() {
 	var valkeyClusterName string
 	var tlsSecretName string
 	var tmpDir string
@@ -463,7 +463,7 @@ spec:
 	})
 })
 
-var _ = Describe("ValkeyCluster mTLS with CN-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS"), func() {
+var _ = Describe("ValkeyCluster mTLS with CN-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS", "security"), func() {
 	const (
 		clusterName       = "cluster-mtls"
 		customIssuer      = "valkey-mtls-custom-issuer"

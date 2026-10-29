@@ -85,7 +85,7 @@ KIND_CLUSTER ?= valkey-operator-test-e2e
 
 # E2E label buckets for the parallel CI matrix (one matrix job per label).
 # The catch-all job is derived below. Labels must be single words.
-E2E_BUCKETS ?= valkeynode ValkeyCluster topology-spread
+E2E_BUCKETS ?= cluster-lifecycle security spec-update valkeynode
 
 # Catch-all filter matching every test not covered by a bucket above, e.g. "!( a || b || c )".
 empty :=

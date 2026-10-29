@@ -42,7 +42,7 @@ const (
 	e2eDefaultPassword     = "e2eDefaultPassword"
 )
 
-var _ = Describe("ValkeyNode", func() {
+var _ = Describe("ValkeyNode", Label("valkeynode"), func() {
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {

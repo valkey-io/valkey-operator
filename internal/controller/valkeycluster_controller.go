@@ -672,8 +672,8 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// Set when a shard's roll is skipped; reported to the caller after the loop.
 	shardRollSkipped := false
 
-	// Empty when clusterState is nil. A fresh cluster then has the full range,
-	// so the rebalance skip below does not fire during bootstrap.
+	// Nil when there is no snapshot. The scale-out skip below needs a real
+	// slot map, and an empty scrape still reports every slot as free.
 	var unassignedSlots []valkey.SlotsRange
 	if clusterState != nil {
 		unassignedSlots = clusterState.GetUnassignedSlots()
@@ -702,16 +702,16 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
 				name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
 				current := &valkeyiov1alpha1.ValkeyNode{}
-				getErr := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, current)
-				if getErr == nil {
+				err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, current)
+				if err == nil {
 					continue
 				}
-				if !apierrors.IsNotFound(getErr) {
-					return false, getErr
+				if !apierrors.IsNotFound(err) {
+					return false, err
 				}
-				result, cerr := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
-				if cerr != nil {
-					return false, cerr
+				result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+				if err != nil {
+					return false, err
 				}
 				if result == nodeCreated {
 					totalCreated++
@@ -1346,7 +1346,7 @@ func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *v
 			return false
 		}
 	}
-	single := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
+	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
 	for shardIndex := range int(cluster.Spec.Shards) {
 		if shardExistsInTopology(state, shardIndex, nodes) {
 			continue
@@ -1356,7 +1356,7 @@ func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *v
 			return false
 		}
 		scraped := scrapedNode(state, primary.Status.PodIP)
-		if scraped == nil || (scraped.IsIsolated() && !single) {
+		if scraped == nil || (scraped.IsIsolated() && !isSingleNodeCluster) {
 			return false
 		}
 	}

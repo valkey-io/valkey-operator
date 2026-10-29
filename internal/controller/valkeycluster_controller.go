@@ -579,8 +579,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		},
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		// Do not take a Service a ValkeyNode already owns. A free name is
-		// still created. The other cluster object existing is not enough.
+		// SetControllerReference already rejects another controller. This
+		// error names the ValkeyNode. A free name is still created.
+		// Another cluster object with the same name is not enough.
 		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
 			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
 		}

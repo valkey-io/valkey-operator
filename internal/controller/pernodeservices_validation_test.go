@@ -79,7 +79,7 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		}
 		err := k8sClient.Create(ctx, cluster)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("per-node Service names would exceed 63 characters"))
+		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
 	})
 
 	It("accepts higher shard and replica counts when the name fits", func() {
@@ -112,7 +112,7 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		}
 		err := k8sClient.Create(ctx, cluster)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("per-node Service names would exceed 63 characters"))
+		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
 	})
 	It("rejects turning perNodeServices on when the name is too long", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
@@ -127,6 +127,6 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		}
 		err := k8sClient.Update(ctx, cluster)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("per-node Service names would exceed 63 characters"))
+		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
 	})
 })

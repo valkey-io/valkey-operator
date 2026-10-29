@@ -37,9 +37,6 @@ import (
 func (r *ValkeyNodeReconciler) ensureNodeService(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	name := valkeyNodeResourceName(node)
 	if node.Spec.Service == nil {
-		if len(name) > validation.DNS1123LabelMaxLength {
-			return nil
-		}
 		return r.deleteNodeService(ctx, node, name)
 	}
 	if len(name) > validation.DNS1123LabelMaxLength {

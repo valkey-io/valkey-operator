@@ -110,6 +110,11 @@ type ClusterState struct {
 	// unscrapedSlots are ranges a peer table still assigns to a primary this
 	// pass did not scrape, excluding ranges copied onto that primary's shard.
 	unscrapedSlots []SlotsRange
+
+	// targets are the addresses this pass set out to scrape: the current pod
+	// IPs. A peer-table primary at any other address is not a pod any more,
+	// so its ranges are not held for it.
+	targets map[string]struct{}
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -142,9 +147,11 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
+		targets:      make(map[string]struct{}, len(addresses)),
 	}
 
 	for _, address := range addresses {
+		state.targets[address] = struct{}{}
 		// Attempt to connect to the Valkey node and extract information.
 		node := getNodeState(ctx, address, port, dial)
 		if node != nil {
@@ -192,6 +199,7 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 // the ranges assigned. The missing primary is not added as a NodeState.
 func (s *ClusterState) noteUnscrapedSlotOwnership() {
 	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
 	type held struct {
 		slots []SlotsRange
 		shard *ShardState
@@ -199,7 +207,7 @@ func (s *ClusterState) noteUnscrapedSlotOwnership() {
 	owners := make(map[string]*held)
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
-			if !entryOwnsUnscrapedSlots(entry, scraped) {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
 				continue
 			}
 			h := owners[entry.Id]
@@ -269,12 +277,41 @@ func (s *ClusterState) shardByID(id string) *ShardState {
 
 // entryOwnsUnscrapedSlots reports a primary this pass did not scrape whose
 // line still lists owned ranges. A migration marker is not an owned range.
-func entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}) bool {
-	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
+//
+// The ranges are held only while the entry's address is still a pod this pass
+// set out to scrape and no scraped node answered at that address under another
+// id. A primary that is merely slow or briefly unreachable keeps its slots,
+// whatever flags its peers put on it. A primary whose pod is gone, or whose
+// address now belongs to a pod with a new id, is not coming back: its ranges
+// return to the free set so the replacement can take them. Holding them would
+// strand the slots whenever fail? cannot become fail, which is every cluster
+// with replicas: 0 and two shards, where the one surviving primary cannot form
+// a failure majority.
+func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}, liveByAddress map[string]string) bool {
+	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 || entry.Host == "" {
 		return false
 	}
-	_, found := scraped[entry.Id]
-	return !found
+	if _, found := scraped[entry.Id]; found {
+		return false
+	}
+	if _, isPod := s.targets[entry.Host]; !isPod {
+		return false
+	}
+	if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+		return false
+	}
+	return true
+}
+
+// liveIDsByAddress maps each scraped node's address to the id it answered with.
+func (s *ClusterState) liveIDsByAddress() map[string]string {
+	live := make(map[string]string)
+	for _, node := range s.AllNodes() {
+		if node.Address != "" && node.Id != "" {
+			live[node.Address] = node.Id
+		}
+	}
+	return live
 }
 
 func slotCount(ranges []SlotsRange) int {
@@ -292,9 +329,10 @@ func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 	var hosts []string
 	seenHost := make(map[string]struct{})
 	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
-			if !entryOwnsUnscrapedSlots(entry, scraped) {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
 				continue
 			}
 			ids[entry.Id] = struct{}{}

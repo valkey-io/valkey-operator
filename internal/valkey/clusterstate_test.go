@@ -1286,6 +1286,73 @@ func TestGetClusterStateKeepsSlotsOwnedByAnUnscrapedPrimary(t *testing.T) {
 	}
 }
 
+// With replicas: 0 and two shards, a primary replaced behind a roll comes back
+// at a new address with a new id, and the survivor can only ever mark the old
+// id "fail?": FAIL needs reports from a majority of two primaries. The old
+// entry's address is no longer a pod, so its ranges must go back to the free
+// set for the replacement, or cluster-require-full-coverage takes the cluster
+// down. The same holds when the replacement reuses the address under a new id.
+func TestGetClusterStateReleasesSlotsOfAReplacedPrimary(t *testing.T) {
+	for name, replacementAddress := range map[string]string{"new address": "10.0.0.4", "same address": "10.0.0.3"} {
+		t.Run(name, func(t *testing.T) {
+			survivorNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+				"ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n" +
+				"jkl " + replacementAddress + ":6379@16379 master - 0 0 3 connected\n"
+			survivor := healthyScrape()
+			survivor[4] = blobResult(survivorNodes)
+
+			replacementNodes := "jkl " + replacementAddress + ":6379@16379 myself,master - 0 0 3 connected\n" +
+				"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n" +
+				"ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n"
+			replacement := []vclient.ValkeyResult{
+				blobResult("jkl"),
+				blobResult("shard-3"),
+				blobResult("role:master\r\n"),
+				blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\ncluster_size:2\r\n"),
+				blobResult(replacementNodes),
+			}
+
+			state := GetClusterState(context.Background(), []string{"10.0.0.1", replacementAddress}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379":              survivor,
+				replacementAddress + ":6379": replacement,
+			}))
+
+			if got, want := state.GetUnassignedSlots(), []SlotsRange{{8192, 16383}}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unassigned slots = %v, want %v: the replaced primary's ranges must be free for the replacement", got, want)
+			}
+			if got := state.UnscrapedSlotOwnerHosts(); len(got) != 0 {
+				t.Fatalf("a primary whose pod is gone must not count as an unscraped slot owner, got %v", got)
+			}
+			if len(state.PendingNodes) != 1 || state.PendingNodes[0].Id != "jkl" {
+				t.Fatalf("the slotless replacement must be pending for slot assignment, got %+v", state.PendingNodes)
+			}
+		})
+	}
+}
+
+// A primary that is only unreachable this pass keeps its slots, whatever its
+// peers currently flag it, as long as its address is still a pod.
+func TestGetClusterStateKeepsSlotsOfAPrimaryItsPeersMerelySuspect(t *testing.T) {
+	viewerNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+		"ghi 10.0.0.3:6379@16379 master,fail? - 0 0 2 connected 8192-16383\n"
+	viewer := healthyScrape()
+	viewer[4] = blobResult(viewerNodes)
+	busy := healthyScrape()
+	busy[0] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.3:6379": busy,
+	}))
+
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("a suspected primary that is still a pod lost its ranges: %v", got)
+	}
+	if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+	}
+}
+
 // Gossip from another shard must hold the busy primary's ranges without
 // writing them onto the viewer's shard.
 func TestGetClusterStateHoldsSlotsReportedByAnotherShard(t *testing.T) {

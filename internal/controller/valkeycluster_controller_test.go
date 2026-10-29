@@ -1762,6 +1762,85 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
 	})
 
+	It("attaches pending nodes while a not-ready pod holds the roll", func() {
+		By("creating all nodes and marking them ready, then dropping one replica")
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		attached := 0
+		orig := attachPendingNodesFn
+		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) {
+			attached++
+			Expect(state).NotTo(BeNil())
+		}
+		defer func() { attachPendingNodesFn = orig }()
+
+		rvOthers := map[string]string{}
+		for _, name := range allNodes {
+			if name == node01 {
+				continue
+			}
+			rvOthers[name] = getResourceVersion(name)
+		}
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the not-ready replica still pauses the roll")
+		Expect(attached).To(Equal(1), "MEET, slot assignment, and REPLICATE run on the pause")
+		for name, rv := range rvOthers {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be updated while %s is not ready", name, node01)
+		}
+	})
+
+	It("leaves a slotless scale-out shard for rebalance", func() {
+		By("creating every node, with shard 1 up but not in the topology")
+		createAllNodes()
+		markAllReady()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		attached := 0
+		orig := attachPendingNodesFn
+		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) {
+			attached++
+		}
+		defer func() { attachPendingNodesFn = orig }()
+
+		rvs := map[string]string{}
+		for _, name := range allNodes {
+			rvs[name] = getResourceVersion(name)
+		}
+
+		// Shard 0 owns every slot. Shard 1 is the scale-out primary: nothing
+		// free to ADDSLOTSRANGE, so only rebalanceSlots can feed it.
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "a not-ready scale-out shard must not pause the walk")
+		Expect(attached).To(Equal(0), "the walk must reach rebalance instead of attaching on a pause")
+		for name, rv := range rvs {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must keep its spec while its shard waits for rebalance", name)
+		}
+	})
+
 	It("skips only the shard whose primary is unidentifiable", func() {
 		By("creating all nodes, marking them ready and publishing pod IPs")
 		createAllNodes()

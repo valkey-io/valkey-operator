@@ -1075,24 +1075,141 @@ func TestLivenessCheckScript(t *testing.T) {
 func TestReadinessCheckScript(t *testing.T) {
 	scriptPath := filepath.Join("scripts", "readiness-check.sh")
 
-	tests := []struct {
+	// PING failures stop before INFO. The stub returns one string for every call.
+	pingFailures := []struct {
 		name     string
 		response string
-		wantErr  bool
 	}{
-		{name: "pong", response: "PONG", wantErr: false},
-		{name: "loading", response: "LOADING 123", wantErr: true},
-		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down", wantErr: true},
-		{name: "error", response: "ERR something bad", wantErr: true},
+		{name: "loading", response: "LOADING 123"},
+		{name: "masterdown", response: "MASTERDOWN Link with MASTER is down"},
+		{name: "error", response: "ERR something bad"},
+	}
+	for _, test := range pingFailures {
+		t.Run(test.name, func(t *testing.T) {
+			if err := runProbeScript(t, scriptPath, test.response); err == nil {
+				t.Fatal("expected PING failure to fail readiness")
+			}
+		})
 	}
 
-	for _, test := range tests {
+	// A primary owns slots. A replacement replica does not, until it is attached
+	// and the sync has finished. The PDB treats only Ready pods as available,
+	// so the second case is what holds the primary's eviction (#552).
+	const primaryLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460"
+	const markerLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected [0->-def]"
+	const slotlessLine = "abc 10.0.0.2:6379@16379 myself,master - 0 0 1 connected"
+	const replicaLine = "abc 10.0.0.2:6379@16379 myself,slave def 0 0 1 connected"
+	const replicaMarkerLine = "abc 10.0.0.2:6379@16379 myself,slave def 0 0 1 connected [5->-abcdef]"
+
+	cases := []struct {
+		name    string
+		info    string
+		nodes   string
+		wantErr bool
+	}{
+		{
+			name: "standalone",
+			info: "cluster_enabled:0\r\nrole:master\r\n",
+		},
+		{
+			name:  "primary with slots",
+			info:  "cluster_enabled:1\r\nrole:master\r\n",
+			nodes: primaryLine,
+		},
+		{
+			name:  "primary mid migration",
+			info:  "cluster_enabled:1\r\nrole:master\r\n",
+			nodes: markerLine,
+		},
+		{
+			name:    "slotless node is not ready",
+			info:    "cluster_enabled:1\r\nrole:master\r\n",
+			nodes:   slotlessLine,
+			wantErr: true,
+		},
+		{
+			name:    "replica link down",
+			info:    "cluster_enabled:1\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nloading:0\r\n",
+			nodes:   replicaLine,
+			wantErr: true,
+		},
+		{
+			name:    "replica migration marker is not enough",
+			info:    "cluster_enabled:1\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nloading:0\r\n",
+			nodes:   replicaMarkerLine,
+			wantErr: true,
+		},
+		{
+			name:    "replica sync in progress",
+			info:    "cluster_enabled:1\r\nrole:slave\r\nmaster_link_status:up\r\nmaster_sync_in_progress:1\r\nloading:0\r\n",
+			nodes:   replicaLine,
+			wantErr: true,
+		},
+		{
+			name:    "replica still loading",
+			info:    "cluster_enabled:1\r\nrole:slave\r\nmaster_link_status:up\r\nmaster_sync_in_progress:0\r\nloading:1\r\n",
+			nodes:   replicaLine,
+			wantErr: true,
+		},
+		{
+			name:  "caught-up replica",
+			info:  "cluster_enabled:1\r\nrole:slave\r\nmaster_link_status:up\r\nmaster_sync_in_progress:0\r\nloading:0\r\n",
+			nodes: replicaLine,
+		},
+		{
+			name:    "cluster info missing",
+			info:    "PONG",
+			wantErr: true,
+		},
+	}
+	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if err := runProbeScript(t, scriptPath, test.response); (err != nil) != test.wantErr {
+			err := runReadinessScript(t, scriptPath, test.info, test.nodes)
+			if (err != nil) != test.wantErr {
 				t.Fatalf("unexpected result: err=%v wantErr=%v", err, test.wantErr)
 			}
 		})
 	}
+}
+
+// runReadinessScript stubs valkey-cli and dispatches on the subcommand so the
+// readiness probe can PING, then read INFO and CLUSTER NODES.
+//
+// Fixtures are files, not environment variables. A value with a newline is not
+// a portable environment variable, and the caught-up replica case is the one
+// that needs every INFO line.
+func runReadinessScript(t *testing.T, scriptPath, info, nodes string) error {
+	t.Helper()
+
+	binDir := t.TempDir()
+	infoFile := filepath.Join(binDir, "info.txt")
+	nodesFile := filepath.Join(binDir, "nodes.txt")
+	if err := os.WriteFile(infoFile, []byte(info), 0o644); err != nil {
+		t.Fatalf("write info fixture: %v", err)
+	}
+	if err := os.WriteFile(nodesFile, []byte(nodes), 0o644); err != nil {
+		t.Fatalf("write nodes fixture: %v", err)
+	}
+	stub := "#!/bin/sh\n" +
+		"cmd=\n" +
+		"for arg in \"$@\"; do cmd=$arg; done\n" +
+		"case \"$cmd\" in\n" +
+		"  PING) echo PONG ;;\n" +
+		"  INFO) cat \"" + infoFile + "\" ;;\n" +
+		"  NODES) cat \"" + nodesFile + "\" ;;\n" +
+		"  *) echo \"unexpected: $*\" >&2; exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write valkey-cli stub: %v", err)
+	}
+
+	cmd := exec.Command(scriptPath)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
 }
 
 func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
@@ -1362,7 +1479,16 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			scriptPath := filepath.Join("scripts", name)
 			binDir := t.TempDir()
 			argsFile := filepath.Join(binDir, "args.txt")
-			stub := "#!/bin/sh\nprintf '%s' \"$*\" > \"" + argsFile + "\"\necho PONG\n"
+			// Readiness exits 0 for a standalone node after INFO reports
+			// cluster_enabled:0. The last argv is still that authenticated call.
+			stub := "#!/bin/sh\n" +
+				"printf '%s\\n' \"$*\" > \"" + argsFile + "\"\n" +
+				"cmd=\n" +
+				"for arg in \"$@\"; do cmd=$arg; done\n" +
+				"case \"$cmd\" in\n" +
+				"  INFO) printf '%s\\n' 'cluster_enabled:0' ;;\n" +
+				"  *) printf '%s\\n' PONG ;;\n" +
+				"esac\n"
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
 			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 

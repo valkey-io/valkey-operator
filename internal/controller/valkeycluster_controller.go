@@ -607,6 +607,31 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
+// attachPendingNodesFn is what a paused roll calls so a pod that is not Ready
+// can still join the cluster. Tests swap it for a stub.
+var attachPendingNodesFn = (*ValkeyClusterReconciler).attachPendingNodes
+
+// attachPendingNodes MEETs isolated nodes, assigns slots to new primaries, and
+// REPLICATEs pending replicas. A nil state does nothing.
+//
+// Replica readiness stays false until the pod has the primary's data (#552),
+// so these steps have to run while the walk is paused or the pod never becomes Ready.
+func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
+	if state == nil {
+		return
+	}
+	log := logf.FromContext(ctx)
+	if _, err := r.meetIsolatedNodes(ctx, cluster, state); err != nil {
+		log.Error(err, "meetIsolatedNodes failed while a roll is paused")
+	}
+	if _, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes); err != nil {
+		log.Error(err, "assignSlotsToPendingPrimaries failed while a roll is paused")
+	}
+	if _, err := r.replicatePendingReplicas(ctx, cluster, state, nodes); err != nil {
+		log.Error(err, "replicatePendingReplicas failed while a roll is paused")
+	}
+}
+
 // reconcileValkeyNodes ensures every (shard, nodeIndex) pair has a ValkeyNode CR.
 // Each ValkeyNode manages exactly one Pod (Replicas=1) and is named
 // deterministically:
@@ -618,6 +643,10 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // shard, using live cluster state to identify the actual primary. At most one spec update is issued per reconcile.
 // Once a node is updated or found not-ready after a prior update,
 // the function returns (true, nil) so the caller requeues before advancing to the next node.
+// Before that return it still MEETs, assigns slots, and REPLICATEs, because replica
+// readiness waits until the pod holds its primary's data (#552).
+// A shard that is not in the topology and has no free slots is left for
+// rebalanceSlots: pausing on it would keep that rebalance from ever running.
 //
 // For a 3-shard cluster with 2 replicas per shard, this produces 9 ValkeyNodes:
 //
@@ -643,6 +672,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	// Set when a shard's roll is skipped; reported to the caller after the loop.
 	shardRollSkipped := false
 
+	// Empty when clusterState is nil. A fresh cluster then has the full range,
+	// so the rebalance skip below does not fire during bootstrap.
+	var unassignedSlots []valkey.SlotsRange
+	if clusterState != nil {
+		unassignedSlots = clusterState.GetUnassignedSlots()
+	}
+
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// If rolls are in progress but the primary of an active shard cannot be
 		// identified from cluster state, skip it rather than roll in an unknown order.
@@ -658,6 +694,32 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			shardRollSkipped = true
 			continue
 		}
+		// Scale-out primaries get slots only from rebalanceSlots, which runs
+		// after this walk returns. The sync-aware probe keeps them Not Ready
+		// until then, so pausing here would stall the rebalance forever.
+		// Create a missing ValkeyNode, and leave an existing one's spec alone.
+		if clusterState != nil && !shardExistsInTopology(clusterState, shardIndex, nodes) && len(unassignedSlots) == 0 {
+			for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
+				name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
+				current := &valkeyiov1alpha1.ValkeyNode{}
+				getErr := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, current)
+				if getErr == nil {
+					continue
+				}
+				if !apierrors.IsNotFound(getErr) {
+					return false, getErr
+				}
+				result, cerr := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+				if cerr != nil {
+					return false, cerr
+				}
+				if result == nodeCreated {
+					totalCreated++
+				}
+			}
+			log.V(1).Info("shard has no slots to assign, leaving it for rebalance", "shardIndex", shardIndex)
+			continue
+		}
 		// Iterate nodes replica-first: use live cluster state to identify the
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
@@ -671,18 +733,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				return false, err
 			}
 			switch result {
-			case nodeDeferred:
-				// Roll deferred; MEET and REPLICATE isolated nodes so they
-				// rejoin the shard before next reconcile.
-				if _, meetErr := r.meetIsolatedNodes(ctx, cluster, clusterState); meetErr != nil {
-					log.Error(meetErr, "meetIsolatedNodes failed during deferred roll")
+			case nodeDeferred, nodeRequeued:
+				// Pause the roll, but still attach. A replacement replica is
+				// not Ready until it has caught up (#552).
+				attachPendingNodesFn(r, ctx, cluster, clusterState, nodes)
+				if result == nodeDeferred {
+					return true, deferred
 				}
-				if _, replErr := r.replicatePendingReplicas(ctx, cluster, clusterState, nodes); replErr != nil {
-					log.Error(replErr, "replicatePendingReplicas failed during deferred roll")
-				}
-				// Requeue, and hand the reason up for the status.
-				return true, deferred
-			case nodeRequeued:
 				return true, nil
 			case nodeCreated:
 				totalCreated++
@@ -1247,6 +1304,65 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 	return met, nil
 }
 
+// labeledPrimary returns the node-index 0 ValkeyNode for a shard, or nil.
+func labeledPrimary(nodes *valkeyiov1alpha1.ValkeyNodeList, shardIndex int) *valkeyiov1alpha1.ValkeyNode {
+	if nodes == nil {
+		return nil
+	}
+	shard := strconv.Itoa(shardIndex)
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Labels[LabelShardIndex] == shard && n.Labels[LabelNodeIndex] == "0" {
+			return n
+		}
+	}
+	return nil
+}
+
+func scrapedNode(state *valkey.ClusterState, address string) *valkey.NodeState {
+	if state == nil || address == "" {
+		return nil
+	}
+	for _, n := range state.AllNodes() {
+		if n.Address == address {
+			return n
+		}
+	}
+	return nil
+}
+
+// initialSlotPrimariesReady reports whether every shard that is not yet in the
+// topology has its primary scraped, and every pod IP answered the scrape.
+// Slot assignment splits whatever is still free across the primaries it can
+// see. Running it before the late primary is up gives that primary nothing,
+// and running it while a pod is down can give that pod's slots away.
+func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	if cluster == nil || state == nil || nodes == nil {
+		return false
+	}
+	for i := range nodes.Items {
+		ip := nodes.Items[i].Status.PodIP
+		if ip != "" && !state.HasAddress(ip) {
+			return false
+		}
+	}
+	single := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
+	for shardIndex := range int(cluster.Spec.Shards) {
+		if shardExistsInTopology(state, shardIndex, nodes) {
+			continue
+		}
+		primary := labeledPrimary(nodes, shardIndex)
+		if primary == nil || primary.Status.PodIP == "" {
+			return false
+		}
+		scraped := scrapedNode(state, primary.Status.PodIP)
+		if scraped == nil || (scraped.IsIsolated() && !single) {
+			return false
+		}
+	}
+	return true
+}
+
 // assignSlotsToPendingPrimaries assigns hash-slot ranges to non-isolated
 // pending nodes whose pod labels indicate they are primaries (node index 0
 // within their shard). During scale-out (no unassigned slots available) it
@@ -1255,6 +1371,14 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 // first in Phase 1.
 func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (int, error) {
 	log := logf.FromContext(ctx)
+
+	// Wait until every not-yet-joined primary is up. Assigning earlier splits
+	// the free slots across whichever primaries have joined, and can hand a
+	// down primary's range to a node that never saw it.
+	if !initialSlotPrimariesReady(cluster, state, nodes) {
+		log.V(1).Info("deferring slot assignment until every primary is scraped")
+		return 0, nil
+	}
 
 	// Collect primary pending nodes (node index 0 = primary), skipping:
 	//  - isolated nodes (cluster_known_nodes <= 1): they haven't been

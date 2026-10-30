@@ -135,7 +135,10 @@ func mergeTrustBundle(sources []trustSource) ([]byte, error) {
 // block to reach the next one, so a corrupted root would vanish from the
 // bundle without an error. A root whose BEGIN line is damaged still leaves its
 // END line outside a block, and one whose END line is damaged runs into the
-// next BEGIN line or the end of the data, so either is reported.
+// next BEGIN line or the end of the data, so either is reported. Each line of
+// a block is trimmed before it is decoded, so an indented block is accepted:
+// the merge re-encodes every certificate, so the indentation never reaches
+// Valkey.
 func decodePEMStrict(data []byte) ([]*pem.Block, error) {
 	var (
 		blocks    []*pem.Block
@@ -160,13 +163,15 @@ func decodePEMStrict(data []byte) ([]*pem.Block, error) {
 			}
 			beginLine, beginText = n, string(line)
 			block.Reset()
-			block.Write(raw)
+			block.Write(line)
+			block.WriteByte('\n')
 			continue
 		}
 		if hasBegin {
 			return nil, fmt.Errorf("unterminated PEM block %s at line %d: another BEGIN at line %d", quotePEMLine([]byte(beginText)), beginLine, n)
 		}
-		block.Write(raw)
+		block.Write(line)
+		block.WriteByte('\n')
 		if !hasEnd {
 			continue
 		}

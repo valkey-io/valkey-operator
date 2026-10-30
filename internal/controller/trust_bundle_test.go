@@ -123,6 +123,21 @@ func TestMergeTrustBundle(t *testing.T) {
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
 
+	t.Run("accepts an indented block", func(t *testing.T) {
+		indent := func(p []byte, prefix string) []byte {
+			lines := bytes.Split(bytes.TrimSuffix(p, []byte("\n")), []byte("\n"))
+			for i := range lines {
+				lines[i] = append([]byte(prefix), lines[i]...)
+			}
+			return append(bytes.Join(lines, []byte("\n")), '\n')
+		}
+		// Every line indented, and a block indented only on its BEGIN line.
+		beginOnly := append([]byte("\t"), clientB...)
+		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"indented", append(indent(clientA, "    "), beginOnly...), "PEM"}})
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
+	})
+
 	t.Run("keeps every certificate of a multi-root source", func(t *testing.T) {
 		rotating := append(append([]byte{}, clientA...), clientB...)
 		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"rotating", rotating, "PEM"}})

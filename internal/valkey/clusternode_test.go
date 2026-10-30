@@ -130,10 +130,10 @@ func TestParseClusterNodes(t *testing.T) {
 		raw := "r1 10.0.0.2:6379@16379 myself,slave,nofailover p1 0 0 1 connected\n" +
 			"p1 10.0.0.1:6379@16379 master,fail - 0 0 1 disconnected\n"
 		nodes := ParseClusterNodes(raw)
-		if !nodes[0].HasNoFailover() {
+		if !nodes[0].IsAutomaticFailoverDisabled() {
 			t.Error("expected nofailover flag")
 		}
-		if nodes[1].HasNoFailover() {
+		if nodes[1].IsAutomaticFailoverDisabled() {
 			t.Error("a fail flag should not report as nofailover")
 		}
 	})

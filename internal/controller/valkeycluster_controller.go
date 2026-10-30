@@ -1555,7 +1555,7 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 		if replica == nil {
 			continue
 		}
-		noFailover := replica.Myself().HasNoFailover()
+		noFailover := replica.Myself().IsAutomaticFailoverDisabled()
 		if !quorum || (noFailover && state.IsNodeFailedByMajority(primaryId)) {
 			orphans = append(orphans, orphan{replica: replica, primaryId: primaryId})
 		}

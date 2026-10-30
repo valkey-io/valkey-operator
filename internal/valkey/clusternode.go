@@ -87,9 +87,10 @@ func (c *ClusterNode) HasNoAddress() bool {
 	return c.HasFlag("noaddr")
 }
 
-// HasNoFailover reports whether the node has native failover disabled, for
-// example by cluster-replica-no-failover.
-func (c *ClusterNode) HasNoFailover() bool {
+// IsAutomaticFailoverDisabled reports whether the node carries the nofailover
+// flag, set for example by cluster-replica-no-failover. Such a replica does not
+// promote itself, but still accepts CLUSTER FAILOVER TAKEOVER.
+func (c *ClusterNode) IsAutomaticFailoverDisabled() bool {
 	return c.HasFlag("nofailover")
 }
 

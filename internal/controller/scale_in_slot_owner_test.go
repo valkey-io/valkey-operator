@@ -370,4 +370,14 @@ func TestDeleteExcessValkeyNodesKeepsPeerReportedOwner(t *testing.T) {
 	assert.Equal(t, []string{"c-3-0"}, kept)
 	assert.True(t, nodeExists(t, r.Client, excess))
 	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Excess ValkeyNode c-3-0 still owns slots according to a peer; waiting for drain")
+
+	// The same peer report does not keep a different excess pod, and an
+	// in-spec pod at that address is not what blocks deletion.
+	other := primaryNode(4)
+	r, cluster, _ = scaleInReconciler(t, inSpec, other)
+	deleted, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, other))
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.Empty(t, kept)
+	assert.False(t, nodeExists(t, r.Client, other))
 }

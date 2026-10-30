@@ -115,6 +115,12 @@ type ClusterState struct {
 	// IPs. A peer-table primary at any other address is not a pod any more.
 	// Its ranges are not held for it unless a scraped replica still follows it.
 	targets map[string]struct{}
+
+	// answered is every id that returned CLUSTER MYID and was then dropped
+	// because a later command failed. The bool is true when that node's own
+	// CLUSTER NODES line lists owned slots. The node itself stays out of
+	// Shards: the scrape is not usable for topology.
+	answered map[string]bool
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -153,37 +159,44 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	for _, address := range addresses {
 		state.targets[address] = struct{}{}
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, dial)
-		if node != nil {
-			// Check if node is pending to be added. A primary carrying only a
-			// migration marker is mid-reshard and already part of the slot map,
-			// so any slot assignment counts here, not just owned ranges.
-			myself := node.Myself()
-			if node.IsPrimary() && (myself == nil || !myself.HasSlotAssignment()) {
-				// Node not part of any shard yet.
-				state.PendingNodes = append(state.PendingNodes, node)
-				continue
+		node, answered, ownsSlots := getNodeState(ctx, address, port, dial)
+		if node == nil {
+			// MYID succeeded and a later command failed. Remember the id so a
+			// replica's stale fail? cannot take over or forget a node this
+			// pass reached. The node stays out of the topology.
+			if answered != "" {
+				state.noteAnswered(answered, ownsSlots)
 			}
+			continue
+		}
+		// Check if node is pending to be added. A primary carrying only a
+		// migration marker is mid-reshard and already part of the slot map,
+		// so any slot assignment counts here, not just owned ranges.
+		myself := node.Myself()
+		if node.IsPrimary() && (myself == nil || !myself.HasSlotAssignment()) {
+			// Node not part of any shard yet.
+			state.PendingNodes = append(state.PendingNodes, node)
+			continue
+		}
 
-			// Find a ShardState with the same ShardId as this node.
-			var shard *ShardState
-			idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
-			if idx >= 0 {
-				shard = state.Shards[idx]
-			} else {
-				// Not know yet, adding it.
-				shard = &ShardState{
-					Id:    node.ShardId,
-					Nodes: make([]*NodeState, 0),
-				}
-				state.Shards = append(state.Shards, shard)
+		// Find a ShardState with the same ShardId as this node.
+		var shard *ShardState
+		idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
+		if idx >= 0 {
+			shard = state.Shards[idx]
+		} else {
+			// Not know yet, adding it.
+			shard = &ShardState{
+				Id:    node.ShardId,
+				Nodes: make([]*NodeState, 0),
 			}
-			// Add node and update shard information.
-			shard.Nodes = append(shard.Nodes, node)
-			if node.IsPrimary() {
-				shard.Slots = node.GetSlots()
-				shard.PrimaryId = node.Id
-			}
+			state.Shards = append(state.Shards, shard)
+		}
+		// Add node and update shard information.
+		shard.Nodes = append(shard.Nodes, node)
+		if node.IsPrimary() {
+			shard.Slots = node.GetSlots()
+			shard.PrimaryId = node.Id
 		}
 	}
 	// Adopt first. A scraped empty primary is in its replica's shard after
@@ -608,6 +621,13 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 			livePrimaries++
 		}
 	}
+	// A primary that answered, then lost a later command, is still up. It is
+	// not in Shards, so count it here or one CLUSTER INFO failure drops quorum.
+	for _, ownsSlots := range s.answered {
+		if ownsSlots {
+			livePrimaries++
+		}
+	}
 	clusterSize := s.clusterSize()
 	if clusterSize == 0 {
 		return false
@@ -710,6 +730,36 @@ func (s *ClusterState) AllNodes() []*NodeState {
 		nodes = append(nodes, shard.Nodes...)
 	}
 	return append(nodes, s.PendingNodes...)
+}
+
+// noteAnswered records an id whose CLUSTER MYID succeeded and whose scrape
+// was then dropped. ownsSlots comes from that node's own CLUSTER NODES line.
+func (s *ClusterState) noteAnswered(id string, ownsSlots bool) {
+	if s.answered == nil {
+		s.answered = make(map[string]bool)
+	}
+	if ownsSlots {
+		s.answered[id] = true
+		return
+	}
+	if _, seen := s.answered[id]; !seen {
+		s.answered[id] = false
+	}
+}
+
+// NodeAnswered reports whether id returned CLUSTER MYID this pass, including
+// a node dropped because a later command failed.
+func (s *ClusterState) NodeAnswered(id string) bool {
+	if s.FindNodeById(id) != nil {
+		return true
+	}
+	_, ok := s.answered[id]
+	return ok
+}
+
+// NoteAnsweredForTesting records a dropped scrape the way GetClusterState does.
+func (s *ClusterState) NoteAnsweredForTesting(id string, ownsSlots bool) {
+	s.noteAnswered(id, ownsSlots)
 }
 
 // FindNodeById returns the reachable node with the given cluster node ID, or
@@ -818,18 +868,35 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 	return nodes
 }
 
+// myselfOwnsSlots reports whether a CLUSTER NODES reply's myself line is a
+// primary with owned ranges. A Valkey error or a missing myself line does not.
+func myselfOwnsSlots(res vclient.ValkeyResult) bool {
+	raw, err := requiredScrapeString(res)
+	if err != nil {
+		return false
+	}
+	for _, entry := range ParseClusterNodes(strings.TrimPrefix(raw, "txt:")) {
+		if entry.IsMyself() && entry.IsPrimary() && len(entry.Slots) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
+// answered is the CLUSTER MYID when that command succeeded and the node was
+// then dropped. ownsSlots is that dropped node's own slot ownership.
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc) (node *NodeState, answered string, ownsSlots bool) {
 	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
 	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
 	client, err := dial(ctx, hostPort)
 	if err != nil {
 		log.Error(err, "failed to create Valkey client")
-		return nil
+		return nil, "", false
 	}
 
-	node := NodeState{Client: client,
+	node = &NodeState{Client: client,
 		Address: address,
 		Port:    port}
 
@@ -849,28 +916,29 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	// command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
-		return nil
+		return nil, "", false
 	}
 	if len(results) != 5 {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
-		return nil
+		return nil, "", false
 	}
 
 	// Identity and topology have to come back whole. An empty id or node table
 	// would put every such node in one shard. A Valkey error leaves the same
 	// gap, so drop the node for this pass. noteUnscrapedSlotOwnership still
-	// keeps slot ranges a peer table assigns to that id.
+	// keeps slot ranges a peer table assigns to that id. The id itself is
+	// returned so the caller can remember that this process answered.
 	id, err := requiredScrapeString(results[0])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER MYID")
-		return nil
+		return nil, "", false
 	}
 	node.Id = id
 
 	shardid, err := requiredScrapeString(results[1])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER MYSHARDID")
-		return nil
+		return nil, id, myselfOwnsSlots(results[4])
 	}
 	node.ShardId = shardid
 
@@ -887,24 +955,24 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	cinfo, err := requiredScrapeString(results[3])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER INFO")
-		return nil
+		return nil, id, myselfOwnsSlots(results[4])
 	}
 	node.ClusterInfo = infoStringToMap(cinfo)
 
 	cnodes, err := requiredScrapeString(results[4])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER NODES")
-		return nil
+		return nil, id, false
 	}
 	// Remove the encoding string included in a verbatim string.
 	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
 	myself := node.Myself()
 	if myself == nil {
 		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")
-		return nil
+		return nil, id, false
 	}
 	node.Flags = myself.Flags
-	return &node
+	return node, "", false
 }
 
 // requiredScrapeString returns the reply of one scrape command. A Valkey

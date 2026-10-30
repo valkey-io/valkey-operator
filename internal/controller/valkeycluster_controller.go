@@ -1541,7 +1541,7 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 			if slices.Contains(deadPrimaries, primaryId) || !state.IsNodeFailed(primaryId) {
 				continue // no viewer reports 'fail' (or 'fail?')
 			}
-			if state.FindNodeById(primaryId) != nil {
+			if state.NodeAnswered(primaryId) {
 				continue // the operator reaches it, so it is not dead
 			}
 			deadPrimaries = append(deadPrimaries, primaryId)
@@ -1580,8 +1580,8 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				// (full restart with persistence — #275). Forgetting it
 				// would ban the live node from rejoining for a minute;
 				// healStaleAddressPeers re-MEETs it instead.
-				if state.FindNodeById(failing.Id) != nil {
-					log.V(1).Info("skipping forget; node is alive at a new address",
+				if state.NodeAnswered(failing.Id) {
+					log.V(1).Info("skipping forget; node answered this pass",
 						"staleAddress", failing.Host, "Id", failing.Id)
 					continue
 				}
@@ -1905,35 +1905,6 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	}
 	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 	return true, nil
-}
-
-// excessNodesStillServing reports whether a ValkeyNode past spec.Shards has
-// the pod IP of a primary a peer table still shows owning slots.
-func excessNodesStillServing(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState) bool {
-	if state == nil || nodes == nil {
-		return false
-	}
-	hosts := make(map[string]struct{})
-	for _, host := range state.UnscrapedSlotOwnerHosts() {
-		hosts[host] = struct{}{}
-	}
-	if len(hosts) == 0 {
-		return false
-	}
-	for i := range nodes.Items {
-		node := &nodes.Items[i]
-		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
-		if err != nil || shardIndex < int(cluster.Spec.Shards) {
-			continue
-		}
-		if node.Status.PodIP == "" {
-			continue
-		}
-		if _, ok := hosts[node.Status.PodIP]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired

@@ -1602,6 +1602,42 @@ func TestGetClusterStateTrustsAScrapedPrimaryWithNoSlots(t *testing.T) {
 	}
 }
 
+// CLUSTER INFO failed after MYID, and the same round trip still carried
+// CLUSTER NODES. The primary stays out of the topology, but it answered and
+// owns slots, so a replica's stale fail? must not cost quorum.
+func TestClusterInfoFailureStillCountsAnsweredPrimary(t *testing.T) {
+	primary := healthyScrape()
+	primary[3] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	replicaNodes := "abc 10.0.0.1:6379@16379 master,fail? - 0 0 1 connected 0-16383\n" +
+		"def 10.0.0.2:6379@16379 myself,slave abc 0 0 1 connected\n"
+	replica := []vclient.ValkeyResult{
+		blobResult("def"),
+		blobResult("shard-1"),
+		blobResult("role:slave\r\nmaster_link_status:up\r\n"),
+		blobResult("cluster_known_nodes:2\r\ncluster_current_epoch:3\r\ncluster_size:1\r\n"),
+		blobResult(replicaNodes),
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": primary,
+		"10.0.0.2:6379": replica,
+	}))
+
+	if state.FindNodeById("abc") != nil {
+		t.Fatal("incomplete primary scrape must not join the topology")
+	}
+	if !state.NodeAnswered("abc") {
+		t.Fatal("primary answered CLUSTER MYID and must not look dead")
+	}
+	if !state.HasFailoverQuorum() {
+		t.Fatal("answered slot owner was left out of the quorum count")
+	}
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("replica-reported slots became free: %v", got)
+	}
+}
+
 func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 	results := healthyScrape()
 	results[2] = valkeyErrorResult("BUSY Valkey is busy running a script")

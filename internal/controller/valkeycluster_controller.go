@@ -1643,12 +1643,37 @@ func replicaOnlyShard(state *valkey.ClusterState) string {
 		return ""
 	}
 	for _, shard := range state.Shards {
-		if len(shard.Nodes) == 0 || shardPrimaryScraped(shard) {
+		if len(shard.Nodes) == 0 || shardPrimaryScraped(shard) || scrapedSlotlessPrimary(state, shard) {
 			continue
 		}
 		return "primary of " + shard.Nodes[0].Address
 	}
 	return ""
+}
+
+// scrapedSlotlessPrimary reports whether this shard's replica follows a
+// primary that was scraped and parked in PendingNodes because it owns no
+// slots. That primary is not missing. replicaOnlyShard must not wait on the
+// replica's address.
+func scrapedSlotlessPrimary(state *valkey.ClusterState, shard *valkey.ShardState) bool {
+	if state == nil || shard == nil {
+		return false
+	}
+	for _, node := range shard.Nodes {
+		if node == nil {
+			continue
+		}
+		id := node.PrimaryIdFromSelf()
+		if id == "" || id == "-" {
+			continue
+		}
+		for _, pending := range state.PendingNodes {
+			if pending != nil && pending.Id == id && pending.IsPrimary() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func slotWaitName(node *valkeyiov1alpha1.ValkeyNode) string {

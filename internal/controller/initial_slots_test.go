@@ -138,5 +138,23 @@ func TestInitialSlotPrimariesReady(t *testing.T) {
 		"a replica-only shard must not make its primary's slots look free")
 	assert.False(t, initialSlotPrimariesReady(cluster, replicaOnly, nodes))
 
+	slotless := slotTestPrimary("10.0.0.1", "2")
+	slotless.Id = "p-slotless"
+	replica := &valkey.NodeState{Address: "10.0.0.2", Id: "r0", Flags: []string{"slave"}}
+	replica.SetClusterNodesForTesting("r0 10.0.0.2:6379@16379 myself,slave p-slotless 0 0 1 connected\n")
+	slotlessWithReplica := &valkey.ClusterState{
+		Shards: []*valkey.ShardState{{
+			Id:    "s0",
+			Nodes: []*valkey.NodeState{replica},
+		}},
+		PendingNodes: []*valkey.NodeState{
+			slotless,
+			slotTestPrimary("10.0.1.1", "2"),
+		},
+	}
+	assert.NotEqual(t, "primary of 10.0.0.2", initialSlotWait(cluster, slotlessWithReplica, nodes),
+		"a scraped slotless primary must not be reported as its replica")
+	assert.True(t, initialSlotPrimariesReady(cluster, slotlessWithReplica, nodes))
+
 	assert.False(t, initialSlotPrimariesReady(cluster, nil, nodes))
 }

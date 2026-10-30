@@ -167,7 +167,7 @@ Common reasons:
 - `TrustSourceNotFound` – a referenced Secret or ConfigMap, or its key, does not exist.
 - `TrustSourceInvalid` – a source's key holds neither PEM certificates nor a SPIFFE bundle with an X.509 authority.
 - `TrustBundleConflict` – a Secret named `<cluster>-tls-trust` exists but the cluster does not control it, or a spec field names that Secret as the server certificate or a `clientAuth.ca` source. The operator never adopts or writes it, and nodes stay on the server root.
-- `TrustBundlePending` – new roots are held back until every node confirms it runs the current ACL; the current bundle stays in place meanwhile.
+- `TrustBundlePending` – new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); the current bundle stays in place meanwhile. The server secret's current root is never held back.
 
 ---
 

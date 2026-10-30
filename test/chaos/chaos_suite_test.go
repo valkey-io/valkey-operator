@@ -110,20 +110,20 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	// Undo any worker node fault an interrupted scenario left behind. Worker nodes
 	// are docker containers that outlive the suite, so a leftover iptables rule,
-	// pause, or stopped node carries over to the next run. Start/heal/unpause skip
+	// pause, or stopped worker carries over to the next run. Start/heal/unpause skip
 	// workers with no fault, so an error means one is still in place. Start stopped
-	// nodes first: a stopped node cannot answer the docker exec/inspect that
+	// workers first: a stopped worker cannot answer the docker exec/inspect that
 	// healing and unpausing run against it.
 	workers := getWorkerNodes()
 	if err := startWorkerNodes(workers); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: a worker node may still be stopped, run 'docker start' on it: %v\n", err)
+		_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: a worker may still be stopped, run 'docker start' on it: %v\n", err)
 	}
 	unthrottleWorkerNodes(workers)
 	if err := healWorkerNodes(workers); err != nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: a network partition may still be in place: %v\n", err)
 	}
 	if err := unpauseWorkerNodes(workers); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: a worker node may still be paused, run 'docker unpause' on it: %v\n", err)
+		_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: a worker may still be paused, run 'docker unpause' on it: %v\n", err)
 	}
 
 	teardownCertManager()

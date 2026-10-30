@@ -164,7 +164,7 @@ func serverRestartedSince(pod, namespace string, since time.Time) error {
 }
 
 // getPodNamesByLabels returns matching pods, ready pods on Ready nodes first.
-// A just-stopped node still reports Ready for ~40s, so exec can still fail.
+// A just-stopped worker still reports Ready for ~40s, so exec can still fail.
 func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, error) {
 	selector := labelsToSelector(labels)
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
@@ -174,7 +174,7 @@ func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, 
 	if err != nil {
 		return nil, err
 	}
-	ready := readyNodeSet()
+	ready := readyWorkerSet()
 	var best, readyPods, rest []string
 	for _, line := range strings.Split(output, "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
@@ -183,12 +183,12 @@ func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, 
 		}
 		name := parts[0]
 		podReady := len(parts) >= 2 && parts[1] == "true"
-		node := ""
+		worker := ""
 		if len(parts) >= 3 {
-			node = parts[2]
+			worker = parts[2]
 		}
 		switch {
-		case podReady && ready[node]:
+		case podReady && ready[worker]:
 			best = append(best, name)
 		case podReady:
 			readyPods = append(readyPods, name)
@@ -203,10 +203,11 @@ func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, 
 	return names, nil
 }
 
-// readyNodeSet returns the set of node names whose Ready condition is True.
-// On query failure it returns nil, so callers treat no node as known-ready and
+// readyWorkerSet returns the Kind containers (the workers and the control plane)
+// whose Kubernetes Node is Ready.
+// On query failure it returns nil, so callers treat no worker as known-ready and
 // fall back to their next preference.
-func readyNodeSet() map[string]bool {
+func readyWorkerSet() map[string]bool {
 	cmd := exec.Command("kubectl", "get", "nodes",
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
@@ -284,32 +285,42 @@ func getShardPrimaryPod(clusterName, namespace string, shardIndex int) (string, 
 	return pod, nil
 }
 
-// getShardReplicaPod queries CLUSTER NODES to find a replica pod for a shard.
-func getShardReplicaPod(clusterName, namespace string, shardIndex int) (string, error) {
+// getShardReplicaPods queries CLUSTER NODES to find the replica pods for a
+// shard, in CLUSTER NODES order. Replicas without a pod are left out.
+func getShardReplicaPods(clusterName, namespace string, shardIndex int) ([]string, error) {
 	output, err := getClusterNodesOutput(clusterName, namespace)
 	if err != nil {
-		return "", fmt.Errorf("failed to run CLUSTER NODES: %w", err)
+		return nil, fmt.Errorf("failed to run CLUSTER NODES: %w", err)
 	}
 
 	primaries := parsePrimariesFromClusterNodes(output)
 	if shardIndex >= len(primaries) {
-		return "", fmt.Errorf("shard index %d out of range", shardIndex)
+		return nil, fmt.Errorf("shard index %d out of range", shardIndex)
 	}
 
 	primaryIP := primaries[shardIndex]
-	replicaIP, err := findReplicaOfPrimary(output, primaryIP)
+	replicaIPs, err := findReplicasOfPrimary(output, primaryIP)
 	if err != nil {
 		// An earlier compound step can delete or promote the only replica.
-		return "", fmt.Errorf("skip: %w", err)
+		return nil, fmt.Errorf("skip: %w", err)
 	}
 
-	pod, err := getPodByIP(namespace, replicaIP)
-	if err != nil {
-		// CLUSTER NODES can still list a node whose pod was just deleted, e.g.
-		// by an earlier compound step.
-		return "", fmt.Errorf("skip: shard %d replica %s has no pod: %w", shardIndex, replicaIP, err)
+	var pods []string
+	var lastErr error
+	for _, ip := range replicaIPs {
+		pod, err := getPodByIP(namespace, ip)
+		if err != nil {
+			// CLUSTER NODES can still list a node whose pod was just deleted,
+			// e.g. by an earlier compound step.
+			lastErr = err
+			continue
+		}
+		pods = append(pods, pod)
 	}
-	return pod, nil
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("skip: shard %d replicas %v have no pod: %w", shardIndex, replicaIPs, lastErr)
+	}
+	return pods, nil
 }
 
 // getPodByIP finds a pod name by its IP address.
@@ -673,8 +684,9 @@ func parsePrimariesFromClusterNodes(output string) []string {
 	return result
 }
 
-// findReplicaOfPrimary finds a replica IP that replicates the primary at the given IP.
-func findReplicaOfPrimary(clusterNodesOutput, primaryIP string) (string, error) {
+// findReplicasOfPrimary returns the IPs of the replicas of the primary at the
+// given IP, in CLUSTER NODES order.
+func findReplicasOfPrimary(clusterNodesOutput, primaryIP string) ([]string, error) {
 	var primaryNodeID string
 	for line := range strings.SplitSeq(clusterNodesOutput, "\n") {
 		fields := strings.Fields(line)
@@ -688,9 +700,10 @@ func findReplicaOfPrimary(clusterNodesOutput, primaryIP string) (string, error) 
 		}
 	}
 	if primaryNodeID == "" {
-		return "", fmt.Errorf("could not find primary node ID for IP %s", primaryIP)
+		return nil, fmt.Errorf("could not find primary node ID for IP %s", primaryIP)
 	}
 
+	var replicas []string
 	for line := range strings.SplitSeq(clusterNodesOutput, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
@@ -701,10 +714,13 @@ func findReplicaOfPrimary(clusterNodesOutput, primaryIP string) (string, error) 
 		}
 		if fields[3] == primaryNodeID {
 			ip, _, _ := strings.Cut(fields[1], ":")
-			return ip, nil
+			replicas = append(replicas, ip)
 		}
 	}
-	return "", fmt.Errorf("no replica found for primary %s (nodeID=%s)", primaryIP, primaryNodeID)
+	if len(replicas) == 0 {
+		return nil, fmt.Errorf("no replica found for primary %s (nodeID=%s)", primaryIP, primaryNodeID)
+	}
+	return replicas, nil
 }
 
 // labelsToSelector renders a label map as a kubectl -l selector.
@@ -716,8 +732,8 @@ func labelsToSelector(labels map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
-// getPodNodeName returns the node name where a pod is running.
-func getPodNodeName(podName, namespace string) (string, error) {
+// getPodWorkerName returns the Kind worker a pod is scheduled on (its spec.nodeName).
+func getPodWorkerName(podName, namespace string) (string, error) {
 	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
 		"-o", "jsonpath={.spec.nodeName}")
 	output, err := utils.Run(cmd)
@@ -743,7 +759,7 @@ func partitionWorkerNode(worker string) error {
 		args := append([]string{"exec", worker, "iptables", "-I"}, rule...)
 		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil {
-			return fmt.Errorf("failed to partition worker node %s: %w", worker, err)
+			return fmt.Errorf("failed to partition worker %s: %w", worker, err)
 		}
 	}
 	return nil
@@ -752,7 +768,7 @@ func partitionWorkerNode(worker string) error {
 // healWorkerNode removes the DROP rules added by partitionWorkerNode to restore
 // network connectivity. Only those rules are deleted, leaving any other rules on
 // the worker node (such as the CNI's) untouched. Rules that are not present are
-// skipped, so this is safe to call on a node that was never partitioned. Removal
+// skipped, so this is safe to call on a worker that was never partitioned. Removal
 // continues past failures so one error cannot leave the node partitioned.
 func healWorkerNode(worker string) error {
 	var firstErr error
@@ -766,18 +782,18 @@ func healWorkerNode(worker string) error {
 		args := append([]string{"exec", worker, "iptables", "-D"}, rule...)
 		cmd := exec.Command("docker", args...)
 		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("failed to heal worker node %s: %w", worker, err)
+			firstErr = fmt.Errorf("failed to heal worker %s: %w", worker, err)
 		}
 	}
 	return firstErr
 }
 
-// unpauseWorkerNode resumes a paused worker node. Nodes that are not paused are
-// skipped, so this is safe to call on a node that was never paused.
+// unpauseWorkerNode resumes a paused worker node. Workers that are not paused are
+// skipped, so this is safe to call on a worker that was never paused.
 func unpauseWorkerNode(worker string) error {
 	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Paused}}", worker))
 	if err != nil {
-		return fmt.Errorf("failed to inspect worker node %s: %w", worker, err)
+		return fmt.Errorf("failed to inspect worker %s: %w", worker, err)
 	}
 	if strings.TrimSpace(out) != "true" {
 		return nil
@@ -791,18 +807,18 @@ func unpauseWorkerNode(worker string) error {
 			return nil
 		}
 		if attempt == 3 {
-			return fmt.Errorf("worker node %s is still paused after %d unpause attempts: %v", worker, attempt, unpauseErr)
+			return fmt.Errorf("worker %s is still paused after %d unpause attempts: %v", worker, attempt, unpauseErr)
 		}
 		time.Sleep(time.Second)
 	}
 }
 
-// startNodeContainer starts a stopped worker node. Already-running nodes are
-// skipped, so it is safe on a node that was never stopped.
-func startNodeContainer(worker string) error {
+// startWorkerContainer starts a stopped worker node. Already-running workers are
+// skipped, so it is safe on a worker that was never stopped.
+func startWorkerContainer(worker string) error {
 	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Running}}", worker))
 	if err != nil {
-		return fmt.Errorf("failed to inspect worker node %s: %w", worker, err)
+		return fmt.Errorf("failed to inspect worker %s: %w", worker, err)
 	}
 	if strings.TrimSpace(out) == "true" {
 		return nil
@@ -815,23 +831,23 @@ func startNodeContainer(worker string) error {
 			return nil
 		}
 		if attempt == 3 {
-			return fmt.Errorf("worker node %s is still stopped after %d start attempts: %v", worker, attempt, startErr)
+			return fmt.Errorf("worker %s is still stopped after %d start attempts: %v", worker, attempt, startErr)
 		}
 		time.Sleep(time.Second)
 	}
 }
 
-// pauseContainer pauses the valkey container in a pod using ctr on the Kind node.
+// pauseContainer pauses the valkey container in a pod using ctr on the Kind worker.
 func pauseContainer(podName, namespace string) error {
 	containerID, err := getContainerID(podName, namespace)
 	if err != nil {
 		return err
 	}
-	nodeName, err := getPodNodeName(podName, namespace)
+	worker, err := getPodWorkerName(podName, namespace)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("docker", "exec", nodeName, "ctr", "-n", "k8s.io", "task", "pause", containerID)
+	cmd := exec.Command("docker", "exec", worker, "ctr", "-n", "k8s.io", "task", "pause", containerID)
 	_, err = utils.Run(cmd)
 	return err
 }
@@ -842,11 +858,11 @@ func unpauseContainer(podName, namespace string) error {
 	if err != nil {
 		return err
 	}
-	nodeName, err := getPodNodeName(podName, namespace)
+	worker, err := getPodWorkerName(podName, namespace)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("docker", "exec", nodeName, "ctr", "-n", "k8s.io", "task", "resume", containerID)
+	cmd := exec.Command("docker", "exec", worker, "ctr", "-n", "k8s.io", "task", "resume", containerID)
 	_, err = utils.Run(cmd)
 	return err
 }
@@ -978,10 +994,10 @@ func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps
 		"--env=DATA_SIZE="+strconv.Itoa(dataSize),
 		"--env=RPS="+strconv.Itoa(rps),
 	)
-	// Run on the operator's node, which node faults already skip, so the writer
+	// Run on the operator's worker, which worker faults already skip, so the writer
 	// costs no extra fault coverage.
-	if node := getControllerNodeName(); node != "" {
-		cmd.Args = append(cmd.Args, fmt.Sprintf(`--overrides={"apiVersion":"v1","spec":{"nodeName":%q}}`, node))
+	if worker := getControllerWorkerName(); worker != "" {
+		cmd.Args = append(cmd.Args, fmt.Sprintf(`--overrides={"apiVersion":"v1","spec":{"nodeName":%q}}`, worker))
 	}
 	if _, err := utils.Run(cmd); err != nil {
 		return 0, err
@@ -1031,9 +1047,9 @@ func stopBackgroundClient(namespace string) {
 	_, _ = utils.Run(cmd)
 }
 
-// getBackgroundClientNodeName returns the node hosting the background writer, or
-// "" when it does not exist.
-func getBackgroundClientNodeName(namespace string) string {
+// getBackgroundClientWorkerName returns the worker hosting the background writer,
+// or "" when it does not exist.
+func getBackgroundClientWorkerName(namespace string) string {
 	out, err := utils.Run(exec.Command("kubectl", "get", "pod", backgroundClientPod,
 		"-n", namespace, "--ignore-not-found=true", "-o", "jsonpath={.spec.nodeName}"))
 	if err != nil {

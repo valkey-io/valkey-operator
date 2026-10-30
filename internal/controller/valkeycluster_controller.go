@@ -1472,10 +1472,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	// The operator renders each node's config from spec.config, so that is
-	// where native failover is disabled. Valkey reads yes/no in any case.
-	noFailover := strings.EqualFold(cluster.Spec.Config["cluster-replica-no-failover"], "yes")
-	candidates := orphansToTakeOver(state, noFailover)
+	candidates := orphansToTakeOver(state)
 	if len(candidates) == 0 {
 		return ctrl.Result{}, false
 	}
@@ -1507,10 +1504,10 @@ type orphan struct {
 //     complete, so every dead primary with a replica qualifies. One promotion
 //     restores a voting primary; the remaining shards then recover natively,
 //     or are taken over on a later reconcile if quorum is still short.
-//   - With quorum, Valkey elects a replacement on its own, unless spec.config
-//     sets cluster-replica-no-failover (noFailover). Such a primary qualifies
-//     once its failure is confirmed (fail, or fail? from a majority of the
-//     slot-owning primaries).
+//   - With quorum, Valkey elects a replacement on its own, unless the replica
+//     reports the nofailover flag. Such a primary qualifies once its failure
+//     is confirmed (fail, or fail? from a majority of the slot-owning
+//     primaries).
 //
 // A primary the operator itself reached in this scrape never qualifies: it
 // is alive, so a peer's failure flag for it is stale or one-sided, and a
@@ -1521,7 +1518,7 @@ type orphan struct {
 // Without persistence, a primary that is only partitioned can still be taken
 // over: the replica claims its slots at a higher epoch, and the old primary
 // demotes itself on reconnect, losing writes it accepted meanwhile.
-func orphansToTakeOver(state *valkey.ClusterState, noFailover bool) []orphan {
+func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 	var deadPrimaries []string
 	for _, shard := range state.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
@@ -1552,6 +1549,7 @@ func orphansToTakeOver(state *valkey.ClusterState, noFailover bool) []orphan {
 		if replica == nil {
 			continue
 		}
+		noFailover := replica.Myself().HasNoFailover()
 		if !quorum || (noFailover && state.IsNodeFailedByMajority(primaryId)) {
 			orphans = append(orphans, orphan{replica: replica, primaryId: primaryId})
 		}

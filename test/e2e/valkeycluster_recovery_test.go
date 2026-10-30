@@ -221,6 +221,13 @@ spec:
 				}).Should(Succeed())
 			}
 
+			By("confirming the replicas report native failover disabled")
+			for _, shard := range lostShards {
+				out, err := utils.ValkeyCLI(podFor(clusterName, shard, 1), cliOpts, "CLUSTER", "NODES")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(out).To(MatchRegexp(`(?m)^\S+ \S+ myself,\S*nofailover\s`), "replica of shard %d does not report nofailover", shard)
+			}
+
 			By("stopping the primaries from handing off on SIGTERM")
 			// The operator sets shutdown-on-sigterm failover, so a terminating
 			// primary hands the shard to its replica. "now" skips that wait, and
@@ -252,7 +259,7 @@ spec:
 				}
 				out, err := utils.ValkeyCLI(podFor(clusterName, 2, 0), cliOpts, "CLUSTER", "NODES")
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(out).To(MatchRegexp(`(?m)^`+firstId+` \S+ \S*fail`), "shard 2 does not report the first primary failed yet")
+				g.Expect(out).To(MatchRegexp(`(?m)^`+firstId+` \S+ (\S+,)?fail\??(,|\s)`), "shard 2 does not report the first primary failed yet")
 			}).Should(Succeed())
 
 			By("force-deleting the second primary pod")

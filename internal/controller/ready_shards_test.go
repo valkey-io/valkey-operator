@@ -57,7 +57,7 @@ func TestCountReadyShards(t *testing.T) {
 	t.Run("healthy shard is counted", func(t *testing.T) {
 		state := shard("node-1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
 			"node-2 10.0.0.2:6379@16379 slave node-1 0 0 1 connected\n")
-		assert.Equal(t, int32(1), r.countReadyShards(state, cluster))
+		assert.Equal(t, int32(1), r.countReadyShards(state, cluster, nil))
 	})
 
 	t.Run("a present node the primary reports as fail? is not ready", func(t *testing.T) {
@@ -65,7 +65,7 @@ func TestCountReadyShards(t *testing.T) {
 		// and its own scrape is clean. Only the primary's view says fail?.
 		state := shard("node-1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
 			"node-2 10.0.0.2:6379@16379 slave,fail? node-1 0 0 1 connected\n")
-		assert.Equal(t, int32(0), r.countReadyShards(state, cluster))
+		assert.Equal(t, int32(0), r.countReadyShards(state, cluster, nil))
 	})
 }
 
@@ -102,9 +102,9 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 	r := &ValkeyClusterReconciler{}
 
 	t.Run("one cut-off node flagging everyone changes nothing", func(t *testing.T) {
-		assert.Equal(t, int32(3), r.countReadyShards(build(clean, clean, allFailing), cluster))
+		assert.Equal(t, int32(3), r.countReadyShards(build(clean, clean, allFailing), cluster, nil))
 	})
 	t.Run("a node the other two agree is failing is not ready", func(t *testing.T) {
-		assert.Equal(t, int32(2), r.countReadyShards(build(n2Failing, n2Failing, clean), cluster))
+		assert.Equal(t, int32(2), r.countReadyShards(build(n2Failing, n2Failing, clean), cluster, nil))
 	})
 }

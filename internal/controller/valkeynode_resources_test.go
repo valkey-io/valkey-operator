@@ -132,7 +132,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// LivenessProbe
 	require.NotNil(t, c.LivenessProbe)
-	assert.Equal(t, int32(5), c.LivenessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.LivenessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.FailureThreshold)
 	assert.Equal(t, int32(5), c.LivenessProbe.TimeoutSeconds)
@@ -140,7 +140,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// ReadinessProbe
 	require.NotNil(t, c.ReadinessProbe)
-	assert.Equal(t, int32(5), c.ReadinessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.ReadinessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.FailureThreshold)
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)

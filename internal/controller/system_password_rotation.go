@@ -25,6 +25,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -57,11 +59,19 @@ const (
 	annotationSystemPasswordRotatedAt = "valkey.operator/system-password-rotated-at"
 	annotationSystemPasswordPhase     = "valkey.operator/system-password-rotation"
 	annotationSystemPasswordCutoverAt = "valkey.operator/system-password-cutover-at"
+	// annotationExporterHoldSince is when _exporter.previous was left behind.
+	// The exporter is not restarted by a rotation. That key stays until the
+	// container starts again, and it does not keep the other users in cutover.
+	annotationExporterHoldSince = "valkey.operator/system-password-exporter-hold"
 	// annotationPrimaryAuthHash is the sha256 of the replication password
 	// last applied with CONFIG SET primaryauth. The cluster drops the
 	// previous replication password only after every node records the hash
 	// of the current one.
 	annotationPrimaryAuthHash = "valkey.operator/primaryauth-sha256"
+	// annotationPrimaryAuthSetAt is when that CONFIG SET was recorded. A
+	// server container that starts later may have read a Secret volume that
+	// kubelet had not refreshed yet, so the hash alone is not enough.
+	annotationPrimaryAuthSetAt = "valkey.operator/primaryauth-set-at"
 
 	systemPasswordPhasePending = "pending"
 	systemPasswordPhaseCutover = "cutover"
@@ -192,7 +202,9 @@ type systemPasswordSignals struct {
 //
 // cutover: <user> is the new password and <user>.previous is the old one.
 // The old hash is removed only after the clients that captured the old
-// password have switched.
+// password have switched. _exporter.previous can outlive that phase. The
+// exporter process is not restarted, and the other users rotate again
+// while its old password stays accepted.
 func advanceSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, signals systemPasswordSignals) (string, error) {
 	if secret.Data == nil {
 		secret.Data = map[string][]byte{}
@@ -201,19 +213,35 @@ func advanceSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, 
 		secret.Annotations = map[string]string{}
 	}
 	users := systemPasswordUsers(exporterEnabled)
+	var event string
+	var err error
 	switch secret.Annotations[annotationSystemPasswordPhase] {
 	case "":
-		return startSystemPasswordRotation(secret, users, signals)
+		event, err = startSystemPasswordRotation(secret, users, signals)
 	case systemPasswordPhasePending:
-		return promoteSystemPasswordRotation(secret, users, exporterEnabled, signals)
+		event, err = promoteSystemPasswordRotation(secret, users, exporterEnabled, signals)
 	case systemPasswordPhaseCutover:
-		return finishSystemPasswordRotation(secret, signals)
+		event, err = finishSystemPasswordRotation(secret, exporterEnabled, signals)
 	default:
 		return "", fmt.Errorf("unknown system password rotation phase %q", secret.Annotations[annotationSystemPasswordPhase])
 	}
+	if err != nil {
+		return "", err
+	}
+	if released := releaseHeldExporter(secret, signals); event == "" {
+		event = released
+	}
+	return event, nil
 }
 
 func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals systemPasswordSignals) (string, error) {
+	// An existing Secret from before this feature has no clock. Stamp it and
+	// wait out the period. Rotating on the upgrade reconcile would overlap
+	// the one-time pod roll that installs the volume and the new command.
+	if secret.Annotations[annotationSystemPasswordRotatedAt] == "" && !systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
+		secret.Annotations[annotationSystemPasswordRotatedAt] = signals.Now.Format(time.RFC3339Nano)
+		return "clock", nil
+	}
 	if rotatedAt, ok := secret.Annotations[annotationSystemPasswordRotatedAt]; ok && rotatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, rotatedAt)
 		if err == nil && signals.Now.Sub(t) < systemPasswordRotationPeriod {
@@ -221,6 +249,11 @@ func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals 
 		}
 	}
 	for _, user := range users {
+		// The exporter's previous password is still the one its running
+		// process captured. Promoting over it would erase that hash.
+		if user == exporterUser && len(secret.Data[systemPasswordPreviousKey(exporterUser)]) > 0 {
+			continue
+		}
 		if signals.SkipNext[user] || len(secret.Data[systemPasswordNextKey(user)]) > 0 {
 			continue
 		}
@@ -269,7 +302,7 @@ func promoteSystemPasswordRotation(secret *corev1.Secret, users []string, export
 	return "cutover", nil
 }
 
-func finishSystemPasswordRotation(secret *corev1.Secret, signals systemPasswordSignals) (string, error) {
+func finishSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, signals systemPasswordSignals) (string, error) {
 	cutoverAt, err := time.Parse(time.RFC3339Nano, secret.Annotations[annotationSystemPasswordCutoverAt])
 	if err != nil || signals.Now.Sub(cutoverAt) < systemPasswordCutoverGrace {
 		return "", nil
@@ -285,7 +318,17 @@ func finishSystemPasswordRotation(secret *corev1.Secret, signals systemPasswordS
 	}
 	drop(operatorUser, signals.OperatorCaughtUp)
 	drop(replicationUser, signals.ReplicationCaughtUp)
-	drop(exporterUser, signals.ExporterCaughtUp)
+	drop(exporterUser, !exporterEnabled || signals.ExporterCaughtUp)
+	if exporterPasswordHeld(secret) && secret.Annotations[annotationExporterHoldSince] == "" {
+		secret.Annotations[annotationExporterHoldSince] = secret.Annotations[annotationSystemPasswordCutoverAt]
+	}
+	// _operator and _replication have switched. Leave the phase so their next
+	// rotation is not stuck behind an exporter that has not restarted.
+	if !systemPasswordHeldExceptExporter(secret) && exporterPasswordHeld(secret) {
+		delete(secret.Annotations, annotationSystemPasswordPhase)
+		delete(secret.Annotations, annotationSystemPasswordCutoverAt)
+		return "holding", nil
+	}
 	if systemPasswordHasSuffix(secret.Data, systemPasswordPreviousSuffix) || systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
 		if deleted {
 			return "holding", nil
@@ -294,7 +337,45 @@ func finishSystemPasswordRotation(secret *corev1.Secret, signals systemPasswordS
 	}
 	delete(secret.Annotations, annotationSystemPasswordPhase)
 	delete(secret.Annotations, annotationSystemPasswordCutoverAt)
+	delete(secret.Annotations, annotationExporterHoldSince)
 	return "complete", nil
+}
+
+func exporterPasswordHeld(secret *corev1.Secret) bool {
+	return len(secret.Data[systemPasswordPreviousKey(exporterUser)]) > 0
+}
+
+func systemPasswordHeldExceptExporter(secret *corev1.Secret) bool {
+	if len(secret.Data[systemPasswordPreviousKey(operatorUser)]) > 0 || len(secret.Data[systemPasswordPreviousKey(replicationUser)]) > 0 {
+		return true
+	}
+	for _, user := range []string{operatorUser, replicationUser} {
+		if len(secret.Data[systemPasswordNextKey(user)]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseHeldExporter drops _exporter.previous once that container has started
+// after the hold. It runs in every phase, so a later rotation of the other
+// users does not have to finish first.
+func releaseHeldExporter(secret *corev1.Secret, signals systemPasswordSignals) string {
+	if !exporterPasswordHeld(secret) {
+		delete(secret.Annotations, annotationExporterHoldSince)
+		return ""
+	}
+	since := secret.Annotations[annotationExporterHoldSince]
+	if since == "" {
+		since = secret.Annotations[annotationSystemPasswordCutoverAt]
+	}
+	heldAt, err := time.Parse(time.RFC3339Nano, since)
+	if err != nil || signals.Now.Sub(heldAt) < systemPasswordCutoverGrace || !signals.ExporterCaughtUp {
+		return ""
+	}
+	delete(secret.Data, systemPasswordPreviousKey(exporterUser))
+	delete(secret.Annotations, annotationExporterHoldSince)
+	return "exporter-released"
 }
 
 func systemPasswordHasSuffix(data map[string][]byte, suffix string) bool {
@@ -400,6 +481,30 @@ func (r *ValkeyClusterReconciler) uncachedReader() client.Reader {
 func (r *ValkeyClusterReconciler) systemPasswordSignals(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (systemPasswordSignals, error) {
 	signals := systemPasswordSignals{Now: time.Now()}
 	phase := secret.Annotations[annotationSystemPasswordPhase]
+	holdSince := secret.Annotations[annotationExporterHoldSince]
+	if holdSince == "" && exporterPasswordHeld(secret) {
+		holdSince = secret.Annotations[annotationSystemPasswordCutoverAt]
+	}
+	var nodes []valkeyiov1alpha1.ValkeyNode
+	var pods []corev1.Pod
+	fetched := false
+	fetch := func() error {
+		if fetched {
+			return nil
+		}
+		var err error
+		nodes, pods, err = r.systemPasswordWorkloads(ctx, cluster)
+		fetched = err == nil
+		return err
+	}
+	if holdSince != "" {
+		if heldAt, err := time.Parse(time.RFC3339Nano, holdSince); err == nil {
+			if err := fetch(); err != nil {
+				return signals, err
+			}
+			signals.ExporterCaughtUp = exporterPasswordCaughtUp(pods, heldAt)
+		}
+	}
 	if phase == "" {
 		return signals, nil
 	}
@@ -412,8 +517,7 @@ func (r *ValkeyClusterReconciler) systemPasswordSignals(ctx context.Context, clu
 		signals.PasswordsLive = live
 		return signals, nil
 	}
-	nodes, pods, err := r.systemPasswordWorkloads(ctx, cluster)
-	if err != nil {
+	if err := fetch(); err != nil {
 		return signals, err
 	}
 	cutoverAt, err := time.Parse(time.RFC3339Nano, secret.Annotations[annotationSystemPasswordCutoverAt])
@@ -421,7 +525,9 @@ func (r *ValkeyClusterReconciler) systemPasswordSignals(ctx context.Context, clu
 		return signals, nil
 	}
 	signals.OperatorCaughtUp = podsMountSystemPasswords(nodes, pods)
-	signals.ExporterCaughtUp = exporterPasswordCaughtUp(pods, cutoverAt)
+	if holdSince == "" {
+		signals.ExporterCaughtUp = exporterPasswordCaughtUp(pods, cutoverAt)
+	}
 	signals.ReplicationCaughtUp = replicationPasswordCaughtUp(nodes, pods, secret.Data[replicationUser])
 	return signals, nil
 }
@@ -487,7 +593,7 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 		return nil
 	}
 	sum := systemPasswordDigest(secret.Data[replicationUser])
-	if node.Annotations[annotationPrimaryAuthHash] == sum {
+	if node.Annotations[annotationPrimaryAuthHash] == sum && !r.serverRestartedSincePrimaryAuth(ctx, node) {
 		return nil
 	}
 	configClient, err := r.newConfigClient(ctx, r, node)
@@ -506,10 +612,53 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[annotationPrimaryAuthHash] = sum
+	current.Annotations[annotationPrimaryAuthSetAt] = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("record replication password: %w", err)
 	}
 	return nil
+}
+
+// serverRestartedSincePrimaryAuth reports whether the server container started
+// after the last CONFIG SET. That process may have read the mounted
+// replication password before kubelet refreshed the Secret volume.
+func (r *ValkeyNodeReconciler) serverRestartedSincePrimaryAuth(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) bool {
+	setAt := node.Annotations[annotationPrimaryAuthSetAt]
+	if setAt == "" || node.Status.PodName == "" {
+		return false
+	}
+	recorded, err := time.Parse(time.RFC3339Nano, setAt)
+	if err != nil {
+		return false
+	}
+	pod := &corev1.Pod{}
+	reader := client.Reader(r.APIReader)
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Name: node.Status.PodName, Namespace: node.Namespace}, pod); err != nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != serverContainerName || status.State.Running == nil {
+			continue
+		}
+		return status.State.Running.StartedAt.After(recorded)
+	}
+	return false
+}
+
+// syncExporterPasswordHold keeps ExporterPasswordHeld set for as long as
+// _exporter.previous remains. One event is not enough: the hold can last
+// until some other change restarts the exporter.
+func (r *ValkeyClusterReconciler) syncExporterPasswordHold(cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) {
+	if secret != nil && exporterPasswordHeld(secret) {
+		setCondition(cluster, valkeyiov1alpha1.ConditionExporterPasswordHeld, valkeyiov1alpha1.ReasonExporterNotRestarted,
+			"The metrics-exporter keeps the previous password until that container starts again. The other system passwords keep rotating.",
+			metav1.ConditionTrue)
+		return
+	}
+	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld)
 }
 
 func (r *ValkeyClusterReconciler) recordSystemPasswordRotation(cluster *valkeyiov1alpha1.ValkeyCluster, event string) {

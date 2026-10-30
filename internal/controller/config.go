@@ -174,6 +174,16 @@ var liveConfigAllowlist = map[string]struct{}{
 	"maxclients":       {},
 }
 
+// liveConfigDefaults are the server defaults of the live-settable keys. A key
+// that was applied live and then left spec.config is set back to its default,
+// since the server would otherwise keep the last applied value until it
+// restarts.
+var liveConfigDefaults = map[string]string{
+	"maxmemory-policy": "noeviction",
+	"maxmemory":        "0",
+	"maxclients":       "10000",
+}
+
 // liveConfigToApply returns the subset of config whose keys are live-settable.
 // A nil config is safe: map lookup on a nil map returns the zero value.
 func liveConfigToApply(config map[string]string) map[string]string {
@@ -184,6 +194,24 @@ func liveConfigToApply(config map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// liveConfigParams returns what to CONFIG SET on the node: the live-settable
+// keys of spec.config, plus the default of every key in applied (the keys set
+// live before) that is no longer in spec.config. The second value is the keys
+// spec.config manages now, to record as applied once the CONFIG SET succeeds.
+func liveConfigParams(config map[string]string, applied []string) (map[string]string, []string) {
+	params := liveConfigToApply(config)
+	managed := slices.Sorted(maps.Keys(params))
+	for _, key := range applied {
+		if _, ok := params[key]; ok {
+			continue
+		}
+		if def, ok := liveConfigDefaults[key]; ok {
+			params[key] = def
+		}
+	}
+	return params, managed
 }
 
 // versionGateConfigWarnings returns warnings when user-set configuration or TLS

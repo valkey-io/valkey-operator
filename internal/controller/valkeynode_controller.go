@@ -249,6 +249,10 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	if applied {
+		if err := r.recordLiveConfigKeys(ctx, node); err != nil {
+			log.Error(err, "failed to record the live config keys")
+			return ctrl.Result{}, err
+		}
 		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, "Live config applied"); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 			return ctrl.Result{}, condErr
@@ -1233,7 +1237,7 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 // via CONFIG SET. Returns (true, nil) when CONFIG SET succeeds, (false, nil)
 // when there is nothing to apply, and (false, err) on failure.
 func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
-	params := liveConfigToApply(node.Spec.Config)
+	params, managed := liveConfigParams(node.Spec.Config, node.Status.LiveConfigKeys)
 	if len(params) == 0 {
 		return false, nil
 	}
@@ -1246,7 +1250,30 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 	if err := c.SetConfig(ctx, params); err != nil {
 		return false, err
 	}
+	// Remembered on the node, see recordLiveConfigKeys, so that a key which
+	// leaves spec.config later is set back to its default.
+	node.Status.LiveConfigKeys = managed
 	return true, nil
+}
+
+// recordLiveConfigKeys persists Status.LiveConfigKeys as applyLiveConfig left
+// it, when it differs from what is stored. updateStatus runs before the live
+// apply in a reconcile, so the list would otherwise only reach the API on the
+// next one, and be lost if the reconcile ends early.
+func (r *ValkeyNodeReconciler) recordLiveConfigKeys(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if slices.Equal(current.Status.LiveConfigKeys, node.Status.LiveConfigKeys) {
+		return nil
+	}
+	patchBase := current.DeepCopy()
+	current.Status.LiveConfigKeys = node.Status.LiveConfigKeys
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch liveConfigKeys: %w", err)
+	}
+	return nil
 }
 
 // parseClusterEnabled reports whether the node runs in cluster mode, from the

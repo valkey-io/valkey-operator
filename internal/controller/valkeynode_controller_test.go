@@ -1903,6 +1903,42 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(applied).To(BeFalse())
 	})
 
+	It("sets a key that left spec.config back to its default and forgets it", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		node := nodeWith(map[string]string{"maxmemory": "1gb"})
+		node.Status.LiveConfigKeys = []string{"maxmemory", "maxmemory-policy"}
+		applied, err := r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory": "1gb", "maxmemory-policy": "noeviction"}))
+		Expect(node.Status.LiveConfigKeys).To(Equal([]string{"maxmemory"}))
+	})
+
+	It("resets the last key that left spec.config and then has nothing to apply", func() {
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+		node := nodeWith(nil)
+		node.Status.LiveConfigKeys = []string{"maxclients"}
+		applied, err := r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxclients": "10000"}))
+		Expect(node.Status.LiveConfigKeys).To(BeEmpty())
+
+		applied, err = r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeFalse())
+	})
+
 	It("does not open a client when no allowlisted keys are present", func() {
 		called := false
 		r := &ValkeyNodeReconciler{
@@ -1915,6 +1951,53 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeFalse())
 		Expect(called).To(BeFalse())
+	})
+})
+
+var _ = Describe("recordLiveConfigKeys", Label("liveconfig"), func() {
+	ctx := context.Background()
+
+	It("persists the keys applyLiveConfig recorded and clears them once the last key leaves", func() {
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "live-config-keys", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{Config: map[string]string{"maxmemory": "1gb"}},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+
+		fake := &fakeConfigClient{}
+		r := &ValkeyNodeReconciler{
+			Client: k8sClient,
+			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+				return fake, nil
+			},
+		}
+
+		By("recording the key after the first apply")
+		applied, err := r.applyLiveConfig(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(r.recordLiveConfigKeys(ctx, node)).To(Succeed())
+		fresh := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), fresh)).To(Succeed())
+		Expect(fresh.Status.LiveConfigKeys).To(Equal([]string{"maxmemory"}))
+
+		By("resetting and forgetting the key once it leaves spec.config")
+		fresh.Spec.Config = nil
+		Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
+		applied, err = r.applyLiveConfig(ctx, fresh)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeTrue())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory": "0"}))
+		Expect(r.recordLiveConfigKeys(ctx, fresh)).To(Succeed())
+		again := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), again)).To(Succeed())
+		Expect(again.Status.LiveConfigKeys).To(BeEmpty())
+
+		By("having nothing to apply on the next reconcile")
+		applied, err = r.applyLiveConfig(ctx, again)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(applied).To(BeFalse())
 	})
 })
 

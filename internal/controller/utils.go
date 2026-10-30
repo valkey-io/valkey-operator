@@ -170,12 +170,29 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	return true
 }
 
-// nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address
-// and returns its node index from the LabelNodeIndex label.
+// nodeAddressesOf returns the pod IPs a ValkeyNode answers at: its pod's, and
+// those of its terminating pods while they serve on beside the replacement.
+func nodeAddressesOf(n *valkeyv1.ValkeyNode) []string {
+	addresses := make([]string, 0, 1+len(n.Status.TerminatingPodIPs))
+	if n.Status.PodIP != "" {
+		addresses = append(addresses, n.Status.PodIP)
+	}
+	return append(addresses, n.Status.TerminatingPodIPs...)
+}
+
+// nodeHasAddress reports whether address is one of the node's pod IPs. An
+// empty address never matches, including against a node that has no pod IP
+// yet: two empty addresses do not identify the same node.
+func nodeHasAddress(n *valkeyv1.ValkeyNode, address string) bool {
+	return address != "" && slices.Contains(nodeAddressesOf(n), address)
+}
+
+// nodeIndexForAddress finds the ValkeyNode that answers at address and
+// returns its node index from the LabelNodeIndex label.
 // Returns -1 if the node is not found or the label is missing or invalid.
 func nodeIndexForAddress(address string, nodes *valkeyv1.ValkeyNodeList) int {
 	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
-		return n.Status.PodIP == address
+		return nodeHasAddress(&n, address)
 	})
 	if idx == -1 {
 		return -1
@@ -199,14 +216,50 @@ func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
 	})
 }
 
-// nodeRoleAndShard finds the ValkeyNode whose Status.PodIP matches address
-// and reads its CR labels to determine the intended role and shard index.
+// shardMemberCount counts the ValkeyNodes that answer in shard. A node whose
+// terminating pod and replacement both answer counts once, and an address no
+// ValkeyNode claims counts on its own.
+func shardMemberCount(shard *valkey.ShardState, nodes []valkeyv1.ValkeyNode) int {
+	seen := map[int]bool{}
+	count := 0
+	for _, member := range shard.Nodes {
+		i := slices.IndexFunc(nodes, func(n valkeyv1.ValkeyNode) bool { return nodeHasAddress(&n, member.Address) })
+		if i >= 0 {
+			if seen[i] {
+				continue
+			}
+			seen[i] = true
+		}
+		count++
+	}
+	return count
+}
+
+// hasNodeWithTerminatingPodIP reports whether any ValkeyNode has podIP among
+// its terminating pods. An empty podIP never matches.
+func hasNodeWithTerminatingPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
+	return podIP != "" && slices.ContainsFunc(nodes, func(n valkeyv1.ValkeyNode) bool {
+		return slices.Contains(n.Status.TerminatingPodIPs, podIP)
+	})
+}
+
+// isMemberAddress reports whether a failing entry at host still belongs to a
+// member, so that forgetStaleNodes leaves it alone: a node's pod, which may
+// come back, or a terminating pod of a node that still answered the scrape.
+// A terminating pod that no longer answers is forgotten like any other dead
+// node, even while its pod object lingers.
+func isMemberAddress(nodes []valkeyv1.ValkeyNode, state *valkey.ClusterState, host string) bool {
+	return hasNodeWithPodIP(nodes, host) || (hasNodeWithTerminatingPodIP(nodes, host) && state.HasAddress(host))
+}
+
+// nodeRoleAndShard finds the ValkeyNode that answers at address and reads its
+// CR labels to determine the intended role and shard index.
 //
 // The role is derived from valkey.io/node-index: node 0 is the initial
 // primary, nodes 1+ are replicas. Returns ("", -1) if not found or labels missing.
 func nodeRoleAndShard(address string, nodes *valkeyv1.ValkeyNodeList) (string, int) {
 	idx := slices.IndexFunc(nodes.Items, func(n valkeyv1.ValkeyNode) bool {
-		return n.Status.PodIP == address
+		return nodeHasAddress(&n, address)
 	})
 	if idx == -1 {
 		return "", -1
@@ -242,12 +295,12 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *va
 	si := strconv.Itoa(shardIndex)
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+		if n.Labels[LabelShardIndex] != si {
 			continue
 		}
 		for _, shard := range state.Shards {
 			for _, node := range shard.Nodes {
-				if node.Address == n.Status.PodIP {
+				if nodeHasAddress(n, node.Address) {
 					return true
 				}
 			}
@@ -265,7 +318,7 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv
 	si := strconv.Itoa(shardIndex)
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+		if n.Labels[LabelShardIndex] != si {
 			continue
 		}
 		for _, shard := range state.Shards {
@@ -273,8 +326,8 @@ func findShardPrimary(state *valkey.ClusterState, shardIndex int, nodes *valkeyv
 				continue
 			}
 			primary := shard.GetPrimaryNode()
-			if primary != nil && primary.Address == n.Status.PodIP {
-				return primary.Id, n.Status.PodIP
+			if primary != nil && nodeHasAddress(n, primary.Address) {
+				return primary.Id, primary.Address
 			}
 		}
 	}

@@ -52,14 +52,14 @@ func TestMaybeProactiveFailoverBeforeRollCause(t *testing.T) {
 		Status:     valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
 	}
 
-	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), primary, true)
+	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), nil, primary, true)
 	assert.Equal(t, "the shard has no synced replica to fail over to", cause, "a primary with no synced replica waits, and says why")
 
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), primary, false), "a spec update that does not roll the pod needs no failover")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), nil, primary, false), "a spec update that does not roll the pod needs no failover")
 	replica := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-1"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"}}
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), replica, true), "a replica rolls without failover")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), nil, replica, true), "a replica rolls without failover")
 	single := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 0}}
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), single, shardState("down"), primary, true), "without replicas there is nothing to wait for")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), single, shardState("down"), nil, primary, true), "without replicas there is nothing to wait for")
 }
 
 func TestMaybeProactiveFailoverBeforeRollFailoverError(t *testing.T) {
@@ -74,13 +74,13 @@ func TestMaybeProactiveFailoverBeforeRollFailoverError(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1}}
 	primary := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-0"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"}}
 
-	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), primary, true)
+	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), nil, primary, true)
 	assert.Equal(t, "the proactive failover to a synced replica did not complete (CLUSTER FAILOVER timed out)", cause)
 
 	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
 		return nil
 	}
-	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), primary, true), "a completed failover lets the roll proceed")
+	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), nil, primary, true), "a completed failover lets the roll proceed")
 }
 
 func TestRollDeferredErrorText(t *testing.T) {

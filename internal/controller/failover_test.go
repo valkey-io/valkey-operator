@@ -38,7 +38,7 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.1")
+		shard, replicas := findFailoverShard(state, "10.0.0.1", nil)
 		assert.NotNil(t, shard)
 		assert.Len(t, replicas, 1)
 	})
@@ -56,7 +56,7 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.2")
+		shard, replicas := findFailoverShard(state, "10.0.0.2", nil)
 		assert.Nil(t, shard)
 		assert.Nil(t, replicas)
 	})
@@ -73,7 +73,7 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.1")
+		shard, replicas := findFailoverShard(state, "10.0.0.1", nil)
 		assert.Nil(t, shard)
 		assert.Nil(t, replicas)
 	})
@@ -91,7 +91,7 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.1")
+		shard, replicas := findFailoverShard(state, "10.0.0.1", nil)
 		assert.Nil(t, shard)
 		assert.Nil(t, replicas)
 	})
@@ -115,7 +115,7 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.1")
+		shard, replicas := findFailoverShard(state, "10.0.0.1", nil)
 		assert.Nil(t, shard)
 		assert.Nil(t, replicas)
 	})
@@ -132,7 +132,41 @@ func TestFindFailoverShard(t *testing.T) {
 				},
 			},
 		}
-		shard, replicas := findFailoverShard(state, "10.0.0.99")
+		shard, replicas := findFailoverShard(state, "10.0.0.99", nil)
+		assert.Nil(t, shard)
+		assert.Nil(t, replicas)
+	})
+
+	t.Run("replica on a terminating pod is not a target", func(t *testing.T) {
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-1",
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.3", Id: "node-3", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+					},
+				},
+			},
+		}
+		// 10.0.0.2 is the old pod of a replica whose replacement runs at 10.0.0.4.
+		nodes := []valkeyiov1alpha1.ValkeyNode{
+			{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.1"}},
+			{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.4", TerminatingPodIPs: []string{"10.0.0.2"}}},
+			{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.3"}},
+		}
+		shard, replicas := findFailoverShard(state, "10.0.0.1", nodes)
+		assert.NotNil(t, shard)
+		if assert.Len(t, replicas, 1) {
+			assert.Equal(t, "10.0.0.3", replicas[0].Address, "the synced replica that is not terminating is the only target")
+		}
+
+		// With the terminating replica as the only synced one, there is no
+		// target and the roll waits for the replacement to sync.
+		state.Shards[0].Nodes = state.Shards[0].Nodes[:2]
+		shard, replicas = findFailoverShard(state, "10.0.0.1", nodes)
 		assert.Nil(t, shard)
 		assert.Nil(t, replicas)
 	})

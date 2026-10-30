@@ -809,6 +809,9 @@ const (
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
 	ConditionTLSConfigured = "TLSConfigured"
+	// ConditionReconciliationPaused is True while the cluster carries the
+	// AnnotationPauseReconciliation annotation and the operator leaves it alone.
+	ConditionReconciliationPaused = "ReconciliationPaused"
 )
 
 const (
@@ -837,6 +840,15 @@ const (
 	// keeps its current contents and the rest of the reconcile carries on.
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
+
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
+// of a standalone ValkeyNode, while its value is exactly "true". The operator
+// copies it onto the ValkeyNodes of a paused cluster and removes it from them
+// when the cluster resumes.
+const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
+
+// ReasonReconciliationPaused is the reason of ConditionReconciliationPaused.
+const ReasonReconciliationPaused = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions

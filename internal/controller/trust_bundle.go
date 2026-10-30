@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"strconv"
 )
 
 // trustSource is one input to a merged trust bundle: PEM certificates, where
@@ -125,39 +126,69 @@ func mergeTrustBundle(sources []trustSource) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// decodePEMStrict decodes every PEM block in data, allowing nothing but
-// whitespace between them. pem.Decode alone is not enough: it skips any text
-// before a block, and any malformed block, to reach the next one, so a
-// corrupted root would vanish from the bundle without an error.
+// decodePEMStrict decodes every PEM block in data. Lines outside a block that
+// carry no PEM marker are skipped, as OpenSSL skips them when Valkey loads a
+// CA file, so a bundle with comments or CA names between its certificates
+// (curl's cacert.pem) or an openssl x509 -text dump is accepted. Every line
+// that does carry a marker must open or close a block that decodes; anything
+// else is an error. pem.Decode alone is not enough: it skips any malformed
+// block to reach the next one, so a corrupted root would vanish from the
+// bundle without an error. A root whose BEGIN line is damaged still leaves its
+// END line outside a block, and one whose END line is damaged runs into the
+// next BEGIN line or the end of the data, so either is reported.
 func decodePEMStrict(data []byte) ([]*pem.Block, error) {
-	var blocks []*pem.Block
-	rest := data
-	for {
-		trimmed := bytes.TrimLeft(rest, " \t\r\n")
-		if len(trimmed) == 0 {
-			return blocks, nil
+	var (
+		blocks    []*pem.Block
+		block     bytes.Buffer
+		beginLine int // the line the open block began on, or 0 outside a block
+		beginText string
+	)
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	for i, raw := range lines {
+		n := i + 1
+		line := bytes.TrimSpace(raw)
+		hasBegin := bytes.Contains(line, []byte("-----BEGIN"))
+		hasEnd := bytes.Contains(line, []byte("-----END"))
+		if beginLine == 0 {
+			switch {
+			case hasEnd:
+				return nil, fmt.Errorf("PEM END line outside a block at line %d: %s", n, quotePEMLine(line))
+			case !hasBegin:
+				continue
+			case !bytes.HasPrefix(line, []byte("-----BEGIN ")) || !bytes.HasSuffix(line, []byte("-----")):
+				return nil, fmt.Errorf("malformed PEM BEGIN line at line %d: %s", n, quotePEMLine(line))
+			}
+			beginLine, beginText = n, string(line)
+			block.Reset()
+			block.Write(raw)
+			continue
 		}
-		offset := len(data) - len(trimmed)
-		if !bytes.HasPrefix(trimmed, []byte("-----BEGIN ")) {
-			return nil, fmt.Errorf("data that is not PEM at byte %d", offset)
+		if hasBegin {
+			return nil, fmt.Errorf("unterminated PEM block %s at line %d: another BEGIN at line %d", quotePEMLine([]byte(beginText)), beginLine, n)
 		}
-		// Decode exactly one block: up to the end of the first END line, so a
-		// malformed block cannot be skipped in favour of a later one.
-		end := bytes.Index(trimmed, []byte("-----END "))
-		// A second BEGIN before the first END means this block never ended:
-		// the END belongs to a later block.
-		if end < 0 || bytes.Contains(trimmed[len("-----BEGIN "):end], []byte("-----BEGIN ")) {
-			return nil, fmt.Errorf("unterminated PEM block at byte %d", offset)
+		block.Write(raw)
+		if !hasEnd {
+			continue
 		}
-		segment, next := trimmed, []byte(nil)
-		if nl := bytes.IndexByte(trimmed[end:], '\n'); nl >= 0 {
-			segment, next = trimmed[:end+nl+1], trimmed[end+nl+1:]
+		decoded, rest := pem.Decode(block.Bytes())
+		if decoded == nil || len(bytes.TrimSpace(rest)) > 0 {
+			return nil, fmt.Errorf("malformed PEM block %s at lines %d-%d", quotePEMLine([]byte(beginText)), beginLine, n)
 		}
-		block, after := pem.Decode(segment)
-		if block == nil || len(bytes.TrimSpace(after)) > 0 {
-			return nil, fmt.Errorf("malformed PEM block at byte %d", offset)
-		}
-		blocks = append(blocks, block)
-		rest = next
+		blocks = append(blocks, decoded)
+		beginLine = 0
 	}
+	if beginLine != 0 {
+		return nil, fmt.Errorf("unterminated PEM block %s at line %d: no END line", quotePEMLine([]byte(beginText)), beginLine)
+	}
+	return blocks, nil
+}
+
+// quotePEMLine quotes a line for an error message, shortened so that a long
+// line of base64 or binary data does not swamp the message.
+func quotePEMLine(line []byte) string {
+	const maxLen = 64
+	if len(line) > maxLen {
+		return strconv.Quote(string(line[:maxLen]) + "...")
+	}
+	return strconv.Quote(string(line))
 }

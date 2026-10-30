@@ -111,6 +111,18 @@ func TestMergeTrustBundle(t *testing.T) {
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
 
+	t.Run("skips text without a PEM marker, as OpenSSL does", func(t *testing.T) {
+		join := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+		// Comments and CA names between certificates, as in curl's cacert.pem.
+		curl := join([]byte("##\n## Bundle of CA Root Certificates\n##\n\nExample Root CA\n===============\n"),
+			clientA, []byte("\nOther Root CA\n=============\n"), clientB, []byte("trailing text"))
+		// The text form openssl x509 -text prints ahead of the certificate.
+		dump := join([]byte("Certificate:\n    Data:\n        Version: 3 (0x2)\n        Serial Number:\n            01:02:03\n"), clientA)
+		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"curl", curl, "PEM"}, {"dump", dump, "PEM"}})
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
+	})
+
 	t.Run("keeps every certificate of a multi-root source", func(t *testing.T) {
 		rotating := append(append([]byte{}, clientA...), clientB...)
 		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"rotating", rotating, "PEM"}})
@@ -131,18 +143,21 @@ func TestMergeTrustBundle(t *testing.T) {
 		pem     []byte
 		wantErr string
 	}{
-		"empty":            {nil, "no certificates"},
-		"not PEM":          {[]byte("not a certificate"), "data that is not PEM at byte 0"},
-		"a private key":    {pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{1}}), `unexpected PEM block "PRIVATE KEY"`},
-		"garbage DER":      {pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1, 2, 3}}), "bad: x509"},
-		"trailing garbage": {append(append([]byte{}, clientA...), []byte("junk")...), "data that is not PEM at byte"},
-		// pem.Decode alone skips the first three to reach the next block, which
+		"empty":         {nil, "no certificates"},
+		"text alone":    {[]byte("not a certificate"), "no certificates"},
+		"a private key": {pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{1}}), `unexpected PEM block "PRIVATE KEY"`},
+		"garbage DER":   {pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1, 2, 3}}), "bad: x509"},
+		// pem.Decode alone skips the next three to reach the next block, which
 		// would drop a root without an error.
-		"a malformed block before a good one":     {append(corruptPEM(t, clientB), clientA...), "malformed PEM block at byte 0"},
-		"a malformed block between good ones":     {append(append(append([]byte{}, clientA...), corruptPEM(t, clientB)...), server...), "malformed PEM block at byte"},
-		"text between good blocks":                {append(append(append([]byte{}, clientA...), []byte("not pem\n")...), server...), "data that is not PEM at byte"},
-		"an unterminated block before a good one": {append([]byte("-----BEGIN CERTIFICATE-----\nAAAA\n"), clientA...), "unterminated PEM block at byte 0"},
-		"an unterminated block":                   {bytes.TrimSuffix(clientA, []byte("-----END CERTIFICATE-----\n")), "unterminated PEM block at byte 0"},
+		"a malformed block before a good one": {append(corruptPEM(t, clientB), clientA...), `malformed PEM block "-----BEGIN CERTIFICATE-----" at lines 1-`},
+		"a malformed block between good ones": {append(append(append([]byte{}, clientA...), corruptPEM(t, clientB)...), server...), `malformed PEM block "-----BEGIN CERTIFICATE-----" at lines`},
+		"an unterminated block before a good one": {append([]byte("-----BEGIN CERTIFICATE-----\nAAAA\n"), clientA...),
+			`unterminated PEM block "-----BEGIN CERTIFICATE-----" at line 1: another BEGIN at line 3`},
+		"an unterminated block": {bytes.TrimSuffix(clientA, []byte("-----END CERTIFICATE-----\n")), `unterminated PEM block "-----BEGIN CERTIFICATE-----" at line 1: no END line`},
+		// A damaged BEGIN line would otherwise turn the block into skipped text.
+		"a block with a damaged BEGIN line": {append(append([]byte{}, clientA...), bytes.Replace(clientB, []byte("-----BEGIN"), []byte("----BEGIN"), 1)...),
+			`PEM END line outside a block at line`},
+		"a malformed BEGIN line": {append([]byte("x"), clientA...), `malformed PEM BEGIN line at line 1: "x-----BEGIN CERTIFICATE-----"`},
 	} {
 		t.Run("rejects a source that is "+name, func(t *testing.T) {
 			got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"bad", tc.pem, "PEM"}})

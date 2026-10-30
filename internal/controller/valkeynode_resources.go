@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -28,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
+
+const serverContainerName = "server"
 
 // valkeyNodeResourceName returns the name used for resources
 // owned by the given ValkeyNode.
@@ -249,7 +252,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 	containers := []corev1.Container{
 		{
-			Name:      "server",
+			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
 			Command: append([]string{
@@ -392,8 +395,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	if err != nil {
 		return nil, err
 	}
+	// Generated containers remain first; user-only sidecars are appended by
+	// mergePatchContainers. Default only that generated prefix, even if a
+	// user-only sidecar reuses the name of the disabled exporter.
+	applyManagedContainerSecurityDefaults(merged[:len(containers)])
 	applyContainerAPIDefaults(merged)
 	return merged, nil
+}
+
+// Match common admission hardening defaults in the rendered workload template.
+// Run after user patches so explicit settings (including privileged containers)
+// are respected, and leave user-added sidecars alone.
+func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		sc := c.SecurityContext.DeepCopy()
+		if sc == nil {
+			sc = &corev1.SecurityContext{}
+		}
+		// Kubernetes treats SYS_ADMIN like privileged mode for privilege escalation.
+		hasSysAdmin := sc.Capabilities != nil &&
+			(slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN")) ||
+				slices.Contains(sc.Capabilities.Add, corev1.Capability("CAP_SYS_ADMIN")))
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) && !hasSysAdmin {
+			sc.AllowPrivilegeEscalation = new(false)
+		}
+		c.SecurityContext = sc
+	}
 }
 
 // applyContainerAPIDefaults fills the container fields the API server would

@@ -242,16 +242,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, "Updating ValkeyNodes", metav1.ConditionTrue)
 	} else if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
 	} else if requeue {
 		// An unschedulable pod is reported first, whether the roll is under
 		// way or held. The pod it reports belongs to a later shard or sits
 		// outside the shard loop: a shard's own replica that is not Ready
 		// requeues before the walk reaches its primary.
-		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+		if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster, state); err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
-			_ = r.updateStatus(ctx, cluster, nil)
+			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{}, err
 		} else if handled {
 			return result, nil
@@ -262,7 +262,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionTrue)
-		_ = r.updateStatus(ctx, cluster, nil)
+		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
@@ -372,7 +372,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return result, nil
 	}
 
-	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster); err != nil {
+	if result, handled, err := r.handlePodSchedulingIssues(ctx, cluster, state); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonValkeyNodeError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
@@ -440,7 +440,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// time using CLUSTER MIGRATESLOTS (atomic migration, requires
 	// Valkey >= 9.0). Each pass requeues so the next reconcile
 	// re-evaluates cluster state with fresh topology before continuing.
-	rebalanced, err := r.rebalanceSlots(ctx, cluster, allShards)
+	move, err := r.rebalanceSlots(ctx, cluster, allShards)
 	if err != nil {
 		log.Error(err, "slot rebalancing failed")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "RebalanceSlots", "Slot rebalancing failed: %v", err)
@@ -450,13 +450,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	if rebalanced {
+	if move != nil {
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
 		// that hadn't received slots yet during scale-out).
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
+		// Name the shard receiving this batch. With more than one shard
+		// under its share, the name changes as each one fills.
+		msg := "Rebalancing slots across primaries"
+		if _, dstShard := nodeRoleAndShard(move.Dst.Address, nodes); dstShard >= 0 {
+			msg = fmt.Sprintf("Rebalancing slots onto shard %d", dstShard)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, msg, metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -503,7 +509,7 @@ type podSchedulingIssue struct {
 	message string
 }
 
-func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (ctrl.Result, bool, error) {
+func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool, error) {
 	issue, err := r.findPodSchedulingIssue(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, false, err
@@ -522,7 +528,7 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
-	if err := r.updateStatus(ctx, cluster, nil); err != nil {
+	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		return ctrl.Result{}, false, err
 	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, true, nil
@@ -1569,7 +1575,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	patchBase := current.DeepCopy()
 	patch := client.MergeFrom(patchBase)
 
-	// Update shard counts
+	// Update shard counts. A nil state leaves the stored counts in place.
 	if state != nil {
 		current.Status.ReadyShards = r.countReadyShards(state, cluster)
 		current.Status.Shards = int32(len(state.Shards))
@@ -1627,7 +1633,9 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 	var readyCount int32 = 0
 	requiredNodes := 1 + int(cluster.Spec.Replicas)
 	for _, shard := range state.Shards {
-		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
+		// A shard whose primary owns no slots, drained or not yet filled,
+		// serves nothing.
+		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil || len(shard.Slots) == 0 {
 			continue
 		}
 		// Check if all nodes in this shard are healthy and in sync. Health is
@@ -1655,29 +1663,29 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 
 const rebalanceSlotBatchSize = 400
 
-func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shards []*valkey.ShardState) (bool, error) {
+// rebalanceSlots plans one slot move and starts it. It returns the move while
+// the rebalance has work left, whether this pass migrated a batch or waited
+// for one in flight, and nil once the slots are balanced.
+func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shards []*valkey.ShardState) (*valkey.SlotMove, error) {
 	move, err := valkey.PlanRebalanceMove(shards, int(cluster.Spec.Shards), rebalanceSlotBatchSize)
-	if err != nil {
-		return false, err
-	}
-	if move == nil {
-		return false, nil
+	if err != nil || move == nil {
+		return nil, err
 	}
 
 	log := logf.FromContext(ctx)
 	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if inProgress {
 		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
-		return true, nil
+		return move, nil
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
 		log.V(1).Info("destination not yet visible to source via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
-		return true, nil
+		return move, nil
 	}
 
 	log.V(1).Info("rebalancing slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
@@ -1687,12 +1695,12 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			log.V(1).Info("slots no longer served by source; will retry with fresh state", "src", move.Src.Address, "dst", move.Dst.Address)
-			return true, nil
+			return move, nil
 		}
-		return false, err
+		return nil, err
 	}
 	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
-	return true, nil
+	return move, nil
 }
 
 // effectiveShards returns state.Shards plus any pending primaries that are

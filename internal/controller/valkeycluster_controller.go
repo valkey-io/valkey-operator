@@ -455,10 +455,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// NodeAddFailed set when replicas couldn't attach to primaries
 		// that hadn't received slots yet during scale-out).
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		// Name the shard the slots go to, a new one or an emptied one, so
-		// the status says what the rebalance is for. The destination stays
-		// the same until that shard has its share, so the message holds for
-		// the whole rebalance.
+		// Name the shard receiving this batch. With more than one shard
+		// under its share, the name changes as each one fills.
 		msg := "Rebalancing slots across primaries"
 		if _, dstShard := nodeRoleAndShard(move.Dst.Address, nodes); dstShard >= 0 {
 			msg = fmt.Sprintf("Rebalancing slots onto shard %d", dstShard)

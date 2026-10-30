@@ -276,8 +276,8 @@ spec:
 			})
 
 			By("waiting for the status to name the shard being refilled")
-			// The message holds for the whole rebalance, since shard 3 stays
-			// the destination until it has its share of the slots.
+			// Shard 3 is the only shard under its share, so every batch
+			// goes to it and the message names it throughout.
 			Eventually(func(g Gomega) {
 				cr, err := utils.GetValkeyClusterStatus(clusterName)
 				g.Expect(err).NotTo(HaveOccurred())

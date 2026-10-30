@@ -94,7 +94,7 @@ Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
-- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 
 ---
 
@@ -138,6 +138,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
+- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces. The field keeps working until `v1beta1`; see [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -217,7 +218,7 @@ Common reasons when `LiveConfigApplied=True`:
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 #### `ACLApplied`
-Indicates whether the ACL the cluster controller wrote for `spec.users` is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
+Indicates whether the ACL the cluster controller wrote for `spec.acl.users` (or the deprecated `spec.users`) is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
 
 This condition is set once the node is ready and mounts an ACL Secret. An edit reads `False` until the mounted aclfile refreshes (the projected Secret volume is updated lazily by kubelet) and the server loads it.
 

@@ -16,7 +16,108 @@ limitations under the License.
 
 package v1alpha1
 
-// An UserAclSpec contains user, authorization, and permissions-related configurations
+// ACLSpec holds the cluster's ACL configuration.
+type ACLSpec struct {
+	// Users managed by the operator
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Users []ACLUserSpec `json:"users,omitempty"`
+}
+
+// ACLUserState selects whether a user can authenticate.
+// Values may be added in future versions.
+// +kubebuilder:validation:Enum=Enabled;Disabled
+type ACLUserState string
+
+const (
+	// ACLUserStateEnabled renders the user as on.
+	ACLUserStateEnabled ACLUserState = "Enabled"
+	// ACLUserStateDisabled renders the user as off; existing connections stay authenticated.
+	ACLUserStateDisabled ACLUserState = "Disabled"
+)
+
+// ACLPasswordType selects how a user authenticates with a password.
+// Values may be added in future versions.
+// +kubebuilder:validation:Enum=Secret;Any;Disabled
+type ACLPasswordType string
+
+const (
+	// ACLPasswordTypeSecret accepts the passwords referenced by secret.
+	ACLPasswordTypeSecret ACLPasswordType = "Secret"
+	// ACLPasswordTypeAny accepts any password (Valkey nopass).
+	ACLPasswordTypeAny ACLPasswordType = "Any"
+	// ACLPasswordTypeDisabled accepts no password (Valkey resetpass). The user can still
+	// authenticate with a TLS client certificate (tls-auth-clients-user).
+	ACLPasswordTypeDisabled ACLPasswordType = "Disabled"
+)
+
+// ACLUserPassword configures password authentication for a user.
+// +kubebuilder:validation:XValidation:message="secret is only used when type is Secret",rule="!has(self.secret) || !has(self.type) || self.type == 'Secret'"
+type ACLUserPassword struct {
+	// How the user authenticates with a password
+	// +kubebuilder:default=Secret
+	// +optional
+	Type ACLPasswordType `json:"type,omitempty"`
+
+	// Reference information to a Secret containing user passwords
+	// +optional
+	Secret *PasswordSecretSpec `json:"secret,omitempty"`
+}
+
+// ACLPermissions holds the command, key and channel rules of an ACL entry.
+type ACLPermissions struct {
+	// Valkey command categories, commands, and subcommands restrictions for this user
+	// +optional
+	Commands CommandsAclSpec `json:"commands,omitempty"`
+
+	// Key restrictions
+	// +optional
+	Keys KeysAclSpec `json:"keys,omitempty"`
+
+	// Channel restrictions
+	// +optional
+	Channels ChannelsAclSpec `json:"channels,omitempty"`
+
+	// Raw ACL for (additional) permissions. Appended to anything generated.
+	// +kubebuilder:validation:Pattern=`^[^\r\n]*$`
+	// +optional
+	RawAcl string `json:"permissions,omitempty"`
+}
+
+// ACLUserSpec defines a Valkey ACL user.
+type ACLUserSpec struct {
+	// Username
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[^\s]+$`
+	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
+	Name string `json:"name"`
+
+	// Whether the user can authenticate
+	// +kubebuilder:default=Enabled
+	// +optional
+	State ACLUserState `json:"state,omitempty"`
+
+	// Password authentication; defaults to the passwords in the Secret <cluster>-users
+	// +kubebuilder:default={}
+	// +optional
+	Password *ACLUserPassword `json:"password,omitempty"`
+
+	ACLPermissions `json:",inline"`
+}
+
+// PasswordType returns the password type, treating an unset one as Secret.
+func (u ACLUserSpec) PasswordType() ACLPasswordType {
+	if u.Password == nil || u.Password.Type == "" {
+		return ACLPasswordTypeSecret
+	}
+	return u.Password.Type
+}
+
+// An UserAclSpec contains user, authorization, and permissions-related configurations.
+// It is the legacy spec.users entry, replaced by ACLUserSpec and removed in v1beta1.
 type UserAclSpec struct {
 
 	// Username
@@ -40,21 +141,31 @@ type UserAclSpec struct {
 	// +kubebuilder:default=false
 	ResetPass bool `json:"resetpass,omitempty"`
 
-	// Valkey command categories, commands, and subcommands restrictions for this user
-	// +optional
-	Commands CommandsAclSpec `json:"commands,omitempty"`
+	ACLPermissions `json:",inline"`
+}
 
-	// Key restrictions
-	// +optional
-	Keys KeysAclSpec `json:"keys,omitempty"`
-
-	// Channel restrictions
-	// +optional
-	Channels ChannelsAclSpec `json:"channels,omitempty"`
-
-	// Raw ACL for (additional) permissions. Appended to anything generated.
-	// +optional
-	RawAcl string `json:"permissions,omitempty"`
+// ToACLUser converts a legacy user. resetpass takes precedence over nopass,
+// and passwordSecret is kept only for the Secret type.
+func (u UserAclSpec) ToACLUser() ACLUserSpec {
+	out := ACLUserSpec{
+		Name:           u.Name,
+		State:          ACLUserStateEnabled,
+		Password:       &ACLUserPassword{Type: ACLPasswordTypeSecret},
+		ACLPermissions: *u.ACLPermissions.DeepCopy(),
+	}
+	if !u.Enabled {
+		out.State = ACLUserStateDisabled
+	}
+	switch {
+	case u.ResetPass:
+		out.Password.Type = ACLPasswordTypeDisabled
+	case u.NoPassword:
+		out.Password.Type = ACLPasswordTypeAny
+	}
+	if out.Password.Type == ACLPasswordTypeSecret && (u.PasswordSecret.Name != "" || len(u.PasswordSecret.Keys) > 0) {
+		out.Password.Secret = u.PasswordSecret.DeepCopy()
+	}
+	return out
 }
 
 type PasswordSecretSpec struct {
@@ -88,14 +199,17 @@ type CommandsAclSpec struct {
 type KeysAclSpec struct {
 
 	// Keys on which this user can read, and write; maps to Valkey: ~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	ReadWrite []string `json:"readWrite,omitempty"`
 
 	// Keys restricted to read-only; maps to Valkey: %R~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	ReadOnly []string `json:"readOnly,omitempty"`
 
 	// Keys restricted to write-only; maps to Valkey: %W~pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	WriteOnly []string `json:"writeOnly,omitempty"`
 }
@@ -103,6 +217,7 @@ type KeysAclSpec struct {
 type ChannelsAclSpec struct {
 
 	// Pub/Sub channel patterns - maps to Valkey: &pattern
+	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	Patterns []string `json:"patterns,omitempty"`
 }

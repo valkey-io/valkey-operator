@@ -701,7 +701,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:    "testuser",
 							Enabled: true,
@@ -738,12 +738,14 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:       "testuser",
 							Enabled:    true,
 							NoPassword: true,
-							RawAcl:     "+@all",
+							ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+								RawAcl: "+@all",
+							},
 						},
 					},
 				},
@@ -770,6 +772,83 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, internalSecret) }()
 
 			Expect(internalSecret.Type).To(Equal(AclSecretType))
+		})
+
+		// declaredUserLines reconciles the cluster's users and returns the
+		// aclfile lines for the declared (non-system) users.
+		declaredUserLines := func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []string {
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			Expect(reconciler.reconcileUsersAcl(ctx, cluster)).To(Succeed())
+
+			internalSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      getInternalSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}, internalSecret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, internalSecret) })
+
+			var lines []string
+			for line := range strings.SplitSeq(string(internalSecret.Data[aclFilename]), "\n") {
+				if strings.HasPrefix(line, "user ") && !strings.HasPrefix(line, "user _") {
+					lines = append(lines, line)
+				}
+			}
+			return lines
+		}
+
+		It("renders users from spec.acl.users", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-new-field-test", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "bob",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@all"},
+					}}},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user bob on nopass +@all"}))
+		})
+
+		It("renders the same aclfile for spec.users and the equivalent spec.acl.users", func() {
+			ctx := context.Background()
+			perms := valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"}
+			legacy := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-parity-legacy", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+						{Name: "carol", Enabled: true, ResetPass: true, ACLPermissions: perms},
+						{Name: "bob", Enabled: true, NoPassword: true, ACLPermissions: perms},
+					},
+				},
+			}
+			current := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-parity-current", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{
+						{Name: "carol", Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled}, ACLPermissions: perms},
+						{Name: "bob", Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny}, ACLPermissions: perms},
+					}},
+				},
+			}
+
+			legacyLines := declaredUserLines(ctx, legacy)
+			Expect(legacyLines).To(Equal([]string{"user bob on nopass +@read", "user carol on +@read"}))
+			Expect(declaredUserLines(ctx, current)).To(Equal(legacyLines))
+			Expect(current.Spec.ACL.Users[0].Name).To(Equal("carol"), "reconcile must not reorder spec.acl.users")
 		})
 
 		It("should be able to create the internal ACL secret when unknown system user is present", func() {

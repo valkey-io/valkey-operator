@@ -33,14 +33,15 @@ spec:
       clientAuth:
         mode: Required
         certificateUser: CN
-  users:
-    - name: alice
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~app:* &events:*"
+  acl:
+    users:
+      - name: alice
+        password:
+          type: Disabled
+        permissions: "+@all ~app:* &events:*"
 ```
 
-With `clientAuth.mode: Required` and `clientAuth.certificateUser: CN`, a client whose certificate carries `CN=alice` is authenticated as the ACL user `alice` during the TLS handshake, with no `AUTH` command required. Pass `resetpass: true` with this configuration so authentication relies exclusively on the client certificate.
+With `clientAuth.mode: Required` and `clientAuth.certificateUser: CN`, a client whose certificate carries `CN=alice` is authenticated as the ACL user `alice` during the TLS handshake, with no `AUTH` command required. Set `password.type: Disabled` with this configuration so authentication relies exclusively on the client certificate.
 
 `clientAuth.mode: Required` does not disable password authentication. It requires a valid client certificate at the TLS handshake; clients can still run `AUTH` when they present a certificate signed by the configured CA.
 
@@ -148,15 +149,16 @@ With `clientAuth.certificateUser: CN`, a presented server certificate CN is the 
 
 ## Security considerations
 
-### Do not use `nopass` on a certificate-mapped user
+### Do not use `password.type: Any` on a certificate-mapped user
 
-`nopass: true` lets any client run `AUTH <user> <any-password>` and succeed, whether or not it holds the matching client certificate. Under `clientAuth.mode: Required`, any client with a valid CA-signed certificate can then authenticate as any `nopass` user.
+`password.type: Any` renders Valkey's `nopass`, which lets any client run `AUTH <user> <any-password>` and succeed, whether or not it holds the matching client certificate. Under `clientAuth.mode: Required`, any client with a valid CA-signed certificate can then authenticate as any such user.
 
-Set `resetpass: true` instead. That clears every password and disables `nopass`, so password authentication is impossible and the CN or URI from the client certificate becomes the only way to authenticate as that user.
+Set `password.type: Disabled` instead. The user then has no password and no `nopass` flag, so password authentication is impossible and the CN or URI from the client certificate becomes the only way to authenticate as that user.
 
 ```yaml
-users:
-  - name: alice
-    enabled: true
-    resetpass: true
+acl:
+  users:
+    - name: alice
+      password:
+        type: Disabled
 ```

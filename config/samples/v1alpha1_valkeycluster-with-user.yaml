@@ -16,51 +16,52 @@ metadata:
 spec:
   shards: 3
   replicas: 1
-  users:
-    - name: alice
-      enabled: true
-      passwordSecret:
-        name: valkey-cluster-sample-users
-        keys: [alicepw]
-      commands:
-        allow: ["@read", "@write", "@connection"]
-        deny: ["@admin", "@dangerous"]
-      keys:
-        readWrite: ["app:*", "cache:*"]
-        readOnly: ["shared:*", "config:*"]
-        writeOnly: ["logs:*", "metrics:*"]
-      channels:
-        patterns: ["notifications:*", "events:*"]
-      permissions: "+client|setname +debug"
-    - name: bob
-      nopass: true
-      enabled: true
-      permissions: "+@all -@admin ~* &*"
-    - name: charlie
-      enabled: false
-      commands:
-        allow: ["@read"]
-      keys:
-        readOnly: ["*"]
-    - name: david
-      enabled: true
-      passwordSecret:
-        name: valkey-cluster-sample-users
+  acl:
+    users:
+      - name: alice
+        password:
+          secret:
+            name: valkey-cluster-sample-users
+            keys: [alicepw]
+        commands:
+          allow: ["@read", "@write", "@connection"]
+          deny: ["@admin", "@dangerous"]
         keys:
-          - davidold
-          - davidnew
-      commands:
-        allow: ["@admin"]
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: valkey-cluster-sample-users
-        keys: [defaultpw]
-    - name: edward
-      enabled: true
-      resetpass: true
-      permissions: "+@admin"
+          readWrite: ["app:*", "cache:*"]
+          readOnly: ["shared:*", "config:*"]
+          writeOnly: ["logs:*", "metrics:*"]
+        channels:
+          patterns: ["notifications:*", "events:*"]
+        permissions: "+client|setname +debug"
+      - name: bob
+        password:
+          type: Any
+        permissions: "+@all -@admin ~* &*"
+      - name: charlie
+        state: Disabled
+        commands:
+          allow: ["@read"]
+        keys:
+          readOnly: ["*"]
+      - name: david
+        password:
+          secret:
+            name: valkey-cluster-sample-users
+            keys:
+              - davidold
+              - davidnew
+        commands:
+          allow: ["@admin"]
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          secret:
+            name: valkey-cluster-sample-users
+            keys: [defaultpw]
+      - name: edward
+        password:
+          type: Disabled
+        permissions: "+@admin"
 
   resources:
     requests:

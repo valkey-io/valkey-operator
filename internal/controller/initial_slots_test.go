@@ -80,7 +80,7 @@ func TestInitialSlotPrimariesReady(t *testing.T) {
 		slotTestPrimary("10.0.1.1", "2"),
 	}}
 	assert.Equal(t, "", initialSlotWait(cluster, replicasDown, nodes),
-		"an unscaped replica must not hold slot assignment")
+		"an unscraped replica must not hold slot assignment")
 
 	isolated := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{
 		slotTestPrimary("10.0.0.1", "2"),

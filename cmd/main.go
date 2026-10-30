@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -82,6 +83,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var pprofAddr string
+	var orphanTakeoverGrace, orphanTakeoverMaxWait time.Duration
 	var tlsOpts []func(*tls.Config)
 	var watchNamespaces []string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -107,6 +109,12 @@ func main() {
 		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
 			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
 			"bind it to localhost and do not add it to a Service.")
+	flag.DurationVar(&orphanTakeoverGrace, "orphan-takeover-grace", controller.DefaultOrphanTakeoverGrace,
+		"With persistence, how long a failed primary gets to come back before its replica is promoted "+
+			"in a cluster without failover quorum.")
+	flag.DurationVar(&orphanTakeoverMaxWait, "orphan-takeover-max-wait", controller.DefaultOrphanTakeoverMaxWait,
+		"With persistence, how long after a primary failed its replica's promotion keeps waiting for a "+
+			"pod of the shard that is Pending or not Ready.")
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -267,6 +275,9 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Recorder:      mgr.GetEventRecorder("valkeycluster-controller"),
 		ValkeyClients: valkeyClients,
+
+		OrphanTakeoverGrace:   orphanTakeoverGrace,
+		OrphanTakeoverMaxWait: orphanTakeoverMaxWait,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "ValkeyCluster")
 		os.Exit(1)

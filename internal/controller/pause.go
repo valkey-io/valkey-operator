@@ -51,6 +51,11 @@ func (r *ValkeyClusterReconciler) syncNodePause(ctx context.Context, cluster *va
 	}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
+		// The label alone can also sit on a standalone node, whose own pause
+		// annotation is not this cluster's to set or clear.
+		if !metav1.IsControlledBy(node, cluster) {
+			continue
+		}
 		_, has := node.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation]
 		if paused == reconciliationPaused(node) && (paused || !has) {
 			continue
@@ -61,8 +66,8 @@ func (r *ValkeyClusterReconciler) syncNodePause(ctx context.Context, cluster *va
 		} else {
 			delete(node.Annotations, valkeyiov1alpha1.AnnotationPauseReconciliation)
 		}
-		if err := r.Patch(ctx, node, patch); err != nil {
-			return client.IgnoreNotFound(err)
+		if err := r.Patch(ctx, node, patch); client.IgnoreNotFound(err) != nil {
+			return err
 		}
 	}
 	return nil

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -55,13 +56,23 @@ var _ = Describe("Pause reconciliation", func() {
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 		nodeKey := types.NamespacedName{Name: "paused-cluster-0-0", Namespace: "default"}
-		Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+		owned := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: nodeKey.Name, Namespace: nodeKey.Namespace,
+				Labels: map[string]string{LabelCluster: key.Name}},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+		}
+		Expect(controllerutil.SetControllerReference(cluster, owned, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, owned)).To(Succeed())
+		By("adding a standalone node that carries the cluster label but no owner reference")
+		strayKey := types.NamespacedName{Name: "paused-cluster-stray", Namespace: "default"}
+		Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: strayKey.Name, Namespace: strayKey.Namespace,
 				Labels: map[string]string{LabelCluster: key.Name}},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		})).To(Succeed())
 		DeferCleanup(func() {
 			deleteNode(nodeKey)
+			deleteNode(strayKey)
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}))).To(Succeed())
 		})
@@ -93,11 +104,14 @@ var _ = Describe("Pause reconciliation", func() {
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, nodeKey, node)).To(Succeed())
 		Expect(node.Annotations).To(HaveKeyWithValue(valkeyiov1alpha1.AnnotationPauseReconciliation, "true"))
+		stray := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, strayKey, stray)).To(Succeed())
+		Expect(stray.Annotations).NotTo(HaveKey(valkeyiov1alpha1.AnnotationPauseReconciliation))
 
 		By("checking nothing else was created")
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodes, client.InNamespace("default"), client.MatchingLabels{LabelCluster: key.Name})).To(Succeed())
-		Expect(nodes.Items).To(HaveLen(1))
+		Expect(nodes.Items).To(HaveLen(2))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: headlessServiceName(key.Name), Namespace: key.Namespace}, &corev1.Service{}))).To(BeTrue())
 

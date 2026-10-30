@@ -186,6 +186,9 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 			}
 		}
 	}
+	// Adopt first. A scraped empty primary is in its replica's shard after
+	// that, so holding unscraped ranges does not put its slots back.
+	state.adoptDrainedPrimaries()
 	state.noteUnscrapedSlotOwnership()
 	return &state
 }
@@ -382,6 +385,32 @@ func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
 func (s *ClusterState) UnscrapedSlotOwnerHosts() []string {
 	_, hosts := s.unscrapedSlotOwners()
 	return hosts
+}
+
+// adoptDrainedPrimaries moves a slot-less pending primary into the shard of a
+// replica that names it as its primary, when that shard has no primary of its
+// own. A primary drained to zero slots keeps its replica and stays a primary
+// (cluster-allow-replica-migration no): it leads an empty shard, it is not a
+// node waiting to join. A scale-in reverted right after its drain leaves one
+// behind. Any other slot-less primary, a scale-out leader before its replicas
+// attach or a stray beside a live primary, stays pending.
+func (s *ClusterState) adoptDrainedPrimaries() {
+	pending := s.PendingNodes[:0]
+	for _, node := range s.PendingNodes {
+		idx := slices.IndexFunc(s.Shards, func(shard *ShardState) bool {
+			return shard.PrimaryId == "" && slices.ContainsFunc(shard.Nodes, func(n *NodeState) bool {
+				return n.PrimaryIdFromSelf() == node.Id
+			})
+		})
+		if idx < 0 {
+			pending = append(pending, node)
+			continue
+		}
+		shard := s.Shards[idx]
+		shard.Nodes = append(shard.Nodes, node)
+		shard.PrimaryId = node.Id
+	}
+	s.PendingNodes = pending
 }
 
 // GetUnassignedSlots returns all unassigned slots

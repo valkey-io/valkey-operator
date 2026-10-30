@@ -1554,8 +1554,9 @@ func slotsContain(ranges []SlotsRange, slot int) bool {
 	return false
 }
 
-// A primary that answered and owns nothing is drained. A replica whose table
-// is behind must not put those ranges back.
+// A primary that answered and owns nothing is drained. It joins the shard of
+// the replica that names it, and a replica whose table is behind must not put
+// those ranges back.
 func TestGetClusterStateTrustsAScrapedPrimaryWithNoSlots(t *testing.T) {
 	primaryNodes := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n" +
 		"def 10.0.0.2:6379@16379 slave abc 0 0 1 connected\n"
@@ -1577,13 +1578,16 @@ func TestGetClusterStateTrustsAScrapedPrimaryWithNoSlots(t *testing.T) {
 		"10.0.0.2:6379": replica,
 	}))
 
-	if len(state.PendingNodes) != 1 || state.PendingNodes[0].Id != "abc" {
-		t.Fatalf("expected the slotless primary to be pending, got %+v", state.PendingNodes)
+	if len(state.PendingNodes) != 0 {
+		t.Fatalf("drained primary should join the replica's shard, still pending: %+v", state.PendingNodes)
 	}
 	if len(state.Shards) != 1 {
 		t.Fatalf("expected the replica shard, got %d shards", len(state.Shards))
 	}
 	shard := state.Shards[0]
+	if shard.GetPrimaryNode() == nil || shard.GetPrimaryNode().Id != "abc" {
+		t.Fatalf("drained primary was not adopted, primary id %q", shard.PrimaryId)
+	}
 	if slotCount(shard.Slots) != 0 {
 		t.Fatalf("stale replica view restored slots: %v", shard.Slots)
 	}

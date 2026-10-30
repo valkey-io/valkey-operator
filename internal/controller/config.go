@@ -43,6 +43,7 @@ const (
 
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
+	initScriptKey      = "init.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -74,7 +75,7 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
 }
 
-//go:embed scripts/*
+//go:embed scripts/*.sh
 var scripts embed.FS
 var scriptsHash string
 
@@ -319,6 +320,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded init.sh: %w", err)
+	}
+
 	// Get the new server config
 	newServerConfig := buildServerConfig(cluster)
 
@@ -353,6 +359,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		serverConfigMap.Data = map[string]string{
 			readinessScriptKey: string(readiness),
 			livenessScriptKey:  string(liveness),
+			initScriptKey:      string(initScript),
 			configFileKey:      newServerConfig,
 		}
 
@@ -379,9 +386,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, and liveness scripts")
+		log.V(1).Info("updated readiness, liveness and init scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
+		serverConfigMap.Data[initScriptKey] = string(initScript)
 	}
 
 	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
@@ -434,6 +442,11 @@ func init() {
 		panic("failure reading embedded liveness-check.sh")
 	}
 
-	// Calculate hash of both files
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(readiness, liveness...)))
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		panic("failure reading embedded init.sh")
+	}
+
+	// Calculate hash of all scripts
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), initScript...)))
 }

@@ -1644,6 +1644,10 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: container name 'server-init' is reserved for the operator-managed
+                    init container
+                  rule: '!self.exists(c, c.name == ''server-init'')'
               exporter:
                 default:
                   enabled: true

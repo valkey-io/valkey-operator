@@ -101,6 +101,10 @@ func (r *ValkeyClusterReconciler) applyConfigurationWarnings(ctx context.Context
 // It does not change Ready. An event is emitted only when the message changes,
 // so a node that stays dropped does not raise a new event on every reconcile.
 func (r *ValkeyClusterReconciler) applyIncompleteScrape(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) {
+	if state == nil {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)
+		return
+	}
 	kind, message := state.ScrapeHeldSummary()
 	if kind == "" {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)

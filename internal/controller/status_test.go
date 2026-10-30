@@ -185,4 +185,9 @@ func TestApplyIncompleteScrape(t *testing.T) {
 
 	r.applyIncompleteScrape(ctx, cluster, &valkey.ClusterState{})
 	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).To(BeNil())
+
+	r.applyIncompleteScrape(ctx, cluster, state)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).NotTo(BeNil())
+	r.applyIncompleteScrape(ctx, cluster, nil)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).To(BeNil())
 }

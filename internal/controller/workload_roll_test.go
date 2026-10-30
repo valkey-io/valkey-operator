@@ -18,6 +18,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -158,7 +159,10 @@ func TestComputeWorkloadRevisionIgnoresScripts(t *testing.T) {
 	for _, e := range entries {
 		body, err := scripts.ReadFile("scripts/" + e.Name())
 		require.NoError(t, err)
-		assert.NotContains(t, string(data), string(body), "%s contents must stay out of the pod template", e.Name())
+		// Search for the body as json.Marshal escapes it, newlines included.
+		encoded, err := json.Marshal(string(body))
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), strings.Trim(string(encoded), `"`), "%s contents must stay out of the pod template", e.Name())
 	}
 }
 

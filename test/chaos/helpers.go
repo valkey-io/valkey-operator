@@ -1,0 +1,1132 @@
+//go:build chaos
+// +build chaos
+
+/*
+Copyright 2026 Valkey Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package chaos
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"math/rand"
+	"os/exec"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/valkey-io/valkey-operator/test/utils"
+)
+
+// DeletePod deletes a pod by name in the given namespace. A pod that is already
+// gone counts as deleted.
+func deletePodByName(name, namespace string) error {
+	cmd := exec.Command("kubectl", "delete", "pod", name, "-n", namespace, "--grace-period=0", "--force",
+		"--ignore-not-found")
+	_, err := utils.Run(cmd)
+	return err
+}
+
+// deletePodsGracefully deletes the pods with their termination grace period, so
+// the servers get SIGTERM, and waits until the pods are gone.
+func deletePodsGracefully(names []string, namespace string) error {
+	args := append([]string{"delete", "pod", "-n", namespace, "--ignore-not-found"}, names...)
+	_, err := utils.Run(exec.Command("kubectl", args...))
+	return err
+}
+
+// errEvictionBlocked means a PodDisruptionBudget does not allow the eviction yet.
+var errEvictionBlocked = errors.New("eviction blocked by a PodDisruptionBudget")
+
+// evictPod creates an Eviction for the pod, which deletes it with its grace
+// period unless a PodDisruptionBudget refuses it (HTTP 429). A pod that is
+// already gone counts as evicted.
+func evictPod(name, namespace string) error {
+	body := fmt.Sprintf(`{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":%q,"namespace":%q}}`,
+		name, namespace)
+	cmd := exec.Command("kubectl", "create", "--raw",
+		fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/eviction", namespace, name), "-f", "-")
+	cmd.Stdin = strings.NewReader(body)
+	_, err := utils.Run(cmd)
+	switch {
+	case err == nil:
+		return nil
+	case strings.Contains(err.Error(), "TooManyRequests"):
+		return errEvictionBlocked
+	case strings.Contains(err.Error(), "NotFound"):
+		return nil
+	}
+	return err
+}
+
+// getPodUID returns the UID of the named pod, or "" when it does not exist.
+func getPodUID(name, namespace string) (string, error) {
+	return utils.Run(exec.Command("kubectl", "get", "pod", name, "-n", namespace,
+		"--ignore-not-found", "-o", "jsonpath={.metadata.uid}"))
+}
+
+// controllerRestarts returns the restart count of the manager container of
+// each operator pod, by pod name.
+func controllerRestarts() (map[string]int, error) {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"-l", "control-plane=controller-manager", "-o", "jsonpath={range .items[*]}{.metadata.name}{\" \"}"+
+			`{.status.containerStatuses[?(@.name=="manager")].restartCount}{"\n"}{end}`))
+	if err != nil {
+		return nil, err
+	}
+	restarts := map[string]int{}
+	for _, line := range utils.GetNonEmptyLines(out) {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue // the container has no status yet
+		}
+		n, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("parsing restart count %q: %w", line, err)
+		}
+		restarts[fields[0]] = n
+	}
+	return restarts, nil
+}
+
+// getPreviousManagerLogs returns the logs of the manager container's previous run.
+func getPreviousManagerLogs(pod string) (string, error) {
+	return utils.Run(exec.Command("kubectl", "logs", pod, "-n", namespace, "-c", "manager", "--previous"))
+}
+
+// crashServer terminates the valkey-server process abnormally via DEBUG
+// SEGFAULT, with no graceful failover handoff. RestartPolicy is Always, so the
+// container restarts in place: same pod, same IP, and the same cluster node ID
+// reloaded from nodes.conf. This models an abrupt crash such as a kernel OOM
+// kill or a grace-period expiry escalated to SIGKILL.
+//
+// DEBUG is a protected command, disabled by default. The chaos cluster sets
+// enable-debug-command: local in spec.config, which permits DEBUG from a local
+// connection; this kubectl exec runs valkey-cli against 127.0.0.1 in the pod,
+// so it qualifies. DEBUG SEGFAULT is preferred over SHUTDOWN NOSAVE because it
+// is an abnormal termination (SIGSEGV) rather than an orderly exit that fsyncs
+// the AOF.
+func crashServer(name, namespace string) error {
+	cmd := exec.Command("kubectl", "exec", name, "-n", namespace, "-c", "server", "--",
+		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli DEBUG SEGFAULT")
+	// The server crashes before replying, so valkey-cli exits non-zero with a
+	// connection error. That is expected; the crash is the goal.
+	_, _ = utils.Run(cmd)
+	return nil
+}
+
+// serverRestartTimeout covers the kubelet's restart backoff, which reaches
+// 300s for a container that keeps crashing.
+const serverRestartTimeout = 10 * time.Minute
+
+// serverRestartedSince returns nil once the pod's server container has
+// terminated at or after since and is ready again. Readiness alone is not
+// enough, as the container still reports ready until the kubelet sees the exit.
+func serverRestartedSince(pod, namespace string, since time.Time) error {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-n", namespace,
+		"-o", `jsonpath={.status.containerStatuses[?(@.name=="server")].lastState.terminated.finishedAt} {.status.containerStatuses[?(@.name=="server")].ready}`))
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return fmt.Errorf("server container of %s has not terminated yet (status %q)", pod, out)
+	}
+	finishedAt, err := time.Parse(time.RFC3339, fields[0])
+	if err != nil {
+		return fmt.Errorf("parsing termination time %q of %s: %w", fields[0], pod, err)
+	}
+	// Termination times have one-second resolution.
+	if finishedAt.Before(since.Truncate(time.Second)) {
+		return fmt.Errorf("server container of %s has not terminated since the crash", pod)
+	}
+	if fields[1] != "true" {
+		return fmt.Errorf("server container of %s is not ready", pod)
+	}
+	return nil
+}
+
+// getPodNamesByLabels returns matching pods, ready pods on Ready nodes first.
+// A just-stopped worker still reports Ready for ~40s, so exec can still fail.
+func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, error) {
+	selector := labelsToSelector(labels)
+	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"-l", selector,
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{" "}{.spec.nodeName}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil, err
+	}
+	ready := readyWorkerSet()
+	var best, readyPods, rest []string
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
+		if len(parts) < 1 || parts[0] == "" {
+			continue
+		}
+		name := parts[0]
+		podReady := len(parts) >= 2 && parts[1] == "true"
+		worker := ""
+		if len(parts) >= 3 {
+			worker = parts[2]
+		}
+		switch {
+		case podReady && ready[worker]:
+			best = append(best, name)
+		case podReady:
+			readyPods = append(readyPods, name)
+		default:
+			rest = append(rest, name)
+		}
+	}
+	names := append(append(best, readyPods...), rest...)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no pods found with labels %v", labels)
+	}
+	return names, nil
+}
+
+// readyWorkerSet returns the Kind containers (the workers and the control plane)
+// whose Kubernetes Node is Ready.
+// On query failure it returns nil, so callers treat no worker as known-ready and
+// fall back to their next preference.
+func readyWorkerSet() map[string]bool {
+	cmd := exec.Command("kubectl", "get", "nodes",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil
+	}
+	ready := map[string]bool{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == "True" {
+			ready[parts[0]] = true
+		}
+	}
+	return ready
+}
+
+// deleteWorkload deletes a StatefulSet or Deployment by name.
+func deleteWorkload(name, namespace, kind string) error {
+	cmd := exec.Command("kubectl", "delete", strings.ToLower(kind), name, "-n", namespace, "--wait=false")
+	_, err := utils.Run(cmd)
+	return err
+}
+
+// getClusterNodesOutput returns CLUSTER NODES from the first pod that answers.
+// The timeout bounds an exec into a pod on a partitioned node.
+func getClusterNodesOutput(clusterName, namespace string) (string, error) {
+	pods, err := getPodNamesByLabels(namespace, map[string]string{
+		"valkey.io/cluster": clusterName,
+	})
+	if err != nil {
+		return "", err
+	}
+	var lastErr error
+	for _, pod := range pods {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
+		out, err := utils.Run(cmd)
+		cancel()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
+// getPodsWide returns kubectl get pods -o wide output for the cluster's pods.
+func getPodsWide(clusterName, namespace string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace, "-l",
+		fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", "wide", "--no-headers")
+	return utils.Run(cmd)
+}
+
+// getShardPrimaryPod queries CLUSTER NODES to find the actual primary pod for a shard.
+func getShardPrimaryPod(clusterName, namespace string, shardIndex int) (string, error) {
+	output, err := getClusterNodesOutput(clusterName, namespace)
+	if err != nil {
+		return "", fmt.Errorf("failed to run CLUSTER NODES: %w", err)
+	}
+
+	primaries := parsePrimariesFromClusterNodes(output)
+	if shardIndex >= len(primaries) {
+		return "", fmt.Errorf("shard index %d out of range (found %d primaries)", shardIndex, len(primaries))
+	}
+
+	ip := primaries[shardIndex]
+	pod, err := getPodByIP(namespace, ip)
+	if err != nil {
+		// CLUSTER NODES can still list a node whose pod was just deleted, e.g.
+		// by an earlier compound step.
+		return "", fmt.Errorf("skip: shard %d primary %s has no pod: %w", shardIndex, ip, err)
+	}
+	return pod, nil
+}
+
+// getShardReplicaPods queries CLUSTER NODES to find the replica pods for a
+// shard, in CLUSTER NODES order. Replicas without a pod are left out.
+func getShardReplicaPods(clusterName, namespace string, shardIndex int) ([]string, error) {
+	output, err := getClusterNodesOutput(clusterName, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run CLUSTER NODES: %w", err)
+	}
+
+	primaries := parsePrimariesFromClusterNodes(output)
+	if shardIndex >= len(primaries) {
+		return nil, fmt.Errorf("shard index %d out of range", shardIndex)
+	}
+
+	primaryIP := primaries[shardIndex]
+	replicaIPs, err := findReplicasOfPrimary(output, primaryIP)
+	if err != nil {
+		// An earlier compound step can delete or promote the only replica.
+		return nil, fmt.Errorf("skip: %w", err)
+	}
+
+	var pods []string
+	var lastErr error
+	for _, ip := range replicaIPs {
+		pod, err := getPodByIP(namespace, ip)
+		if err != nil {
+			// CLUSTER NODES can still list a node whose pod was just deleted,
+			// e.g. by an earlier compound step.
+			lastErr = err
+			continue
+		}
+		pods = append(pods, pod)
+	}
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("skip: shard %d replicas %v have no pod: %w", shardIndex, replicaIPs, lastErr)
+	}
+	return pods, nil
+}
+
+// getPodByIP finds a pod name by its IP address.
+func getPodByIP(namespace, ip string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"--field-selector", fmt.Sprintf("status.podIP=%s", ip),
+		"-o", "jsonpath={.items[*].metadata.name}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to find pod with IP %s: %w", ip, err)
+	}
+	names := strings.Fields(output)
+	if len(names) == 0 {
+		return "", fmt.Errorf("no pod found with IP %s", ip)
+	}
+	return names[0], nil
+}
+
+// getWorkloadForPod returns the owning workload name for a pod.
+func getWorkloadForPod(podName, namespace, workloadType string) (string, error) {
+	jsonpath := "{.metadata.ownerReferences[0].name}"
+	if strings.EqualFold(workloadType, "statefulset") {
+		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+			"-o", "jsonpath="+jsonpath)
+		output, err := utils.Run(cmd)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(output), nil
+	}
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+		"-o", "jsonpath="+jsonpath)
+	rsName, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	cmd = exec.Command("kubectl", "get", "replicaset", strings.TrimSpace(rsName), "-n", namespace,
+		"-o", "jsonpath="+jsonpath)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// verifyClusterHealth checks that all pods report cluster_state:ok, the
+// topology has no stale nodes, correct node count, and no shard merges, and
+// that all nodes agree on every node's address and every slot's owner.
+func verifyClusterHealth(clusterName, namespace string, shards, replicas int) error {
+	expectedNodes := shards * (1 + replicas)
+	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.status.podIP}{\"\\n\"}{end}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return err
+	}
+
+	var pods []string
+	podIPs := map[string]bool{}
+	for _, line := range utils.GetNonEmptyLines(output) {
+		name, ip, _ := strings.Cut(line, " ")
+		pods = append(pods, name)
+		podIPs[ip] = true
+	}
+	if len(pods) != expectedNodes {
+		return fmt.Errorf("expected %d pods, got %d", expectedNodes, len(pods))
+	}
+
+	views := map[string]string{}
+	for _, pod := range pods {
+		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER INFO")
+		info, err := utils.Run(cmd)
+		if err != nil {
+			return fmt.Errorf("CLUSTER INFO failed on %s: %w", pod, err)
+		}
+		if !strings.Contains(info, "cluster_state:ok") {
+			return fmt.Errorf("pod %s reports cluster_state not ok: %s", pod, info)
+		}
+
+		cmd = exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
+		nodes, err := utils.Run(cmd)
+		if err != nil {
+			return fmt.Errorf("CLUSTER NODES failed on %s: %w", pod, err)
+		}
+		if strings.HasPrefix(nodes, "ERR ") || strings.HasPrefix(nodes, "AUTH ") {
+			return fmt.Errorf("CLUSTER NODES returned an error on %s: %s", pod, nodes)
+		}
+		if err := verifyClusterNodesOutput(nodes, shards, replicas, pod); err != nil {
+			return err
+		}
+		views[pod] = nodes
+	}
+	return verifyClusterNodesAgree(views, podIPs)
+}
+
+// verifyClusterNodesAgree checks that the CLUSTER NODES outputs of all pods list
+// every node ID at the same address, that the address is a running pod's IP,
+// and that they agree on every slot's owner. A recreated pod with persistence
+// keeps its node ID but gets a new IP, which peers learn by gossip, so right
+// after recovery a node can still route clients to an address that is gone.
+func verifyClusterNodesAgree(views map[string]string, podIPs map[string]bool) error {
+	addrs := map[string]string{}    // node ID -> host
+	addrFrom := map[string]string{} // node ID -> pod whose view set addrs
+	var owners [16384]string
+	var ownersFrom string
+	for _, pod := range slices.Sorted(maps.Keys(views)) {
+		var viewOwners [16384]string
+		for _, line := range utils.GetNonEmptyLines(views[pod]) {
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			id := fields[0]
+			hostPort, _, _ := strings.Cut(fields[1], "@")
+			host := hostPort
+			if i := strings.LastIndex(hostPort, ":"); i >= 0 {
+				host = hostPort[:i]
+			}
+			if !podIPs[host] {
+				return fmt.Errorf("[%s] node %s is at %s, which is no running pod's IP", pod, id, host)
+			}
+			if prev, ok := addrs[id]; !ok {
+				addrs[id], addrFrom[id] = host, pod
+			} else if prev != host {
+				return fmt.Errorf("node %s is at %s according to %s but at %s according to %s",
+					id, prev, addrFrom[id], host, pod)
+			}
+			for _, r := range fields[8:] {
+				if strings.HasPrefix(r, "[") {
+					continue // a slot being imported or migrated
+				}
+				lo, hi, found := strings.Cut(r, "-")
+				if !found {
+					hi = lo
+				}
+				start, err1 := strconv.Atoi(lo)
+				end, err2 := strconv.Atoi(hi)
+				if err1 != nil || err2 != nil || start < 0 || end >= len(viewOwners) {
+					return fmt.Errorf("[%s] cannot parse slot range %q", pod, r)
+				}
+				for s := start; s <= end; s++ {
+					viewOwners[s] = id
+				}
+			}
+		}
+		if ownersFrom == "" {
+			owners, ownersFrom = viewOwners, pod
+			continue
+		}
+		for s := range owners {
+			if owners[s] != viewOwners[s] {
+				return fmt.Errorf("slot %d is owned by %q according to %s but by %q according to %s",
+					s, owners[s], ownersFrom, viewOwners[s], pod)
+			}
+		}
+	}
+	return nil
+}
+
+// verifyClusterNodesOutput checks a single pod's CLUSTER NODES output: no node
+// carries a fail or noaddr flag, the node count matches the expected topology,
+// and every primary has the expected number of replicas.
+func verifyClusterNodesOutput(output string, shards, replicas int, pod string) error {
+	expectedNodes := shards * (1 + replicas)
+
+	var healthy int
+	replicasOf := map[string]int{}
+	for line := range strings.SplitSeq(strings.TrimSpace(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			continue
+		}
+		flags := fields[2]
+		if strings.Contains(flags, "fail") || strings.Contains(flags, "noaddr") {
+			return fmt.Errorf("[%s] stale node in topology: %s (flags=%s)\nCLUSTER NODES:\n%s", pod, fields[1], flags, output)
+		}
+		healthy++
+		if strings.Contains(flags, "slave") {
+			primaryId := fields[3]
+			replicasOf[primaryId]++
+		}
+	}
+	if healthy != expectedNodes {
+		return fmt.Errorf("[%s] expected %d nodes in topology, got %d\nCLUSTER NODES:\n%s",
+			pod, expectedNodes, healthy, output)
+	}
+	for primaryId, count := range replicasOf {
+		if count != replicas {
+			return fmt.Errorf("[%s] primary %s has %d replicas (expected %d)\nCLUSTER NODES:\n%s",
+				pod, primaryId, count, replicas, output)
+		}
+	}
+	return nil
+}
+
+// verifyK8sResources verifies the correct number of pods, ValkeyNodes, and workloads exist.
+func verifyK8sResources(clusterName, namespace, workloadType string, shards, replicas int) error {
+	expectedTotal := shards * (1 + replicas)
+
+	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"--field-selector", "status.phase=Running",
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return err
+	}
+	pods := utils.GetNonEmptyLines(output)
+	if len(pods) != expectedTotal {
+		return fmt.Errorf("expected %d Running pods, got %d", expectedTotal, len(pods))
+	}
+
+	cmd = exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err = utils.Run(cmd)
+	if err != nil {
+		return err
+	}
+	nodes := utils.GetNonEmptyLines(output)
+	if len(nodes) != expectedTotal {
+		return fmt.Errorf("expected %d ValkeyNodes, got %d", expectedTotal, len(nodes))
+	}
+
+	kind := "statefulsets"
+	if strings.EqualFold(workloadType, "deployment") {
+		kind = "deployments"
+	}
+	cmd = exec.Command("kubectl", "get", kind, "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err = utils.Run(cmd)
+	if err != nil {
+		return err
+	}
+	workloads := utils.GetNonEmptyLines(output)
+	if len(workloads) != expectedTotal {
+		return fmt.Errorf("expected %d %s, got %d", expectedTotal, kind, len(workloads))
+	}
+
+	return nil
+}
+
+// flushAll runs FLUSHALL on every primary in the cluster.
+func flushAll(clusterName, namespace string) error {
+	output, err := getClusterNodesOutput(clusterName, namespace)
+	if err != nil {
+		return err
+	}
+	for _, ip := range parsePrimariesFromClusterNodes(output) {
+		pod, err := getPodByIP(namespace, ip)
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli FLUSHALL")
+		if _, err := utils.Run(cmd); err != nil {
+			return fmt.Errorf("FLUSHALL failed on %s: %w", pod, err)
+		}
+	}
+	return nil
+}
+
+// verifyTestData checks that the total key count across all primaries matches expected.
+func verifyTestData(clusterName, namespace string, seededKeys int) error {
+	totalKeys, perShard, err := getTotalKeyCount(clusterName, namespace)
+	if err != nil {
+		return fmt.Errorf("failed to get keyspace info: %w", err)
+	}
+	if totalKeys != seededKeys {
+		return fmt.Errorf(
+			"keyspace count mismatch: expected %d keys, INFO keyspace reports %d (per-shard: %v)",
+			seededKeys, totalKeys, perShard)
+	}
+	return nil
+}
+
+// getTotalKeyCount sums the key count from INFO keyspace across all primaries.
+func getTotalKeyCount(clusterName, namespace string) (int, map[string]int, error) {
+	output, err := getClusterNodesOutput(clusterName, namespace)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	primaryIPs := parsePrimariesFromClusterNodes(output)
+	total := 0
+	perShard := make(map[string]int, len(primaryIPs))
+	for _, ip := range primaryIPs {
+		pod, err := getPodByIP(namespace, ip)
+		if err != nil {
+			return 0, nil, err
+		}
+		cmd := exec.Command("kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli INFO keyspace")
+		info, err := utils.Run(cmd)
+		if err != nil {
+			return 0, nil, fmt.Errorf("INFO keyspace failed on %s: %w", pod, err)
+		}
+		keys := parseKeysFromInfoKeyspace(info)
+		perShard[pod] = keys
+		total += keys
+	}
+	return total, perShard, nil
+}
+
+// parseKeysFromInfoKeyspace parses INFO keyspace output and sums all db keys.
+// Format: db0:keys=123,expires=0,avg_ttl=0
+func parseKeysFromInfoKeyspace(info string) int {
+	total := 0
+	for line := range strings.SplitSeq(info, "\n") {
+		if !strings.HasPrefix(line, "db") {
+			continue
+		}
+		_, after, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		for field := range strings.SplitSeq(after, ",") {
+			if v, ok := strings.CutPrefix(field, "keys="); ok {
+				n, _ := strconv.Atoi(v)
+				total += n
+			}
+		}
+	}
+	return total
+}
+
+// parsePrimariesFromClusterNodes parses CLUSTER NODES output and returns primary IPs
+// sorted by their slot ranges (shard 0 = lowest slots, etc.)
+func parsePrimariesFromClusterNodes(output string) []string {
+	type primaryInfo struct {
+		ip        string
+		slotStart int
+	}
+	var primaries []primaryInfo
+
+	for line := range strings.SplitSeq(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 9 {
+			continue
+		}
+		if !strings.Contains(fields[2], "master") {
+			continue
+		}
+		ip, _, _ := strings.Cut(fields[1], ":")
+		slotStart, _ := strconv.Atoi(strings.SplitN(fields[8], "-", 2)[0])
+		primaries = append(primaries, primaryInfo{ip: ip, slotStart: slotStart})
+	}
+
+	sort.Slice(primaries, func(i, j int) bool {
+		return primaries[i].slotStart < primaries[j].slotStart
+	})
+
+	result := make([]string, len(primaries))
+	for i, p := range primaries {
+		result[i] = p.ip
+	}
+	return result
+}
+
+// findReplicasOfPrimary returns the IPs of the replicas of the primary at the
+// given IP, in CLUSTER NODES order.
+func findReplicasOfPrimary(clusterNodesOutput, primaryIP string) ([]string, error) {
+	var primaryNodeID string
+	for line := range strings.SplitSeq(clusterNodesOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		ip, _, _ := strings.Cut(fields[1], ":")
+		if ip == primaryIP && strings.Contains(fields[2], "master") {
+			primaryNodeID = fields[0]
+			break
+		}
+	}
+	if primaryNodeID == "" {
+		return nil, fmt.Errorf("could not find primary node ID for IP %s", primaryIP)
+	}
+
+	var replicas []string
+	for line := range strings.SplitSeq(clusterNodesOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		if !strings.Contains(fields[2], "slave") {
+			continue
+		}
+		if fields[3] == primaryNodeID {
+			ip, _, _ := strings.Cut(fields[1], ":")
+			replicas = append(replicas, ip)
+		}
+	}
+	if len(replicas) == 0 {
+		return nil, fmt.Errorf("no replica found for primary %s (nodeID=%s)", primaryIP, primaryNodeID)
+	}
+	return replicas, nil
+}
+
+// labelsToSelector renders a label map as a kubectl -l selector.
+func labelsToSelector(labels map[string]string) string {
+	parts := make([]string, 0, len(labels))
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	return strings.Join(parts, ",")
+}
+
+// getPodWorkerName returns the Kind worker a pod is scheduled on (its spec.nodeName).
+func getPodWorkerName(podName, namespace string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+		"-o", "jsonpath={.spec.nodeName}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// partitionRules are the iptables rules partitionWorkerNode adds and healWorkerNode removes.
+var partitionRules = [][]string{
+	{"INPUT", "-j", "DROP"},
+	{"OUTPUT", "-j", "DROP"},
+	{"FORWARD", "-j", "DROP"},
+}
+
+// partitionWorkerNode adds iptables DROP rules to isolate a worker node from the
+// cluster network. In Kind, worker nodes are docker containers. docker exec still
+// works as it uses the Docker daemon socket, not the container's network. The
+// rules are inserted at the top of each chain, ahead of the CNI's ACCEPT rules.
+func partitionWorkerNode(worker string) error {
+	for _, rule := range partitionRules {
+		args := append([]string{"exec", worker, "iptables", "-I"}, rule...)
+		cmd := exec.Command("docker", args...)
+		if _, err := utils.Run(cmd); err != nil {
+			return fmt.Errorf("failed to partition worker %s: %w", worker, err)
+		}
+	}
+	return nil
+}
+
+// healWorkerNode removes the DROP rules added by partitionWorkerNode to restore
+// network connectivity. Only those rules are deleted, leaving any other rules on
+// the worker node (such as the CNI's) untouched. Rules that are not present are
+// skipped, so this is safe to call on a worker that was never partitioned. Removal
+// continues past failures so one error cannot leave the node partitioned.
+func healWorkerNode(worker string) error {
+	var firstErr error
+	for _, rule := range partitionRules {
+		// iptables -C exits non-zero when the rule is absent, so only delete
+		// rules we actually added.
+		check := exec.Command("docker", append([]string{"exec", worker, "iptables", "-C"}, rule...)...)
+		if _, err := utils.Run(check); err != nil {
+			continue
+		}
+		args := append([]string{"exec", worker, "iptables", "-D"}, rule...)
+		cmd := exec.Command("docker", args...)
+		if _, err := utils.Run(cmd); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("failed to heal worker %s: %w", worker, err)
+		}
+	}
+	return firstErr
+}
+
+// unpauseWorkerNode resumes a paused worker node. Workers that are not paused are
+// skipped, so this is safe to call on a worker that was never paused.
+func unpauseWorkerNode(worker string) error {
+	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Paused}}", worker))
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker %s: %w", worker, err)
+	}
+	if strings.TrimSpace(out) != "true" {
+		return nil
+	}
+	// A frozen worker would carry over to later runs, so retry a failed unpause
+	// and confirm the result.
+	for attempt := 1; ; attempt++ {
+		_, unpauseErr := utils.Run(exec.Command("docker", "unpause", worker))
+		out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Paused}}", worker))
+		if err == nil && strings.TrimSpace(out) == "false" {
+			return nil
+		}
+		if attempt == 3 {
+			return fmt.Errorf("worker %s is still paused after %d unpause attempts: %v", worker, attempt, unpauseErr)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// startWorkerContainer starts a stopped worker node. Already-running workers are
+// skipped, so it is safe on a worker that was never stopped.
+func startWorkerContainer(worker string) error {
+	out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Running}}", worker))
+	if err != nil {
+		return fmt.Errorf("failed to inspect worker %s: %w", worker, err)
+	}
+	if strings.TrimSpace(out) == "true" {
+		return nil
+	}
+	// Retry and confirm: a stopped worker would carry over to later runs.
+	for attempt := 1; ; attempt++ {
+		_, startErr := utils.Run(exec.Command("docker", "start", worker))
+		out, err := utils.Run(exec.Command("docker", "inspect", "-f", "{{.State.Running}}", worker))
+		if err == nil && strings.TrimSpace(out) == "true" {
+			return nil
+		}
+		if attempt == 3 {
+			return fmt.Errorf("worker %s is still stopped after %d start attempts: %v", worker, attempt, startErr)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// pauseContainer pauses the valkey container in a pod using ctr on the Kind worker.
+func pauseContainer(podName, namespace string) error {
+	containerID, err := getContainerID(podName, namespace)
+	if err != nil {
+		return err
+	}
+	worker, err := getPodWorkerName(podName, namespace)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("docker", "exec", worker, "ctr", "-n", "k8s.io", "task", "pause", containerID)
+	_, err = utils.Run(cmd)
+	return err
+}
+
+// unpauseContainer unpauses a previously paused container.
+func unpauseContainer(podName, namespace string) error {
+	containerID, err := getContainerID(podName, namespace)
+	if err != nil {
+		return err
+	}
+	worker, err := getPodWorkerName(podName, namespace)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("docker", "exec", worker, "ctr", "-n", "k8s.io", "task", "resume", containerID)
+	_, err = utils.Run(cmd)
+	return err
+}
+
+// unpauseContainers unpauses the server container in every given pod, continuing
+// past failures so a single error cannot leave a container paused. Returns the
+// first error.
+func unpauseContainers(pods []string, namespace string) error {
+	var firstErr error
+	for _, pod := range pods {
+		fmt.Printf("  Unpausing container in pod: %s\n", pod)
+		if err := unpauseContainer(pod, namespace); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// getContainerID returns the container ID for the server container in a pod.
+// containerID format: containerd://abc123 or docker://abc123
+func getContainerID(podName, namespace string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+		"-o", "jsonpath={.status.containerStatuses[?(@.name=='server')].containerID}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(output)
+	if idx := strings.Index(id, "://"); idx >= 0 {
+		id = id[idx+3:]
+	}
+	return id, nil
+}
+
+// getWorkerNodes returns the names of all worker nodes in the cluster.
+func getWorkerNodes() []string {
+	cmd := exec.Command("kubectl", "get", "nodes",
+		"--selector=!node-role.kubernetes.io/control-plane",
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return nil
+	}
+	return utils.GetNonEmptyLines(output)
+}
+
+// throttleWorkerNodes applies a CPU limit to the given worker nodes.
+func throttleWorkerNodes(workers []string, cpus float64) []string {
+	var throttled []string
+	for _, worker := range workers {
+		cmd := exec.Command("docker", "update", "--cpus", fmt.Sprintf("%.2f", cpus), worker)
+		if _, err := utils.Run(cmd); err != nil {
+			continue
+		}
+		throttled = append(throttled, worker)
+	}
+	return throttled
+}
+
+var hostCPUs string
+
+// getHostCPUs returns the Docker host's CPU count, caching it after the first
+// lookup. Used to restore a throttled worker node to its unthrottled limit.
+func getHostCPUs() string {
+	if hostCPUs == "" {
+		cmd := exec.Command("docker", "info", "--format", "{{.NCPU}}")
+		output, err := utils.Run(cmd)
+		if err == nil {
+			hostCPUs = strings.TrimSpace(output)
+		}
+	}
+	return hostCPUs
+}
+
+// unthrottleWorkerNodes removes CPU limits from the given worker nodes.
+// docker update --cpus 0 is a no-op; we must set cpus to the host max.
+func unthrottleWorkerNodes(workers []string) {
+	cpus := getHostCPUs()
+	for _, worker := range workers {
+		cmd := exec.Command("docker", "update", "--cpus", cpus, worker)
+		_, _ = utils.Run(cmd)
+	}
+}
+
+// throttleRandomWorkerNodes picks a random subset of the given worker nodes and
+// applies a random CPU limit per worker node.
+func throttleRandomWorkerNodes(rnd *rand.Rand, workers []string, cpuMin, cpuMax float64) []string {
+	if len(workers) == 0 {
+		return nil
+	}
+	count := 1 + rnd.Intn(len(workers))
+	perm := rnd.Perm(len(workers))
+	var throttled []string
+	for i := 0; i < count; i++ {
+		cpus := cpuMin + rnd.Float64()*(cpuMax-cpuMin)
+		if result := throttleWorkerNodes([]string{workers[perm[i]]}, cpus); len(result) > 0 {
+			throttled = append(throttled, result...)
+		}
+	}
+	return throttled
+}
+
+const (
+	// clientImage is the chaos client image built and loaded in BeforeSuite.
+	clientImage         = "chaos-client:v0.0.1"
+	backgroundClientPod = "chaos-background-client"
+)
+
+// startBackgroundClient deploys a pod running a custom Go client that seeds
+// all keys and then continuously overwrites them. Waits for seeding to complete.
+// Returns the number of keys seeded.
+func startBackgroundClient(clusterName, namespace string, numKeys, dataSize, rps int) (int, error) {
+	if numKeys < 1 {
+		return 0, fmt.Errorf("numKeys must be >= 1, got %d", numKeys)
+	}
+	stopBackgroundClient(namespace)
+
+	svcHost := fmt.Sprintf("valkey-%s.%s.svc.cluster.local:6379", clusterName, namespace)
+	// Never restart: the client exits after seeding when rps is 0, and a seeding
+	// failure is meant to be terminal. Restarting would hide the failure in a
+	// previous container's log and re-seed behind the suite's back.
+	cmd := exec.Command("kubectl", "run", backgroundClientPod,
+		"-n", namespace,
+		"--image="+clientImage,
+		"--restart=Never",
+		"--image-pull-policy=Never",
+		"--env=VALKEY_ADDR="+svcHost,
+		"--env=NUM_KEYS="+strconv.Itoa(numKeys),
+		"--env=DATA_SIZE="+strconv.Itoa(dataSize),
+		"--env=RPS="+strconv.Itoa(rps),
+	)
+	// Run on the operator's worker, which worker faults already skip, so the writer
+	// costs no extra fault coverage.
+	if worker := getControllerWorkerName(); worker != "" {
+		cmd.Args = append(cmd.Args, fmt.Sprintf(`--overrides={"apiVersion":"v1","spec":{"nodeName":%q}}`, worker))
+	}
+	if _, err := utils.Run(cmd); err != nil {
+		return 0, err
+	}
+
+	// Fail fast if the client gets stuck rather than waiting out the suite timeout.
+	// Seeding is one unthrottled round-trip per key, measured well above 10k
+	// keys/sec on Kind, so 1s per 1000 keys leaves room for a throttled worker.
+	timeout := 60*time.Second + time.Duration(numKeys/1000)*time.Second
+	deadline := time.Now().Add(timeout)
+	var seeded int
+	for time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+		cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace)
+		output, err := utils.Run(cmd)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(output, "\n") {
+			if idx := strings.Index(line, "SEEDED "); idx >= 0 {
+				if n, err := fmt.Sscanf(line[idx:], "SEEDED %d", &seeded); n == 1 && err == nil {
+					return seeded, nil
+				}
+			}
+			// The client seeds every key or exits, so report its failure here
+			// rather than waiting for the deadline.
+			if idx := strings.Index(line, "SEED FAILED"); idx >= 0 {
+				return 0, fmt.Errorf("background client failed to seed: %s", line[idx:])
+			}
+		}
+	}
+	cmd = exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=50")
+	if output, err := utils.Run(cmd); err == nil {
+		fmt.Printf("  Background client logs at timeout:\n%s\n", output)
+	}
+	return 0, fmt.Errorf("background client did not finish seeding within %s", timeout)
+}
+
+// stopBackgroundClient prints stats and deletes the background client pod.
+func stopBackgroundClient(namespace string) {
+	cmd := exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=20")
+	if output, err := utils.Run(cmd); err == nil && output != "" {
+		fmt.Printf("  Background client output:\n%s\n", output)
+	}
+	cmd = exec.Command("kubectl", "delete", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "--grace-period=0", "--force")
+	_, _ = utils.Run(cmd)
+}
+
+// getBackgroundClientWorkerName returns the worker hosting the background writer,
+// or "" when it does not exist.
+func getBackgroundClientWorkerName(namespace string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "-o", "jsonpath={.spec.nodeName}"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// backgroundClientWrites returns the client pod's phase and its latest cumulative
+// writes count (last "writes=N" log line). found is false when no stats line has
+// been logged yet (e.g. just after seeding), so the caller can retry rather than
+// read that as zero writes. A pod that is gone returns "" and an error.
+func backgroundClientWrites(namespace string) (phase string, writes int64, found bool, err error) {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pod", backgroundClientPod,
+		"-n", namespace, "--ignore-not-found=true", "-o", "jsonpath={.status.phase}"))
+	if err != nil {
+		return "", 0, false, err
+	}
+	phase = strings.TrimSpace(out)
+	if phase == "" {
+		return "", 0, false, fmt.Errorf("background client pod %s not found", backgroundClientPod)
+	}
+	logs, err := utils.Run(exec.Command("kubectl", "logs", backgroundClientPod, "-n", namespace, "--tail=5"))
+	if err != nil {
+		return phase, 0, false, err
+	}
+	// Newest "writes=N" line wins; a tail without one leaves found false.
+	for _, line := range strings.Split(logs, "\n") {
+		if idx := strings.Index(line, "writes="); idx >= 0 {
+			if n, _ := fmt.Sscanf(line[idx:], "writes=%d", &writes); n == 1 {
+				found = true
+			}
+		}
+	}
+	return phase, writes, found, nil
+}
+
+// verifyClusterConverged checks that all ValkeyNodes have converged: no node is
+// still waiting for a pod-template roll, and no node is stuck with ACLApplied=False.
+func verifyClusterConverged(clusterName, namespace string) error {
+	// No node should be left waiting for a pod-template roll to be authorized.
+	// WorkloadRollPending=True is expected staging mid-roll, but once the cluster
+	// has recovered every node must have completed or never needed its roll.
+	cmd := exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="WorkloadRollPending")]}{.status}{end}{"\n"}{end}`)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to get WorkloadRollPending conditions: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		if parts[1] == "True" {
+			return fmt.Errorf("node %s still has WorkloadRollPending=True", parts[0])
+		}
+	}
+
+	// No node should have ACLApplied=False (if the condition exists it must be True)
+	cmd = exec.Command("kubectl", "get", "valkeynodes", "-n", namespace,
+		"-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="ACLApplied")]}{.status}{end}{"\n"}{end}`)
+	output, err = utils.Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to get ACLApplied conditions: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		if parts[1] == "False" {
+			return fmt.Errorf("node %s has ACLApplied=False", parts[0])
+		}
+	}
+
+	return nil
+}

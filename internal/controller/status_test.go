@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -152,4 +153,41 @@ func TestNodesWithFailedACL(t *testing.T) {
 
 	g.Expect(nodesWithFailedACL(nodes)).To(Equal([]string{"broken"}))
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
+}
+
+func TestApplyIncompleteScrape(t *testing.T) {
+	g := NewWithT(t)
+
+	ctx := context.Background()
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Generation = 3
+	recorder := events.NewFakeRecorder(10)
+	r := &ValkeyClusterReconciler{Recorder: recorder}
+
+	r.applyIncompleteScrape(ctx, cluster, &valkey.ClusterState{})
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).To(BeNil())
+
+	state := &valkey.ClusterState{}
+	state.NoteIncompleteForTesting("10.0.0.4", "abc", false)
+	r.applyIncompleteScrape(ctx, cluster, state)
+
+	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)
+	g.Expect(cond).NotTo(BeNil())
+	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeScrapeIncomplete))
+	g.Expect(cond.Message).To(Equal("incomplete scrape 10.0.0.4 (id abc, no slot table)"))
+	g.Expect(cond.ObservedGeneration).To(Equal(int64(3)))
+	g.Expect(<-recorder.Events).To(ContainSubstring("10.0.0.4"))
+
+	// The same gap on the next pass must not raise another event.
+	r.applyIncompleteScrape(ctx, cluster, state)
+	g.Expect(recorder.Events).To(BeEmpty())
+
+	r.applyIncompleteScrape(ctx, cluster, &valkey.ClusterState{})
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).To(BeNil())
+
+	r.applyIncompleteScrape(ctx, cluster, state)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).NotTo(BeNil())
+	r.applyIncompleteScrape(ctx, cluster, nil)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)).To(BeNil())
 }

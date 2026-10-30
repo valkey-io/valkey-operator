@@ -1541,7 +1541,7 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 			if slices.Contains(deadPrimaries, primaryId) || !state.IsNodeFailed(primaryId) {
 				continue // no viewer reports 'fail' (or 'fail?')
 			}
-			if state.FindNodeById(primaryId) != nil {
+			if state.NodeAnswered(primaryId) {
 				continue // the operator reaches it, so it is not dead
 			}
 			deadPrimaries = append(deadPrimaries, primaryId)
@@ -1580,8 +1580,8 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 				// (full restart with persistence — #275). Forgetting it
 				// would ban the live node from rejoining for a minute;
 				// healStaleAddressPeers re-MEETs it instead.
-				if state.FindNodeById(failing.Id) != nil {
-					log.V(1).Info("skipping forget; node is alive at a new address",
+				if state.NodeAnswered(failing.Id) {
+					log.V(1).Info("skipping forget; node answered this pass",
 						"staleAddress", failing.Host, "Id", failing.Id)
 					continue
 				}
@@ -1631,8 +1631,12 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Shards = int32(len(state.Shards))
 	}
 
-	// Apply conditions from the in-memory cluster object
+	// Apply conditions from the in-memory cluster object. A pass that scraped
+	// names any node it could not keep and any primary whose slots stay held.
+	// A pass that did not scrape clears IncompleteScrape: there is no scrape
+	// evidence to keep showing.
 	current.Status.Conditions = cluster.Status.Conditions
+	r.applyIncompleteScrape(ctx, current, state)
 
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
@@ -1863,6 +1867,13 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	if len(draining) == 0 {
 		return false, nil
 	}
+	// Peer tables still assign this shard's slots to a primary this pass did
+	// not scrape. PlanDrainMove has no source and would mark the cluster
+	// degraded, and deleting the shard would drop the remaining copy.
+	if state.PrimaryUnscrapedButServing(draining[0]) {
+		log.V(1).Info("draining shard has no scraped primary but peers still assign it slots; will retry", "shard", draining[0].Id)
+		return true, nil
+	}
 	if len(remaining) == 0 {
 		return false, fmt.Errorf("shard %s owns slots but %w", draining[0].Id, errNoDrainDestination)
 	}
@@ -1906,6 +1917,13 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted bool, kept []string, err error) {
 	log := logf.FromContext(ctx)
 	owners := slotOwningPrimaryAddresses(state)
+	// Ranges a peer still assigns to a primary this pass did not scrape are
+	// subtracted from GetUnassignedSlots, so the unaccounted check below does
+	// not see them.
+	unscrapedHosts := make(map[string]struct{})
+	for _, host := range state.UnscrapedSlotOwnerHosts() {
+		unscrapedHosts[host] = struct{}{}
+	}
 	// Slots no scraped primary owns may belong to a node we could not reach.
 	unaccounted := len(state.GetUnassignedSlots()) > 0
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -1928,6 +1946,11 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 		if excessShard {
 			if owners[node.Status.PodIP] {
 				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Excess ValkeyNode %s still owns slots; waiting for drain", node.Name)
+				kept = append(kept, node.Name)
+				continue
+			}
+			if _, serving := unscrapedHosts[node.Status.PodIP]; serving {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Excess ValkeyNode %s still owns slots according to a peer; waiting for drain", node.Name)
 				kept = append(kept, node.Name)
 				continue
 			}

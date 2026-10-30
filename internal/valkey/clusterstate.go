@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -105,6 +106,44 @@ type ShardState struct {
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
+
+	// unscrapedSlots are ranges a peer table still assigns to a primary this
+	// pass did not scrape, excluding ranges copied onto that primary's shard.
+	unscrapedSlots []SlotsRange
+
+	// targets are the addresses this pass set out to scrape: the current pod
+	// IPs. A peer-table primary at any other address is not a pod any more.
+	// Its ranges are not held for it unless a scraped replica still follows it.
+	targets map[string]struct{}
+
+	// answered is every id that returned CLUSTER MYID and was then dropped
+	// because a later command failed. The bool is true when that node's own
+	// CLUSTER NODES line lists owned slots. The node itself stays out of
+	// Shards: the scrape is not usable for topology.
+	answered map[string]bool
+
+	// incomplete are addresses this pass set out to scrape and did not keep.
+	// The order is the order of the address list passed to GetClusterState.
+	incomplete []IncompleteScrape
+}
+
+// IncompleteScrape is one address this pass did not keep in the topology.
+// Id is empty when CLUSTER MYID itself failed or the dial never completed.
+// OwnsSlots is true when that node's own CLUSTER NODES line listed owned
+// ranges before the scrape was dropped.
+type IncompleteScrape struct {
+	Address   string
+	Id        string
+	OwnsSlots bool
+}
+
+// HeldPrimary is an unscraped primary whose slots this pass still holds.
+// ReplicaFollows is true when a scraped node still names it as its primary,
+// which is the lost-volume case: the ranges stay unserved until a manual failover.
+type HeldPrimary struct {
+	Id             string
+	Host           string
+	ReplicaFollows bool
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -137,45 +176,254 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
+		targets:      make(map[string]struct{}, len(addresses)),
 	}
 
 	for _, address := range addresses {
+		state.targets[address] = struct{}{}
 		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, dial)
-		if node != nil {
-			// Check if node is pending to be added. A primary carrying only a
-			// migration marker is mid-reshard and already part of the slot map,
-			// so any slot assignment counts here, not just owned ranges.
-			myself := node.Myself()
-			if node.IsPrimary() && (myself == nil || !myself.HasSlotAssignment()) {
-				// Node not part of any shard yet.
-				state.PendingNodes = append(state.PendingNodes, node)
+		node, answered, ownsSlots := getNodeState(ctx, address, port, dial)
+		if node == nil {
+			// The address was a pod this pass set out to scrape. Remember it,
+			// and the id when MYID succeeded, so the status can name a node
+			// that stays dropped. A later-command failure also keeps the id
+			// for the takeover and forget guards. The node stays out of the
+			// topology either way.
+			state.noteIncomplete(address, answered, ownsSlots)
+			if answered != "" {
+				state.noteAnswered(answered, ownsSlots)
+			}
+			continue
+		}
+		// Check if node is pending to be added. A primary carrying only a
+		// migration marker is mid-reshard and already part of the slot map,
+		// so any slot assignment counts here, not just owned ranges.
+		myself := node.Myself()
+		if node.IsPrimary() && (myself == nil || !myself.HasSlotAssignment()) {
+			// Node not part of any shard yet.
+			state.PendingNodes = append(state.PendingNodes, node)
+			continue
+		}
+
+		// Find a ShardState with the same ShardId as this node.
+		var shard *ShardState
+		idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
+		if idx >= 0 {
+			shard = state.Shards[idx]
+		} else {
+			// Not know yet, adding it.
+			shard = &ShardState{
+				Id:    node.ShardId,
+				Nodes: make([]*NodeState, 0),
+			}
+			state.Shards = append(state.Shards, shard)
+		}
+		// Add node and update shard information.
+		shard.Nodes = append(shard.Nodes, node)
+		if node.IsPrimary() {
+			shard.Slots = node.GetSlots()
+			shard.PrimaryId = node.Id
+		}
+	}
+	// Adopt first. A scraped empty primary is in its replica's shard after
+	// that, so holding unscraped ranges does not put its slots back.
+	state.adoptDrainedPrimaries()
+	state.noteUnscrapedSlotOwnership()
+	return &state
+}
+
+// noteUnscrapedSlotOwnership keeps ranges that a scraped CLUSTER NODES table
+// still assigns to a primary this pass did not reach. The process can be up
+// and serving those slots. Every peer's ranges for that id are unioned: one
+// table can still show the old range while another shows slots it just
+// received. A replica of that primary copies the union onto its own shard so
+// scale-in can see the shard is not empty. Another shard's table only marks
+// the ranges assigned. The missing primary is not added as a NodeState.
+func (s *ClusterState) noteUnscrapedSlotOwnership() {
+	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
+	type held struct {
+		slots []SlotsRange
+		shard *ShardState
+	}
+	owners := make(map[string]*held)
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
 				continue
 			}
-
-			// Find a ShardState with the same ShardId as this node.
-			var shard *ShardState
-			idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == node.ShardId })
-			if idx >= 0 {
-				shard = state.Shards[idx]
-			} else {
-				// Not know yet, adding it.
-				shard = &ShardState{
-					Id:    node.ShardId,
-					Nodes: make([]*NodeState, 0),
-				}
-				state.Shards = append(state.Shards, shard)
+			h := owners[entry.Id]
+			if h == nil {
+				h = &held{}
+				owners[entry.Id] = h
 			}
-			// Add node and update shard information.
-			shard.Nodes = append(shard.Nodes, node)
-			if node.IsPrimary() {
-				shard.Slots = node.GetSlots()
-				shard.PrimaryId = node.Id
+			h.slots = unionSlots(h.slots, entry.Slots)
+			if node.PrimaryIdFromSelf() != entry.Id {
+				continue
+			}
+			if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
+				h.shard = shard
 			}
 		}
 	}
-	state.adoptDrainedPrimaries()
-	return &state
+	for _, h := range owners {
+		if h.shard != nil {
+			h.shard.Slots = unionSlots(h.shard.Slots, h.slots)
+			continue
+		}
+		s.unscrapedSlots = unionSlots(s.unscrapedSlots, h.slots)
+	}
+}
+
+// unionSlots returns a sorted, merged copy of both range lists. Overlapping
+// and adjacent ranges become one range.
+func unionSlots(a, b []SlotsRange) []SlotsRange {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make([]SlotsRange, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
+	merged := []SlotsRange{out[0]}
+	for _, r := range out[1:] {
+		last := &merged[len(merged)-1]
+		if r.Start <= last.End+1 {
+			if r.End > last.End {
+				last.End = r.End
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
+}
+
+func (s *ClusterState) scrapedIDs() map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, node := range s.AllNodes() {
+		if node.Id != "" {
+			ids[node.Id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func (s *ClusterState) shardByID(id string) *ShardState {
+	idx := slices.IndexFunc(s.Shards, func(shard *ShardState) bool { return shard.Id == id })
+	if idx < 0 {
+		return nil
+	}
+	return s.Shards[idx]
+}
+
+// entryOwnsUnscrapedSlots reports a primary this pass did not scrape whose
+// line still lists owned ranges. A migration marker is not an owned range.
+//
+// A scraped replica that still follows this primary keeps the ranges even
+// when the primary's address is gone or now answers under another id. Scale-in
+// treats a shard with no recorded slots as drained and deletes its nodes.
+// Persistence does not promote that replica, so releasing the ranges deletes
+// the remaining copy before a slot move.
+//
+// With no such replica, the ranges are held only while the entry's address is
+// still a pod this pass set out to scrape and no scraped node answered there
+// under another id. A primary that is merely slow or briefly unreachable keeps
+// its slots, whatever flags its peers put on it. A primary whose pod is gone,
+// or whose address now belongs to a pod with a new id, is not coming back: its
+// ranges return to the free set so the replacement can take them. Holding them
+// would strand the slots whenever fail? cannot become fail, which is every
+// cluster with replicas: 0 and two shards, where the one surviving primary
+// cannot form a failure majority.
+func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}, liveByAddress map[string]string) bool {
+	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 || entry.Host == "" {
+		return false
+	}
+	if _, found := scraped[entry.Id]; found {
+		return false
+	}
+	if s.HasReplicaOf(entry.Id) {
+		return true
+	}
+	if _, isPod := s.targets[entry.Host]; !isPod {
+		return false
+	}
+	if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+		return false
+	}
+	return true
+}
+
+// liveIDsByAddress maps each scraped node's address to the id it answered with.
+func (s *ClusterState) liveIDsByAddress() map[string]string {
+	live := make(map[string]string)
+	for _, node := range s.AllNodes() {
+		if node.Address != "" && node.Id != "" {
+			live[node.Address] = node.Id
+		}
+	}
+	return live
+}
+
+func slotCount(ranges []SlotsRange) int {
+	n := 0
+	for _, r := range ranges {
+		n += r.End - r.Start + 1
+	}
+	return n
+}
+
+// unscrapedSlotOwners returns ids and announced addresses of primaries this
+// pass did not scrape that a peer table still shows owning slots.
+func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
+	ids := make(map[string]struct{})
+	var hosts []string
+	seenHost := make(map[string]struct{})
+	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
+				continue
+			}
+			ids[entry.Id] = struct{}{}
+			if entry.Host == "" {
+				continue
+			}
+			if _, ok := seenHost[entry.Host]; ok {
+				continue
+			}
+			seenHost[entry.Host] = struct{}{}
+			hosts = append(hosts, entry.Host)
+		}
+	}
+	return ids, hosts
+}
+
+// PrimaryUnscrapedButServing reports that shard has no scraped primary while
+// some peer table still assigns slots to the primary its members replicate.
+// A primary that answered with an empty range is pending and is not included.
+func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
+	if shard == nil || shard.GetPrimaryNode() != nil {
+		return false
+	}
+	if slotCount(shard.Slots) > 0 {
+		return true
+	}
+	ids, _ := s.unscrapedSlotOwners()
+	for _, node := range shard.Nodes {
+		if _, ok := ids[node.PrimaryIdFromSelf()]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// UnscrapedSlotOwnerHosts returns addresses of primaries this pass did not
+// scrape whose peer-table lines still list owned slots.
+func (s *ClusterState) UnscrapedSlotOwnerHosts() []string {
+	_, hosts := s.unscrapedSlotOwners()
+	return hosts
 }
 
 // adoptDrainedPrimaries moves a slot-less pending primary into the shard of a
@@ -208,14 +456,18 @@ func (s *ClusterState) adoptDrainedPrimaries() {
 func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	remaining := []SlotsRange{{0, 16383}}
 	for _, shard := range s.Shards {
-		for _, slot := range shard.Slots {
-			var next []SlotsRange //nolint:prealloc
-			for _, base := range remaining {
-				parts := SubtractSlotsRange(base, slot)
-				next = append(next, parts...)
-			}
-			remaining = next
+		remaining = subtractSlotRanges(remaining, shard.Slots)
+	}
+	return subtractSlotRanges(remaining, s.unscrapedSlots)
+}
+
+func subtractSlotRanges(remaining, remove []SlotsRange) []SlotsRange {
+	for _, slot := range remove {
+		var next []SlotsRange //nolint:prealloc
+		for _, base := range remaining {
+			next = append(next, SubtractSlotsRange(base, slot)...)
 		}
+		remaining = next
 	}
 	return remaining
 }
@@ -284,6 +536,16 @@ func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 // its peers, and nothing else should.
 func (n *NodeState) SetClusterNodesForTesting(raw string) {
 	n.nodes = ParseClusterNodes(raw)
+}
+
+// SetTargetsForTesting records the addresses a hand-built state set out to
+// scrape. GetClusterState fills this from the pod IPs it dials. Tests in
+// other packages use this, and nothing else should.
+func (s *ClusterState) SetTargetsForTesting(addresses ...string) {
+	s.targets = make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		s.targets[address] = struct{}{}
+	}
 }
 
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
@@ -382,6 +644,13 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 	var livePrimaries int
 	for _, shard := range s.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
+			livePrimaries++
+		}
+	}
+	// A primary that answered, then lost a later command, is still up. It is
+	// not in Shards, so count it here or one CLUSTER INFO failure drops quorum.
+	for _, ownsSlots := range s.answered {
+		if ownsSlots {
 			livePrimaries++
 		}
 	}
@@ -487,6 +756,166 @@ func (s *ClusterState) AllNodes() []*NodeState {
 		nodes = append(nodes, shard.Nodes...)
 	}
 	return append(nodes, s.PendingNodes...)
+}
+
+// noteAnswered records an id whose CLUSTER MYID succeeded and whose scrape
+// was then dropped. ownsSlots comes from that node's own CLUSTER NODES line.
+func (s *ClusterState) noteAnswered(id string, ownsSlots bool) {
+	if s.answered == nil {
+		s.answered = make(map[string]bool)
+	}
+	if ownsSlots {
+		s.answered[id] = true
+		return
+	}
+	if _, seen := s.answered[id]; !seen {
+		s.answered[id] = false
+	}
+}
+
+// NodeAnswered reports whether id returned CLUSTER MYID this pass, including
+// a node dropped because a later command failed.
+func (s *ClusterState) NodeAnswered(id string) bool {
+	if s.FindNodeById(id) != nil {
+		return true
+	}
+	_, ok := s.answered[id]
+	return ok
+}
+
+// NoteAnsweredForTesting records a dropped scrape the way GetClusterState does.
+func (s *ClusterState) NoteAnsweredForTesting(id string, ownsSlots bool) {
+	s.noteAnswered(id, ownsSlots)
+}
+
+// NoteIncompleteForTesting records an address GetClusterState did not keep.
+func (s *ClusterState) NoteIncompleteForTesting(address, id string, ownsSlots bool) {
+	s.noteIncomplete(address, id, ownsSlots)
+}
+
+func (s *ClusterState) noteIncomplete(address, id string, ownsSlots bool) {
+	s.incomplete = append(s.incomplete, IncompleteScrape{
+		Address:   address,
+		Id:        id,
+		OwnsSlots: ownsSlots,
+	})
+}
+
+// IncompleteScrapes returns addresses this pass did not keep, in target order.
+func (s *ClusterState) IncompleteScrapes() []IncompleteScrape {
+	if s == nil || len(s.incomplete) == 0 {
+		return nil
+	}
+	out := make([]IncompleteScrape, len(s.incomplete))
+	copy(out, s.incomplete)
+	return out
+}
+
+// HeldPrimaries returns unscraped primaries whose slots this pass still holds,
+// sorted by id.
+func (s *ClusterState) HeldPrimaries() []HeldPrimary {
+	if s == nil {
+		return nil
+	}
+	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
+	byID := make(map[string]*HeldPrimary)
+	var order []string
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
+				continue
+			}
+			h := byID[entry.Id]
+			if h == nil {
+				h = &HeldPrimary{
+					Id:             entry.Id,
+					Host:           entry.Host,
+					ReplicaFollows: s.HasReplicaOf(entry.Id),
+				}
+				byID[entry.Id] = h
+				order = append(order, entry.Id)
+				continue
+			}
+			if h.Host == "" {
+				h.Host = entry.Host
+			}
+		}
+	}
+	sort.Strings(order)
+	out := make([]HeldPrimary, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out
+}
+
+// ScrapeHeldSummary describes nodes this pass could not scrape and primaries
+// whose slots stay held. kind is "slots-held" when a scraped replica still
+// follows a missing primary, "incomplete" for any other gap, and "" when
+// there is nothing to report. The message names each address and id.
+func (s *ClusterState) ScrapeHeldSummary() (kind, message string) {
+	if s == nil {
+		return "", ""
+	}
+	held := s.HeldPrimaries()
+	incomplete := s.IncompleteScrapes()
+	if len(held) == 0 && len(incomplete) == 0 {
+		return "", ""
+	}
+	var lost, plain []string
+	for _, h := range held {
+		name := h.Id
+		if h.Host != "" {
+			name += " at " + h.Host
+		}
+		if h.ReplicaFollows {
+			lost = append(lost, name)
+			continue
+		}
+		plain = append(plain, name)
+	}
+	var parts []string
+	if len(lost) > 0 {
+		follows := "it"
+		if len(lost) > 1 {
+			follows = "them"
+		}
+		parts = append(parts, "holding slots for "+joinNames(lost)+" while a replica still follows "+follows)
+	}
+	if len(plain) > 0 {
+		parts = append(parts, "holding slots for unreached primary "+joinNames(plain))
+	}
+	if len(incomplete) > 0 {
+		names := make([]string, 0, len(incomplete))
+		for _, inc := range incomplete {
+			switch {
+			case inc.Id == "":
+				names = append(names, inc.Address)
+			case inc.OwnsSlots:
+				names = append(names, inc.Address+" (id "+inc.Id+")")
+			default:
+				names = append(names, inc.Address+" (id "+inc.Id+", no slot table)")
+			}
+		}
+		// List order is not stable across reconciles. The same pods must
+		// produce the same message, or every pass emits a new warning.
+		slices.Sort(names)
+		parts = append(parts, "incomplete scrape "+joinNames(names))
+	}
+	kind = "incomplete"
+	if len(lost) > 0 {
+		kind = "slots-held"
+	}
+	return kind, strings.Join(parts, "; ")
+}
+
+func joinNames(names []string) string {
+	const maxNames = 4
+	if len(names) <= maxNames {
+		return strings.Join(names, ", ")
+	}
+	return strings.Join(names[:maxNames], ", ") + fmt.Sprintf(", and %d more", len(names)-maxNames)
 }
 
 // FindNodeById returns the reachable node with the given cluster node ID, or
@@ -595,18 +1024,35 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 	return nodes
 }
 
+// myselfOwnsSlots reports whether a CLUSTER NODES reply's myself line is a
+// primary with owned ranges. A Valkey error or a missing myself line does not.
+func myselfOwnsSlots(res vclient.ValkeyResult) bool {
+	raw, err := requiredScrapeString(res)
+	if err != nil {
+		return false
+	}
+	for _, entry := range ParseClusterNodes(strings.TrimPrefix(raw, "txt:")) {
+		if entry.IsMyself() && entry.IsPrimary() && len(entry.Slots) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
+// answered is the CLUSTER MYID when that command succeeded and the node was
+// then dropped. ownsSlots is that dropped node's own slot ownership.
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc) (node *NodeState, answered string, ownsSlots bool) {
 	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
 	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
 	client, err := dial(ctx, hostPort)
 	if err != nil {
 		log.Error(err, "failed to create Valkey client")
-		return nil
+		return nil, "", false
 	}
 
-	node := NodeState{Client: client,
+	node = &NodeState{Client: client,
 		Address: address,
 		Port:    port}
 
@@ -626,48 +1072,77 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	// command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
-		return nil
+		return nil, "", false
 	}
-
-	if len(results) == 5 {
-		id, err := results[0].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYID")
-		}
-		node.Id = id
-
-		shardid, err := results[1].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYSHARDID")
-		}
-		node.ShardId = shardid
-
-		info, err := results[2].ToString()
-		if err != nil {
-			log.Error(err, "command failed: INFO")
-		}
-		node.Info = infoStringToMap(info)
-
-		cinfo, err := results[3].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER INFO")
-		}
-		node.ClusterInfo = infoStringToMap(cinfo)
-
-		cnodes, err := results[4].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER NODES")
-		}
-		// Remove the encoding string included in a verbatim string.
-		node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
-	} else {
+	if len(results) != 5 {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
+		return nil, "", false
 	}
 
-	if myself := node.Myself(); myself != nil {
-		node.Flags = myself.Flags
+	// Identity and topology have to come back whole. An empty id or node table
+	// would put every such node in one shard. A Valkey error leaves the same
+	// gap, so drop the node for this pass. noteUnscrapedSlotOwnership still
+	// keeps slot ranges a peer table assigns to that id. The id itself is
+	// returned so the caller can remember that this process answered.
+	id, err := requiredScrapeString(results[0])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYID")
+		return nil, "", false
 	}
-	return &node
+	node.Id = id
+
+	shardid, err := requiredScrapeString(results[1])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYSHARDID")
+		return nil, id, myselfOwnsSlots(results[4])
+	}
+	node.ShardId = shardid
+
+	// INFO is different. A replica with no master_link_status counts as out
+	// of sync, and a primary's role comes from CLUSTER NODES, not from INFO.
+	// Keep the node and leave replication fields unknown.
+	info, err := results[2].ToString()
+	if err != nil {
+		log.Error(err, "command failed: INFO")
+	} else {
+		node.Info = infoStringToMap(info)
+	}
+
+	cinfo, err := requiredScrapeString(results[3])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER INFO")
+		return nil, id, myselfOwnsSlots(results[4])
+	}
+	node.ClusterInfo = infoStringToMap(cinfo)
+
+	cnodes, err := requiredScrapeString(results[4])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER NODES")
+		return nil, id, false
+	}
+	// Remove the encoding string included in a verbatim string.
+	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	myself := node.Myself()
+	if myself == nil {
+		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")
+		return nil, id, false
+	}
+	node.Flags = myself.Flags
+	return node, "", false
+}
+
+// requiredScrapeString returns the reply of one scrape command. A Valkey
+// error and an empty reply are both failures: either one leaves a field the
+// caller would otherwise treat as known.
+func requiredScrapeString(res vclient.ValkeyResult) (string, error) {
+	s, err := res.ToString()
+	if err != nil {
+		return "", err
+	}
+	if s == "" {
+		return "", fmt.Errorf("empty reply")
+	}
+	return s, nil
 }
 
 // Convert a string containing INFO elements to a map.

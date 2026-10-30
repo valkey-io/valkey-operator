@@ -321,3 +321,63 @@ func TestHandleScaleInReportsKeptNodes(t *testing.T) {
 	assert.Equal(t, valkeyiov1alpha1.ReasonScaleInBlocked, progressing.Reason)
 	assert.Contains(t, progressing.Message, "c-3-0")
 }
+
+// TestHandleScaleInRequeuesWhenPrimaryIsUnscraped: slots copied onto a shard
+// with no scraped primary must wait. PlanDrainMove would fail with no source
+// and mark the cluster degraded.
+func TestHandleScaleInRequeuesWhenPrimaryIsUnscraped(t *testing.T) {
+	replica := primaryNode(1)
+	replica.Status.Role = RoleReplica
+	r, cluster, _ := scaleInReconciler(t, primaryNode(0), replica)
+	cluster.Spec.Shards = 1
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+		{
+			Id:    "s1",
+			Slots: []valkey.SlotsRange{{Start: 8192, End: 16383}},
+			Nodes: []*valkey.NodeState{{Id: "r1", Address: "10.0.0.1"}},
+		},
+	}}
+
+	result, requeue := r.handleScaleIn(context.Background(), cluster, state, nodeList(primaryNode(0), replica))
+	assert.True(t, requeue)
+	assert.Positive(t, result.RequeueAfter)
+	assert.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded))
+	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	require.NotNil(t, progressing)
+	assert.Equal(t, valkeyiov1alpha1.ReasonRebalancingSlots, progressing.Reason)
+	assert.True(t, nodeExists(t, r.Client, replica))
+}
+
+// TestDeleteExcessValkeyNodesKeepsPeerReportedOwner: every slot is assigned on
+// the scraped primary, so the unaccounted-slot guard does not apply. A peer
+// table still shows the excess pod owning slots, and that node stays.
+func TestDeleteExcessValkeyNodesKeepsPeerReportedOwner(t *testing.T) {
+	inSpec := primaryNode(0)
+	excess := primaryNode(3)
+	r, cluster, recorder := scaleInReconciler(t, inSpec, excess)
+	shard := primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383})
+	shard.Nodes[0].SetClusterNodesForTesting(
+		"p0 10.0.0.0:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
+			"p3 10.0.0.3:6379@16379 master - 0 0 2 connected 8192-16383\n",
+	)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard}}
+	state.SetTargetsForTesting("10.0.0.0", "10.0.0.3")
+
+	deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, excess))
+	require.NoError(t, err)
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-3-0"}, kept)
+	assert.True(t, nodeExists(t, r.Client, excess))
+	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Excess ValkeyNode c-3-0 still owns slots according to a peer; waiting for drain")
+
+	// The same peer report does not keep a different excess pod, and an
+	// in-spec pod at that address is not what blocks deletion.
+	other := primaryNode(4)
+	r, cluster, _ = scaleInReconciler(t, inSpec, other)
+	deleted, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, other))
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.Empty(t, kept)
+	assert.False(t, nodeExists(t, r.Client, other))
+}

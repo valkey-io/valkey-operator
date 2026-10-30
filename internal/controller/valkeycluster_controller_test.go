@@ -488,6 +488,24 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 	})
 })
 
+// generationFrozenClient serves ValkeyNode Gets from a snapshot taken before
+// the spec write. Writes pass through. This is the informer cache after
+// CreateOrUpdate: the following Get still shows the old generation.
+type generationFrozenClient struct {
+	client.Client
+	frozen map[string]valkeyiov1alpha1.ValkeyNode
+}
+
+func (c generationFrozenClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if node, ok := obj.(*valkeyiov1alpha1.ValkeyNode); ok {
+		if snap, ok := c.frozen[key.Name]; ok {
+			snap.DeepCopyInto(node)
+			return nil
+		}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 // staleConfigMapClient wraps a client.Client and always reports ConfigMaps as
 // NotFound on Get, simulating the read-after-write staleness of the cached
 // controller-runtime client used in production (mgr.GetClient()): immediately
@@ -1947,6 +1965,54 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		requeue, err := reconcileNodesWithState(state)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue(), "approving a pod replacement must hold rebalance")
+		Expect(getImage(node10)).To(Equal(newImage))
+		Expect(getImage(node11)).To(Equal(newImage))
+	})
+
+	It("holds rebalance when the cache still has the pre-write ValkeyNode", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		for _, name := range []string{node00, node01} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			node.Spec.Image = newImage
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(testCtx, node)).To(Succeed())
+			setReady(name)
+		}
+
+		frozen := map[string]valkeyiov1alpha1.ValkeyNode{}
+		for _, name := range allNodes {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			frozen[name] = *node
+		}
+		r.Client = generationFrozenClient{Client: k8sClient, frozen: frozen}
+		r.APIReader = k8sClient
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "a stale cache must not let this pass rebalance onto the pod being replaced")
 		Expect(getImage(node10)).To(Equal(newImage))
 		Expect(getImage(node11)).To(Equal(newImage))
 	})

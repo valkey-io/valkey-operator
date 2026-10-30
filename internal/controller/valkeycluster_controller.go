@@ -787,7 +787,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 					continue
 				}
 				updated := &valkeyiov1alpha1.ValkeyNode{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, updated); err != nil {
+				// The cached client still has the pre-write object on this pass,
+				// so Generation == before and the hold would miss the write.
+				reader := client.Reader(r.Client)
+				if r.APIReader != nil {
+					reader = r.APIReader
+				}
+				if err := reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, updated); err != nil {
 					return false, err
 				}
 				pending, err := r.slotlessReplacementPending(ctx, updated, before, liveHashes[name])

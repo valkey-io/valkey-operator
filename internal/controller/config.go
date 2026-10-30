@@ -75,7 +75,7 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
 }
 
-//go:embed scripts/*
+//go:embed scripts/*.sh
 var scripts embed.FS
 var scriptsHash string
 

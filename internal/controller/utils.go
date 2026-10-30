@@ -212,6 +212,25 @@ func hasNodeWithPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {
 	})
 }
 
+// shardMemberCount counts the ValkeyNodes that answer in shard. A node whose
+// terminating pod and replacement both answer counts once, and an address no
+// ValkeyNode claims counts on its own.
+func shardMemberCount(shard *valkey.ShardState, nodes []valkeyv1.ValkeyNode) int {
+	seen := map[int]bool{}
+	count := 0
+	for _, member := range shard.Nodes {
+		i := slices.IndexFunc(nodes, func(n valkeyv1.ValkeyNode) bool { return nodeHasAddress(&n, member.Address) })
+		if i >= 0 {
+			if seen[i] {
+				continue
+			}
+			seen[i] = true
+		}
+		count++
+	}
+	return count
+}
+
 // hasNodeWithTerminatingPodIP reports whether any ValkeyNode has podIP among
 // its terminating pods. An empty podIP never matches.
 func hasNodeWithTerminatingPodIP(nodes []valkeyv1.ValkeyNode, podIP string) bool {

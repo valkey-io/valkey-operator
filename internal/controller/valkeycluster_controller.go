@@ -395,9 +395,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if countSlots(shard.Slots) == 0 {
 			continue
 		}
-		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
+		if members := shardMemberCount(shard, nodes.Items); members < (1 + int(cluster.Spec.Replicas)) {
 			log.V(1).Info("missing replicas, requeue..")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", members, 1+int(cluster.Spec.Replicas))
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
 			setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
@@ -1626,7 +1626,11 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 
 	// Update shard counts. A nil state leaves the stored counts in place.
 	if state != nil {
-		current.Status.ReadyShards = r.countReadyShards(state, cluster)
+		nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+		if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+			return err
+		}
+		current.Status.ReadyShards = r.countReadyShards(state, cluster, nodes.Items)
 		current.Status.Shards = int32(len(state.Shards))
 	}
 
@@ -1677,14 +1681,15 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 }
 
 // countReadyShards counts shards that have all required nodes, are healthy,
-// and have all replicas in sync with their primary.
-func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, cluster *valkeyiov1alpha1.ValkeyCluster) int32 {
+// and have all replicas in sync with their primary. nodes tells which
+// addresses belong to the same ValkeyNode.
+func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, cluster *valkeyiov1alpha1.ValkeyCluster, nodes []valkeyiov1alpha1.ValkeyNode) int32 {
 	var readyCount int32 = 0
 	requiredNodes := 1 + int(cluster.Spec.Replicas)
 	for _, shard := range state.Shards {
 		// A shard whose primary owns no slots, drained or not yet filled,
 		// serves nothing.
-		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil || len(shard.Slots) == 0 {
+		if shardMemberCount(shard, nodes) < requiredNodes || shard.GetPrimaryNode() == nil || len(shard.Slots) == 0 {
 			continue
 		}
 		// Check if all nodes in this shard are healthy and in sync. Health is

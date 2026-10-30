@@ -91,6 +91,30 @@ containers:
 
 `containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
 
+The operator sets `securityContext.allowPrivilegeEscalation: false` on its
+`server` and `metrics-exporter` containers when the field is unset. It keeps
+any explicit value, and leaves the field unset on containers that run
+privileged or add `SYS_ADMIN` (or `CAP_SYS_ADMIN`). Upgrading to a release
+with this default rolls each pod once, unless an admission policy already
+sets the field.
+
+Sidecars added through `containers` are not defaulted. If an admission policy
+(Kyverno, Gatekeeper, a MutatingAdmissionPolicy) sets this field on workload
+templates, set it on every sidecar:
+
+```yaml
+containers:
+  - name: log-shipper
+    image: example/log-shipper:1.0
+    securityContext:
+      allowPrivilegeEscalation: false
+```
+
+Otherwise the admitted template never matches the one the operator renders,
+and the operator fails over the shard primary on every reconcile while the
+cluster still reports Ready. The same happens for any other field such a
+policy adds to the template.
+
 ### Service account
 
 ```yaml

@@ -1117,7 +1117,7 @@ func syncInProgress(info string) bool {
 // container in the Running state. A missing status counts as not running.
 func serverContainerRunning(pod *corev1.Pod) bool {
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "server" {
+		if cs.Name == serverContainerName {
 			return cs.State.Running != nil
 		}
 	}

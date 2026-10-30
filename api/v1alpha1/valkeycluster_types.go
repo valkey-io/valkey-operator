@@ -703,7 +703,19 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionReconciliationPaused is True while the cluster carries the
+	// AnnotationPauseReconciliation annotation and the operator leaves it alone.
+	ConditionReconciliationPaused = "ReconciliationPaused"
 )
+
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
+// of a standalone ValkeyNode, while its value is exactly "true". The operator
+// copies it onto the ValkeyNodes of a paused cluster and removes it from them
+// when the cluster resumes.
+const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
+
+// ReasonReconciliationPaused is the reason of ConditionReconciliationPaused.
+const ReasonReconciliationPaused = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions

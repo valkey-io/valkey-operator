@@ -151,6 +151,17 @@ Non-blocking warning when TLS is enabled and discovery still uses IP announce (d
 Common reasons:
 - `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
+#### `ReconciliationPaused`
+Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annotation. The operator changes nothing in the cluster until the annotation is removed, so the other conditions keep the values they had when the pause began. See [Pausing reconciliation](valkeycluster.md#pausing-reconciliation).
+
+| Status | Meaning |
+|---|---|
+| `True` | Reconciliation is paused. |
+| (absent) | Reconciliation runs. The condition is removed on resume, with a `ReconciliationResumed` event. |
+
+Common reasons:
+- `PauseAnnotationSet` – the pause annotation is set to `"true"`.
+
 ---
 
 ### ValkeyNode conditions

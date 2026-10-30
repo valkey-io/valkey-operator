@@ -234,3 +234,22 @@ func TestTerminatingPodIsStillTheShardPrimary(t *testing.T) {
 	assert.False(t, isMemberAddress(nodes.Items, state, ""))
 	assert.False(t, hasNodeWithPodIP(nodes.Items, "10.0.0.1"), "the plain pod IP match stays on the current pod")
 }
+
+func TestShardMemberCountCountsEachNodeOnce(t *testing.T) {
+	// Node 0's old pod is still the primary at 10.0.0.1 and its replacement at
+	// 10.0.0.4 already replicates from it. Node 1 has not joined yet.
+	shard := &valkey.ShardState{Nodes: []*valkey.NodeState{
+		{Address: "10.0.0.1"},
+		{Address: "10.0.0.4"},
+	}}
+	nodes := []valkeyiov1alpha1.ValkeyNode{
+		{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.4", TerminatingPodIPs: []string{"10.0.0.1"}}},
+		{Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.2"}},
+	}
+	assert.Equal(t, 1, shardMemberCount(shard, nodes), "a terminating pod and its replacement are one node")
+
+	shard.Nodes = append(shard.Nodes, &valkey.NodeState{Address: "10.0.0.2"})
+	assert.Equal(t, 2, shardMemberCount(shard, nodes))
+
+	assert.Equal(t, 3, shardMemberCount(shard, nil), "without the nodes every address counts")
+}

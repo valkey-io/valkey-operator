@@ -148,6 +148,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// A paused cluster gets its ValkeyNodes marked and its condition set, and
+	// nothing else: no owned object is written and no command is sent.
+	if reconciliationPaused(cluster) {
+		return ctrl.Result{RequeueAfter: pausedRequeue}, r.reconcilePaused(ctx, cluster)
+	}
+	if err := r.resumeIfPaused(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	initClusterMetrics(req.Name, req.Namespace)
 
 	if err := r.upsertService(ctx, cluster); err != nil {

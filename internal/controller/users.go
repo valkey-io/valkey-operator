@@ -460,6 +460,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		log.Error(err, "failed to rotate system passwords")
 		return nil, err
 	}
+	r.syncExporterPasswordHold(cluster, systemUsersSecret)
 	// A steady Secret is not written again. An Update on every reconcile
 	// would change its resourceVersion and requeue the cluster forever.
 	if !createSecret && len(filled) == 0 && rotationEvent == "" {

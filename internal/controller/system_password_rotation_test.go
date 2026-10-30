@@ -57,6 +57,10 @@ func TestSystemPasswordVolumeFollowsClusterLabel(t *testing.T) {
 	require.NotNil(t, volume)
 	require.Equal(t, getSystemPasswordSecretName("c1"), volume.Secret.SecretName)
 	require.Equal(t, int32(0444), *volume.Secret.DefaultMode)
+	require.Equal(t, []corev1.KeyToPath{
+		{Key: operatorUser, Path: operatorUser},
+		{Key: replicationUser, Path: replicationUser},
+	}, volume.Secret.Items)
 
 	var mount *corev1.VolumeMount
 	for i := range pts.Spec.Containers[0].VolumeMounts {
@@ -168,6 +172,68 @@ func TestAdvanceSystemPasswordRotationKeepsTheOldPasswordUntilClientsSwitch(t *t
 	require.Equal(t, nextOperator, secret.Data[operatorUser])
 }
 
+func TestExistingSecretStartsTheClockInsteadOfRotating(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	secret := &corev1.Secret{Data: map[string][]byte{
+		operatorUser:    []byte("op-old"),
+		replicationUser: []byte("re-old"),
+		exporterUser:    []byte("ex-old"),
+	}}
+	event, err := advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now})
+	require.NoError(t, err)
+	require.Equal(t, "clock", event)
+	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
+	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordRotatedAt])
+
+	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now.Add(time.Hour)})
+	require.NoError(t, err)
+	require.Empty(t, event)
+	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
+}
+
+func TestExporterHoldDoesNotBlockTheNextRotation(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	secret := &corev1.Secret{
+		Data: map[string][]byte{
+			operatorUser:                            []byte("op-new"),
+			replicationUser:                         []byte("re-new"),
+			exporterUser:                            []byte("ex-new"),
+			systemPasswordPreviousKey(operatorUser): []byte("op-old"),
+			systemPasswordPreviousKey(replicationUser): []byte("re-old"),
+			systemPasswordPreviousKey(exporterUser):    []byte("ex-old"),
+		},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			annotationSystemPasswordPhase:     systemPasswordPhaseCutover,
+			annotationSystemPasswordCutoverAt: now.Format(time.RFC3339Nano),
+			annotationSystemPasswordRotatedAt: now.Format(time.RFC3339Nano),
+		}},
+	}
+	after := now.Add(systemPasswordCutoverGrace + time.Second)
+	event, err := advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+		Now: after, OperatorCaughtUp: true, ReplicationCaughtUp: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "holding", event)
+	require.Empty(t, secret.Annotations[annotationSystemPasswordPhase])
+	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
+	require.Empty(t, secret.Data[systemPasswordPreviousKey(operatorUser)])
+	require.Empty(t, secret.Data[systemPasswordPreviousKey(replicationUser)])
+
+	later := after.Add(systemPasswordRotationPeriod + time.Second)
+	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: later})
+	require.NoError(t, err)
+	require.Equal(t, "started", event)
+	require.Equal(t, []byte("op-new"), secret.Data[operatorUser])
+	require.NotEmpty(t, secret.Data[systemPasswordNextKey(operatorUser)])
+	require.Empty(t, secret.Data[systemPasswordNextKey(exporterUser)], "the held exporter password must not be promoted over")
+	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
+
+	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: later, ExporterCaughtUp: true})
+	require.NoError(t, err)
+	require.Equal(t, "exporter-released", event)
+	require.Empty(t, secret.Data[systemPasswordPreviousKey(exporterUser)])
+}
+
 func TestSystemUserPasswordHashesCoverEveryAcceptedPassword(t *testing.T) {
 	data := map[string][]byte{
 		operatorUser:                            []byte("current"),
@@ -241,7 +307,7 @@ func TestApplyReplicationPasswordSetsPrimaryAuthDuringCutover(t *testing.T) {
 		replicationUser: []byte("re-new"),
 		systemPasswordPreviousKey(replicationUser): []byte("re-old"),
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(node, secret).Build()
 	valkeyClient := &fakeConfigClient{}
 	r := &ValkeyNodeReconciler{
 		Client:    c,
@@ -260,6 +326,22 @@ func TestApplyReplicationPasswordSetsPrimaryAuthDuringCutover(t *testing.T) {
 	valkeyClient.params = nil
 	require.NoError(t, r.applyReplicationPassword(context.Background(), got))
 	require.Nil(t, valkeyClient.params, "a node already on the current password must not CONFIG SET again")
+
+	setAt := time.Now().Add(-time.Minute)
+	got.Annotations[annotationPrimaryAuthSetAt] = setAt.UTC().Format(time.RFC3339Nano)
+	got.Status.PodName = "n0-pod"
+	require.NoError(t, c.Update(context.Background(), got))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "n0-pod", Namespace: "ns"}}
+	require.NoError(t, c.Create(context.Background(), pod))
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name: serverContainerName,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{
+			StartedAt: metav1.NewTime(setAt.Add(time.Second)),
+		}},
+	}}}
+	require.NoError(t, c.Status().Update(context.Background(), pod))
+	require.NoError(t, r.applyReplicationPassword(context.Background(), got))
+	require.Equal(t, map[string]string{"primaryauth": "re-new"}, valkeyClient.params, "a restarted server may have read a stale volume")
 }
 
 func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {

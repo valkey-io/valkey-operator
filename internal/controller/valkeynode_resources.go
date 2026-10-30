@@ -640,7 +640,13 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			Name: systemPasswordVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  getSystemPasswordSecretName(clusterName),
+					SecretName: getSystemPasswordSecretName(clusterName),
+					// The server reads _operator (probes) and _replication
+					// (start). The exporter password stays in its own env var.
+					Items: []corev1.KeyToPath{
+						{Key: operatorUser, Path: operatorUser},
+						{Key: replicationUser, Path: replicationUser},
+					},
 					DefaultMode: &mode,
 				},
 			},

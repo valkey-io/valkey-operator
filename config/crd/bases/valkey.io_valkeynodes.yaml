@@ -2899,6 +2899,61 @@ spec:
                 required:
                 - size
                 type: object
+              podMetadata:
+                description: PodMetadata adds labels and annotations to the ValkeyNode
+                  pod.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations added to the object. Values have no format rule, but keys and
+                      values together are limited to 256 KiB less the operator's own annotation.
+                      Keys under valkey.io/ are reserved for the operator.
+                    maxProperties: 1024
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'annotations must total at most 262059 characters (keys
+                        plus values): 256 KiB less the operator''s valkey.io/config-hash
+                        annotation'
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262059
+                    - message: annotation keys must be an optional DNS subdomain prefix
+                        (at most 253 characters) and '/', followed by a name of at
+                        most 63 alphanumerics, '-', '_' or '.', starting and ending
+                        with an alphanumeric
+                      rule: self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
+                    - message: annotation keys under valkey.io/ are reserved for the
+                        operator
+                      rule: self.all(k, !k.startsWith('valkey.io/'))
+                  labels:
+                    additionalProperties:
+                      description: |-
+                        LabelValue is a label value: at most 63 characters, empty or alphanumerics,
+                        '-', '_' and '.', starting and ending with an alphanumeric.
+                      maxLength: 63
+                      pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                      type: string
+                    description: |-
+                      Labels added to the object. Keys under valkey.io/ and the
+                      app.kubernetes.io/ name, instance, component, part-of and managed-by keys
+                      are reserved for the operator.
+                    maxProperties: 1024
+                    type: object
+                    x-kubernetes-validations:
+                    - message: label keys must be an optional DNS subdomain prefix
+                        (lowercase, at most 253 characters) and '/', followed by a
+                        name of at most 63 alphanumerics, '-', '_' or '.', starting
+                        and ending with an alphanumeric
+                      rule: self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
+                    - message: label keys under valkey.io/ and app.kubernetes.io/
+                        name, instance, component, part-of and managed-by are reserved
+                        for the operator
+                      rule: self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name',
+                        'app.kubernetes.io/instance', 'app.kubernetes.io/component',
+                        'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))
+                type: object
               podSecurityContext:
                 description: |-
                   Override the PodSecurityContext applied to the ValkeyNode pod.

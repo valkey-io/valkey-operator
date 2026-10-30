@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -311,21 +312,40 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// localAddr matches the local end of a net.OpError ("10.244.1.2:54034->"),
+// which changes on every redial.
+var localAddr = regexp.MustCompile(`\S+:\d+->`)
+
+// shouldSkipConditionUpdate reports whether a condition is unchanged after
+// ignoring the local address in network error messages. The local port can
+// change on every redial, and writing each change requeues the node without
+// backoff. Other message changes still update the condition. The full error
+// remains available in the operator log.
+func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) bool {
+	existing := meta.FindStatusCondition(conditions, conditionType)
+	return existing != nil &&
+		existing.Status == status &&
+		existing.Reason == reason &&
+		existing.ObservedGeneration == observedGeneration &&
+		localAddr.ReplaceAllString(existing.Message, "") == localAddr.ReplaceAllString(message, "")
+}
+
 func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, message, current.Generation) {
+		return nil
+	}
 	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
+	})
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
@@ -339,16 +359,17 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, message, current.Generation) {
+		return nil
+	}
 	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 		Type:               valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
+	})
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch ACLApplied condition: %w", err)
 	}
@@ -412,8 +433,9 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 }
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
-// template, and therefore the ones that feed the WorkloadRevision roll hash.
-// Only the server-config hash lives here: a config change that is not
+// template, and therefore the ones that feed the WorkloadRevision roll hash:
+// the user's spec.podMetadata.annotations plus the server-config hash. The
+// config hash is needed because a config change that is not
 // live-settable still needs a rolling restart to take effect, and the config
 // itself lives in a ConfigMap whose content changes never alter the pod
 // template. The hash is derived from the node spec (Config minus live-settable
@@ -428,6 +450,9 @@ func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]s
 	annotations := map[string]string{}
 	if node.Spec.ServerConfigMapName != "" {
 		annotations[configHashKey] = nodeServerConfigRollHash(node)
+	}
+	if node.Spec.PodMetadata != nil {
+		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)
 	}
 	return annotations
 }
@@ -1092,7 +1117,7 @@ func syncInProgress(info string) bool {
 // container in the Running state. A missing status counts as not running.
 func serverContainerRunning(pod *corev1.Pod) bool {
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "server" {
+		if cs.Name == serverContainerName {
 			return cs.State.Running != nil
 		}
 	}
@@ -1130,7 +1155,14 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	// settles it: a server container that is not running (crash-looping on a
 	// bad config, or never pulled) is not loading anything and stays eligible.
 	// A running container that will not answer is left alone and retried.
-	info, err := r.nodeInfo(ctx, node)
+	//
+	// nodeInfo dials node.Status.PodIP, which only updateStatus refreshes, and
+	// Reconcile returns before updateStatus when this function defers. A pod
+	// that came back at another IP would be probed at the stale one on every
+	// retry and never replaced. So the probe goes to the pod just read.
+	probe := node.DeepCopy()
+	probe.Status.PodIP = pod.Status.PodIP
+	info, err := r.nodeInfo(ctx, probe)
 	switch {
 	case err == nil && syncInProgress(info):
 		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)

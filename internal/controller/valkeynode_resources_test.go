@@ -1449,6 +1449,67 @@ func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_EmptyIsNoop(t *testin
 	assert.Empty(t, pts.Spec.ServiceAccountName, "omitting ServiceAccountName must leave the field unset so existing templates stay unchanged")
 }
 
+func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
+	for _, workloadType := range []valkeyv1.WorkloadType{valkeyv1.WorkloadTypeStatefulSet, valkeyv1.WorkloadTypeDeployment} {
+		t.Run(string(workloadType), func(t *testing.T) {
+			node := newTestValkeyNode("mycluster-0-0", "test-ns")
+			node.Labels = map[string]string{LabelCluster: "mycluster"}
+			node.Spec.WorkloadType = workloadType
+			node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{
+				Labels: map[string]valkeyv1.LabelValue{
+					"team":       "data",
+					LabelCluster: "spoofed",
+				},
+				Annotations: map[string]string{
+					"example.com/scrape": "true",
+					configHashKey:        "spoofed",
+				},
+			}
+
+			tmpl, err := buildNodePodTemplate(node)
+			require.NoError(t, err)
+
+			assert.Equal(t, "data", tmpl.Labels["team"])
+			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
+			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
+			assert.Equal(t, nodeServerConfigRollHash(node), tmpl.Annotations[configHashKey], "operator annotations win over podMetadata")
+
+			var selector map[string]string
+			if workloadType == valkeyv1.WorkloadTypeDeployment {
+				dep, err := buildValkeyNodeDeployment(node)
+				require.NoError(t, err)
+				selector = dep.Spec.Selector.MatchLabels
+			} else {
+				sts, err := buildValkeyNodeStatefulSet(node)
+				require.NoError(t, err)
+				selector = sts.Spec.Selector.MatchLabels
+			}
+			assert.Equal(t, valkeyNodeLabels(node), selector, "podMetadata must stay out of the immutable selector")
+		})
+	}
+}
+
+func TestComputeWorkloadRevision_PodMetadata(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	base, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+
+	node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{}
+	empty, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.Equal(t, base, empty, "an empty podMetadata must not roll pods")
+
+	node.Spec.PodMetadata.Labels = map[string]valkeyv1.LabelValue{"team": "data"}
+	withLabel, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.NotEqual(t, base, withLabel, "a pod label change must roll pods")
+
+	node.Spec.PodMetadata.Annotations = map[string]string{"example.com/scrape": "true"}
+	withAnnotation, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.NotEqual(t, withLabel, withAnnotation, "a pod annotation change must roll pods")
+}
+
 // TestDefaultImagePullPolicy pins the mirror of the API server's defaulting
 // rule branch by branch — a silent divergence on any of these makes that
 // container churn on every reconcile (#315). Rule: the effective tag is the

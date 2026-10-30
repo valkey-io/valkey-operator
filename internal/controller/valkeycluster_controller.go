@@ -441,7 +441,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// time using CLUSTER MIGRATESLOTS (atomic migration, requires
 	// Valkey >= 9.0). Each pass requeues so the next reconcile
 	// re-evaluates cluster state with fresh topology before continuing.
-	rebalanced, err := r.rebalanceSlots(ctx, cluster, allShards)
+	move, err := r.rebalanceSlots(ctx, cluster, allShards)
 	if err != nil {
 		log.Error(err, "slot rebalancing failed")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "RebalanceSlots", "Slot rebalancing failed: %v", err)
@@ -451,13 +451,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	if rebalanced {
+	if move != nil {
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
 		// that hadn't received slots yet during scale-out).
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots across primaries", metav1.ConditionTrue)
+		// Name the shard receiving this batch. With more than one shard
+		// under its share, the name changes as each one fills.
+		msg := "Rebalancing slots across primaries"
+		if _, dstShard := nodeRoleAndShard(move.Dst.Address, nodes); dstShard >= 0 {
+			msg = fmt.Sprintf("Rebalancing slots onto shard %d", dstShard)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, msg, metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -1676,7 +1682,9 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 	var readyCount int32 = 0
 	requiredNodes := 1 + int(cluster.Spec.Replicas)
 	for _, shard := range state.Shards {
-		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil {
+		// A shard whose primary owns no slots, drained or not yet filled,
+		// serves nothing.
+		if len(shard.Nodes) < requiredNodes || shard.GetPrimaryNode() == nil || len(shard.Slots) == 0 {
 			continue
 		}
 		// Check if all nodes in this shard are healthy and in sync. Health is
@@ -1704,29 +1712,29 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 
 const rebalanceSlotBatchSize = 400
 
-func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shards []*valkey.ShardState) (bool, error) {
+// rebalanceSlots plans one slot move and starts it. It returns the move while
+// the rebalance has work left, whether this pass migrated a batch or waited
+// for one in flight, and nil once the slots are balanced.
+func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shards []*valkey.ShardState) (*valkey.SlotMove, error) {
 	move, err := valkey.PlanRebalanceMove(shards, int(cluster.Spec.Shards), rebalanceSlotBatchSize)
-	if err != nil {
-		return false, err
-	}
-	if move == nil {
-		return false, nil
+	if err != nil || move == nil {
+		return nil, err
 	}
 
 	log := logf.FromContext(ctx)
 	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if inProgress {
 		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
-		return true, nil
+		return move, nil
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
 		log.V(1).Info("destination not yet visible to source via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
-		return true, nil
+		return move, nil
 	}
 
 	log.V(1).Info("rebalancing slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
@@ -1736,12 +1744,12 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			log.V(1).Info("slots no longer served by source; will retry with fresh state", "src", move.Src.Address, "dst", move.Dst.Address)
-			return true, nil
+			return move, nil
 		}
-		return false, err
+		return nil, err
 	}
 	slotMigrationBatchesTotal.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
-	return true, nil
+	return move, nil
 }
 
 // effectiveShards returns state.Shards plus any pending primaries that are

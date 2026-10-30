@@ -1216,7 +1216,9 @@ func runReadinessScript(t *testing.T, scriptPath, info, nodes string) error {
 		t.Fatalf("write valkey-cli stub: %v", err)
 	}
 
-	cmd := exec.Command(scriptPath)
+	// 5s per call. The script default is 1s, and primary_mid_migration
+	// failed that default on a busy machine even though the stub returns at once.
+	cmd := exec.Command(scriptPath, "5")
 	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {

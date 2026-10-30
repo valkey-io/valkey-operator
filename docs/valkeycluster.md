@@ -555,7 +555,7 @@ metadata:
 
 The annotation stops the operator from acting on the cluster, for example while you repair a shard by hand or look at a failed cluster before anything is changed. Only the exact value `"true"` pauses. Any other value, or removing the annotation, resumes reconciliation.
 
-While the cluster is paused the operator creates, updates and deletes nothing that belongs to it, sends no commands to its Valkey nodes, and leaves `spec` changes for later. It sets the `ReconciliationPaused` condition and records a `ReconciliationPaused` event, and looks at the cluster again every 30 seconds. Deleting a paused cluster still works.
+While the cluster is paused the operator creates, updates and deletes nothing that belongs to it, sends no commands to its Valkey nodes, not even the reads of the role poller, and leaves `spec` changes for later. It sets the `ReconciliationPaused` condition and records a `ReconciliationPaused` event, and looks at the cluster again every 30 seconds. Deleting a paused cluster still works.
 
 The operator otherwise does not change objects it does not render itself, and the pause is the exception: it copies the annotation onto every ValkeyNode of the cluster, and the ValkeyNode controller skips a node that carries it, so the StatefulSet or Deployment, `CONFIG SET` and `ACL LOAD` stay as they are as well. When the cluster resumes, the operator removes the annotation from all of its ValkeyNodes, including one you set on a node by hand. To pause a single node of a running cluster, pause the whole cluster.
 

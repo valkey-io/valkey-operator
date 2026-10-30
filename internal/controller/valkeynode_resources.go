@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -28,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
+
+const serverContainerName = "server"
 
 // valkeyNodeResourceName returns the name used for resources
 // owned by the given ValkeyNode.
@@ -52,8 +55,8 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, the server start script, plus an empty
-// valkey.conf.
+// and readiness probe scripts, the init container script, the server start
+// script, plus an empty valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
@@ -63,6 +66,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+	}
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
 	if err != nil {
@@ -79,6 +86,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
+			initScriptKey:        string(initScript),
 			serverStartScriptKey: string(serverStart),
 		},
 	}, nil
@@ -300,7 +308,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 	containers := []corev1.Container{
 		{
-			Name:      "server",
+			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
 			Command:   serverCommand(node, announceArgs),
@@ -375,12 +383,12 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      "scripts",
-					MountPath: "/scripts",
+					Name:      scriptsVolumeName,
+					MountPath: scriptsMountPath,
 				},
 				{
-					Name:      "valkey-conf",
-					MountPath: "/config",
+					Name:      configVolumeName,
+					MountPath: configMountPath,
 					ReadOnly:  true,
 				},
 			},
@@ -392,6 +400,9 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
 		Name:      dataVolumeName,
 		MountPath: dataMountPath,
+	}, corev1.VolumeMount{
+		Name:      initVolumeName,
+		MountPath: initMountPath,
 	})
 
 	if node.Spec.TLS != nil {
@@ -435,8 +446,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	if err != nil {
 		return nil, err
 	}
+	// Generated containers remain first; user-only sidecars are appended by
+	// mergePatchContainers. Default only that generated prefix, even if a
+	// user-only sidecar reuses the name of the disabled exporter.
+	applyManagedContainerSecurityDefaults(merged[:len(containers)])
 	applyContainerAPIDefaults(merged)
 	return merged, nil
+}
+
+// Match common admission hardening defaults in the rendered workload template.
+// Run after user patches so explicit settings (including privileged containers)
+// are respected, and leave user-added sidecars alone.
+func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		sc := c.SecurityContext.DeepCopy()
+		if sc == nil {
+			sc = &corev1.SecurityContext{}
+		}
+		// Kubernetes treats SYS_ADMIN like privileged mode for privilege escalation.
+		hasSysAdmin := sc.Capabilities != nil &&
+			(slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN")) ||
+				slices.Contains(sc.Capabilities.Add, corev1.Capability("CAP_SYS_ADMIN")))
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) && !hasSysAdmin {
+			sc.AllowPrivilegeEscalation = new(false)
+		}
+		c.SecurityContext = sc
+	}
 }
 
 // applyContainerAPIDefaults fills the container fields the API server would
@@ -530,6 +566,39 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 	}
 }
 
+// buildInitContainer returns the init container that runs init.sh from the
+// scripts ConfigMap, when present, before the server starts. The script lives in the
+// ConfigMap so changing it never changes the pod template. The container takes
+// the server's image, pull policy, resources, security context, env and volume
+// mounts after spec.containers patches: matching resources keeps the pod's QoS
+// class, Pod Security admission checks init containers as well, and a later
+// init.sh can use anything the server sees without a pod template change.
+func buildInitContainer(server corev1.Container) corev1.Container {
+	s := server.DeepCopy()
+	c := []corev1.Container{{
+		Name:            "server-init",
+		Image:           s.Image,
+		ImagePullPolicy: s.ImagePullPolicy,
+		Command:         initContainerCommand(scriptsMountPath + "/" + initScriptKey),
+		Env:             s.Env,
+		EnvFrom:         s.EnvFrom,
+		Resources:       s.Resources,
+		SecurityContext: s.SecurityContext,
+		VolumeMounts:    s.VolumeMounts,
+	}}
+	applyContainerAPIDefaults(c)
+	return c[0]
+}
+
+// initContainerCommand runs script when it exists and exits 0 otherwise. An
+// external ConfigMap (spec.serverConfigMapName on a standalone ValkeyNode)
+// may predate init.sh, and its absence must not block the pod.
+func initContainerCommand(script string) []string {
+	return []string{shellPath, "-c", fmt.Sprintf(
+		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
+		script, shellPath)}
+}
+
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
@@ -566,7 +635,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		SchedulerName: corev1.DefaultSchedulerName,
 		Volumes: []corev1.Volume{
 			{
-				Name: "scripts",
+				Name: scriptsVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -577,7 +646,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				},
 			},
 			{
-				Name: "valkey-conf",
+				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -635,7 +704,13 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		}
 	}
-	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
+	podSpec.Volumes = append(podSpec.Volumes, dataVolume, corev1.Volume{
+		Name:         initVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+
+	// Built last so it picks up every mount added to the server above.
+	podSpec.InitContainers = []corev1.Container{buildInitContainer(podSpec.Containers[0])}
 
 	// Mirror the remaining API-server defaults (see the comment on the struct
 	// literal above): a nil here is not "unset" once stored, it is a diff.

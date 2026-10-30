@@ -209,7 +209,7 @@ This condition is only set when the node is ready and there are allowlisted conf
 | `False` | `CONFIG SET` failed; the running config may not match `spec.config`. The cluster controller will not advance past this node until the condition is `True`. |
 
 Common reasons when `LiveConfigApplied=False`:
-- `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the exact error.
+- `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
 
 Common reasons when `LiveConfigApplied=True`:
 - `Applied` – Live config applied successfully.
@@ -228,7 +228,7 @@ This condition is set once the node is ready and mounts an ACL Secret. An edit r
 
 Common reasons when `ACLApplied=False`:
 - `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
-- `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the exact error.
+- `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
 
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
@@ -369,7 +369,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 
 | Event Type | Type | Description |
 |---|---|---|
-| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER` after quorum loss |
+| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
 
 ### Maintenance events
 

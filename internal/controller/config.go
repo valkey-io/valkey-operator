@@ -43,6 +43,7 @@ const (
 
 	readinessScriptKey   = "readiness-check.sh"
 	livenessScriptKey    = "liveness-check.sh"
+	initScriptKey        = "init.sh"
 	serverStartScriptKey = "server-start.sh"
 
 	// Average-ish length of Valkey parameter + value
@@ -75,7 +76,7 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
 }
 
-//go:embed scripts/*
+//go:embed scripts/*.sh
 var scripts embed.FS
 var scriptsHash string
 
@@ -320,6 +321,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded init.sh: %w", err)
+	}
+
 	// Embed the server start script
 	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
 	if err != nil {
@@ -360,6 +366,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		serverConfigMap.Data = map[string]string{
 			readinessScriptKey:   string(readiness),
 			livenessScriptKey:    string(liveness),
+			initScriptKey:        string(initScript),
 			serverStartScriptKey: string(serverStart),
 			configFileKey:        newServerConfig,
 		}
@@ -387,9 +394,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, liveness and server start scripts")
+		log.V(1).Info("updated readiness, liveness, init and server start scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
+		serverConfigMap.Data[initScriptKey] = string(initScript)
 		serverConfigMap.Data[serverStartScriptKey] = string(serverStart)
 	}
 
@@ -443,12 +451,17 @@ func init() {
 		panic("failure reading embedded liveness-check.sh")
 	}
 
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		panic("failure reading embedded init.sh")
+	}
+
 	// Read the server start script
 	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
 	if err != nil {
 		panic("failure reading embedded server-start.sh")
 	}
 
-	// Calculate hash of all three files
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), serverStart...)))
+	// Calculate hash of all scripts
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(slices.Concat(readiness, liveness, initScript, serverStart)))
 }

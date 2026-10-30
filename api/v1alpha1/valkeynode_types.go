@@ -106,6 +106,7 @@ type ValkeyNodeSpec struct {
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// TLS configuration for the node

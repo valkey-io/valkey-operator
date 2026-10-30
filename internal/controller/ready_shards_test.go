@@ -42,6 +42,7 @@ func TestCountReadyShards(t *testing.T) {
 				{
 					Id:        "shard-0",
 					PrimaryId: "node-1",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 					Nodes: []*valkey.NodeState{
 						primary,
 						{Id: "node-2", Address: "10.0.0.2", Flags: []string{"slave"},
@@ -94,7 +95,7 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"},
 				Info: map[string]string{"role": "master"}, ClusterInfo: map[string]string{"cluster_size": "3"}}
 			n.SetClusterNodesForTesting(withMyself(views[i], id))
-			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Nodes: []*valkey.NodeState{n}})
+			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Slots: []valkey.SlotsRange{{Start: 0, End: 100}}, Nodes: []*valkey.NodeState{n}})
 		}
 		return st
 	}

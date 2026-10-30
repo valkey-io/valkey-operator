@@ -260,15 +260,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command: append([]string{
-				"valkey-server",
-				"/config/valkey.conf",
-			}, append(announceArgs, []string{
-				"--primaryuser",
-				replicationUser,
-				"--primaryauth",
-				"$(PRIMARY_AUTH)",
-			}...)...),
+			Command:   valkeyServerCommand(announceArgs),
 			Env: append(announceEnv, corev1.EnvVar{
 				Name: "PRIMARY_AUTH",
 				ValueFrom: &corev1.EnvVarSource{
@@ -634,6 +626,27 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	if node.Spec.TLS != nil {
 		podSpec.Volumes = append(podSpec.Volumes, tlsVolume(node.Spec.TLS))
+	}
+
+	// The system-password files are how probes and a restarted server pick up
+	// a rotation. The Secret name is fixed, so a later password change does
+	// not change this pod template and does not roll the pod.
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		mode := int32(0400)
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: systemPasswordVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  getSystemPasswordSecretName(clusterName),
+					DefaultMode: &mode,
+				},
+			},
+		})
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      systemPasswordVolumeName,
+			MountPath: systemPasswordMountPath,
+			ReadOnly:  true,
+		})
 	}
 
 	if node.Spec.ServiceAccountName != "" {

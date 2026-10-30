@@ -164,7 +164,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 		if user == exporterUser && !cluster.Spec.ExporterEnabled() {
 			continue
 		}
-		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
+		passwordHashes := systemUserPasswordHashes(systemUserSecret.Data, user)
 		userAcl := valkeyiov1alpha1.UserAclSpec{
 			Name:    user,
 			Enabled: true,
@@ -174,7 +174,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 				Keys: []string{user},
 			},
 		}
-		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, []string{passwordHash}))
+		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes))
 	}
 
 	return systemsAcls.String(), nil
@@ -409,7 +409,7 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 		return fmt.Errorf("%w: %s", errMissingSystemUser, user)
 	}
 	for user := range data {
-		if !slices.Contains(systemUsers, user) {
+		if !isSystemPasswordKey(user) {
 			return fmt.Errorf("%w: %s", errUnknownSystemUser, user)
 		}
 	}
@@ -448,6 +448,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		createSecret = true
 	}
 
+	filled := map[string]bool{}
 	for _, user := range systemUsers {
 		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
 			continue
@@ -462,9 +463,22 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			return systemUsersSecret, err
 		}
 		systemUsersSecret.Data[user] = password
+		filled[user] = true
 	}
 
-	var err error
+	signals, err := r.systemPasswordSignals(ctx, cluster, systemUsersSecret)
+	if err != nil {
+		log.Error(err, "failed to read system password rotation state")
+		return nil, err
+	}
+	signals.SkipNext = filled
+	rotationEvent, err := advanceSystemPasswordRotation(systemUsersSecret, cluster.Spec.ExporterEnabled(), signals)
+	if err != nil {
+		log.Error(err, "failed to rotate system passwords")
+		return nil, err
+	}
+	r.recordSystemPasswordRotation(cluster, rotationEvent)
+
 	if createSecret {
 		err = r.Create(ctx, systemUsersSecret)
 	} else {

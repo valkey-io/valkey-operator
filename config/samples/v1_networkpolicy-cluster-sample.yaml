@@ -40,7 +40,8 @@ spec:
           port: 16379
     # The operator, which dials every node by pod IP on the client port.
     # valkey-operator-system is the namespace of the kustomize install; for a
-    # Helm install use the release namespace.
+    # Helm install use the release namespace, and if you set nameOverride,
+    # use it for app.kubernetes.io/name below.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -71,6 +72,8 @@ spec:
       ports:
         - protocol: TCP
           port: 9121
+  # Every container in the pod shares these rules. A sidecar added through
+  # spec.containers needs its own egress rules here, DNS included.
   egress:
     # Nodes of the same cluster: replication and the cluster bus.
     - to:

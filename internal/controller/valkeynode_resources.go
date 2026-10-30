@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -28,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
+
+const serverContainerName = "server"
 
 // valkeyNodeResourceName returns the name used for resources
 // owned by the given ValkeyNode.
@@ -52,7 +55,7 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, plus an empty valkey.conf.
+// and readiness probe scripts, the init container script, plus an empty valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
@@ -62,6 +65,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
+	}
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 
 	return &corev1.ConfigMap{
@@ -74,6 +81,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"valkey.conf":        generateValkeyNodeConfig(node),
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
+			initScriptKey:        string(initScript),
 		},
 	}, nil
 }
@@ -249,7 +257,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 
 	containers := []corev1.Container{
 		{
-			Name:      "server",
+			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
 			Command: append([]string{
@@ -330,12 +338,12 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
-					Name:      "scripts",
-					MountPath: "/scripts",
+					Name:      scriptsVolumeName,
+					MountPath: scriptsMountPath,
 				},
 				{
-					Name:      "valkey-conf",
-					MountPath: "/config",
+					Name:      configVolumeName,
+					MountPath: configMountPath,
 					ReadOnly:  true,
 				},
 			},
@@ -347,6 +355,9 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	containers[0].VolumeMounts = append(containers[0].VolumeMounts, corev1.VolumeMount{
 		Name:      dataVolumeName,
 		MountPath: dataMountPath,
+	}, corev1.VolumeMount{
+		Name:      initVolumeName,
+		MountPath: initMountPath,
 	})
 
 	if node.Spec.TLS != nil {
@@ -355,14 +366,14 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			MountPath: tlsCertMountPath,
 			ReadOnly:  true,
 		})
-		tlsArgs := fmt.Sprintf("--tls --cacert %s", tlsCertMountPath+"/"+tlsSecretKeyCA)
+		tlsArgs := fmt.Sprintf("--tls --cacert %s", nodeServerCAPath(node.Spec.TLS))
 		if node.Spec.TLS.RequiresClientCertificate() {
 			tlsArgs = fmt.Sprintf("%s --cert %s --key %s", tlsArgs,
 				tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)
 		}
 		containers[0].Env = append(containers[0].Env,
 			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCA},
+			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: nodeServerCAPath(node.Spec.TLS)},
 			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
 			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
 			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: tlsArgs},
@@ -390,8 +401,33 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	if err != nil {
 		return nil, err
 	}
+	// Generated containers remain first; user-only sidecars are appended by
+	// mergePatchContainers. Default only that generated prefix, even if a
+	// user-only sidecar reuses the name of the disabled exporter.
+	applyManagedContainerSecurityDefaults(merged[:len(containers)])
 	applyContainerAPIDefaults(merged)
 	return merged, nil
+}
+
+// Match common admission hardening defaults in the rendered workload template.
+// Run after user patches so explicit settings (including privileged containers)
+// are respected, and leave user-added sidecars alone.
+func applyManagedContainerSecurityDefaults(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		sc := c.SecurityContext.DeepCopy()
+		if sc == nil {
+			sc = &corev1.SecurityContext{}
+		}
+		// Kubernetes treats SYS_ADMIN like privileged mode for privilege escalation.
+		hasSysAdmin := sc.Capabilities != nil &&
+			(slices.Contains(sc.Capabilities.Add, corev1.Capability("SYS_ADMIN")) ||
+				slices.Contains(sc.Capabilities.Add, corev1.Capability("CAP_SYS_ADMIN")))
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) && !hasSysAdmin {
+			sc.AllowPrivilegeEscalation = new(false)
+		}
+		c.SecurityContext = sc
+	}
 }
 
 // applyContainerAPIDefaults fills the container fields the API server would
@@ -485,6 +521,39 @@ func defaultImagePullPolicy(image string) corev1.PullPolicy {
 	}
 }
 
+// buildInitContainer returns the init container that runs init.sh from the
+// scripts ConfigMap, when present, before the server starts. The script lives in the
+// ConfigMap so changing it never changes the pod template. The container takes
+// the server's image, pull policy, resources, security context, env and volume
+// mounts after spec.containers patches: matching resources keeps the pod's QoS
+// class, Pod Security admission checks init containers as well, and a later
+// init.sh can use anything the server sees without a pod template change.
+func buildInitContainer(server corev1.Container) corev1.Container {
+	s := server.DeepCopy()
+	c := []corev1.Container{{
+		Name:            "server-init",
+		Image:           s.Image,
+		ImagePullPolicy: s.ImagePullPolicy,
+		Command:         initContainerCommand(scriptsMountPath + "/" + initScriptKey),
+		Env:             s.Env,
+		EnvFrom:         s.EnvFrom,
+		Resources:       s.Resources,
+		SecurityContext: s.SecurityContext,
+		VolumeMounts:    s.VolumeMounts,
+	}}
+	applyContainerAPIDefaults(c)
+	return c[0]
+}
+
+// initContainerCommand runs script when it exists and exits 0 otherwise. An
+// external ConfigMap (spec.serverConfigMapName on a standalone ValkeyNode)
+// may predate init.sh, and its absence must not block the pod.
+func initContainerCommand(script string) []string {
+	return []string{shellPath, "-c", fmt.Sprintf(
+		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
+		script, shellPath)}
+}
+
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
 // Valkey node.
 func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels map[string]string) (corev1.PodTemplateSpec, error) {
@@ -521,7 +590,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		SchedulerName: corev1.DefaultSchedulerName,
 		Volumes: []corev1.Volume{
 			{
-				Name: "scripts",
+				Name: scriptsVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -532,7 +601,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				},
 			},
 			{
-				Name: "valkey-conf",
+				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -562,14 +631,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	}
 
 	if node.Spec.TLS != nil {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: tlsVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: node.Spec.TLS.Certificates.Server.SecretName,
-				},
-			},
-		})
+		podSpec.Volumes = append(podSpec.Volumes, tlsVolume(node.Spec.TLS))
 	}
 
 	if node.Spec.ServiceAccountName != "" {
@@ -590,7 +652,13 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		}
 	}
-	podSpec.Volumes = append(podSpec.Volumes, dataVolume)
+	podSpec.Volumes = append(podSpec.Volumes, dataVolume, corev1.Volume{
+		Name:         initVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+
+	// Built last so it picks up every mount added to the server above.
+	podSpec.InitContainers = []corev1.Container{buildInitContainer(podSpec.Containers[0])}
 
 	// Mirror the remaining API-server defaults (see the comment on the struct
 	// literal above): a nil here is not "unset" once stored, it is a diff.
@@ -606,6 +674,9 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		}
 		if sec := podSpec.Volumes[i].Secret; sec != nil && sec.DefaultMode == nil {
 			sec.DefaultMode = func(i int32) *int32 { return &i }(corev1.SecretVolumeSourceDefaultMode)
+		}
+		if pr := podSpec.Volumes[i].Projected; pr != nil && pr.DefaultMode == nil {
+			pr.DefaultMode = func(i int32) *int32 { return &i }(corev1.ProjectedVolumeSourceDefaultMode)
 		}
 	}
 
@@ -709,4 +780,55 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			},
 		},
 	}, nil
+}
+
+// tlsVolume is the volume mounted at tlsCertMountPath. Without a trust bundle
+// it is the server secret as is. With one, it is a projection that keeps every
+// path valkey.conf names: tls.crt and tls.key from the server secret, ca.crt
+// from the trust bundle, and the server secret's own ca.crt moved aside to
+// server-ca.crt for probes and the exporter. Keeping tls-ca-cert-file at the
+// same path means the shared ConfigMap does not change when a trust bundle is
+// added, so a pod that restarts before its roll still finds every file its
+// config names.
+func tlsVolume(tls *valkeyiov1alpha1.NodeTLSSpec) corev1.Volume {
+	server := tls.Certificates.Server.SecretName
+	if tls.Certificates.TrustBundle == nil {
+		return corev1.Volume{
+			Name: tlsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: server},
+			},
+		}
+	}
+	return corev1.Volume{
+		Name: tlsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: server},
+						Items: []corev1.KeyToPath{
+							{Key: tlsSecretKeyCert, Path: tlsSecretKeyCert},
+							{Key: tlsSecretKeyKey, Path: tlsSecretKeyKey},
+							{Key: tlsSecretKeyCA, Path: tlsSecretKeyServerCA},
+						},
+					}},
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tls.Certificates.TrustBundle.SecretName},
+						Items:                []corev1.KeyToPath{{Key: tlsSecretKeyCA, Path: tlsSecretKeyCA}},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// nodeServerCAPath is the in-pod path of the root the server certificate chains
+// to, which probes and the exporter verify the server against. It is ca.crt
+// unless a trust bundle has taken that path over.
+func nodeServerCAPath(tls *valkeyiov1alpha1.NodeTLSSpec) string {
+	if tls != nil && tls.Certificates.TrustBundle != nil {
+		return tlsCertMountPath + "/" + tlsSecretKeyServerCA
+	}
+	return tlsCertMountPath + "/" + tlsSecretKeyCA
 }

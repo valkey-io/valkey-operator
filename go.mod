@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/moby/patternmatcher v0.6.1
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0
 	github.com/prometheus/client_golang v1.24.0

@@ -748,19 +748,16 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// Scale-out primaries get slots only from rebalanceSlots, which runs
 		// after this walk returns. The sync-aware probe keeps them Not Ready
 		// until then, so pausing here would stall the rebalance forever.
-		// Create a missing ValkeyNode, and leave an existing one's spec alone.
+		// Still reconcile each ValkeyNode: an existing spec (a new image, for
+		// example) has to land or the pod never joins. NotReady does not stop
+		// the walk, because this shard is not serving.
 		if clusterState != nil && !shardExistsInTopology(clusterState, shardIndex, nodes) && len(unassignedSlots) == 0 {
 			for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-				name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
-				current := &valkeyiov1alpha1.ValkeyNode{}
-				err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, current)
-				if err == nil {
-					continue
-				}
-				if !apierrors.IsNotFound(err) {
-					return false, err
-				}
 				result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+				var deferred *rollDeferredError
+				if errors.As(err, &deferred) {
+					err = nil
+				}
 				if err != nil {
 					return false, err
 				}
@@ -1408,26 +1405,21 @@ func scrapedNode(state *valkey.ClusterState, address string) *valkey.NodeState {
 }
 
 // initialSlotPrimariesReady reports whether every shard that is not yet in the
-// topology has its primary scraped, and every pod IP answered the scrape.
-// Slot assignment splits whatever is still free across the primaries it can
-// see. Running it before the late primary is up gives that primary nothing,
-// and running it while a pod is down can give that pod's slots away.
+// topology has its primary scraped. Slot assignment splits whatever is still
+// free across the primaries it can see. Running it before the late primary is
+// up gives that primary nothing. A replica that missed the scrape is not a
+// reason to wait: GetClusterState omits it, and replicas are not given the
+// initial ranges.
 func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
 	return initialSlotWait(cluster, state, nodes) == ""
 }
 
 // initialSlotWait returns the ValkeyNode name slot assignment is waiting on,
 // or "" when every not-yet-joined primary has been scraped. A node with no
-// name is reported by its pod IP.
+// name is reported by its pod IP. Down replicas are ignored.
 func initialSlotWait(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) string {
 	if cluster == nil || state == nil || nodes == nil {
 		return "cluster state"
-	}
-	for i := range nodes.Items {
-		ip := nodes.Items[i].Status.PodIP
-		if ip != "" && !state.HasAddress(ip) {
-			return slotWaitName(&nodes.Items[i])
-		}
 	}
 	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
 	for shardIndex := range int(cluster.Spec.Shards) {

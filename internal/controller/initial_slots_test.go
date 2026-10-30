@@ -75,6 +75,13 @@ func TestInitialSlotPrimariesReady(t *testing.T) {
 	assert.Equal(t, "n-1-0", initialSlotWait(cluster, late, nodes),
 		"the log names the primary that has not been scraped")
 
+	replicasDown := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{
+		slotTestPrimary("10.0.0.1", "2"),
+		slotTestPrimary("10.0.1.1", "2"),
+	}}
+	assert.Equal(t, "", initialSlotWait(cluster, replicasDown, nodes),
+		"an unscaped replica must not hold slot assignment")
+
 	isolated := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{
 		slotTestPrimary("10.0.0.1", "2"),
 		slotTestPrimary("10.0.0.2", "2"),

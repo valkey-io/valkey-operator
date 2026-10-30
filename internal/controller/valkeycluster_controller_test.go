@@ -1909,6 +1909,47 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		}
 	})
 
+	It("applies a spec change on a slotless scale-out shard without pausing rebalance", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		// Shard 0 already matches the new spec, so the walk reaches shard 1.
+		// Shard 1 is not in the topology and owns no slots.
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		for _, name := range []string{node00, node01} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			node.Spec.Image = newImage
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(testCtx, node)).To(Succeed())
+			setReady(name)
+		}
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "the slotless shard must not pause rebalance")
+		Expect(getImage(node10)).To(Equal(newImage))
+		Expect(getImage(node11)).To(Equal(newImage))
+	})
+
 	It("skips only the shard whose primary is unidentifiable", func() {
 		By("creating all nodes, marking them ready and publishing pod IPs")
 		createAllNodes()

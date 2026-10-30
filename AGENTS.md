@@ -17,3 +17,5 @@ Reference these docs in PR descriptions rather than duplicating their content.
 ## Workflow
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branching, PR, and coding standards guidance.
+
+Before opening a PR, offer to run the [`pre-pr-review`](.agents/skills/pre-pr-review/SKILL.md) skill.

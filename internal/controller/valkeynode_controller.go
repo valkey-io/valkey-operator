@@ -914,23 +914,17 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		return false, err
 	}
 
+	readyStatus := metav1.ConditionFalse
+	readyReason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+	readyMessage := "Pod does not exist yet"
 	if pod == nil {
 		current.Status.Ready = false
 		current.Status.PodName = ""
 		current.Status.PodIP = ""
 		current.Status.Role = ""
-		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-		message := "Pod does not exist yet"
 		if node.Spec.Persistence != nil {
-			_, reason, message = pvcStatusCondition(pvc)
+			_, readyReason, readyMessage = pvcStatusCondition(pvc)
 		}
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: current.Generation,
-		})
 	} else {
 		current.Status.PodName = pod.Name
 		current.Status.PodIP = pod.Status.PodIP
@@ -949,10 +943,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			rolledOut = rolled
 		}
 
-		// A Service error keeps Ready false. Setting it true here and then
-		// false below changes LastTransitionTime, so the status patch runs
-		// on every reconcile while the Service name stays taken.
-		current.Status.Ready = ready && rolledOut && serviceErr == nil
+		current.Status.Ready = ready && rolledOut
 
 		// Role follows the pod, not the rollout: a pod that is serving has a
 		// resolvable role even while its workload rolls, and blanking it there
@@ -972,42 +963,37 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		}
 
 		if current.Status.Ready {
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodRunning,
-				Message:            "Pod is running and ready",
-				ObservedGeneration: current.Generation,
-			})
+			readyStatus = metav1.ConditionTrue
+			readyReason = valkeyiov1alpha1.ValkeyNodeReasonPodRunning
+			readyMessage = "Pod is running and ready"
 		} else {
-			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-			message := "Pod is not ready"
+			readyMessage = "Pod is not ready"
 			if node.Spec.Persistence != nil {
 				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
-					reason = pvcReason
-					message = pvcMessage
+					readyReason = pvcReason
+					readyMessage = pvcMessage
 				}
 			}
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             reason,
-				Message:            message,
-				ObservedGeneration: current.Generation,
-			})
 		}
 	}
-
+	// One Ready write. ServiceError replaces the pod reason only when the
+	// pod would otherwise be ready. Writing True and then False would
+	// change LastTransitionTime on every reconcile.
 	if serviceErr != nil {
 		current.Status.Ready = false
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             valkeyiov1alpha1.ValkeyNodeReasonServiceError,
-			Message:            serviceErr.Error(),
-			ObservedGeneration: current.Generation,
-		})
+		if readyStatus == metav1.ConditionTrue {
+			readyStatus = metav1.ConditionFalse
+			readyReason = valkeyiov1alpha1.ValkeyNodeReasonServiceError
+			readyMessage = serviceErr.Error()
+		}
 	}
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+		Status:             readyStatus,
+		Reason:             readyReason,
+		Message:            readyMessage,
+		ObservedGeneration: current.Generation,
+	})
 
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {

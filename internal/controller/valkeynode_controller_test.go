@@ -325,7 +325,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 
 			got := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
@@ -398,7 +398,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(updated.Status.Ready).To(BeFalse())
 			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 			aclCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
 			Expect(aclCond).NotTo(BeNil())
 			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
@@ -480,7 +480,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(updated.Status.Ready).To(BeFalse())
 			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 			aclCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
 			Expect(aclCond).NotTo(BeNil())
 			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
@@ -531,7 +531,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(updated.Status.Ready).To(BeFalse())
 			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonServiceError))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady))
 		})
 
 		It("should surface pending PVC status before the pod is ready when persistence is enabled", func() {

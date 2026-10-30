@@ -64,6 +64,10 @@ var _ = BeforeSuite(func() {
 	err = valkeyiov1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	// envtest has no kubelet. Existing specs publish valkey.conf without running
+	// the parse pod; the specs that cover the check clear this hook.
+	serverConfigParsesFn = func(context.Context, *valkeyiov1alpha1.ValkeyCluster, string) error { return nil }
+
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")

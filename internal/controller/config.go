@@ -319,8 +319,13 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
-	// Get the new server config
+	// Get the new server config. Ask spec.image to parse it before this ConfigMap
+	// is created or replaced. A file Valkey will not start must not be published:
+	// every node mounts this one object, and the workload revision rolls onto it.
 	newServerConfig := buildServerConfig(cluster)
+	if err := r.checkRenderedConfig(ctx, cluster, newServerConfig); err != nil {
+		return err
+	}
 
 	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))

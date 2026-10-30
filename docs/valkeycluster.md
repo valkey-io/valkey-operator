@@ -67,6 +67,12 @@ For example, `tls-auto-reload-interval` requires Valkey `9.1.0` or newer.
 
 Apply the image change and wait for the roll to finish before adding a version-gated directive. Adding both in one spec change can write the new config to the shared ConfigMap before every node has the new image, and a node still on the old image can crash-loop if it restarts.
 
+#### Config the image will not parse
+
+A directive the version map does not know about, including a typo, is still rendered into the candidate file. Before that file replaces the shared `valkey.conf`, the operator starts a one-shot pod with `spec.image` and asks `valkey-server` to load it. `FATAL CONFIG FILE ERROR` means the file is not published and the workload revision does not change. Example: `ACTOKEY: ACTOSTRING` on a Ready cluster leaves shard 0 on the previous file instead of crash-looping it. The `ServerConfig` condition is `False` with reason `ConfigRejected` until the spec parses. The check image has to provide `/bin/sh`, `grep`, `sleep`, and `valkey-server`. A distroless image cannot run the check, and the operator leaves the published file unchanged until the check can run.
+
+The first publish waits for the same check. Nodes are not created on a file Valkey will not start.
+
 #### Constraints
 
 - Cluster management settings owned by the operator cannot be overwritten

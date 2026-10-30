@@ -62,6 +62,18 @@ Common reasons when `Ready=False`:
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
+- `ConfigCheckPending` – the rendered `valkey.conf` is still being parsed by `spec.image`, and no file has been published yet
+- `ConfigRejected` – `spec.image` rejected the rendered file before anything was published
+
+#### `ServerConfig`
+Reports the parse check that gates publishing `valkey.conf`. Absent once the published file matches the candidate.
+
+| Status | Meaning |
+|---|---|
+| `False` | The check is still running (`ConfigCheckPending`), or `spec.image` rejected the rendered file (`ConfigRejected`). |
+| Absent | The published `valkey.conf` matches the candidate. |
+
+A rejection leaves the previous file in place and does not roll. `Ready` stays as it was when a file is already published. On first create, `Ready` stays `False` until a file is published.
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy

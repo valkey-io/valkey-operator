@@ -88,7 +88,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -101,7 +101,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
-//     (upsertConfigMap).
+//     (upsertConfigMap). The rendered file is parsed by spec.image first. A
+//     file that does not parse is not written, and the workload revision is
+//     left unchanged.
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
@@ -169,9 +171,20 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+		var rejected *configRejectedError
+		var pending *configCheckPendingError
+		switch {
+		case errors.As(err, &rejected):
+			r.noteServerConfig(ctx, cluster, valkeyiov1alpha1.ReasonConfigRejected, err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		case errors.As(err, &pending):
+			r.noteServerConfig(ctx, cluster, valkeyiov1alpha1.ReasonConfigCheckPending, err.Error())
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		default:
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
 	}
 	configWarnings := make([]configWarning, 0, 2)
 	// Surface a ConfigurationWarning condition when an explicit

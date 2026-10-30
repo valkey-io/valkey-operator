@@ -1097,6 +1097,8 @@ func TestReadinessCheckScript(t *testing.T) {
 	// so the second case is what holds the primary's eviction (#552).
 	const primaryLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460"
 	const markerLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected [0->-def]"
+	const importingLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected [0-<-def]"
+	const slotsAndImportingLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [5461-<-def]"
 	const slotlessLine = "abc 10.0.0.2:6379@16379 myself,master - 0 0 1 connected"
 	const replicaLine = "abc 10.0.0.2:6379@16379 myself,slave def 0 0 1 connected"
 	const replicaMarkerLine = "abc 10.0.0.2:6379@16379 myself,slave def 0 0 1 connected [5->-abcdef]"
@@ -1120,6 +1122,17 @@ func TestReadinessCheckScript(t *testing.T) {
 			name:  "primary mid migration",
 			info:  "cluster_enabled:1\r\nrole:master\r\n",
 			nodes: markerLine,
+		},
+		{
+			name:    "importing-only primary is not serving",
+			info:    "cluster_enabled:1\r\nrole:master\r\n",
+			nodes:   importingLine,
+			wantErr: true,
+		},
+		{
+			name:  "primary with slots and an importing marker",
+			info:  "cluster_enabled:1\r\nrole:master\r\n",
+			nodes: slotsAndImportingLine,
 		},
 		{
 			name:    "slotless node is not ready",

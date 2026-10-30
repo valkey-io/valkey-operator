@@ -28,10 +28,15 @@ timeout_cmd() {
         count=$((count + 1))
     done
 
-    # Timeout reached
+    # Timeout reached. The second wait is 0.1s, not 1s: PING, INFO and
+    # CLUSTER NODES can each hit this path, and a 1s grace made the three
+    # hung calls outlast the 5s readiness probe.
     kill -TERM $cmdpid 2>/dev/null
     sleep 0.1
-    kill -0 $cmdpid 2>/dev/null && sleep 1 && kill -KILL $cmdpid 2>/dev/null
+    if kill -0 $cmdpid 2>/dev/null; then
+        sleep 0.1
+        kill -KILL $cmdpid 2>/dev/null
+    fi
     wait $cmdpid 2>/dev/null
     return 124
 }
@@ -98,7 +103,13 @@ has_slots=$(printf '%s\n' "$nodes" | tr -d '\r' | awk '
             if (flags[i] == "myself") is_me = 1
             if (flags[i] == "master") is_master = 1
         }
-        if (is_me && is_master && NF >= 9) { print "yes"; exit }
+        if (!is_me || !is_master) next
+        for (f = 9; f <= NF; f++) {
+            # A numeric range is owned. A migrating marker [slot->-id] is still
+            # owned. An importing marker [slot-<-id] is not, so it does not
+            # make a slotless primary Ready.
+            if ($f ~ /^[0-9]/ || index($f, "->") > 0) { print "yes"; exit }
+        }
     }
 ')
 if [ "$has_slots" = "yes" ]; then

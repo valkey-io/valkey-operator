@@ -69,6 +69,12 @@ type ValkeyClusterReconciler struct {
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
+
+	// healStaleAddressPeersFn and attachPendingNodesFn stand in for the
+	// methods of the same name. Nil calls the method. Tests set the field on
+	// the reconciler they built instead of swapping a package variable.
+	healStaleAddressPeersFn func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int
+	attachPendingNodesFn    func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) error
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -609,15 +615,6 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 	return nil
 }
 
-// attachPendingNodesFn is what a paused roll calls so a pod that is not Ready
-// can still join the cluster. Tests swap it for a stub.
-var attachPendingNodesFn = (*ValkeyClusterReconciler).attachPendingNodes
-
-// healStaleAddressPeersFn is what a paused roll calls so peers that came back
-// at a new pod IP are re-introduced before the walk returns. Tests swap it
-// for a stub. Reconcile also calls healStaleAddressPeers once the walk completes.
-var healStaleAddressPeersFn = (*ValkeyClusterReconciler).healStaleAddressPeers
-
 // attachPendingNodes MEETs isolated nodes, assigns slots to new primaries, and
 // REPLICATEs pending replicas. A nil state does nothing.
 //
@@ -795,11 +792,23 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				if err := r.createMissingValkeyNodes(ctx, cluster, nodesPerShard, nodes, clusterState, liveHashes); err != nil {
 					return false, err
 				}
-				if healed := healStaleAddressPeersFn(r, ctx, cluster, clusterState); healed > 0 {
+				healed := 0
+				if r.healStaleAddressPeersFn != nil {
+					healed = r.healStaleAddressPeersFn(ctx, cluster, clusterState)
+				} else {
+					healed = r.healStaleAddressPeers(ctx, cluster, clusterState)
+				}
+				if healed > 0 {
 					r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
 				}
-				if err := attachPendingNodesFn(r, ctx, cluster, clusterState, nodes); err != nil {
-					setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
+				var attachErr error
+				if r.attachPendingNodesFn != nil {
+					attachErr = r.attachPendingNodesFn(ctx, cluster, clusterState, nodes)
+				} else {
+					attachErr = r.attachPendingNodes(ctx, cluster, clusterState, nodes)
+				}
+				if attachErr != nil {
+					setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, attachErr.Error(), metav1.ConditionTrue)
 				}
 				if result == nodeDeferred {
 					return true, deferred
@@ -1404,13 +1413,20 @@ func scrapedNode(state *valkey.ClusterState, address string) *valkey.NodeState {
 // see. Running it before the late primary is up gives that primary nothing,
 // and running it while a pod is down can give that pod's slots away.
 func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	return initialSlotWait(cluster, state, nodes) == ""
+}
+
+// initialSlotWait returns the ValkeyNode name slot assignment is waiting on,
+// or "" when every not-yet-joined primary has been scraped. A node with no
+// name is reported by its pod IP.
+func initialSlotWait(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) string {
 	if cluster == nil || state == nil || nodes == nil {
-		return false
+		return "cluster state"
 	}
 	for i := range nodes.Items {
 		ip := nodes.Items[i].Status.PodIP
 		if ip != "" && !state.HasAddress(ip) {
-			return false
+			return slotWaitName(&nodes.Items[i])
 		}
 	}
 	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
@@ -1420,14 +1436,21 @@ func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *v
 		}
 		primary := labeledPrimary(nodes, shardIndex)
 		if primary == nil || primary.Status.PodIP == "" {
-			return false
+			return fmt.Sprintf("shard %d primary", shardIndex)
 		}
 		scraped := scrapedNode(state, primary.Status.PodIP)
 		if scraped == nil || (scraped.IsIsolated() && !isSingleNodeCluster) {
-			return false
+			return slotWaitName(primary)
 		}
 	}
-	return true
+	return ""
+}
+
+func slotWaitName(node *valkeyiov1alpha1.ValkeyNode) string {
+	if node.Name != "" {
+		return node.Name
+	}
+	return node.Status.PodIP
 }
 
 // assignSlotsToPendingPrimaries assigns hash-slot ranges to non-isolated
@@ -1442,8 +1465,8 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	// Wait until every not-yet-joined primary is up. Assigning earlier splits
 	// the free slots across whichever primaries have joined, and can hand a
 	// down primary's range to a node that never saw it.
-	if !initialSlotPrimariesReady(cluster, state, nodes) {
-		log.V(1).Info("deferring slot assignment until every primary is scraped")
+	if wait := initialSlotWait(cluster, state, nodes); wait != "" {
+		log.V(1).Info("deferring slot assignment until every primary is scraped", "waiting", wait)
 		return 0, nil
 	}
 

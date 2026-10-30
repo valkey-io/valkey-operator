@@ -1845,13 +1845,11 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		setNotReady(node01)
 
 		attached := 0
-		orig := attachPendingNodesFn
-		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
 			attached++
 			Expect(state).NotTo(BeNil())
 			return nil
 		}
-		defer func() { attachPendingNodesFn = orig }()
 
 		rvOthers := map[string]string{}
 		for _, name := range allNodes {
@@ -1909,13 +1907,11 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		setNotReady(node01)
 
 		healed := 0
-		orig := healStaleAddressPeersFn
-		healStaleAddressPeersFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+		r.healStaleAddressPeersFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
 			healed++
 			Expect(state).NotTo(BeNil())
 			return 1
 		}
-		defer func() { healStaleAddressPeersFn = orig }()
 
 		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
 		Expect(err).NotTo(HaveOccurred())
@@ -1929,11 +1925,9 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		markAllReady()
 		setNotReady(node01)
 
-		orig := attachPendingNodesFn
-		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
 			return stderrors.New("meet failed")
 		}
-		defer func() { attachPendingNodesFn = orig }()
 
 		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
 		Expect(err).NotTo(HaveOccurred())
@@ -1957,12 +1951,10 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		setNotReady(node11)
 
 		attached := 0
-		orig := attachPendingNodesFn
-		attachPendingNodesFn = func(_ *ValkeyClusterReconciler, _ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
 			attached++
 			return nil
 		}
-		defer func() { attachPendingNodesFn = orig }()
 
 		rvs := map[string]string{}
 		for _, name := range allNodes {

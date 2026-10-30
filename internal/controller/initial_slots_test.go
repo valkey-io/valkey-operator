@@ -72,6 +72,8 @@ func TestInitialSlotPrimariesReady(t *testing.T) {
 	}}
 	assert.False(t, initialSlotPrimariesReady(cluster, late, nodes),
 		"a primary that has not been scraped must not be skipped")
+	assert.Equal(t, "n-1-0", initialSlotWait(cluster, late, nodes),
+		"the log names the primary that has not been scraped")
 
 	isolated := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{
 		slotTestPrimary("10.0.0.1", "2"),

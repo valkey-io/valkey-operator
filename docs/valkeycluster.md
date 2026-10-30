@@ -117,6 +117,8 @@ and the operator fails over the shard primary on every reconcile while the
 cluster still reports Ready. The same happens for any other field such a
 policy adds to the template.
 
+Each pod also runs an operator-managed [init container](architecture.md#init-container) named `server-init`. The API server rejects a `containers` entry with that name, and the init container cannot be patched through `containers`.
+
 ### Service account
 
 ```yaml

@@ -3337,10 +3337,8 @@ spec:
                         default: Disabled
                         description: |-
                           CertificateUser configures how Valkey maps an authenticated client
-                          certificate to an ACL user. Set to `CN` to use the certificate's Common Name
-                          (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
-                          certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
-                          Defaults to `Disabled`, which leaves the directive unset.
+                          certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+                          `Disabled`, which leaves the directive unset.
                         enum:
                         - CN
                         - URI
@@ -3350,10 +3348,7 @@ spec:
                         default: Optional
                         description: |-
                           Mode controls whether clients must authenticate with a TLS certificate.
-                          `Required` enforces mTLS, `Optional` allows both authenticated and
-                          unauthenticated clients, and `Disabled` turns client certificate processing
-                          off entirely.
-                          Defaults to `Optional`.
+                          Maps to `tls-auth-clients`. Defaults to `Optional`.
                         enum:
                         - Required
                         - Optional

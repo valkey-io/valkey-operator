@@ -33,7 +33,7 @@ import (
 
 // Recovery from cluster states the operator has to repair on its own, without a
 // spec change or manual intervention.
-var _ = Describe("ValkeyCluster recovery", Label("valkeycluster", "recovery"), func() {
+var _ = Describe("ValkeyCluster recovery", Label("ValkeyCluster", "recovery", "spec-update"), func() {
 	// The clusters declare no users, so valkey-cli runs as the default user with
 	// no password. The connect timeout bounds a stale MOVED redirect pointing at
 	// a terminated pod.

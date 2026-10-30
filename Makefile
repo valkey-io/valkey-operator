@@ -83,6 +83,15 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= valkey-operator-test-e2e
 
+# E2E label buckets for the parallel CI matrix (one matrix job per label).
+# The catch-all job is derived below. Labels must be single words.
+E2E_BUCKETS ?= cluster-lifecycle security spec-update valkeynode
+
+# Catch-all filter matching every test not covered by a bucket above, e.g. "!( a || b || c )".
+empty :=
+space := $(empty) $(empty)
+E2E_CATCHALL := !( $(subst $(space),$(space)||$(space),$(strip $(E2E_BUCKETS))) )
+
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
@@ -100,13 +109,26 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@"$(KUBECTL)" config use-context kind-$(KIND_CLUSTER)
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 30m
+test-e2e: manifests generate fmt vet test-e2e-run ## Run the e2e tests. Expected an isolated environment using Kind.
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-run
+test-e2e-run: setup-test-e2e ## Run the e2e tests on the Kind cluster, without code generation or vet.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 30m
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: test-e2e-matrix
+test-e2e-matrix: ## Emit the e2e matrix as JSON objects {name, filter} for the CI matrix
+	@jq -nc --arg catchall "$(E2E_CATCHALL)" \
+		'[$$ARGS.positional[] | {name: ("\"" + . + "\""), filter: .}] + [{name: "remaining tests", filter: $$catchall}]' \
+		--args $(E2E_BUCKETS)
+
+.PHONY: test-e2e-verify-buckets
+test-e2e-verify-buckets: ## Verify every e2e test runs in exactly one matrix job
+	@hack/verify-e2e-buckets.sh '$(E2E_CATCHALL)' $(E2E_BUCKETS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

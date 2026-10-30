@@ -36,7 +36,7 @@ import (
 // Test valkey cluster on PSS restricted namespace
 const pssRestrictedNamespace = "valkey-pss-restricted"
 
-var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem"), func() {
+var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem", "security"), func() {
 	const noPersistClusterName = "cluster-readonly-rootfs-sample"
 	const noPersistManifest = "config/samples/v1alpha1_valkeycluster-readonly-rootfs.yaml"
 	const persistClusterName = "cluster-readonly-rootfs-persistent-sample"

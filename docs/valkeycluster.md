@@ -12,6 +12,7 @@
 
 - [Config](#config)
 - [Containers](#containers)
+- [Default images](#default-images)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
@@ -125,6 +126,17 @@ serviceAccountName: valkey-sa
 pod. If unset, the pod uses the namespace's default ServiceAccount.
 
 The referenced ServiceAccount **must already exist in the same namespace** as the ValkeyCluster. The operator assigns the name to each pod template; it does not create the ServiceAccount or configure its RBAC. If the ServiceAccount does not exist, pod admission rejects each pod and the cluster cannot become ready. The operator reports a `ConfigurationWarning` with reason `ServiceAccountNotFound`; if an API error prevents the existence check, it reports `ServiceAccountLookupFailed`. The check is advisory, and Kubernetes admission remains authoritative. Changing this field updates every ValkeyNode pod template and rolls all pods.
+
+### Default images
+
+A ValkeyCluster or ValkeyNode that leaves `image` empty runs the Valkey image the operator was started with, and a cluster or standalone ValkeyNode whose `exporter.image` is empty runs the operator's exporter image. Both come from the manager flags `--default-valkey-image` and `--default-exporter-image`, which default to the images compiled into the binary. Changing either flag, or upgrading to a build with a new compiled default, rolls every cluster and node that left the field empty, the same as setting `image` would. `--print-default-images` prints the defaults, after any override, and exits, so they can be checked without a cluster:
+
+```sh
+$ docker run --rm ghcr.io/valkey-io/valkey-operator:<tag> --print-default-images
+{"valkey":"valkey/valkey:9.0.0","exporter":"oliver006/redis_exporter:v1.88.0"}
+```
+
+`--version` prints the build version and exits. With both flags set, both are printed.
 
 ### Metrics
 

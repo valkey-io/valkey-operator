@@ -56,7 +56,7 @@ func TestSystemPasswordVolumeFollowsClusterLabel(t *testing.T) {
 	}
 	require.NotNil(t, volume)
 	require.Equal(t, getSystemPasswordSecretName("c1"), volume.Secret.SecretName)
-	require.Equal(t, int32(0400), *volume.Secret.DefaultMode)
+	require.Equal(t, int32(0444), *volume.Secret.DefaultMode)
 
 	var mount *corev1.VolumeMount
 	for i := range pts.Spec.Containers[0].VolumeMounts {
@@ -294,6 +294,39 @@ func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {
 	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordPhase])
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(current))
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(secret.Data[systemPasswordNextKey(operatorUser)]))
+}
+
+func TestCreateSystemUsersAclRotatesAnExistingSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	enabled := false
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
+	}}
+	current := []byte("op-current")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
+		Annotations: map[string]string{
+			annotationSystemPasswordRotatedAt: time.Now().Add(-systemPasswordRotationPeriod - time.Second).Format(time.RFC3339Nano),
+		},
+	}, Data: map[string][]byte{
+		operatorUser:    current,
+		replicationUser: []byte("re-current"),
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster, secret).Build()
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, APIReader: c}
+
+	acl, err := r.createSystemUsersAcl(context.Background(), cluster)
+	require.NoError(t, err)
+	require.Contains(t, acl, "user "+operatorUser)
+
+	got := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), got))
+	require.Equal(t, current, got.Data[operatorUser])
+	require.NotEmpty(t, got.Data[systemPasswordNextKey(operatorUser)])
+	require.NotEqual(t, current, got.Data[systemPasswordNextKey(operatorUser)])
+	require.Equal(t, systemPasswordPhasePending, got.Annotations[annotationSystemPasswordPhase])
 }
 
 func TestApplyReplicationPasswordSkipsASteadySecret(t *testing.T) {

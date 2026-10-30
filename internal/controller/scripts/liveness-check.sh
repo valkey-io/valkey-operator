@@ -47,7 +47,9 @@ fi
 # fixed at container start and is the fallback when the file is not mounted.
 pwfile="/etc/valkey/system-passwords/_operator"
 if [ -f "$pwfile" ]; then
-    pw=$(cat "$pwfile")
+    # A file the process cannot read must not fail the probe. set -e would
+    # exit here and drop the password from the environment.
+    pw=$(cat "$pwfile" 2>/dev/null) || true
     if [ -n "$pw" ]; then
         VALKEYCLI_AUTH=$pw
         export VALKEYCLI_AUTH

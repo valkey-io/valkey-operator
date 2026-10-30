@@ -128,36 +128,19 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("getting system users secret: " + cluster.Name)
-	var systemsAcls strings.Builder
-	systemUserSecret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: cluster.Namespace,
-		Name:      getSystemPasswordSecretName(cluster.Name),
-	}, systemUserSecret)
+	// Every reconcile, including one where the Secret is already complete.
+	// Rotation is decided here. A Get that finds the Secret and returns
+	// would leave the passwords in place forever.
+	systemUserSecret, err := r.upsertSystemUsersPasswordSecret(ctx, cluster)
 	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch system users secret")
-			return "", err
-		}
-		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
-		if err != nil {
-			log.Error(err, "failed to create system user secret")
-			return "", err
-		}
+		log.Error(err, "failed to reconcile system user secret")
+		return "", err
 	}
 
-	err = validateSystemUserPasswordSecret(systemUserSecret.Data, cluster)
-	if err != nil {
-		if errors.Is(err, errMissingSystemUser) {
-			systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
-			if err != nil {
-				log.Error(err, "failed to update system user secret")
-				return "", err
-			}
-		} else {
-			// error is unknown system user, either by manual modification, or removal from between valkey-operator versions
-			log.Error(err, "error validating system user secret")
-		}
+	var systemsAcls strings.Builder
+	if err := validateSystemUserPasswordSecret(systemUserSecret.Data, cluster); err != nil && !errors.Is(err, errMissingSystemUser) {
+		// Unknown key, from a hand edit or a user removed between versions.
+		log.Error(err, "error validating system user secret")
 	}
 
 	for _, user := range systemUsers {
@@ -477,14 +460,22 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		log.Error(err, "failed to rotate system passwords")
 		return nil, err
 	}
-	r.recordSystemPasswordRotation(cluster, rotationEvent)
+	// A steady Secret is not written again. An Update on every reconcile
+	// would change its resourceVersion and requeue the cluster forever.
+	if !createSecret && len(filled) == 0 && rotationEvent == "" {
+		return systemUsersSecret, nil
+	}
 
 	if createSecret {
 		err = r.Create(ctx, systemUsersSecret)
 	} else {
 		err = r.Update(ctx, systemUsersSecret)
 	}
-	return systemUsersSecret, err
+	if err != nil {
+		return systemUsersSecret, err
+	}
+	r.recordSystemPasswordRotation(cluster, rotationEvent)
+	return systemUsersSecret, nil
 }
 
 func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclBytes []byte) error {

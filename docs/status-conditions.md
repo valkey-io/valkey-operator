@@ -235,7 +235,25 @@ Common reasons when `ACLApplied=False`:
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
 
-> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff. Once the condition is `True`, the node records the revision it confirmed in `status.appliedACLRevision`.
+
+#### `TrustBundleApplied`
+Indicates whether the running Valkey process has loaded the trust bundle named by `spec.tls.certificates.trustBundle` as its `tls-ca-cert-file`. The bundle is reloaded live, with `CONFIG SET tls-ca-cert-file` on its unchanged path, so a changed bundle takes effect for new connections without a pod roll.
+
+This condition is set once the node is ready, its ACL is applied, and it has a trust bundle. It is absent on a node without one.
+
+| Status | Meaning |
+|---|---|
+| `True` | The mounted trust bundle was reloaded in the last reconcile. |
+| `False` | The reload failed. The server keeps the roots it last loaded. |
+
+Common reasons when `TrustBundleApplied=False`:
+- `ApplyFailed` – `CONFIG SET tls-ca-cert-file` returned an error, for example because the mounted `ca.crt` is malformed. The message field contains the current error.
+
+Common reasons when `TrustBundleApplied=True`:
+- `Applied` – the mounted trust bundle is loaded.
+
+> **Note:** On a failed reload the node controller emits a `TrustBundleReloadFailed` warning event and retries every 10 seconds, not with exponential backoff, so a fixed bundle is picked up within one retry of the mounted file refreshing.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
@@ -401,6 +419,7 @@ These events are emitted during live configuration application on ValkeyNode res
 | Event Type | Type | Description |
 |---|---|---|
 | `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
+| `TrustBundleReloadFailed` | Warning | Reloading a node's trust bundle failed; the `TrustBundleApplied` condition is set to `False` and the reload is retried every 10 seconds |
 
 ### Users/ACL events
 

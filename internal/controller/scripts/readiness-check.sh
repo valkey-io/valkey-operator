@@ -42,6 +42,18 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
+# The mounted file is the current _operator password. It updates when the
+# Secret rotates, without a container restart. The environment variable is
+# fixed at container start and is the fallback when the file is not mounted.
+pwfile="/etc/valkey/system-passwords/_operator"
+if [ -f "$pwfile" ]; then
+    pw=$(cat "$pwfile")
+    if [ -n "$pw" ]; then
+        VALKEYCLI_AUTH=$pw
+        export VALKEYCLI_AUTH
+    fi
+fi
+
 # Authenticate as the custom user when user and password are set.
 auth_args=""
 if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then

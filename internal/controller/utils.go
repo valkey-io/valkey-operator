@@ -88,8 +88,13 @@ const (
 	dataMountPath     = "/data"
 	scriptsVolumeName = "scripts"
 	scriptsMountPath  = "/scripts"
-	configVolumeName  = "valkey-conf"
-	configMountPath   = "/config"
+	// systemPasswordVolumeName mounts internal-<cluster>-system-passwords.
+	// Probes and the server start script read the current password from the
+	// files, so a rotation reaches them without restarting the container.
+	systemPasswordVolumeName = "system-passwords"
+	systemPasswordMountPath  = "/etc/valkey/system-passwords"
+	configVolumeName         = "valkey-conf"
+	configMountPath          = "/config"
 	// initVolumeName is the emptyDir the init container writes to and the
 	// server container reads from.
 	initVolumeName   = "init-conf"

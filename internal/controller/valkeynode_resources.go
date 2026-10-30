@@ -631,8 +631,11 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	// The system-password files are how probes and a restarted server pick up
 	// a rotation. The Secret name is fixed, so a later password change does
 	// not change this pod template and does not roll the pod.
+	// 0444, not 0400: the operator does not set fsGroup. A pod with
+	// runAsUser and no fsGroup still has to read these files. They are
+	// mounted only into this pod.
 	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
-		mode := int32(0400)
+		mode := int32(0444)
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 			Name: systemPasswordVolumeName,
 			VolumeSource: corev1.VolumeSource{

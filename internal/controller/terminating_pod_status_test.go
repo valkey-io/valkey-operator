@@ -75,7 +75,7 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 	}
 
 	status := func() valkeyiov1alpha1.ValkeyNodeStatus {
-		_, err := r.updateStatus(ctx, node)
+		_, err := r.updateStatus(ctx, node, nil)
 		Expect(err).NotTo(HaveOccurred())
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())

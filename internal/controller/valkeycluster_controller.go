@@ -801,7 +801,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveTemplates, trustBundle)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, nodes.Items, liveTemplates, trustBundle)
 			var deferred *rollDeferredError
 			if errors.As(err, &deferred) {
 				err = nil
@@ -850,9 +850,9 @@ const (
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
-// liveTemplates is the reconcileValkeyNodes snapshot so WorkloadRevision,
+// nodes and liveTemplates are the reconcileValkeyNodes snapshot so WorkloadRevision,
 // config revision and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplates map[string]liveWorkloadTemplate, trustBundle string) (nodeResult, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, nodes []valkeyiov1alpha1.ValkeyNode, liveTemplates map[string]liveWorkloadTemplate, trustBundle string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
@@ -896,7 +896,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	// change, not pure WorkloadRevision backfill when live already matches.
 	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
 
-	if cause := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); cause != "" {
+	if cause := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, nodes, current, needsFailover); cause != "" {
 		return nodeDeferred, &rollDeferredError{shardIndex: shardIndex, node: current.Name, cause: cause}
 	}
 
@@ -930,12 +930,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 // maybeProactiveFailoverBeforeRoll runs proactive failover when rolling a
 // primary. Returns why the roll has to wait when the primary has no synced
 // replica yet, or the failover did not complete, and "" when it may proceed.
-func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, current *valkeyiov1alpha1.ValkeyNode, rolling bool) string {
+func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, clusterState *valkey.ClusterState, nodes []valkeyiov1alpha1.ValkeyNode, current *valkeyiov1alpha1.ValkeyNode, rolling bool) string {
 	log := logf.FromContext(ctx)
 	if clusterState == nil || !rolling {
 		return ""
 	}
-	shard, replicas := findFailoverShard(clusterState, current.Status.PodIP)
+	shard, replicas := findFailoverShard(clusterState, current.Status.PodIP, nodes)
 	if shard != nil {
 		log.Info("proactive failover before rolling primary",
 			"name", current.Name, "address", current.Status.PodIP,

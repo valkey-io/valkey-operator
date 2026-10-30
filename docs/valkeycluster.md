@@ -166,6 +166,10 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
 
+Without `persistence`, `/data` is an `emptyDir`. It outlives a restart of the server container while the dataset in memory does not, so a primary whose server crashes starts over as a new node when it had a replica: the restarted container waits until the replica has been promoted (up to six `cluster-node-timeout`s, at most five minutes), drops its node identity, and then starts and is attached to the new primary as a replica. The replica keeps the shard's data. A primary without a reachable replica, or whose replica is not promoted within that time, keeps its node ID and its slots, and the shard's data is gone with the crash.
+
+With `persistence`, a primary whose server crashes restarts with its node ID and reloads its last snapshot. Valkey does not enable the append-only file by default, so with snapshots alone the writes since the last save are lost, and its replica, which may hold them, full-syncs to the older data. Set `appendonly: "yes"` in `config` to keep that window small.
+
 #### Constraints
 
 - Only supported with `workloadType: StatefulSet`

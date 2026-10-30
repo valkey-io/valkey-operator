@@ -102,7 +102,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command
+	// Command: a standalone node starts the server directly
 	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser,
@@ -718,11 +718,12 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
-	// Must contain both script keys and valkey.conf
+	// Must contain the script keys and valkey.conf
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
 	assert.Contains(t, cm.Data, "init.sh")
+	assert.Contains(t, cm.Data, serverStartScriptKey)
 }
 
 func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
@@ -863,6 +864,61 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	}
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
+}
+
+// clusterMember labels the node as buildClusterValkeyNode does.
+func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
+	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	return node
+}
+
+func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughServerStartScript(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "-c", serverStartCommand, "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+	// The startup probe allows for the replica hand-off wait of up to 300s.
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *testing.T) {
+	// A standalone ValkeyNode may carry the cluster label and mount an
+	// external ConfigMap without the script. It gets the same command, which
+	// falls back to the server at run time, see TestServerStartCommandFallsBackToServer.
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mynode"}
+	node.Spec.ServerConfigMapName = "my-own-config"
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, []string{shellPath, "-c", serverStartCommand, "valkey-server"}, containers[0].Command[:4])
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestStartupFailureThreshold(t *testing.T) {
+	// A cluster-node-timeout in the config must not change the probe, since
+	// that would roll the pod on a change of the value.
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
+	assert.Equal(t, int32(80), startupFailureThreshold(node))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	assert.Equal(t, int32(20), startupFailureThreshold(node))
+}
+
+func TestBuildContainersDef_PersistentClusterNodeStartsServerDirectly(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser,
+		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {

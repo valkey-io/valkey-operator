@@ -98,7 +98,8 @@ var _ = Describe("Pause reconciliation", func() {
 		nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodes, client.InNamespace("default"), client.MatchingLabels{LabelCluster: key.Name})).To(Succeed())
 		Expect(nodes.Items).To(HaveLen(1))
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &corev1.Service{}))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: headlessServiceName(key.Name), Namespace: key.Namespace}, &corev1.Service{}))).To(BeTrue())
 
 		By("resuming with a value that is not exactly \"true\"")
 		cluster.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation] = "True"

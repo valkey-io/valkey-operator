@@ -697,7 +697,10 @@ func (r *ValkeyClusterReconciler) createMissingValkeyNodes(ctx context.Context, 
 // readiness waits until the pod holds its primary's data (#552), and this return
 // happens before Reconcile reaches healStaleAddressPeers (#275).
 // A shard that is not in the topology and has no free slots is left for
-// rebalanceSlots: pausing on it would keep that rebalance from ever running.
+// rebalanceSlots: pausing on NotReady would keep that rebalance from ever
+// running. A spec change that replaces one of its pods still holds the
+// walk until that pod is on the new revision, so rebalance does not
+// migrate onto a pod that is about to be deleted.
 //
 // For a 3-shard cluster with 2 replicas per shard, this produces 9 ValkeyNodes:
 //
@@ -722,6 +725,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 
 	// Set when a shard's roll is skipped; reported to the caller after the loop.
 	shardRollSkipped := false
+	// A slotless scale-out pod is being replaced. Rebalance must not run on
+	// this pass: it would migrate onto the snapshot of the pod that is leaving.
+	holdRebalance := false
 
 	// Nil when there is no snapshot. The scale-out skip below needs a real
 	// slot map, and an empty scrape still reports every slot as free.
@@ -747,12 +753,24 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		}
 		// Scale-out primaries get slots only from rebalanceSlots, which runs
 		// after this walk returns. The sync-aware probe keeps them Not Ready
-		// until then, so pausing here would stall the rebalance forever.
+		// until then, so pausing on NotReady would stall the rebalance forever.
 		// Still reconcile each ValkeyNode: an existing spec (a new image, for
 		// example) has to land or the pod never joins. NotReady does not stop
-		// the walk, because this shard is not serving.
+		// the walk, because this shard is not serving. A spec write that
+		// replaces a pod does: rebalance would otherwise use this pass's
+		// snapshot of the pod that Kubernetes is about to delete.
 		if clusterState != nil && !shardExistsInTopology(clusterState, shardIndex, nodes) && len(unassignedSlots) == 0 {
 			for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
+				name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
+				before := int64(0)
+				existed := false
+				existing := &valkeyiov1alpha1.ValkeyNode{}
+				if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, existing); err == nil {
+					existed = true
+					before = existing.Generation
+				} else if !apierrors.IsNotFound(err) {
+					return false, err
+				}
 				result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
 				var deferred *rollDeferredError
 				if errors.As(err, &deferred) {
@@ -763,6 +781,22 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				}
 				if result == nodeCreated {
 					totalCreated++
+					continue
+				}
+				if !existed {
+					continue
+				}
+				updated := &valkeyiov1alpha1.ValkeyNode{}
+				if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, updated); err != nil {
+					return false, err
+				}
+				pending, err := r.slotlessReplacementPending(ctx, updated, before, liveHashes[name])
+				if err != nil {
+					return false, err
+				}
+				if pending {
+					holdRebalance = true
+					log.V(1).Info("slotless shard pod replacement is still in progress", "shardIndex", shardIndex, "node", name)
 				}
 			}
 			log.V(1).Info("shard has no slots to assign, leaving it for rebalance", "shardIndex", shardIndex)
@@ -820,10 +854,138 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	if totalCreated > 0 {
 		log.V(1).Info("created ValkeyNodes", "count", totalCreated)
 	}
+	if holdRebalance {
+		// Prefer this over errShardRollSkipped. Continuing would reach
+		// rebalanceSlots with the pre-replacement snapshot.
+		log.V(1).Info("holding rebalance until a slotless pod replacement finishes")
+		return true, nil
+	}
 	if shardRollSkipped {
 		return false, errShardRollSkipped
 	}
 	return false, nil
+}
+
+// slotlessReplacementPending reports whether a scale-out node that owns no
+// slots is in the middle of a pod replacement. An unchanged NotReady pod is
+// not pending: it stays unready until rebalance gives it slots, and waiting
+// on Ready would stall that rebalance. A spec write, a node controller that
+// has not observed it, a workload template that does not match, or a pod
+// still on the previous revision is pending.
+func (r *ValkeyClusterReconciler) slotlessReplacementPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, generationBefore int64, liveHash string) (bool, error) {
+	if node == nil {
+		return false, nil
+	}
+	if node.Generation != generationBefore {
+		return true, nil
+	}
+	if node.Status.ObservedGeneration > 0 && node.Generation != node.Status.ObservedGeneration {
+		return true, nil
+	}
+	if liveHash != "" && node.Spec.WorkloadRevision != liveHash {
+		return true, nil
+	}
+	if node.Status.PodIP == "" {
+		return false, nil
+	}
+	return r.podReplacementInProgress(ctx, node)
+}
+
+// podReplacementInProgress reports whether the workload has not yet started
+// the pod that matches its current template. A missing workload is not a
+// replacement: tests and a node that has not been created yet have nothing
+// to wait for, and the pod IP is what rebalance would migrate onto.
+func (r *ValkeyClusterReconciler) podReplacementInProgress(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
+	switch effectiveWorkloadType(node.Spec.WorkloadType) {
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		dep := &appsv1.Deployment{}
+		if err := r.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return deploymentRollNotOnNewPod(dep), nil
+	default:
+		sts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, key, sts); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		pod, err := r.currentPod(ctx, node)
+		if err != nil {
+			return false, err
+		}
+		return statefulSetRollNotOnNewPod(sts, pod), nil
+	}
+}
+
+func (r *ValkeyClusterReconciler) currentPod(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (*corev1.Pod, error) {
+	if node == nil {
+		return nil, nil
+	}
+	list := &corev1.PodList{}
+	if err := r.List(ctx, list, client.InNamespace(node.Namespace), client.MatchingLabels(valkeyNodeLabels(node))); err != nil {
+		return nil, err
+	}
+	var terminating *corev1.Pod
+	for i := range list.Items {
+		pod := &list.Items[i]
+		if pod.DeletionTimestamp != nil {
+			if terminating == nil {
+				terminating = pod
+			}
+			continue
+		}
+		return pod, nil
+	}
+	return terminating, nil
+}
+
+// statefulSetRollNotOnNewPod reports whether the running pod is still the one
+// a template change is replacing. ReadyReplicas is not part of the check: a
+// slotless primary is NotReady until rebalance gives it slots, and OrderedReady
+// waits for Ready before it will replace the pod. The node controller deletes
+// a NotReady pod left on the previous revision, so this ends when the
+// replacement pod exists, not when it is Ready.
+func statefulSetRollNotOnNewPod(sts *appsv1.StatefulSet, pod *corev1.Pod) bool {
+	if sts == nil {
+		return false
+	}
+	if sts.Status.ObservedGeneration < sts.Generation {
+		return true
+	}
+	if sts.Status.UpdateRevision == "" {
+		return false
+	}
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return true
+	}
+	rev := pod.Labels[appsv1.StatefulSetRevisionLabel]
+	if rev == "" || rev != sts.Status.UpdateRevision {
+		return true
+	}
+	return false
+}
+
+// deploymentRollNotOnNewPod reports whether a Recreate deployment has not
+// created the replacement pod yet. UpdatedReplicas counts that pod before it
+// is Ready, which a slotless primary will not be until it owns slots.
+func deploymentRollNotOnNewPod(dep *appsv1.Deployment) bool {
+	if dep == nil {
+		return false
+	}
+	if dep.Status.ObservedGeneration < dep.Generation {
+		return true
+	}
+	replicas := int32(1)
+	if dep.Spec.Replicas != nil {
+		replicas = *dep.Spec.Replicas
+	}
+	return dep.Status.UpdatedReplicas < replicas
 }
 
 // nodeResult describes the outcome of reconciling a single ValkeyNode.
@@ -1405,21 +1567,29 @@ func scrapedNode(state *valkey.ClusterState, address string) *valkey.NodeState {
 }
 
 // initialSlotPrimariesReady reports whether every shard that is not yet in the
-// topology has its primary scraped. Slot assignment splits whatever is still
-// free across the primaries it can see. Running it before the late primary is
-// up gives that primary nothing. A replica that missed the scrape is not a
-// reason to wait: GetClusterState omits it, and replicas are not given the
-// initial ranges.
+// topology has its primary scraped, and every shard already in the snapshot
+// has its own primary. Slot assignment splits whatever is still free across
+// the primaries it can see. Running it before the late primary is up gives
+// that primary nothing. A replica that missed the scrape is not a reason to
+// wait: GetClusterState omits it, and replicas are not given the initial
+// ranges. A replica that answered while its primary did not is a reason:
+// shard slots are filled only from the primary, so the primary's slots would
+// look free. That primary may be a promoted node at a nonzero index.
 func initialSlotPrimariesReady(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
 	return initialSlotWait(cluster, state, nodes) == ""
 }
 
 // initialSlotWait returns the ValkeyNode name slot assignment is waiting on,
-// or "" when every not-yet-joined primary has been scraped. A node with no
-// name is reported by its pod IP. Down replicas are ignored.
+// or "" when every not-yet-joined primary has been scraped and every shard
+// already in the snapshot has its primary. A node with no name is reported
+// by its pod IP. Down replicas are ignored. A shard seen only through a
+// replica is not.
 func initialSlotWait(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) string {
 	if cluster == nil || state == nil || nodes == nil {
 		return "cluster state"
+	}
+	if wait := replicaOnlyShard(state); wait != "" {
+		return wait
 	}
 	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
 	for shardIndex := range int(cluster.Spec.Shards) {
@@ -1434,6 +1604,43 @@ func initialSlotWait(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.Clus
 		if scraped == nil || (scraped.IsIsolated() && !isSingleNodeCluster) {
 			return slotWaitName(primary)
 		}
+	}
+	return ""
+}
+
+// shardPrimaryScraped reports whether this snapshot contains the shard's
+// primary. GetPrimaryNode is the usual case. A primary flag covers a shard
+// whose PrimaryId was not filled in, which still has its slot ranges.
+func shardPrimaryScraped(shard *valkey.ShardState) bool {
+	if shard == nil {
+		return false
+	}
+	if shard.GetPrimaryNode() != nil {
+		return true
+	}
+	for _, node := range shard.Nodes {
+		if node != nil && node.IsPrimary() {
+			return true
+		}
+	}
+	return false
+}
+
+// replicaOnlyShard returns a wait token when a scraped shard has no primary
+// in the snapshot. GetClusterState copies slot ranges only from a primary it
+// reached, so the gaps would otherwise be handed to a pending primary.
+// The token names the replica that was scraped, which is the only address
+// this snapshot has. A promoted primary at a nonzero node index is covered:
+// the check uses the shard's primary, not the node-index 0 label.
+func replicaOnlyShard(state *valkey.ClusterState) string {
+	if state == nil {
+		return ""
+	}
+	for _, shard := range state.Shards {
+		if len(shard.Nodes) == 0 || shardPrimaryScraped(shard) {
+			continue
+		}
+		return "primary of " + shard.Nodes[0].Address
 	}
 	return ""
 }

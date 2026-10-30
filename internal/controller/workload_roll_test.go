@@ -27,6 +27,49 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func TestStatefulSetRollNotOnNewPod(t *testing.T) {
+	sts := &appsv1.StatefulSet{}
+	sts.Generation = 2
+	sts.Status.ObservedGeneration = 2
+	sts.Status.UpdateRevision = "rev-new"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+		appsv1.StatefulSetRevisionLabel: "rev-new",
+	}}}
+	assert.False(t, statefulSetRollNotOnNewPod(sts, pod), "the pod already on the update revision is not a replacement")
+
+	pod.Labels[appsv1.StatefulSetRevisionLabel] = "rev-old"
+	assert.True(t, statefulSetRollNotOnNewPod(sts, pod), "the previous revision has to finish before rebalance")
+
+	assert.True(t, statefulSetRollNotOnNewPod(sts, nil), "a missing pod has not been replaced yet")
+
+	sts.Status.ObservedGeneration = 1
+	assert.True(t, statefulSetRollNotOnNewPod(sts, pod), "the StatefulSet controller has not observed the template yet")
+
+	notReady := &appsv1.StatefulSet{}
+	notReady.Generation = 1
+	notReady.Status.ObservedGeneration = 1
+	notReady.Status.UpdateRevision = "rev-new"
+	slotless := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+		appsv1.StatefulSetRevisionLabel: "rev-new",
+	}}}
+	assert.False(t, statefulSetRollNotOnNewPod(notReady, slotless),
+		"NotReady does not count: a slotless primary stays unready until it has slots")
+}
+
+func TestDeploymentRollNotOnNewPod(t *testing.T) {
+	dep := &appsv1.Deployment{}
+	dep.Generation = 3
+	dep.Status.ObservedGeneration = 3
+	dep.Status.UpdatedReplicas = 1
+	assert.False(t, deploymentRollNotOnNewPod(dep), "the replacement pod exists before it is Ready")
+
+	dep.Status.UpdatedReplicas = 0
+	assert.True(t, deploymentRollNotOnNewPod(dep), "Recreate has not started the new pod")
+
+	dep.Status.ObservedGeneration = 2
+	assert.True(t, deploymentRollNotOnNewPod(dep), "the Deployment controller has not observed the template")
+}
+
 func TestPodTemplateRollHashStable(t *testing.T) {
 	tmpl := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{

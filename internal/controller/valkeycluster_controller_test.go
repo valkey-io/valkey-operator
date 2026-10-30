@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -1909,7 +1910,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		}
 	})
 
-	It("applies a spec change on a slotless scale-out shard without pausing rebalance", func() {
+	It("applies a spec change on a slotless scale-out shard and holds rebalance", func() {
 		createAllNodes()
 		setPodIP(node00, "10.0.0.1")
 		setPodIP(node01, "10.0.0.2")
@@ -1945,9 +1946,76 @@ var _ = Describe("reconcileValkeyNodes", func() {
 
 		requeue, err := reconcileNodesWithState(state)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requeue).To(BeFalse(), "the slotless shard must not pause rebalance")
+		Expect(requeue).To(BeTrue(), "approving a pod replacement must hold rebalance")
 		Expect(getImage(node10)).To(Equal(newImage))
 		Expect(getImage(node11)).To(Equal(newImage))
+	})
+
+	It("holds rebalance while a slotless scale-out pod is on the previous revision", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: node10, Namespace: "default"}, node)).To(Succeed())
+		tmpl, err := buildNodePodTemplate(node)
+		Expect(err).NotTo(HaveOccurred())
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node), Namespace: "default"},
+			Spec: appsv1.StatefulSetSpec{
+				Selector:    &metav1.LabelSelector{MatchLabels: valkeyNodeLabels(node)},
+				ServiceName: "scale-out-hold",
+				Template:    tmpl,
+			},
+		}
+		Expect(k8sClient.Create(testCtx, sts)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, sts))).To(Succeed())
+		})
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, sts)).To(Succeed())
+		// The stored template has to hash to the node's revision, or the
+		// walk treats the workload as not yet applied and holds for that.
+		Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(node.Spec.WorkloadRevision))
+		sts.Status.ObservedGeneration = sts.Generation
+		sts.Status.UpdateRevision = "rev-new"
+		Expect(k8sClient.Status().Update(testCtx, sts)).To(Succeed())
+
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-old"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: node10 + "-0", Namespace: "default", Labels: podLabels},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
+		}
+		Expect(k8sClient.Create(testCtx, pod)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, pod))).To(Succeed())
+		})
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the old pod must not receive slots it would lose on replacement")
+
+		pod.Labels[appsv1.StatefulSetRevisionLabel] = "rev-new"
+		Expect(k8sClient.Update(testCtx, pod)).To(Succeed())
+		requeue, err = reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "the replacement pod can take slots before it is Ready")
 	})
 
 	It("skips only the shard whose primary is unidentifiable", func() {

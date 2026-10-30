@@ -360,6 +360,7 @@ type ValkeyClusterSpec struct {
 
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Additional Valkey configuration parameters

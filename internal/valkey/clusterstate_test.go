@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	vclient "github.com/valkey-io/valkey-go"
@@ -1169,6 +1170,9 @@ func TestGetClusterStateKeepsACompleteScrape(t *testing.T) {
 	if shard.Id != "shard-1" || shard.PrimaryId != "abc" {
 		t.Fatalf("shard id %q primary %q", shard.Id, shard.PrimaryId)
 	}
+	if kind, message := state.ScrapeHeldSummary(); kind != "" || message != "" {
+		t.Fatalf("complete scrape reported a gap: %s %s", kind, message)
+	}
 }
 
 // A Valkey error or an empty reply on identity or topology must not become a
@@ -1219,6 +1223,28 @@ func TestGetClusterStateSkipsNodeWhenScrapeCommandFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dialScrape(t, tc.results))
 			assertNoNodes(t, state)
+			got := state.IncompleteScrapes()
+			if len(got) != 1 || got[0].Address != "10.0.0.1" {
+				t.Fatalf("incomplete scrapes = %+v, want 10.0.0.1", got)
+			}
+			wantID := "abc"
+			wantSlots := false
+			switch tc.name {
+			case "CLUSTER MYID", "empty CLUSTER MYID", "every command BUSY", "short DoMulti reply":
+				wantID = ""
+			case "CLUSTER MYSHARDID", "CLUSTER INFO":
+				wantSlots = true
+			}
+			if got[0].Id != wantID || got[0].OwnsSlots != wantSlots {
+				t.Fatalf("incomplete scrape id %q ownsSlots %v, want id %q ownsSlots %v", got[0].Id, got[0].OwnsSlots, wantID, wantSlots)
+			}
+			kind, message := state.ScrapeHeldSummary()
+			if kind != "incomplete" || !strings.Contains(message, "10.0.0.1") {
+				t.Fatalf("summary = %s %q, want incomplete naming 10.0.0.1", kind, message)
+			}
+			if tc.name == "CLUSTER NODES" && !strings.Contains(message, "no slot table") {
+				t.Fatalf("summary %q does not name the missing slot table", message)
+			}
 		})
 	}
 }
@@ -1635,6 +1661,22 @@ func TestClusterInfoFailureStillCountsAnsweredPrimary(t *testing.T) {
 	}
 	if got := state.GetUnassignedSlots(); len(got) != 0 {
 		t.Fatalf("replica-reported slots became free: %v", got)
+	}
+	held := state.HeldPrimaries()
+	if len(held) != 1 || held[0].Id != "abc" || held[0].Host != "10.0.0.1" || !held[0].ReplicaFollows {
+		t.Fatalf("held primaries = %+v, want abc at 10.0.0.1 followed by its replica", held)
+	}
+	kind, message := state.ScrapeHeldSummary()
+	if kind != "slots-held" {
+		t.Fatalf("summary kind = %s, want slots-held", kind)
+	}
+	for _, want := range []string{
+		"holding slots for abc at 10.0.0.1 while a replica still follows it",
+		"incomplete scrape 10.0.0.1 (id abc)",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("summary %q does not contain %q", message, want)
+		}
 	}
 }
 

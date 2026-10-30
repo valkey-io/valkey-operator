@@ -1631,8 +1631,13 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Shards = int32(len(state.Shards))
 	}
 
-	// Apply conditions from the in-memory cluster object
+	// Apply conditions from the in-memory cluster object. A pass that scraped
+	// names any node it could not keep and any primary whose slots stay held.
+	// A pass with no state leaves the previous condition in place.
 	current.Status.Conditions = cluster.Status.Conditions
+	if state != nil {
+		r.applyIncompleteScrape(ctx, current, state)
+	}
 
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)

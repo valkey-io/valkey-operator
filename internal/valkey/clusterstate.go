@@ -121,6 +121,29 @@ type ClusterState struct {
 	// CLUSTER NODES line lists owned slots. The node itself stays out of
 	// Shards: the scrape is not usable for topology.
 	answered map[string]bool
+
+	// incomplete are addresses this pass set out to scrape and did not keep.
+	// The order is the order of the address list passed to GetClusterState.
+	incomplete []IncompleteScrape
+}
+
+// IncompleteScrape is one address this pass did not keep in the topology.
+// Id is empty when CLUSTER MYID itself failed or the dial never completed.
+// OwnsSlots is true when that node's own CLUSTER NODES line listed owned
+// ranges before the scrape was dropped.
+type IncompleteScrape struct {
+	Address   string
+	Id        string
+	OwnsSlots bool
+}
+
+// HeldPrimary is an unscraped primary whose slots this pass still holds.
+// ReplicaFollows is true when a scraped node still names it as its primary,
+// which is the lost-volume case: the ranges stay unserved until a manual failover.
+type HeldPrimary struct {
+	Id             string
+	Host           string
+	ReplicaFollows bool
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -161,9 +184,12 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 		// Attempt to connect to the Valkey node and extract information.
 		node, answered, ownsSlots := getNodeState(ctx, address, port, dial)
 		if node == nil {
-			// MYID succeeded and a later command failed. Remember the id so a
-			// replica's stale fail? cannot take over or forget a node this
-			// pass reached. The node stays out of the topology.
+			// The address was a pod this pass set out to scrape. Remember it,
+			// and the id when MYID succeeded, so the status can name a node
+			// that stays dropped. A later-command failure also keeps the id
+			// for the takeover and forget guards. The node stays out of the
+			// topology either way.
+			state.noteIncomplete(address, answered, ownsSlots)
 			if answered != "" {
 				state.noteAnswered(answered, ownsSlots)
 			}
@@ -760,6 +786,133 @@ func (s *ClusterState) NodeAnswered(id string) bool {
 // NoteAnsweredForTesting records a dropped scrape the way GetClusterState does.
 func (s *ClusterState) NoteAnsweredForTesting(id string, ownsSlots bool) {
 	s.noteAnswered(id, ownsSlots)
+}
+
+// NoteIncompleteForTesting records an address GetClusterState did not keep.
+func (s *ClusterState) NoteIncompleteForTesting(address, id string, ownsSlots bool) {
+	s.noteIncomplete(address, id, ownsSlots)
+}
+
+func (s *ClusterState) noteIncomplete(address, id string, ownsSlots bool) {
+	s.incomplete = append(s.incomplete, IncompleteScrape{
+		Address:   address,
+		Id:        id,
+		OwnsSlots: ownsSlots,
+	})
+}
+
+// IncompleteScrapes returns addresses this pass did not keep, in target order.
+func (s *ClusterState) IncompleteScrapes() []IncompleteScrape {
+	if s == nil || len(s.incomplete) == 0 {
+		return nil
+	}
+	out := make([]IncompleteScrape, len(s.incomplete))
+	copy(out, s.incomplete)
+	return out
+}
+
+// HeldPrimaries returns unscraped primaries whose slots this pass still holds,
+// sorted by id.
+func (s *ClusterState) HeldPrimaries() []HeldPrimary {
+	if s == nil {
+		return nil
+	}
+	scraped := s.scrapedIDs()
+	live := s.liveIDsByAddress()
+	byID := make(map[string]*HeldPrimary)
+	var order []string
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
+				continue
+			}
+			h := byID[entry.Id]
+			if h == nil {
+				h = &HeldPrimary{
+					Id:             entry.Id,
+					Host:           entry.Host,
+					ReplicaFollows: s.HasReplicaOf(entry.Id),
+				}
+				byID[entry.Id] = h
+				order = append(order, entry.Id)
+				continue
+			}
+			if h.Host == "" {
+				h.Host = entry.Host
+			}
+		}
+	}
+	sort.Strings(order)
+	out := make([]HeldPrimary, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out
+}
+
+// ScrapeHeldSummary describes nodes this pass could not scrape and primaries
+// whose slots stay held. kind is "slots-held" when a scraped replica still
+// follows a missing primary, "incomplete" for any other gap, and "" when
+// there is nothing to report. The message names each address and id.
+func (s *ClusterState) ScrapeHeldSummary() (kind, message string) {
+	if s == nil {
+		return "", ""
+	}
+	held := s.HeldPrimaries()
+	incomplete := s.IncompleteScrapes()
+	if len(held) == 0 && len(incomplete) == 0 {
+		return "", ""
+	}
+	var lost, plain []string
+	for _, h := range held {
+		name := h.Id
+		if h.Host != "" {
+			name += " at " + h.Host
+		}
+		if h.ReplicaFollows {
+			lost = append(lost, name)
+			continue
+		}
+		plain = append(plain, name)
+	}
+	var parts []string
+	if len(lost) > 0 {
+		follows := "it"
+		if len(lost) > 1 {
+			follows = "them"
+		}
+		parts = append(parts, "holding slots for "+joinNames(lost)+" while a replica still follows "+follows)
+	}
+	if len(plain) > 0 {
+		parts = append(parts, "holding slots for unreached primary "+joinNames(plain))
+	}
+	if len(incomplete) > 0 {
+		names := make([]string, 0, len(incomplete))
+		for _, inc := range incomplete {
+			switch {
+			case inc.Id == "":
+				names = append(names, inc.Address)
+			case inc.OwnsSlots:
+				names = append(names, inc.Address+" (id "+inc.Id+")")
+			default:
+				names = append(names, inc.Address+" (id "+inc.Id+", no slot table)")
+			}
+		}
+		parts = append(parts, "incomplete scrape "+joinNames(names))
+	}
+	kind = "incomplete"
+	if len(lost) > 0 {
+		kind = "slots-held"
+	}
+	return kind, strings.Join(parts, "; ")
+}
+
+func joinNames(names []string) string {
+	const maxNames = 4
+	if len(names) <= maxNames {
+		return strings.Join(names, ", ")
+	}
+	return strings.Join(names[:maxNames], ", ") + fmt.Sprintf(", and %d more", len(names)-maxNames)
 }
 
 // FindNodeById returns the reachable node with the given cluster node ID, or

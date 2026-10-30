@@ -46,8 +46,10 @@ func isSPIFFEBundle(data []byte) bool {
 
 // spiffeBundleToPEM converts a SPIFFE trust bundle, a JWK Set, to PEM: the
 // x5c certificate of every key whose use is x509-svid, in order. Keys for
-// other uses (jwt-svid) carry no certificate and are skipped. A bundle with
-// no X.509 authority is an error, not an empty result.
+// other uses (jwt-svid) carry no certificate and are skipped. As the X509-SVID
+// specification (section 6.2) requires, an x509-svid key whose x5c is missing
+// or empty is ignored, and of several x5c values only the first is used. A
+// bundle with no X.509 authority is an error, not an empty result.
 func spiffeBundleToPEM(data []byte) ([]byte, error) {
 	var bundle struct {
 		Keys []struct {
@@ -59,7 +61,7 @@ func spiffeBundleToPEM(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("not a SPIFFE bundle: %w", err)
 	}
 	var out bytes.Buffer
-	jwtKeys := 0
+	jwtKeys, noX5C := 0, 0
 	for i, key := range bundle.Keys {
 		if key.Use == "jwt-svid" {
 			jwtKeys++
@@ -68,7 +70,8 @@ func spiffeBundleToPEM(data []byte) ([]byte, error) {
 			continue
 		}
 		if len(key.X5C) == 0 {
-			return nil, fmt.Errorf("x509-svid key %d has no x5c certificate", i)
+			noX5C++
+			continue
 		}
 		der, err := base64.StdEncoding.DecodeString(key.X5C[0])
 		if err != nil {
@@ -81,8 +84,8 @@ func spiffeBundleToPEM(data []byte) ([]byte, error) {
 	if out.Len() == 0 {
 		// Say what was found, so pointing at a JWT-only bundle by mistake is
 		// recognisable from the error alone.
-		return nil, fmt.Errorf("SPIFFE bundle has no x509-svid authority (it has %d key(s), %d of them jwt-svid): "+
-			"only x509-svid keys can verify client certificates", len(bundle.Keys), jwtKeys)
+		return nil, fmt.Errorf("SPIFFE bundle has no x509-svid authority (it has %d key(s), %d of them jwt-svid and %d x509-svid without an x5c certificate): "+
+			"only x509-svid keys with a certificate can verify client certificates", len(bundle.Keys), jwtKeys, noX5C)
 	}
 	return out.Bytes(), nil
 }

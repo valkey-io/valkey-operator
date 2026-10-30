@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -186,15 +187,23 @@ func TestSPIFFEBundleToPEM(t *testing.T) {
 		assert.Equal(t, [][]byte{derOf(t, a), derOf(t, b)}, bundleDERs(t, got))
 	})
 
+	t.Run("ignores an x509-svid key without x5c and uses only the first x5c value", func(t *testing.T) {
+		data := fmt.Appendf(nil, `{"keys":[{"use":"x509-svid","kty":"EC"},{"use":"x509-svid","kty":"EC","x5c":[]},{"use":"x509-svid","kty":"EC","x5c":[%q,%q]}]}`,
+			base64.StdEncoding.EncodeToString(derOf(t, a)), base64.StdEncoding.EncodeToString(derOf(t, b)))
+		got, err := spiffeBundleToPEM(data)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, a)}, bundleDERs(t, got))
+	})
+
 	for name, tc := range map[string]struct {
 		data    []byte
 		wantErr string
 	}{
-		"not JSON":                     {[]byte("-----BEGIN CERTIFICATE-----"), "not a SPIFFE bundle"},
-		"a JWT-only bundle":            {[]byte(`{"keys":[{"use":"jwt-svid","kty":"EC"},{"use":"jwt-svid","kty":"RSA"}]}`), "no x509-svid authority (it has 2 key(s), 2 of them jwt-svid): only x509-svid keys can verify client certificates"},
-		"a bundle with no keys":        {[]byte(`{"keys":[]}`), "no x509-svid authority (it has 0 key(s), 0 of them jwt-svid)"},
-		"an x509-svid key without x5c": {[]byte(`{"keys":[{"use":"x509-svid","kty":"EC"}]}`), "has no x5c certificate"},
-		"bad base64":                   {[]byte(`{"keys":[{"use":"x509-svid","x5c":["%%%"]}]}`), "x5c"},
+		"not JSON":                        {[]byte("-----BEGIN CERTIFICATE-----"), "not a SPIFFE bundle"},
+		"a JWT-only bundle":               {[]byte(`{"keys":[{"use":"jwt-svid","kty":"EC"},{"use":"jwt-svid","kty":"RSA"}]}`), "no x509-svid authority (it has 2 key(s), 2 of them jwt-svid and 0 x509-svid without an x5c certificate): only x509-svid keys with a certificate can verify client certificates"},
+		"a bundle with no keys":           {[]byte(`{"keys":[]}`), "no x509-svid authority (it has 0 key(s), 0 of them jwt-svid and 0 x509-svid without an x5c certificate)"},
+		"only x509-svid keys without x5c": {[]byte(`{"keys":[{"use":"x509-svid","kty":"EC"},{"use":"jwt-svid","kty":"EC"}]}`), "no x509-svid authority (it has 2 key(s), 1 of them jwt-svid and 1 x509-svid without an x5c certificate)"},
+		"bad base64":                      {[]byte(`{"keys":[{"use":"x509-svid","x5c":["%%%"]}]}`), "x5c"},
 	} {
 		t.Run("rejects "+name, func(t *testing.T) {
 			got, err := spiffeBundleToPEM(tc.data)

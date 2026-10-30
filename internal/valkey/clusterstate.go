@@ -898,6 +898,9 @@ func (s *ClusterState) ScrapeHeldSummary() (kind, message string) {
 				names = append(names, inc.Address+" (id "+inc.Id+", no slot table)")
 			}
 		}
+		// List order is not stable across reconciles. The same pods must
+		// produce the same message, or every pass emits a new warning.
+		slices.Sort(names)
 		parts = append(parts, "incomplete scrape "+joinNames(names))
 	}
 	kind = "incomplete"

@@ -1680,6 +1680,25 @@ func TestClusterInfoFailureStillCountsAnsweredPrimary(t *testing.T) {
 	}
 }
 
+func TestScrapeHeldSummarySortsFailedAddresses(t *testing.T) {
+	first := &ClusterState{}
+	first.NoteIncompleteForTesting("10.0.0.2", "bbb", false)
+	first.NoteIncompleteForTesting("10.0.0.1", "aaa", true)
+	second := &ClusterState{}
+	second.NoteIncompleteForTesting("10.0.0.1", "aaa", true)
+	second.NoteIncompleteForTesting("10.0.0.2", "bbb", false)
+
+	_, a := first.ScrapeHeldSummary()
+	_, b := second.ScrapeHeldSummary()
+	if a != b {
+		t.Fatalf("list order changed the message:\n%s\n%s", a, b)
+	}
+	const want = "incomplete scrape 10.0.0.1 (id aaa), 10.0.0.2 (id bbb, no slot table)"
+	if a != want {
+		t.Fatalf("summary = %q, want %q", a, want)
+	}
+}
+
 func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 	results := healthyScrape()
 	results[2] = valkeyErrorResult("BUSY Valkey is busy running a script")

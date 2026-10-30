@@ -36,6 +36,7 @@ The `-i` flag ensures the log is fully written even if you Ctrl+C the test.
    - Waits for recovery (Ready state, K8s resources, cluster health, and convergence)
    - Checks that the operator container has not restarted
    - Verifies data integrity (unless the scenario is expected to lose data)
+   - Checks that the background writer is still writing (when `CHAOS_WRITE_RPS` > 0)
 5. On failure, collects controller logs, pod states, and CLUSTER NODES output
 
 ## Configuration
@@ -59,7 +60,7 @@ All configuration is via environment variables:
 | `CHAOS_SEED` | current time | Random seed for reproducibility |
 | `CHAOS_MODE` | `random` | `random` or `sequential` scenario selection |
 | `CHAOS_TARGET_SHARDS` | `random` | Shards to target: `random` (1 to N shards each iteration), `randomX` (exactly X random shards), `all`, or comma-separated indices (e.g. `0,2`) |
-| `CHAOS_RECOVERY_TIMEOUT` | `15s × pods` (min 5m) | Max time to wait for cluster recovery |
+| `CHAOS_RECOVERY_TIMEOUT` | `30s × pods + 60s` (min 5m) | Max time to wait for cluster recovery |
 | `CHAOS_TOLERATION_SECONDS` | `0` | Pod toleration seconds for not-ready/unreachable (0 = not set) |
 | `CHAOS_NUM_KEYS` | `100000` | Number of keys |
 | `CHAOS_DATA_SIZE` | `3` | Size of each key's value in bytes |
@@ -113,7 +114,7 @@ They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testin
 `stop-worker-node` and `start-worker-node` are a pair: `stop-worker-node` leaves the node
 down so other scenarios run while it is gone, and `start-worker-node` restarts it. Use
 them as the ends of a compound, e.g.
-`stop-worker-node+scale-shards+delete-primary-pod+start-worker-node`. Run on its own,
+`stop-worker-node+delete-primary-pod+start-worker-node`. Run on its own,
 `stop-worker-node` leaves the node down and the iteration's recovery check fails.
 
 `partition-worker-node` and `heal-worker-node` are the same kind of pair for a network
@@ -125,6 +126,8 @@ recovery check if run without their partner.
 All worker node faults skip the nodes hosting the controller-manager and the background
 writer, since losing either fails the operator restart or writer check. The writer is
 started on the controller-manager's node so that normally only one node is skipped.
+With the default 2 workers that leaves one candidate node, and most node faults are
+skipped; use `KIND_WORKERS=3` or more (4 for the stop/start and partition/heal pairs).
 
 ### Fault Cleanup
 
@@ -172,14 +175,14 @@ Each sub-scenario runs sequentially with a random delay between them, testing th
 A scenario can appear more than once.
 
 ```bash
-# Scale shards while killing a primary during the operation
-CHAOS_SCENARIOS=scale-shards+delete-primary-pod make test-chaos
+# Scale shards while killing a replica during the operation
+CHAOS_SCENARIOS=scale-shards+delete-replica-pod make test-chaos
 
 # Multiple compounds, randomly selected each iteration
-CHAOS_SCENARIOS=scale-shards+delete-primary-pod,scale-replicas+delete-replica-pod make test-chaos
+CHAOS_SCENARIOS=scale-shards+delete-replica-pod,scale-replicas+delete-replica-pod make test-chaos
 
-# Triple fault: scale + kill primary + kill replica
-CHAOS_SCENARIOS=scale-shards+delete-primary-pod+delete-replica-pod make test-chaos
+# Triple fault: scale + kill replica + pause primary
+CHAOS_SCENARIOS=scale-shards+delete-replica-pod+pause-primary-container make test-chaos
 
 # Change the shard count again while the first change is still running
 CHAOS_SCENARIOS=scale-shards+scale-shards CHAOS_COMPOUND_MAX_DELAY=60s make test-chaos
@@ -187,11 +190,14 @@ CHAOS_SCENARIOS=scale-shards+scale-shards CHAOS_COMPOUND_MAX_DELAY=60s make test
 
 A compound is expected to lose data when:
 
-- one of its steps loses data on its own, or
-- one step kills a primary while another removes its replicas (e.g. `delete-replica-pod`).
+- one of its steps loses data on its own,
+- one step kills a primary while another removes its replicas (e.g. `delete-replica-pod`), or
+- two steps kill primaries (e.g. `stop-worker-node` and `delete-primary-pod`) with fewer than 2 replicas.
+  The second kill can hit the promoted primary, whose only replica is the restarted old primary, still empty.
 
 Replicas added by `scale-replicas` in the same iteration do not count, since they have not synced yet.
-The test then logs how many keys were lost and re-seeds. Otherwise the data is verified, as after a single scenario.
+With `CHAOS_PERSISTENCE=true` and AOF on, a killed node restarts with its keys, so only scenarios that always lose data (e.g. `delete-recreate-cluster`) are expected to.
+The test then checks the data and re-seeds only if keys were lost. Otherwise the data is verified, as after a single scenario.
 
 ## Reading the Output
 
@@ -239,11 +245,11 @@ CHAOS_SCENARIOS=network-partition-primary,pause-worker-node \
   CHAOS_TOLERATION_SECONDS=10 make test-chaos
 
 # Run scenarios while a worker node is down (true node loss, then recovery)
-CHAOS_SCENARIOS=stop-worker-node+scale-shards+delete-primary-pod+start-worker-node \
+CHAOS_SCENARIOS=stop-worker-node+delete-primary-pod+start-worker-node \
   CHAOS_TOLERATION_SECONDS=10 KIND_WORKERS=4 make test-chaos
 
 # Run scenarios while a worker node is network-partitioned, then heal it
-CHAOS_SCENARIOS=partition-worker-node+scale-shards+delete-primary-pod+heal-worker-node \
+CHAOS_SCENARIOS=partition-worker-node+delete-primary-pod+heal-worker-node \
   CHAOS_TOLERATION_SECONDS=10 KIND_WORKERS=4 make test-chaos
 
 # Large cluster with more workers
@@ -278,3 +284,20 @@ KIND_CLUSTER_CHAOS=chaos-2 KUBECONFIG=/tmp/chaos-2.conf \
 ```
 
 Each run creates its own Kind cluster, so they don't interfere with each other.
+
+## Running Repeatedly
+
+A run stops at the first failure, and the default set includes scenarios that hit known operator bugs, so a single run can end within a few iterations.
+To keep collecting failures, run it in a loop. A failed run leaves its Kind cluster, which the next run reuses:
+
+```bash
+for i in $(seq 1 10); do
+  log="chaos-persistent-default-$i.log"
+  echo "=== run $i starting $(date -Is) ==="
+  KIND_WORKERS=3 KIND_CLUSTER_CHAOS=chaos-testing KUBECONFIG=./kubeconfig-chaos.conf \
+    CHAOS_PERSISTENCE=true CHAOS_MIN_SHARDS=1 CHAOS_MAX_SHARDS=9 \
+    CHAOS_REPLICAS=1 CHAOS_MAX_REPLICAS=2 \
+    make test-chaos 2>&1 | tee -i "$log"
+  echo "=== run $i exit=${PIPESTATUS[0]} $(date -Is) ==="  # zsh: ${pipestatus[1]}
+done
+```

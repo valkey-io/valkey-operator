@@ -20,6 +20,7 @@ limitations under the License.
 package chaos
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -162,22 +163,19 @@ func serverRestartedSince(pod, namespace string, since time.Time) error {
 	return nil
 }
 
-// getPodNameByLabels returns a Ready pod name matching the given labels,
-// falling back to any matching pod if none are Ready.
-func getPodNameByLabels(namespace string, labels map[string]string) (string, error) {
+// getPodNamesByLabels returns matching pods, ready pods on Ready nodes first.
+// A just-stopped node still reports Ready for ~40s, so exec can still fail.
+func getPodNamesByLabels(namespace string, labels map[string]string) ([]string, error) {
 	selector := labelsToSelector(labels)
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
 		"-l", selector,
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{" "}{.spec.nodeName}{"\n"}{end}`)
 	output, err := utils.Run(cmd)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	// Prefer a ready pod on a Ready node: a pod on a stopped or partitioned node
-	// stays ready in the API but kubectl exec into it fails. Fall back to any ready
-	// pod, then any.
 	ready := readyNodeSet()
-	var readyPodFallback, anyFallback string
+	var best, readyPods, rest []string
 	for _, line := range strings.Split(output, "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
 		if len(parts) < 1 || parts[0] == "" {
@@ -189,23 +187,20 @@ func getPodNameByLabels(namespace string, labels map[string]string) (string, err
 		if len(parts) >= 3 {
 			node = parts[2]
 		}
-		if podReady && ready[node] {
-			return name, nil
-		}
-		if podReady && readyPodFallback == "" {
-			readyPodFallback = name
-		}
-		if anyFallback == "" {
-			anyFallback = name
+		switch {
+		case podReady && ready[node]:
+			best = append(best, name)
+		case podReady:
+			readyPods = append(readyPods, name)
+		default:
+			rest = append(rest, name)
 		}
 	}
-	if readyPodFallback != "" {
-		return readyPodFallback, nil
+	names := append(append(best, readyPods...), rest...)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no pods found with labels %v", labels)
 	}
-	if anyFallback != "" {
-		return anyFallback, nil
-	}
-	return "", fmt.Errorf("no pods found with labels %v", labels)
+	return names, nil
 }
 
 // readyNodeSet returns the set of node names whose Ready condition is True.
@@ -235,17 +230,28 @@ func deleteWorkload(name, namespace, kind string) error {
 	return err
 }
 
-// getClusterNodesOutput returns the CLUSTER NODES output from any pod in the cluster.
+// getClusterNodesOutput returns CLUSTER NODES from the first pod that answers.
+// The timeout bounds an exec into a pod on a partitioned node.
 func getClusterNodesOutput(clusterName, namespace string) (string, error) {
-	anyPod, err := getPodNameByLabels(namespace, map[string]string{
+	pods, err := getPodNamesByLabels(namespace, map[string]string{
 		"valkey.io/cluster": clusterName,
 	})
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("kubectl", "exec", anyPod, "-n", namespace, "-c", "server", "--",
-		"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
-	return utils.Run(cmd)
+	var lastErr error
+	for _, pod := range pods {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", pod, "-n", namespace, "-c", "server", "--",
+			"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli CLUSTER NODES")
+		out, err := utils.Run(cmd)
+		cancel()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
 }
 
 // getPodsWide returns kubectl get pods -o wide output for the cluster's pods.
@@ -293,7 +299,8 @@ func getShardReplicaPod(clusterName, namespace string, shardIndex int) (string, 
 	primaryIP := primaries[shardIndex]
 	replicaIP, err := findReplicaOfPrimary(output, primaryIP)
 	if err != nil {
-		return "", err
+		// An earlier compound step can delete or promote the only replica.
+		return "", fmt.Errorf("skip: %w", err)
 	}
 
 	pod, err := getPodByIP(namespace, replicaIP)
@@ -309,16 +316,16 @@ func getShardReplicaPod(clusterName, namespace string, shardIndex int) (string, 
 func getPodByIP(namespace, ip string) (string, error) {
 	cmd := exec.Command("kubectl", "get", "pods", "-n", namespace,
 		"--field-selector", fmt.Sprintf("status.podIP=%s", ip),
-		"-o", "jsonpath={.items[0].metadata.name}")
+		"-o", "jsonpath={.items[*].metadata.name}")
 	output, err := utils.Run(cmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to find pod with IP %s: %w", ip, err)
 	}
-	name := strings.TrimSpace(output)
-	if name == "" {
+	names := strings.Fields(output)
+	if len(names) == 0 {
 		return "", fmt.Errorf("no pod found with IP %s", ip)
 	}
-	return name, nil
+	return names[0], nil
 }
 
 // getWorkloadForPod returns the owning workload name for a pod.

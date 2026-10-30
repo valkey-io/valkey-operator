@@ -79,22 +79,30 @@ type Scenario struct {
 // losesData reports whether the scenario is expected to lose data, given the
 // lowest replica count during the iteration. Scenarios that kill a whole shard
 // only lose data when there is no replica to fail over to. A compound loses
-// data when one of its steps would, or when one step kills a primary while
-// another destroys the replicas it would fail over to.
-func (s Scenario) losesData(lowestReplicas int) bool {
+// data when one of its steps would, when one step kills a primary while
+// another destroys its replicas, or when two steps kill primaries with fewer
+// than 2 replicas (the second can hit a promoted primary with an empty replica).
+// With AOF a killed node restarts with its keys, so only LosesData applies.
+func (s Scenario) losesData(lowestReplicas int, aof bool) bool {
 	if len(s.Steps) == 0 {
-		return s.LosesData || (s.LosesDataIfNoReplica && lowestReplicas == 0)
+		return s.LosesData || (!aof && s.LosesDataIfNoReplica && lowestReplicas == 0)
 	}
-	var needsReplica, destroysReplicas bool
+	var primaryKills int
+	var destroysReplicas bool
 	for _, name := range s.Steps {
 		step := scenarioByName(name)
 		if step.LosesData {
 			return true
 		}
-		needsReplica = needsReplica || step.LosesDataIfNoReplica
+		if step.LosesDataIfNoReplica {
+			primaryKills++
+		}
 		destroysReplicas = destroysReplicas || step.DestroysReplicas
 	}
-	return needsReplica && (lowestReplicas == 0 || destroysReplicas)
+	if aof || primaryKills == 0 {
+		return false
+	}
+	return lowestReplicas == 0 || destroysReplicas || (primaryKills >= 2 && lowestReplicas < 2)
 }
 
 var allScenarios = []Scenario{
@@ -135,8 +143,7 @@ var defaultCompounds = []struct {
 	{name: "scale-shards+delete-controller-pod", maxDelay: 2 * time.Minute},
 	{name: "scale-replicas+delete-primary-pod"},
 	{name: "scale-replicas+evict-primary-pod"},
-	// Enable once deleting a primary mid-shard-scale no longer loses data.
-	// {name: "scale-shards+delete-primary-pod"},
+	{name: "scale-shards+delete-primary-pod"},
 }
 
 // defaultCompoundDelay is the longest random delay between compound steps.
@@ -156,7 +163,6 @@ var _ = Describe("ValkeyCluster Chaos", Label("chaos"), Ordered, func() {
 		numKeys         int
 		dataSize        int
 		seededKeys      int
-		lastWrites      int64
 		recoveryTimeout time.Duration
 		tolerationSec   int
 		targetShards    string
@@ -402,11 +408,16 @@ spec:
 		_, _ = utils.Run(cmd)
 		cmd = exec.Command("kubectl", "get", "valkeynodes", "-l", selector, "-n", "default", "-o", "name")
 		out, _ := utils.Run(cmd)
-		for _, node := range utils.GetNonEmptyLines(out) {
+		stuck := utils.GetNonEmptyLines(out)
+		for _, node := range stuck {
 			_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: %s still exists, removing its finalizers\n", node)
 			cmd = exec.Command("kubectl", "patch", node, "-n", "default", "--type=merge",
 				"-p", `{"metadata":{"finalizers":null}}`)
 			_, _ = utils.Run(cmd)
+		}
+		// The operator was running during the wait, so a leftover finalizer is its bug.
+		if len(stuck) > 0 {
+			Fail(fmt.Sprintf("ValkeyNodes kept their finalizers after 2m: %v", stuck))
 		}
 	})
 
@@ -427,6 +438,25 @@ spec:
 				_, _ = fmt.Fprintln(GinkgoWriter, line)
 			}
 			_, _ = fmt.Fprintf(GinkgoWriter, "=================================================\n")
+		}
+
+		// expectWriterProgress fails when the writer is gone or its writes do not
+		// increase during the check (a --restart=Never writer is not replaced).
+		// Call it only while the seeded keys exist: SET XX cannot write lost keys.
+		expectWriterProgress := func(iteration int) {
+			if writeRPS == 0 {
+				return
+			}
+			By(fmt.Sprintf("Iteration %d: verifying background writer still writing", iteration))
+			// Baseline is 0 if a fresh writer has not logged yet.
+			_, baseline, _, _ := backgroundClientWrites("default")
+			Eventually(func(g Gomega) {
+				phase, writes, found, err := backgroundClientWrites("default")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Running"), "writer pod is %s", phase)
+				g.Expect(found).To(BeTrue(), "writer logged no stats line yet")
+				g.Expect(writes).To(BeNumerically(">", baseline), "writer made no progress (writes=%d)", writes)
+			}, 30*time.Second, 2*time.Second).Should(Succeed(), "background writer stopped in iteration %d", iteration)
 		}
 
 		for iteration := 1; ; iteration++ {
@@ -573,45 +603,26 @@ spec:
 			logClusterState(clusterName, "default", "after")
 			expectNoControllerRestarts(fmt.Sprintf("in iteration %d", iteration))
 
-			// A --restart=Never writer evicted by a long fault is not replaced, and
-			// the seeded data still verifies, so the iteration would PASS with no
-			// write traffic. Require the writer alive and still advancing writes.
-			if writeRPS > 0 {
-				By(fmt.Sprintf("Iteration %d: verifying background writer still writing", iteration))
-				var writes int64
-				Eventually(func(g Gomega) {
-					var phase string
-					var found bool
-					var err error
-					phase, writes, found, err = backgroundClientWrites("default")
-					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(phase).To(Equal("Running"), "writer pod is %s", phase)
-					g.Expect(found).To(BeTrue(), "writer logged no stats line yet")
-					g.Expect(writes).To(BeNumerically(">", lastWrites), "writer made no progress (writes=%d)", writes)
-				}, 30*time.Second, 2*time.Second).Should(Succeed(), "background writer stopped in iteration %d", iteration)
-				lastWrites = writes
-			}
-
-			if !scenario.losesData(ctx.LowestReplicas) {
+			if !scenario.losesData(ctx.LowestReplicas, aof) {
 				By(fmt.Sprintf("Iteration %d: verifying test data integrity", iteration))
 				Eventually(func() error {
 					return verifyTestData(clusterName, "default", seededKeys)
 				}, 60*time.Second, 2*time.Second).Should(Succeed(),
 					fmt.Sprintf("Iteration %d: data integrity check failed (seed=%d)", iteration, seed))
+				expectWriterProgress(iteration)
 			} else {
 				By(fmt.Sprintf("Iteration %d: checking for data loss (scenario may lose data)", iteration))
 				if err := verifyTestData(clusterName, "default", seededKeys); err != nil {
 					_, _ = fmt.Fprintf(GinkgoWriter, "  WARNING: data lost (expected): %s\n", err)
+					By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
+					Eventually(func() error {
+						return flushAll(clusterName, "default")
+					}, 60*time.Second, 2*time.Second).Should(Succeed(), "Failed to flush data")
+					seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
+					Expect(err).NotTo(HaveOccurred(), "Failed to re-seed test data")
+					_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
 				}
-				By(fmt.Sprintf("Iteration %d: re-seeding test data after data-loss scenario", iteration))
-				Eventually(func() error {
-					return flushAll(clusterName, "default")
-				}, 60*time.Second, 2*time.Second).Should(Succeed(), "Failed to flush data")
-				var err error
-				seededKeys, err = startBackgroundClient(clusterName, "default", numKeys, dataSize, writeRPS)
-				Expect(err).NotTo(HaveOccurred(), "Failed to re-seed test data")
-				lastWrites = 0 // a fresh client restarts its writes counter at 0
-				_, _ = fmt.Fprintf(GinkgoWriter, "  Seeded keys:      %d\n", seededKeys)
+				expectWriterProgress(iteration)
 			}
 
 			_, _ = fmt.Fprintf(GinkgoWriter, "  Iteration %d: PASSED\n", iteration)
@@ -651,7 +662,7 @@ func deleteReplicaPod(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: deleting replica pod for shard %d: %w", shard, err)
+			return fmt.Errorf("deleting replica pod for shard %d: %w", shard, err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Deleting replica pod: %s\n", pod)
 		pods = append(pods, pod)
@@ -689,7 +700,7 @@ func deleteReplicaPodGraceful(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: deleting replica pod for shard %d: %w", shard, err)
+			return fmt.Errorf("deleting replica pod for shard %d: %w", shard, err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Gracefully deleting replica pod: %s\n", pod)
 		pods = append(pods, pod)
@@ -719,7 +730,7 @@ func evictReplicaPod(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: evicting replica pod for shard %d: %w", shard, err)
+			return fmt.Errorf("evicting replica pod for shard %d: %w", shard, err)
 		}
 		pods = append(pods, pod)
 	}
@@ -797,7 +808,7 @@ func crashReplica(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: crashing replica server for shard %d: %w", shard, err)
+			return fmt.Errorf("crashing replica server for shard %d: %w", shard, err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Crashing replica server: %s\n", pod)
 		pods = append(pods, pod)
@@ -873,7 +884,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: deleting replica workload for shard %d: %w", shard, err)
+			return fmt.Errorf("deleting replica workload for shard %d: %w", shard, err)
 		}
 		workload, err := getWorkloadForPod(pod, ctx.Namespace, ctx.WorkloadType)
 		if err != nil {
@@ -892,7 +903,7 @@ func deleteReplicaWorkload(ctx *ChaosContext) error {
 
 // networkPartitionPrimary isolates the worker nodes hosting the targeted primaries, then heals them.
 func networkPartitionPrimary(ctx *ChaosContext) error {
-	// Without tolerations: 3-5s, enough to trigger failover.
+	// Without tolerations: 3-5s, below the 5-15s default node timeout, so no failover.
 	// With tolerations: extends up to eviction threshold + 20s to also test pod rescheduling.
 	maxDuration := 5 * time.Second
 	if ctx.TolerationSec > 0 {
@@ -943,7 +954,7 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
 	}
-	// Without tolerations: 3-5s, enough to trigger failover.
+	// Without tolerations: 3-5s, below the 5-15s default node timeout, so no failover.
 	// With tolerations: extends up to eviction threshold + 20s to also test pod rescheduling.
 	maxDuration := 5 * time.Second
 	if ctx.TolerationSec > 0 {
@@ -955,7 +966,7 @@ func networkPartitionReplica(ctx *ChaosContext) error {
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: partitioning replica node for shard %d: %w", shard, err)
+			return fmt.Errorf("partitioning replica node for shard %d: %w", shard, err)
 		}
 		nodeName, err := getPodNodeName(pod, ctx.Namespace)
 		if err != nil {
@@ -1004,7 +1015,7 @@ func healWorkerNodes(workers []string) error {
 
 // pausePrimaryContainer freezes the server container of every targeted primary, then resumes it.
 func pausePrimaryContainer(ctx *ChaosContext) error {
-	// 1-5s covers both non-failover (<2s timeout) and failover (>2s) cases
+	// 1-5s stays below the 5-15s default node timeout: a blip, not a failover.
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
 	var pods []string
 	for _, shard := range ctx.TargetShards {
@@ -1033,13 +1044,13 @@ func pauseReplicaContainer(ctx *ChaosContext) error {
 	if ctx.Replicas == 0 {
 		return fmt.Errorf("skip: no replicas configured")
 	}
-	// 1-5s covers both non-failover (<2s timeout) and failover (>2s) cases
+	// 1-5s stays below the 5-15s default node timeout: a blip, not a failover.
 	duration := randomDuration(ctx.Rand, 1*time.Second, 5*time.Second)
 	var pods []string
 	for _, shard := range ctx.TargetShards {
 		pod, err := getShardReplicaPod(ctx.ClusterName, ctx.Namespace, shard)
 		if err != nil {
-			return fmt.Errorf("skip: pausing replica container for shard %d: %w", shard, err)
+			return fmt.Errorf("pausing replica container for shard %d: %w", shard, err)
 		}
 		_, _ = fmt.Fprintf(GinkgoWriter, "  Pausing replica container in pod: %s for %s\n",
 			pod, duration.Truncate(time.Millisecond))
@@ -1122,6 +1133,9 @@ func unpauseWorkerNodes(workers []string) error {
 // same instance resumes), a stop reboots the node: containers get new IPs and Valkey
 // reloads cold. Alone it leaves the node down and the recovery check fails.
 func stopWorkerNode(ctx *ChaosContext) error {
+	if len(ctx.TargetShards) == 0 {
+		return fmt.Errorf("skip: no target shards")
+	}
 	pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, ctx.TargetShards[0])
 	if err != nil {
 		return err
@@ -1179,6 +1193,9 @@ func startWorkerNodes(workers []string) error {
 // the controller and writer nodes. Alone it leaves the node partitioned and the
 // recovery check fails.
 func partitionNode(ctx *ChaosContext) error {
+	if len(ctx.TargetShards) == 0 {
+		return fmt.Errorf("skip: no target shards")
+	}
 	pod, err := getShardPrimaryPod(ctx.ClusterName, ctx.Namespace, ctx.TargetShards[0])
 	if err != nil {
 		return err

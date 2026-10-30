@@ -1698,12 +1698,14 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 }
 
 // effectiveShards returns state.Shards plus any pending primaries that are
-// scale-out leaders (slot-less Valkey primaries labeled as RolePrimary).
+// scale-out leaders (slot-less Valkey primaries labeled as RolePrimary). A
+// pending node-index 0 pod whose shard is already in the topology replaces a
+// failed primary and waits to become its replica, so it is left out.
 func effectiveShards(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) []*valkey.ShardState {
 	shards := append([]*valkey.ShardState(nil), state.Shards...)
 	for _, node := range state.PendingNodes {
-		role, _ := nodeRoleAndShard(node.Address, nodes)
-		if role == RolePrimary {
+		role, shardIndex := nodeRoleAndShard(node.Address, nodes)
+		if role == RolePrimary && !shardExistsInTopology(state, shardIndex, nodes) {
 			shards = append(shards, &valkey.ShardState{
 				Id:        node.ShardId,
 				Nodes:     []*valkey.NodeState{node},
@@ -1873,7 +1875,7 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 				kept = append(kept, node.Name)
 				continue
 			}
-			if unaccounted && mayOwnSlots(node, nodeIndex) && !state.HasAddress(node.Status.PodIP) {
+			if unaccounted && mayOwnSlots(node) && !state.HasAddress(node.Status.PodIP) {
 				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Keeping unreachable excess ValkeyNode %s: some slots are unassigned", node.Name)
 				kept = append(kept, node.Name)
 				continue
@@ -1893,19 +1895,11 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 }
 
 // mayOwnSlots reports whether a node the scrape did not reach could be a
-// primary: it has a pod IP, and was last seen as a primary or, with no role
-// recorded, is the shard's initial primary.
-func mayOwnSlots(node *valkeyiov1alpha1.ValkeyNode, nodeIndex int) bool {
-	if node.Status.PodIP == "" {
-		return false
-	}
-	switch node.Status.Role {
-	case RolePrimary:
-		return true
-	case RoleReplica:
-		return false
-	}
-	return nodeIndex == 0
+// primary: it has a pod IP and was not last seen as a replica. An unready pod
+// has no role recorded, and after a failover a primary can be at any node
+// index.
+func mayOwnSlots(node *valkeyiov1alpha1.ValkeyNode) bool {
+	return node.Status.PodIP != "" && node.Status.Role != RoleReplica
 }
 
 // slotOwningPrimaryAddresses returns the pod IPs of primaries that own slots.

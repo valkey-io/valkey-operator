@@ -106,6 +106,32 @@ func TestSplitShardsForScaleIn(t *testing.T) {
 	assert.Empty(t, draining)
 }
 
+// TestEffectiveShardsSkipsPostFailoverReplacement: shard 0's primary restarted
+// empty before its replica was promoted. The new pod waits to become that
+// replica, so it is not a new shard and must not receive drained slots.
+func TestEffectiveShardsSkipsPostFailoverReplacement(t *testing.T) {
+	replica := primaryNode(0)
+	replica.Name = "c-0-1"
+	replica.Labels[LabelNodeIndex] = "1"
+	replica.Status.PodIP = "10.0.1.0"
+	replacement := primaryNode(0)
+	nodes := nodeList(replacement, replica, primaryNode(1), primaryNode(2))
+	state := &valkey.ClusterState{
+		Shards: []*valkey.ShardState{
+			{Id: "s0", Nodes: []*valkey.NodeState{{Id: "r0", Address: "10.0.1.0"}}},
+			primaryShard(1, valkey.SlotsRange{Start: 5461, End: 10922}),
+			primaryShard(2, valkey.SlotsRange{Start: 10923, End: 16383}),
+		},
+		PendingNodes: []*valkey.NodeState{{Id: "new0", Address: "10.0.0.0"}},
+	}
+	assert.Equal(t, []string{"", "p1", "p2"}, primaryIDs(effectiveShards(state, nodes)))
+
+	remaining, draining := splitShardsForScaleIn(effectiveShards(state, nodes), nodes, 2)
+	move, err := valkey.PlanDrainMove(draining[0], remaining, 400)
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.1", move.Dst.Address)
+}
+
 // scaleInReconciler returns a reconciler for a 2-shard cluster "c" whose
 // fake API holds the given ValkeyNodes.
 func scaleInReconciler(t *testing.T, objs ...client.Object) (*ValkeyClusterReconciler, *valkeyiov1alpha1.ValkeyCluster, *events.FakeRecorder) {
@@ -198,6 +224,24 @@ func TestDeleteExcessValkeyNodesKeepsUnreachablePrimaries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, kept)
 	assert.False(t, nodeExists(t, r.Client, unreachable), "deleted once every slot is accounted for")
+}
+
+// TestDeleteExcessValkeyNodesKeepsUnreadyPromotedPrimary: an unready pod has
+// no role recorded, and after a failover the primary can be at node index 1.
+func TestDeleteExcessValkeyNodesKeepsUnreadyPromotedPrimary(t *testing.T) {
+	promoted := primaryNode(3)
+	promoted.Name = "c-3-1"
+	promoted.Labels[LabelNodeIndex] = "1"
+	promoted.Status = valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.1.3"}
+	r, cluster, _ := scaleInReconciler(t, primaryNode(0), promoted)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+	}}
+
+	_, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), promoted))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c-3-1"}, kept)
+	assert.True(t, nodeExists(t, r.Client, promoted))
 }
 
 // TestDeleteExcessValkeyNodesDeletesNodesThatCannotOwnSlots: an unreachable

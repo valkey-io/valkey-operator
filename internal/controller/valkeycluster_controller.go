@@ -760,52 +760,14 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// replaces a pod does: rebalance would otherwise use this pass's
 		// snapshot of the pod that Kubernetes is about to delete.
 		if clusterState != nil && !shardExistsInTopology(clusterState, shardIndex, nodes) && len(unassignedSlots) == 0 {
-			for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-				name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
-				before := int64(0)
-				existed := false
-				existing := &valkeyiov1alpha1.ValkeyNode{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, existing); err == nil {
-					existed = true
-					before = existing.Generation
-				} else if !apierrors.IsNotFound(err) {
-					return false, err
-				}
-				result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
-				var deferred *rollDeferredError
-				if errors.As(err, &deferred) {
-					err = nil
-				}
-				if err != nil {
-					return false, err
-				}
-				if result == nodeCreated {
-					totalCreated++
-					continue
-				}
-				if !existed {
-					continue
-				}
-				updated := &valkeyiov1alpha1.ValkeyNode{}
-				// The cached client still has the pre-write object on this pass,
-				// so Generation == before and the hold would miss the write.
-				reader := client.Reader(r.Client)
-				if r.APIReader != nil {
-					reader = r.APIReader
-				}
-				if err := reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, updated); err != nil {
-					return false, err
-				}
-				pending, err := r.slotlessReplacementPending(ctx, updated, before, liveHashes[name])
-				if err != nil {
-					return false, err
-				}
-				if pending {
-					holdRebalance = true
-					log.V(1).Info("slotless shard pod replacement is still in progress", "shardIndex", shardIndex, "node", name)
-				}
+			created, hold, err := r.reconcileSlotlessShard(ctx, cluster, shardIndex, nodesPerShard, nodes, clusterState, liveHashes)
+			if err != nil {
+				return false, err
 			}
-			log.V(1).Info("shard has no slots to assign, leaving it for rebalance", "shardIndex", shardIndex)
+			totalCreated += created
+			if hold {
+				holdRebalance = true
+			}
 			continue
 		}
 		// Iterate nodes replica-first: use live cluster state to identify the
@@ -870,6 +832,62 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		return false, errShardRollSkipped
 	}
 	return false, nil
+}
+
+// reconcileSlotlessShard reconciles a scale-out shard that is not in the
+// topology and has no free slots. NotReady does not stop the walk. A pod
+// replacement does: rebalance must not use the snapshot of the pod that is
+// leaving. created is how many ValkeyNodes this shard added. hold is true
+// while a replacement is still in progress.
+func (r *ValkeyClusterReconciler) reconcileSlotlessShard(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string) (created int, hold bool, err error) {
+	log := logf.FromContext(ctx)
+	for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
+		name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
+		before := int64(0)
+		existed := false
+		existing := &valkeyiov1alpha1.ValkeyNode{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, existing); err == nil {
+			existed = true
+			before = existing.Generation
+		} else if !apierrors.IsNotFound(err) {
+			return created, false, err
+		}
+		result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+		var deferred *rollDeferredError
+		if errors.As(err, &deferred) {
+			err = nil
+		}
+		if err != nil {
+			return created, false, err
+		}
+		if result == nodeCreated {
+			created++
+			continue
+		}
+		if !existed {
+			continue
+		}
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		// The cached client still has the pre-write object on this pass,
+		// so Generation == before and the hold would miss the write.
+		reader := client.Reader(r.Client)
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, updated); err != nil {
+			return created, false, err
+		}
+		pending, err := r.slotlessReplacementPending(ctx, updated, before, liveHashes[name])
+		if err != nil {
+			return created, false, err
+		}
+		if pending {
+			hold = true
+			log.V(1).Info("slotless shard pod replacement is still in progress", "shardIndex", shardIndex, "node", name)
+		}
+	}
+	log.V(1).Info("shard has no slots to assign, leaving it for rebalance", "shardIndex", shardIndex)
+	return created, hold, nil
 }
 
 // slotlessReplacementPending reports whether a scale-out node that owns no

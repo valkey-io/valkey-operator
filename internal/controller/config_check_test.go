@@ -116,7 +116,7 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 		t.Fatalf("limits must match the fixed request, got %#v", container.Resources.Limits)
 	}
 	script := container.Command[2]
-	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") || !strings.Contains(script, "--loglevel notice") || !strings.Contains(script, "logfile_path") || !strings.Contains(script, "Configuration loaded") {
+	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") || !strings.Contains(script, "--loglevel notice") || !strings.Contains(script, "Configuration loaded") {
 		t.Fatalf("script does not ask valkey to parse: %s", script)
 	}
 	if strings.Contains(script, "\nexit 0\n") && !strings.Contains(script, "if loaded; then") {
@@ -356,37 +356,39 @@ func TestUnchangedFileWithANewImageStartsACheck(t *testing.T) {
 }
 
 func TestBuildServerConfigDropsLogfile(t *testing.T) {
-	cluster := &valkeyiov1alpha1.ValkeyCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"},
-		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Image:  "valkey/valkey:9.0.0",
-			Config: map[string]string{"logfile": "/var/log/valkey.log", "maxmemory": "1gb"},
-		},
-	}
-	rendered := buildServerConfig(cluster)
-	if strings.Contains(rendered, "logfile") {
-		t.Fatalf("logfile was published: %s", rendered)
-	}
-	if !strings.Contains(rendered, "maxmemory 1gb") {
-		t.Fatalf("other user config missing: %s", rendered)
-	}
-	var found bool
-	for _, warning := range versionGateConfigWarnings(cluster) {
-		if warning.reason == valkeyiov1alpha1.ReasonLogfileIgnored && strings.Contains(warning.message, "logfile") {
-			found = true
+	for _, key := range []string{"logfile", "LOGFILE", "LogFile"} {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Image:  "valkey/valkey:9.0.0",
+				Config: map[string]string{key: "/tmp/valkey.log", "maxmemory": "1gb"},
+			},
 		}
-	}
-	if !found {
-		t.Fatal("expected a logfile warning")
-	}
-	with := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-		Image: cluster.Spec.Image, Config: cluster.Spec.Config,
-	}})
-	without := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-		Image: cluster.Spec.Image, Config: map[string]string{"maxmemory": "1gb"},
-	}})
-	if with != without {
-		t.Fatalf("logfile changed the roll hash: %s %s", with, without)
+		rendered := buildServerConfig(cluster)
+		if strings.Contains(strings.ToLower(rendered), "logfile") {
+			t.Fatalf("%s was published: %s", key, rendered)
+		}
+		if !strings.Contains(rendered, "maxmemory 1gb") {
+			t.Fatalf("other user config missing: %s", rendered)
+		}
+		var found bool
+		for _, warning := range versionGateConfigWarnings(cluster) {
+			if warning.reason == valkeyiov1alpha1.ReasonLogfileIgnored && strings.Contains(warning.message, "logfile") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected a logfile warning for %s", key)
+		}
+		with := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image: cluster.Spec.Image, Config: cluster.Spec.Config,
+		}})
+		without := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image: cluster.Spec.Image, Config: map[string]string{"maxmemory": "1gb"},
+		}})
+		if with != without {
+			t.Fatalf("%s changed the roll hash: %s %s", key, with, without)
+		}
 	}
 }
 
@@ -412,6 +414,10 @@ func TestConfigCheckScriptRequiresConfigurationLoaded(t *testing.T) {
 	err = run(`echo "ready"; exit 0`)
 	if !errors.As(err, &exit) || exit.ExitCode() != configCheckExitUnproven {
 		t.Fatalf("a process that never loaded should not publish: %v", err)
+	}
+	err = run(`sleep 30`)
+	if !errors.As(err, &exit) || exit.ExitCode() != configCheckExitUnproven {
+		t.Fatalf("a process still running after 8s should not publish: %v", err)
 	}
 }
 

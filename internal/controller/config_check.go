@@ -71,17 +71,16 @@ const (
 // and out of the operator ACL file. cluster-enabled is left as rendered:
 // appending cluster-enabled no would hide "replicaof directive not allowed in
 // cluster mode", which Valkey checks against the final value. bind 127.0.0.1
-// holds both the client port and the cluster bus on localhost. logfile is not
-// overridden: Valkey opens the rendered path while loading, so a path it
-// cannot open still fails the check. The script also reads that file for
-// "Configuration loaded", and a process that stays up wrote it to /dev/null.
-// A directive Valkey rejects still fails on its own line, before these arguments.
+// holds both the client port and the cluster bus on localhost. logfile is
+// omitted from the rendered file, every spelling, so this pod does not have
+// to open a path that exists only on the server. A directive Valkey rejects
+// still fails on its own line, before these arguments.
 //
-// Exit 0: the log contains "Configuration loaded", so the file parsed.
-// Exit 1: the image rejected the file. Exit 2: the process never proved
-// that it parsed (timeout, signal, OOM). Exit 127: valkey-server, grep, or
-// sleep could not be executed. A missing /bin/sh never reaches this script;
-// containerd reports StartError and the container exits 128.
+// Exit 0: the captured log contains "Configuration loaded". Exit 1: the
+// image rejected the file. Exit 2: the process never proved that it parsed,
+// including a process still running after 8s. Exit 127: valkey-server, grep,
+// or sleep could not be executed. A missing /bin/sh never reaches this
+// script; containerd reports StartError and the container exits 128.
 //
 // CONFIG INFO (#141) can replace this pod once the image can describe its own
 // settings. The rule stays the same: the binary decides, and a rejected file
@@ -92,21 +91,6 @@ if ! command -v valkey-server >/dev/null 2>&1 || ! command -v grep >/dev/null 2>
   exit 127
 fi
 log=/tmp/valkey-config-check.log
-# Last logfile directive wins, as it does in Valkey. Empty means stdout.
-logfile_path=
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    "#"*) continue ;;
-  esac
-  set -- $line
-  if [ "$1" = "logfile" ]; then
-    logfile_path=$2
-    logfile_path=${logfile_path#\"}
-    logfile_path=${logfile_path%\"}
-    logfile_path=${logfile_path#\'}
-    logfile_path=${logfile_path%\'}
-  fi
-done < /config/valkey.conf
 (
   valkey-server /config/valkey.conf \
     --daemonize no \
@@ -117,15 +101,8 @@ done < /config/valkey.conf
     --loglevel notice
 ) >"$log" 2>&1 &
 pid=$!
-marker() {
-  grep -q "$1" "$log" 2>/dev/null && return 0
-  if [ -n "$logfile_path" ] && [ -f "$logfile_path" ]; then
-    grep -q "$1" "$logfile_path" 2>/dev/null && return 0
-  fi
-  return 1
-}
-loaded() { marker "Configuration loaded"; }
-fatal() { marker "FATAL CONFIG FILE ERROR"; }
+loaded() { grep -q "Configuration loaded" "$log" 2>/dev/null; }
+fatal() { grep -q "FATAL CONFIG FILE ERROR" "$log" 2>/dev/null; }
 i=0
 while [ "$i" -lt 8 ]; do
   if fatal; then
@@ -159,17 +136,7 @@ while [ "$i" -lt 8 ]; do
   i=$((i + 1))
   sleep 1
 done
-if kill -0 "$pid" 2>/dev/null; then
-  kill "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
-  if fatal; then
-    cat "$log" >&2
-    exit 1
-  fi
-  # Still running, and not fatal: load finished. /dev/null discarded the
-  # marker, and a logfile Valkey could not open would have exited.
-  exit 0
-fi
+kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 if fatal; then
   cat "$log" >&2
@@ -178,6 +145,7 @@ fi
 if loaded; then
   exit 0
 fi
+# Still running after 8s, or dead without the marker. Do not publish.
 cat "$log" >&2
 exit 2
 `

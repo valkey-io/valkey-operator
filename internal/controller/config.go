@@ -217,11 +217,14 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 		})
 	}
 
-	if _, ok := cluster.Spec.Config["logfile"]; ok {
-		warnings = append(warnings, configWarning{
-			reason:  valkeyiov1alpha1.ReasonLogfileIgnored,
-			message: "spec.config.logfile is ignored; servers log to stdout so a path the check pod cannot open is not published",
-		})
+	for key := range cluster.Spec.Config {
+		if strings.EqualFold(key, "logfile") {
+			warnings = append(warnings, configWarning{
+				reason:  valkeyiov1alpha1.ReasonLogfileIgnored,
+				message: "spec.config.logfile is ignored in any capitalization; servers log to stdout so a path the check pod cannot open is not published",
+			})
+			break
+		}
 	}
 
 	if tls := cluster.GetTLS(); tls != nil {
@@ -265,13 +268,15 @@ func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[str
 }
 
 // suppressedUserConfigKeys are user directives omitted from valkey.conf.
-// logfile is one of them: the check pod and the server pod do not share a
-// filesystem, and Valkey opens the final logfile path after parsing. A path
-// the server cannot create would otherwise pass the check and crash the pod.
+// logfile is one of them, in any capitalization: Valkey treats the key as
+// case-insensitive, and the check pod's /tmp is not the server pod's.
+// LOGFILE /tmp/valkey.log would pass the check and crash a read-only server.
 func suppressedUserConfigKeys(image string, userConfig map[string]string) map[string]struct{} {
 	skip := gatedUserKeysToSuppress(image, userConfig)
-	if _, ok := userConfig["logfile"]; ok {
-		skip["logfile"] = struct{}{}
+	for key := range userConfig {
+		if strings.EqualFold(key, "logfile") {
+			skip[key] = struct{}{}
+		}
 	}
 	return skip
 }

@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -486,6 +487,24 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		}
 	})
 })
+
+// generationFrozenClient serves ValkeyNode Gets from a snapshot taken before
+// the spec write. Writes pass through. This is the informer cache after
+// CreateOrUpdate: the following Get still shows the old generation.
+type generationFrozenClient struct {
+	client.Client
+	frozen map[string]valkeyiov1alpha1.ValkeyNode
+}
+
+func (c generationFrozenClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if node, ok := obj.(*valkeyiov1alpha1.ValkeyNode); ok {
+		if snap, ok := c.frozen[key.Name]; ok {
+			snap.DeepCopyInto(node)
+			return nil
+		}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
 
 // staleConfigMapClient wraps a client.Client and always reports ConfigMaps as
 // NotFound on Get, simulating the read-after-write staleness of the cached
@@ -1791,6 +1810,309 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
+	})
+
+	It("attaches pending nodes while a not-ready pod holds the roll", func() {
+		By("creating all nodes and marking them ready, then dropping one replica")
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		attached := 0
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+			attached++
+			Expect(state).NotTo(BeNil())
+			return nil
+		}
+
+		rvOthers := map[string]string{}
+		for _, name := range allNodes {
+			if name == node01 {
+				continue
+			}
+			rvOthers[name] = getResourceVersion(name)
+		}
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the not-ready replica still pauses the roll")
+		Expect(attached).To(Equal(1), "MEET, slot assignment, and REPLICATE run on the pause")
+		for name, rv := range rvOthers {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be updated while %s is not ready", name, node01)
+		}
+	})
+
+	It("creates missing ValkeyNodes before waiting on a not-ready replica", func() {
+		By("creating every node, then dropping shard 1 as if create was interrupted")
+		createAllNodes()
+		markAllReady()
+		for _, name := range []string{node10, node11} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			Expect(k8sClient.Delete(testCtx, node)).To(Succeed())
+		}
+		setNotReady(node01)
+
+		rvShard0 := map[string]string{
+			node00: getResourceVersion(node00),
+			node01: getResourceVersion(node01),
+		}
+
+		By("pausing on shard 0's unready replica must still create shard 1")
+		requeue, err := reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the unready replica still pauses the roll")
+		for _, name := range []string{node10, node11} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			Expect(node.Spec.Image).To(Equal(cluster.Spec.Image))
+		}
+		for name, rv := range rvShard0 {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be updated while %s is not ready", name, node01)
+		}
+	})
+
+	It("re-introduces stale peers while a not-ready pod holds the roll", func() {
+		By("creating every node and dropping one replica")
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		healed := 0
+		r.healStaleAddressPeersFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
+			healed++
+			Expect(state).NotTo(BeNil())
+			return 1
+		}
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the not-ready replica still pauses the roll")
+		Expect(healed).To(Equal(1), "address repair runs on the pause, before Reconcile would reach it")
+		Expect(filterEvents(collectEvents(fakeRecorder), "StaleAddressesHealed")).To(HaveLen(1))
+	})
+
+	It("marks the cluster degraded when attaching during a pause fails", func() {
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+			return stderrors.New("meet failed")
+		}
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the roll still requeues")
+		degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+		Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeAddFailed))
+		Expect(degraded.Message).To(Equal("meet failed"))
+	})
+
+	It("leaves a slotless scale-out shard for rebalance", func() {
+		By("creating every node, with shard 1 up but not in the topology")
+		createAllNodes()
+		markAllReady()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		attached := 0
+		r.attachPendingNodesFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, _ *valkey.ClusterState, _ *valkeyiov1alpha1.ValkeyNodeList) error {
+			attached++
+			return nil
+		}
+
+		rvs := map[string]string{}
+		for _, name := range allNodes {
+			rvs[name] = getResourceVersion(name)
+		}
+
+		// Shard 0 owns every slot. Shard 1 is the scale-out primary: nothing
+		// free to ADDSLOTSRANGE, so only rebalanceSlots can feed it.
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "a not-ready scale-out shard must not pause the walk")
+		Expect(attached).To(Equal(0), "the walk must reach rebalance instead of attaching on a pause")
+		for name, rv := range rvs {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must keep its spec while its shard waits for rebalance", name)
+		}
+	})
+
+	It("applies a spec change on a slotless scale-out shard and holds rebalance", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		// Shard 0 already matches the new spec, so the walk reaches shard 1.
+		// Shard 1 is not in the topology and owns no slots.
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		for _, name := range []string{node00, node01} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			node.Spec.Image = newImage
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(testCtx, node)).To(Succeed())
+			setReady(name)
+		}
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "approving a pod replacement must hold rebalance")
+		Expect(getImage(node10)).To(Equal(newImage))
+		Expect(getImage(node11)).To(Equal(newImage))
+	})
+
+	It("holds rebalance when the cache still has the pre-write ValkeyNode", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		for _, name := range []string{node00, node01} {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			node.Spec.Image = newImage
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(testCtx, node)).To(Succeed())
+			setReady(name)
+		}
+
+		frozen := map[string]valkeyiov1alpha1.ValkeyNode{}
+		for _, name := range allNodes {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			frozen[name] = *node
+		}
+		r.Client = generationFrozenClient{Client: k8sClient, frozen: frozen}
+		r.APIReader = k8sClient
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "a stale cache must not let this pass rebalance onto the pod being replaced")
+		Expect(getImage(node10)).To(Equal(newImage))
+		Expect(getImage(node11)).To(Equal(newImage))
+	})
+
+	It("holds rebalance while a slotless scale-out pod is on the previous revision", func() {
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+		setNotReady(node10)
+		setNotReady(node11)
+
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: node10, Namespace: "default"}, node)).To(Succeed())
+		tmpl, err := buildNodePodTemplate(node)
+		Expect(err).NotTo(HaveOccurred())
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node), Namespace: "default"},
+			Spec: appsv1.StatefulSetSpec{
+				Selector:    &metav1.LabelSelector{MatchLabels: valkeyNodeLabels(node)},
+				ServiceName: "scale-out-hold",
+				Template:    tmpl,
+			},
+		}
+		Expect(k8sClient.Create(testCtx, sts)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, sts))).To(Succeed())
+		})
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, sts)).To(Succeed())
+		// The stored template has to hash to the node's revision, or the
+		// walk treats the workload as not yet applied and holds for that.
+		Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(node.Spec.WorkloadRevision))
+		sts.Status.ObservedGeneration = sts.Generation
+		sts.Status.UpdateRevision = "rev-new"
+		Expect(k8sClient.Status().Update(testCtx, sts)).To(Succeed())
+
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-old"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: node10 + "-0", Namespace: "default", Labels: podLabels},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
+		}
+		Expect(k8sClient.Create(testCtx, pod)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, pod))).To(Succeed())
+		})
+
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{{
+				Id:        "shard-0",
+				PrimaryId: "n0",
+				Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
+				Nodes: []*valkey.NodeState{
+					{Address: "10.0.0.1", Id: "n0", Flags: []string{"master"}},
+					{Address: "10.0.0.2", Id: "n1", Flags: []string{"slave"}},
+				},
+			}},
+		}
+
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the old pod must not receive slots it would lose on replacement")
+
+		pod.Labels[appsv1.StatefulSetRevisionLabel] = "rev-new"
+		Expect(k8sClient.Update(testCtx, pod)).To(Succeed())
+		requeue, err = reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeFalse(), "the replacement pod can take slots before it is Ready")
 	})
 
 	It("skips only the shard whose primary is unidentifiable", func() {

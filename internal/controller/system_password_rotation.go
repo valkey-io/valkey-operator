@@ -479,9 +479,9 @@ func replicationPasswordCaughtUp(nodes []valkeyiov1alpha1.ValkeyNode, pods []cor
 	return sawServer
 }
 
-// primaryAuthSurvivedRestart reports whether the running server started at or
-// before the recorded CONFIG SET. A later start may have loaded the mounted
-// file instead of the value that was set.
+// primaryAuthSurvivedRestart reports whether the running server started in
+// an earlier second than the recorded CONFIG SET. StartedAt is whole
+// seconds, so the same second counts as a restart.
 func primaryAuthSurvivedRestart(node *valkeyiov1alpha1.ValkeyNode, pods map[string]*corev1.Pod) bool {
 	recorded, err := time.Parse(time.RFC3339Nano, node.Annotations[annotationPrimaryAuthSetAt])
 	if err != nil {
@@ -495,9 +495,16 @@ func primaryAuthSurvivedRestart(node *valkeyiov1alpha1.ValkeyNode, pods map[stri
 		if status.Name != serverContainerName || status.State.Running == nil {
 			continue
 		}
-		return !status.State.Running.StartedAt.After(recorded)
+		return serverStartedBeforeConfigSet(status.State.Running.StartedAt.Time, recorded)
 	}
 	return false
+}
+
+// serverStartedBeforeConfigSet reports whether the container started in an
+// earlier second than the CONFIG SET. The API stores StartedAt at whole
+// seconds, so a restart later in the same second counts as not before.
+func serverStartedBeforeConfigSet(started, recorded time.Time) bool {
+	return started.Before(recorded.Truncate(time.Second))
 }
 
 func (r *ValkeyClusterReconciler) uncachedReader() client.Reader {
@@ -674,7 +681,7 @@ func (r *ValkeyNodeReconciler) serverRestartedSincePrimaryAuth(ctx context.Conte
 		if status.Name != serverContainerName || status.State.Running == nil {
 			continue
 		}
-		return status.State.Running.StartedAt.After(recorded)
+		return !serverStartedBeforeConfigSet(status.State.Running.StartedAt.Time, recorded)
 	}
 	return false
 }

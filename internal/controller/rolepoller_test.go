@@ -56,6 +56,7 @@ func oneShardState() *valkey.ClusterState {
 		Shards: []*valkey.ShardState{{
 			Id:        "shard-1",
 			PrimaryId: "id-primary",
+			Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 			Nodes: []*valkey.NodeState{
 				{Id: "id-primary", Address: pollPrimaryIP},
 				{Id: "id-replica", Address: pollReplicaIP},

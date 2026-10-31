@@ -268,7 +268,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
 	// longer part of the pod template (it does not enter Spec.WorkloadRevision),
 	// so a node waiting on a roll must still pick up ACL edits without one.
-	aclSynced, err := r.applyLiveACL(ctx, node)
+	aclSynced, aclRevision, err := r.applyLiveACL(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to apply live ACL")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
@@ -293,6 +293,26 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"Desired ACL passwords are live"); condErr != nil {
 		log.Error(condErr, "failed to set ACLApplied condition")
 		return ctrl.Result{}, condErr
+	}
+	// Record which ACL revision ACLApplied=True confirmed. Whatever widens a
+	// node's trust bundle can hold new roots back until every node reports the
+	// current revision.
+	if err := r.setAppliedACLRevision(ctx, node, aclRevision); err != nil {
+		log.Error(err, "failed to record the applied ACL revision")
+		return ctrl.Result{}, err
+	}
+
+	// Reload the trust bundle live as well: a changed bundle never rolls the
+	// pod, and Valkey reads tls-ca-cert-file only when it starts or the TLS
+	// config is set. This runs only once the ACL is confirmed live (the
+	// not-synced case returned above). The ACL and the bundle are separate
+	// mounted Secrets that the kubelet updates independently, so reloading
+	// first could trust a new root while a stale ACL still lets its clients in
+	// as a permissive default.
+	if requeue, err := r.applyTrustBundle(ctx, node); err != nil {
+		return ctrl.Result{}, err
+	} else if requeue {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
@@ -372,6 +392,48 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 	})
 	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
 		return fmt.Errorf("patch ACLApplied condition: %w", err)
+	}
+	return nil
+}
+
+// setTrustBundleCondition sets the TrustBundleApplied condition, reporting
+// whether the server has reloaded the mounted trust bundle.
+func (r *ValkeyNodeReconciler) setTrustBundleCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied, status, reason, message, current.Generation) {
+		return nil
+	}
+	patchBase := current.DeepCopy()
+	meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+		Type:               valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: current.Generation,
+	})
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch TrustBundleApplied condition: %w", err)
+	}
+	return nil
+}
+
+// clearTrustBundleCondition removes the TrustBundleApplied condition if
+// present, so a node whose trust bundle is removed stops reporting on it. It
+// no-ops (no patch) when the condition is already absent.
+func (r *ValkeyNodeReconciler) clearTrustBundleCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	patchBase := current.DeepCopy()
+	if !meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("patch TrustBundleApplied condition: %w", err)
 	}
 	return nil
 }
@@ -1117,7 +1179,7 @@ func syncInProgress(info string) bool {
 // container in the Running state. A missing status counts as not running.
 func serverContainerRunning(pod *corev1.Pod) bool {
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "server" {
+		if cs.Name == serverContainerName {
 			return cs.State.Running != nil
 		}
 	}
@@ -1227,6 +1289,54 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 		return ""
 	}
 	return parseClusterNodesRole(nodes)
+}
+
+// applyTrustBundle reloads the node's trust bundle and reports the outcome as
+// the TrustBundleApplied condition, which it removes from a node without a
+// trust bundle. A failed reload is not returned as an error: the server
+// refused the file and keeps serving with the roots it last loaded, so it asks
+// for a requeue at a fixed cadence, as for a stale ACL, rather than error
+// backoff, which would delay picking up a fixed bundle. The error returned is
+// a failure to update the condition.
+func (r *ValkeyNodeReconciler) applyTrustBundle(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	log := logf.FromContext(ctx)
+	reloaded, err := r.reloadTrustBundle(ctx, node)
+	switch {
+	case err != nil:
+		log.Error(err, "failed to reload the trust bundle")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "TrustBundleReloadFailed", "ReloadTrustBundle", "Failed to reload the trust bundle: %v", err)
+		return true, r.setTrustBundleCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error())
+	case reloaded:
+		return false, r.setTrustBundleCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
+			"The mounted trust bundle is loaded")
+	default:
+		return false, r.clearTrustBundleCondition(ctx, node)
+	}
+}
+
+// reloadTrustBundle has a node with a trust bundle re-read tls-ca-cert-file.
+// The bundle Secret can change while the pod runs (a SPIFFE trust domain
+// rotates its roots about daily), and the kubelet updates the mounted file in
+// place, but the running server keeps
+// the roots it loaded until its TLS config is set again: tls-auto-reload-interval
+// was not observed to reload the CA. CONFIG SET of the unchanged path rebuilds
+// the TLS context with the current file, so running this on every reconcile
+// bounds how long a new root waits by the volume refresh plus the requeue.
+// The reload affects new connections only. Returns (true, nil) once the bundle
+// is reloaded, (false, nil) for a node without a trust bundle, which is left
+// alone, and (false, err) on failure.
+func (r *ValkeyNodeReconciler) reloadTrustBundle(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	if node.Spec.TLS == nil || node.Spec.TLS.Certificates.TrustBundle == nil {
+		return false, nil
+	}
+	c, err := r.newConfigClient(ctx, r, node)
+	if err != nil {
+		return false, err
+	}
+	if err := c.SetConfig(ctx, map[string]string{"tls-ca-cert-file": tlsCertMountPath + "/" + tlsSecretKeyCA}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // applyLiveConfig applies the live-settable subset of the node's desired config

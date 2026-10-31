@@ -83,12 +83,24 @@ const (
 	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
 	tlsVolumeName = "tls-certs"
 	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
-	tlsCertMountPath = "/tls"
-	dataVolumeName   = "data"
-	dataMountPath    = "/data"
+	tlsCertMountPath  = "/tls"
+	dataVolumeName    = "data"
+	dataMountPath     = "/data"
+	scriptsVolumeName = "scripts"
+	scriptsMountPath  = "/scripts"
+	configVolumeName  = "valkey-conf"
+	configMountPath   = "/config"
+	// initVolumeName is the emptyDir the init container writes to and the
+	// server container reads from.
+	initVolumeName   = "init-conf"
+	initMountPath    = "/init"
 	tlsSecretKeyCA   = "ca.crt"
 	tlsSecretKeyCert = "tls.crt"
 	tlsSecretKeyKey  = "tls.key"
+	// tlsSecretKeyServerCA is where the server secret's ca.crt is projected
+	// when a trust bundle takes over ca.crt. Probes and the exporter verify the
+	// server against it.
+	tlsSecretKeyServerCA = "server-ca.crt"
 )
 
 // Role label values.

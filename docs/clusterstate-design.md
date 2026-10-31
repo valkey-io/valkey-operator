@@ -17,6 +17,16 @@ on a client pinned to that node so it is never redirected elsewhere. Unreachable
 nodes are skipped. A primary with no slot assignment becomes a pending node;
 everything else is grouped into a shard by shard ID.
 
+One pass follows: a pending primary that a replica names as its primary, in a
+shard that has no primary of its own, moves into that shard. That is a primary
+drained to zero slots that kept its replica, as a scale-in reverted right after
+its drain leaves behind (`cluster-allow-replica-migration no` keeps it a
+primary). The shard then has a primary and no slots, so readers that care
+whether a shard serves check its slots, not only its primary: `countReadyShards`
+does not count it, and the role poller reports no role for its primary. A
+scale-out leader with no replica following it yet, and a slot-less primary
+beside a shard's live primary, stay pending.
+
 Two consequences follow:
 
 - **Never nil, but often empty.** With nothing reachable, shards and pending nodes

@@ -30,17 +30,12 @@ import (
 
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	vclient "github.com/valkey-io/valkey-go"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -204,23 +199,7 @@ func main() {
 	// Only cache Kubernetes resources managed by this operator to reduce memory
 	// usage in large clusters. User-provided Secrets (passwords, TLS certs) are
 	// fetched directly from the API server via APIReader.
-	managedBySelector := labels.SelectorFromSet(labels.Set{
-		"app.kubernetes.io/managed-by": "valkey-operator",
-	})
-	cacheOpts := cache.Options{
-		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Service{}:               {Label: managedBySelector},
-			&appsv1.StatefulSet{}:           {Label: managedBySelector},
-			&appsv1.Deployment{}:            {Label: managedBySelector},
-			&corev1.ConfigMap{}:             {Label: managedBySelector},
-			&corev1.Secret{}:                {Label: managedBySelector},
-			&corev1.PersistentVolumeClaim{}: {Label: managedBySelector},
-			&policyv1.PodDisruptionBudget{}: {Label: managedBySelector},
-			// Pod is not explicitly watched but is cached due to r.List calls
-			// in the ValkeyNode controller.
-			&corev1.Pod{}: {Label: managedBySelector},
-		},
-	}
+	cacheOpts := cache.Options{ByObject: controller.ManagedCacheByObject()}
 	if len(watchNamespaces) > 0 {
 		setupLog.Info("Restricting cache to namespaces", "namespaces", watchNamespaces)
 		cacheOpts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))

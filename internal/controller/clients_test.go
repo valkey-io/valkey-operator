@@ -198,6 +198,45 @@ func TestForCluster(t *testing.T) {
 		assert.Empty(t, got)
 	})
 
+	t.Run("unpublished candidate dials the TLS still on the node", func(t *testing.T) {
+		var got []vclient.ClientOption
+		cluster := newCluster(tlsOn)
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{},
+		}
+		published := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName("vc"), Namespace: "ns"},
+			Data:       map[string]string{configFileKey: "port 6379\n"},
+		}
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t), published, node), &got)
+		dial, err := p.ForCluster(ctx, cluster)
+		require.NoError(t, err)
+		_, err = dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Nil(t, got[0].TLSConfig)
+	})
+
+	t.Run("published file dials the cluster TLS", func(t *testing.T) {
+		var got []vclient.ClientOption
+		cluster := newCluster(tlsOn)
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+		}
+		published := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName("vc"), Namespace: "ns"},
+			Data:       map[string]string{configFileKey: buildServerConfig(cluster)},
+		}
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t), published, node), &got)
+		dial, err := p.ForCluster(ctx, cluster)
+		require.NoError(t, err)
+		_, err = dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].TLSConfig)
+	})
+
 	t.Run("missing operator password secret is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
 		dial, err := newTestProvider(providerTestClient(t), &got).ForCluster(ctx, newCluster(nil))

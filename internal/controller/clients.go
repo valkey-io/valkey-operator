@@ -24,7 +24,9 @@ import (
 	"strconv"
 
 	vclient "github.com/valkey-io/valkey-go"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -113,6 +115,12 @@ func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.Val
 	cfg := connConfig{username: operatorUser, password: password}
 
 	tlsSpec := nodeTLSFromCluster(cluster)
+	// A candidate that is not published yet left the nodes on their previous
+	// TLS. Dialing the cluster spec would use TLS against servers that are
+	// still on plaintext, or the reverse, and the scrape would fail.
+	if held, ok := p.unpublishedNodeTLS(ctx, cluster); ok {
+		tlsSpec = held
+	}
 	tlsCfg, token, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
 	if err != nil {
 		// Fail each dial, not the caller: the cluster reconcile still has
@@ -129,6 +137,34 @@ func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.Val
 	return func(ctx context.Context, address string) (vclient.Client, error) {
 		return p.pool.Get(ctx, clientOption(address, cfg), token)
 	}, nil
+}
+
+// unpublishedNodeTLS is the TLS the nodes are serving while the candidate
+// valkey.conf is not the published file. The bool is false when the file
+// already matches or there is no node to copy. A nil spec with true means
+// those nodes are on plaintext.
+func (p *provider) unpublishedNodeTLS(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*valkeyiov1alpha1.NodeTLSSpec, bool) {
+	cm := &corev1.ConfigMap{}
+	err := p.client.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)
+	if err != nil {
+		return nil, false
+	}
+	published := cm.Data[configFileKey]
+	if published == "" || published == buildServerConfig(cluster) {
+		return nil, false
+	}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := p.client.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil || len(nodes.Items) == 0 {
+		return nil, false
+	}
+	spec := nodes.Items[0].Spec.TLS
+	if spec != nil {
+		spec = spec.DeepCopy()
+		if spec.ServerName == "" {
+			spec.ServerName = nodeTLSServerName(&nodes.Items[0])
+		}
+	}
+	return spec, true
 }
 
 func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (vclient.Client, error) {

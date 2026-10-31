@@ -39,7 +39,10 @@ import (
 const (
 	scriptsHashKey = "valkey.io/script-hash"
 	configHashKey  = "valkey.io/config-hash"
-	configFileKey  = "valkey.conf"
+	// configCheckedImageKey is the spec.image that parsed the published file.
+	// An image change with the same bytes still has to be checked.
+	configCheckedImageKey = "valkey.io/config-checked-image"
+	configFileKey         = "valkey.conf"
 
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
@@ -357,8 +360,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{
-				configHashKey:  newServerConfigHash,
-				scriptsHashKey: scriptsHash,
+				configHashKey:         newServerConfigHash,
+				scriptsHashKey:        scriptsHash,
+				configCheckedImageKey: effectiveImage(cluster.Spec.Image),
 			},
 		}
 		serverConfigMap.Data = map[string]string{
@@ -401,10 +405,13 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// annotation is always updated when the config changes — even when updatedScripts
 	// is true and would otherwise short-circuit the && below.
 	updatedConfig := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
+	// Stamp the image that just parsed this file. The bytes can be unchanged
+	// when only spec.image moved, and the next reconcile has to know that.
+	updatedImage := upsertAnnotation(serverConfigMap, configCheckedImageKey, effectiveImage(cluster.Spec.Image))
 
 	// If the generated config contents hash (from above) matches the hash of the current
 	// config contents, and we did not update the scripts contents, exit early
-	if !updatedScripts && !updatedConfig {
+	if !updatedScripts && !updatedConfig && !updatedImage {
 		log.V(1).Info("server config unchanged")
 		return nil
 	}

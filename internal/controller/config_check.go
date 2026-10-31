@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,7 +154,8 @@ func (e *configCheckPendingError) Error() string {
 
 // checkRenderedConfig reports whether rendered is safe to publish as valkey.conf.
 // A file the image rejects is not written. A file equal to the one already
-// published is not checked again.
+// published is not checked again, unless spec.image is not the image that
+// parsed it. An image downgrade can reject a directive the file already has.
 func (r *ValkeyClusterReconciler) checkRenderedConfig(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, rendered string) error {
 	if serverConfigParsesFn != nil {
 		err := serverConfigParsesFn(ctx, cluster, rendered)
@@ -165,11 +167,11 @@ func (r *ValkeyClusterReconciler) checkRenderedConfig(ctx context.Context, clust
 
 	log := logf.FromContext(ctx)
 	image := effectiveImage(cluster.Spec.Image)
-	published, err := r.publishedServerConfig(ctx, cluster)
+	published, err := r.readPublishedServerFile(ctx, cluster)
 	if err != nil {
 		return err
 	}
-	if published == rendered {
+	if published.data == rendered && r.configCheckedForImage(ctx, cluster, published.image) {
 		r.deleteConfigCheck(ctx, cluster)
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionServerConfig)
 		return nil
@@ -193,11 +195,23 @@ func (r *ValkeyClusterReconciler) checkRenderedConfig(ctx context.Context, clust
 		if err := controllerutil.SetControllerReference(cluster, pod, r.Scheme); err != nil {
 			return fmt.Errorf("set config check pod owner: %w", err)
 		}
-		if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create config check pod: %w", err)
+		if err := r.Create(ctx, pod); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create config check pod: %w", err)
+			}
+			// The cache misses an object that lacks the managed-by label.
+			// Read it from the API before treating AlreadyExists as ours.
+			pod = &corev1.Pod{}
+			if err := r.readConfigCheckObject(ctx, key, pod); err != nil {
+				return err
+			}
+		} else {
+			log.V(1).Info("started valkey config check", "image", image, "pod", pod.Name)
+			return &configCheckPendingError{image: image}
 		}
-		log.V(1).Info("started valkey config check", "image", image, "pod", pod.Name)
-		return &configCheckPendingError{image: image}
+	}
+	if !configCheckOwnedBy(pod, cluster) {
+		return fmt.Errorf("config check pod %s is not owned by this cluster", pod.Name)
 	}
 
 	return r.configCheckPodResult(ctx, cluster, pod, hash, image)
@@ -249,22 +263,63 @@ func (r *ValkeyClusterReconciler) configCheckPodResult(ctx context.Context, clus
 	}
 }
 
+// publishedServerFile is the valkey.conf currently mounted, and the image
+// recorded as having parsed it. image is empty when the file predates that
+// annotation.
+type publishedServerFile struct {
+	data  string
+	image string
+}
+
 func (r *ValkeyClusterReconciler) publishedServerConfig(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
-	cm := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)
-	if apierrors.IsNotFound(err) {
-		return "", nil
-	}
+	published, err := r.readPublishedServerFile(ctx, cluster)
 	if err != nil {
 		return "", err
 	}
-	return cm.Data[configFileKey], nil
+	return published.data, nil
+}
+
+func (r *ValkeyClusterReconciler) readPublishedServerFile(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (publishedServerFile, error) {
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)
+	if apierrors.IsNotFound(err) {
+		return publishedServerFile{}, nil
+	}
+	if err != nil {
+		return publishedServerFile{}, err
+	}
+	return publishedServerFile{data: cm.Data[configFileKey], image: cm.Annotations[configCheckedImageKey]}, nil
+}
+
+// configCheckedForImage reports whether this spec.image is already known to
+// parse the published file. A missing annotation is the upgrade case: nodes
+// already on spec.image do not need a check pod. A node still on another
+// image does, because a downgrade can reject a directive the file already has.
+func (r *ValkeyClusterReconciler) configCheckedForImage(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, recorded string) bool {
+	image := effectiveImage(cluster.Spec.Image)
+	if recorded == image {
+		return true
+	}
+	if recorded != "" {
+		return false
+	}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
+		return false
+	}
+	for i := range nodes.Items {
+		if nodeImage := nodes.Items[i].Spec.Image; nodeImage != "" && nodeImage != image {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ValkeyClusterReconciler) ensureConfigCheckConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, rendered, hash string) error {
 	name := configCheckName(cluster)
+	key := types.NamespacedName{Name: name, Namespace: cluster.Namespace}
 	cm := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, cm)
+	err := r.Get(ctx, key, cm)
 	if apierrors.IsNotFound(err) {
 		cm = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -278,15 +333,24 @@ func (r *ValkeyClusterReconciler) ensureConfigCheckConfigMap(ctx context.Context
 		if err := controllerutil.SetControllerReference(cluster, cm, r.Scheme); err != nil {
 			return fmt.Errorf("set config check configmap owner: %w", err)
 		}
-		if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create config check configmap: %w", err)
+		if err := r.Create(ctx, cm); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create config check configmap: %w", err)
+			}
+			cm = &corev1.ConfigMap{}
+			if err := r.readConfigCheckObject(ctx, key, cm); err != nil {
+				return err
+			}
+		} else {
+			return nil
 		}
-		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
 	}
-	if cm.Data[configFileKey] == rendered && cm.Annotations[configCheckHashAnnotation] == hash && configCheckLabelsMatch(cm, cluster) {
+	if !configCheckOwnedBy(cm, cluster) {
+		return fmt.Errorf("config check configmap %s is not owned by this cluster", name)
+	}
+	if cm.Data[configFileKey] == rendered && cm.Annotations[configCheckHashAnnotation] == hash && maps.Equal(cm.Labels, configCheckLabels(cluster)) {
 		return nil
 	}
 	if cm.Annotations == nil {
@@ -353,7 +417,7 @@ func newConfigCheckPod(cluster *valkeyiov1alpha1.ValkeyCluster, hash string) *co
 				Image:           image,
 				ImagePullPolicy: defaultImagePullPolicy(image),
 				Command:         []string{shellPath, "-c", configCheckScript},
-				Resources:       cluster.Spec.Resources,
+				Resources:       configCheckResources(),
 				SecurityContext: &corev1.SecurityContext{
 					RunAsUser:                containerUser,
 					RunAsNonRoot:             &nonRoot,
@@ -410,21 +474,23 @@ func configCheckWaiting(pod *corev1.Pod) string {
 
 func (r *ValkeyClusterReconciler) deleteConfigCheck(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) {
 	r.deleteConfigCheckPod(ctx, cluster)
-	r.deleteConfigCheckObject(ctx, &corev1.ConfigMap{
+	r.deleteConfigCheckObject(ctx, cluster, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: configCheckName(cluster), Namespace: cluster.Namespace},
 	})
 }
 
 func (r *ValkeyClusterReconciler) deleteConfigCheckPod(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) {
-	r.deleteConfigCheckObject(ctx, &corev1.Pod{
+	r.deleteConfigCheckObject(ctx, cluster, &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: configCheckName(cluster), Namespace: cluster.Namespace},
 	})
 }
 
 // deleteConfigCheckObject removes a leftover check pod or ConfigMap. A steady
 // reconcile, where the published file already matches, gets the object first
-// and skips the delete when it is already gone.
-func (r *ValkeyClusterReconciler) deleteConfigCheckObject(ctx context.Context, obj client.Object) {
+// and skips the delete when it is already gone. An object this cluster does
+// not own is left alone: the name used to match another cluster's server
+// ConfigMap.
+func (r *ValkeyClusterReconciler) deleteConfigCheckObject(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, obj client.Object) {
 	err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 	if apierrors.IsNotFound(err) {
 		return
@@ -433,9 +499,25 @@ func (r *ValkeyClusterReconciler) deleteConfigCheckObject(ctx context.Context, o
 		logf.FromContext(ctx).Error(err, "failed to get config check object", "name", obj.GetName())
 		return
 	}
+	if !configCheckOwnedBy(obj, cluster) {
+		logf.FromContext(ctx).Info("leaving config check object in place; this cluster does not own it", "name", obj.GetName())
+		return
+	}
 	if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 		logf.FromContext(ctx).Error(err, "failed to delete config check object", "name", obj.GetName())
 	}
+}
+
+// readConfigCheckObject reads a check pod or ConfigMap. Get on the manager
+// cache is NotFound for an object without the managed-by label, so a create
+// that lost the race falls back to the API reader and can then see that the
+// object belongs to someone else.
+func (r *ValkeyClusterReconciler) readConfigCheckObject(ctx context.Context, key types.NamespacedName, obj client.Object) error {
+	err := r.Get(ctx, key, obj)
+	if !apierrors.IsNotFound(err) || r.APIReader == nil {
+		return err
+	}
+	return r.APIReader.Get(ctx, key, obj)
 }
 
 // noteServerConfig records a check that has not published valkey.conf yet.
@@ -466,11 +548,41 @@ func (r *ValkeyClusterReconciler) noteServerConfig(ctx context.Context, cluster 
 }
 
 func configCheckLabels(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
-	return map[string]string{LabelConfigCheck: cluster.Name}
+	// labels() carries app.kubernetes.io/managed-by. The manager cache
+	// selects on that label; without it Get never sees this object.
+	out := labels(cluster)
+	out[LabelConfigCheck] = cluster.Name
+	return out
 }
 
-func configCheckLabelsMatch(cm *corev1.ConfigMap, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
-	return len(cm.Labels) == 1 && cm.Labels[LabelConfigCheck] == cluster.Name
+// configCheckOwnedBy reports whether obj is a check pod or candidate
+// ConfigMap for cluster. Both the controller owner and the check label
+// have to match, so a same-named object from another cluster is not updated
+// or deleted.
+func configCheckOwnedBy(obj client.Object, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	if obj.GetNamespace() != cluster.Namespace || obj.GetLabels()[LabelConfigCheck] != cluster.Name {
+		return false
+	}
+	if obj.GetLabels()["app.kubernetes.io/managed-by"] != "valkey-operator" {
+		return false
+	}
+	owner := metav1.GetControllerOf(obj)
+	return owner != nil &&
+		owner.UID == cluster.UID &&
+		owner.Name == cluster.Name &&
+		owner.Kind == "ValkeyCluster" &&
+		owner.APIVersion == valkeyiov1alpha1.GroupVersion.String()
+}
+
+// configCheckResources is a small fixed request. Copying spec.resources
+// would leave an 8 second parse waiting on a multi-gigabyte schedule hole.
+func configCheckResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+	}
 }
 
 // configCheckPodSecurityContext starts from the cluster's pod security context.
@@ -505,18 +617,18 @@ func configCheckPodSecurityContext(in *corev1.PodSecurityContext) *corev1.PodSec
 
 // configCheckIdentity is the set of inputs that decide whether an existing
 // check pod is still the one we would create. The rendered file alone is not
-// enough: a fixed image, pull secret, or resource request has to replace a
-// pod that is waiting or that exited 127/128.
+// enough: a fixed image or pull secret has to replace a pod that is waiting
+// or that exited 127/128. The resource request is fixed, so a change to
+// spec.resources does not rebuild the pod.
 type configCheckIdentity struct {
-	Rendered           string                      `json:"rendered"`
-	Image              string                      `json:"image"`
-	ImagePullSecrets   []string                    `json:"imagePullSecrets,omitempty"`
-	ServiceAccountName string                      `json:"serviceAccountName,omitempty"`
-	Resources          corev1.ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector       map[string]string           `json:"nodeSelector,omitempty"`
-	Tolerations        []corev1.Toleration         `json:"tolerations,omitempty"`
-	PriorityClassName  string                      `json:"priorityClassName,omitempty"`
-	SecurityContext    *corev1.PodSecurityContext  `json:"securityContext,omitempty"`
+	Rendered           string                     `json:"rendered"`
+	Image              string                     `json:"image"`
+	ImagePullSecrets   []string                   `json:"imagePullSecrets,omitempty"`
+	ServiceAccountName string                     `json:"serviceAccountName,omitempty"`
+	NodeSelector       map[string]string          `json:"nodeSelector,omitempty"`
+	Tolerations        []corev1.Toleration        `json:"tolerations,omitempty"`
+	PriorityClassName  string                     `json:"priorityClassName,omitempty"`
+	SecurityContext    *corev1.PodSecurityContext `json:"securityContext,omitempty"`
 }
 
 func configCheckInputHash(cluster *valkeyiov1alpha1.ValkeyCluster, rendered string) (string, error) {
@@ -537,7 +649,6 @@ func configCheckInputHash(cluster *valkeyiov1alpha1.ValkeyCluster, rendered stri
 		Image:              effectiveImage(cluster.Spec.Image),
 		ImagePullSecrets:   secrets,
 		ServiceAccountName: cluster.Spec.ServiceAccountName,
-		Resources:          cluster.Spec.Resources,
 		NodeSelector:       nodeSelector,
 		Tolerations:        tolerations,
 		PriorityClassName:  priority,
@@ -640,21 +751,30 @@ func (h *serverSpecHold) apply(desired, current *valkeyiov1alpha1.ValkeyNode, cu
 	return true
 }
 
+// configCheckName is the check pod and the candidate ConfigMap. It cannot
+// equal GetServerConfigMapName, which is always "valkey-<cluster>", and it
+// cannot equal a ValkeyNode pod name ("<cluster>-<shard>-<index>"), which
+// ends in "-<digits>-<digits>". "valkey-<cluster>-cfg" collided with the
+// server ConfigMap of cluster "<cluster>-cfg".
 func configCheckName(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	const marker = "-cfg"
-	base := resourcePrefix + cluster.Name + marker
+	const prefix = "chk."
+	const suffix = ".x"
+	base := prefix + cluster.Name + suffix
 	if len(base) <= 63 {
 		return base
 	}
 	sum := sha256.Sum256([]byte(cluster.Namespace + "/" + cluster.Name))
 	hash := fmt.Sprintf("%x", sum[:4])
-	keep := 63 - len(resourcePrefix) - 1 - len(hash)
+	keep := 63 - len(prefix) - 1 - len(hash)
 	trimmed := cluster.Name
 	if len(trimmed) > keep {
 		trimmed = trimmed[:keep]
 	}
-	trimmed = strings.TrimRight(trimmed, "-")
-	return resourcePrefix + trimmed + "-" + hash
+	trimmed = strings.TrimRight(trimmed, "-.")
+	if trimmed == "" {
+		return prefix + hash
+	}
+	return prefix + trimmed + "." + hash
 }
 
 func trimConfigCheckMessage(message string) string {

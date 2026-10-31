@@ -31,9 +31,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -42,8 +48,11 @@ import (
 
 func TestConfigCheckNameFitsLabel(t *testing.T) {
 	short := configCheckName(&valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"}})
-	if short != "valkey-demo-cfg" {
+	if short != "chk.demo.x" {
 		t.Fatalf("short name %q", short)
+	}
+	if short == GetServerConfigMapName("demo-cfg") || strings.HasPrefix(short, resourcePrefix) {
+		t.Fatalf("name collides with a server configmap: %s", short)
 	}
 	long := configCheckName(&valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 200), Namespace: "ns"},
@@ -51,8 +60,8 @@ func TestConfigCheckNameFitsLabel(t *testing.T) {
 	if len(long) > 63 {
 		t.Fatalf("len %d name %q", len(long), long)
 	}
-	if long == "valkey-"+strings.Repeat("a", 200)+"-cfg" {
-		t.Fatal("long name was not shortened")
+	if strings.HasPrefix(long, resourcePrefix) || long == "chk."+strings.Repeat("a", 200)+".x" {
+		t.Fatalf("long name was not shortened safely: %s", long)
 	}
 }
 
@@ -75,7 +84,7 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 		},
 	}
 	pod := newConfigCheckPod(cluster, "abc")
-	if pod.Name != "valkey-demo-cfg" || pod.Namespace != "ns" {
+	if pod.Name != "chk.demo.x" || pod.Namespace != "ns" {
 		t.Fatalf("identity %s/%s", pod.Namespace, pod.Name)
 	}
 	if pod.Annotations[configCheckHashAnnotation] != "abc" {
@@ -94,8 +103,13 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 	if container.ImagePullPolicy != defaultImagePullPolicy(container.Image) {
 		t.Fatalf("pull policy %s", container.ImagePullPolicy)
 	}
-	if container.Resources.Limits.Memory().IsZero() {
-		t.Fatal("resources were not copied")
+	wantRes := configCheckResources()
+	if container.Resources.Requests.Cpu().Cmp(wantRes.Requests[corev1.ResourceCPU]) != 0 ||
+		container.Resources.Requests.Memory().Cmp(wantRes.Requests[corev1.ResourceMemory]) != 0 {
+		t.Fatalf("fixed request %#v", container.Resources.Requests)
+	}
+	if !container.Resources.Limits.Memory().IsZero() {
+		t.Fatal("server memory limit must not be copied onto the check pod")
 	}
 	script := container.Command[2]
 	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") {
@@ -116,6 +130,9 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 	}
 	if pod.Labels[LabelConfigCheck] != cluster.Name {
 		t.Fatalf("config-check label %v", pod.Labels)
+	}
+	if pod.Labels["app.kubernetes.io/managed-by"] != "valkey-operator" {
+		t.Fatalf("managed-by label %v", pod.Labels)
 	}
 	if _, ok := pod.Labels[LabelCluster]; ok {
 		t.Fatal("config check pod must not carry the cluster label")
@@ -199,8 +216,8 @@ func TestConfigCheckInputHashTracksPodInputs(t *testing.T) {
 	cluster.Spec.Image = "valkey/valkey:9.0.0"
 	cluster.Spec.Resources.Limits = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}
 	changed, err = configCheckInputHash(cluster, "cluster-enabled yes\n")
-	if err != nil || changed == base {
-		t.Fatal("resource change should replace the check pod")
+	if err != nil || changed != base {
+		t.Fatal("a fixed check request must ignore spec.resources")
 	}
 }
 
@@ -219,6 +236,107 @@ func TestConfigCheckPodStale(t *testing.T) {
 	unset := &corev1.Pod{}
 	if configCheckPodStale(unset, now) {
 		t.Fatal("a pod with no creation time should be kept")
+	}
+}
+
+func TestConfigCheckRefusesForeignObject(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := valkeyiov1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	demo := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns", UID: "demo-uid"}}
+	other := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "demo-cfg", Namespace: "ns", UID: "other-uid"}}
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configCheckName(demo),
+			Namespace: "ns",
+			Labels:    labels(other),
+		},
+		Data: map[string]string{configFileKey: "live", readinessScriptKey: "keep"},
+	}
+	if err := controllerutil.SetControllerReference(other, foreign, scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
+	r := &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme}
+
+	r.deleteConfigCheck(ctx, demo)
+	got := &corev1.ConfigMap{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Data[configFileKey] != "live" || got.Data[readinessScriptKey] != "keep" {
+		t.Fatalf("foreign configmap changed: %#v", got.Data)
+	}
+	err := r.ensureConfigCheckConfigMap(ctx, demo, "candidate\n", "hash")
+	if err == nil {
+		t.Fatal("expected an ownership error")
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Data[configFileKey] != "live" || got.Data[readinessScriptKey] != "keep" {
+		t.Fatalf("foreign configmap overwritten: %#v", got.Data)
+	}
+}
+
+func TestUnchangedFileWithANewImageStartsACheck(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := valkeyiov1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns", UID: "demo-uid"},
+		Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Image: "valkey/valkey:8.0.0"},
+	}
+	rendered := buildServerConfig(cluster)
+	published := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      GetServerConfigMapName(cluster.Name),
+			Namespace: "ns",
+			Labels:    labels(cluster),
+		},
+		Data: map[string]string{configFileKey: rendered},
+	}
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-0-0",
+			Namespace: "ns",
+			Labels:    map[string]string{LabelCluster: cluster.Name},
+		},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{Image: "valkey/valkey:9.0.0"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(published, node).Build()
+	r := &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme}
+	err := r.checkRenderedConfig(ctx, cluster, rendered)
+	var pending *configCheckPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("image downgrade should be checked, got %v", err)
+	}
+
+	stored := &valkeyiov1alpha1.ValkeyNode{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(node), stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Spec.Image = cluster.Spec.Image
+	if err := c.Update(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	// Nodes already on spec.image, and no image stamped on the file, is the
+	// upgrade case. The check pod from the downgrade is removed and not replaced.
+	if err := r.checkRenderedConfig(ctx, cluster, rendered); err != nil {
+		t.Fatalf("nodes already on spec.image should skip the check: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: configCheckName(cluster), Namespace: "ns"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("check pod created for an image the nodes already run: %v", err)
 	}
 }
 
@@ -425,6 +543,67 @@ var _ = Describe("unparsable spec.config", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonConfigRejected))
 		Expect(updated.Status.State).NotTo(Equal(valkeyiov1alpha1.ClusterStateFailed))
+	})
+
+	It("reads the check pod through the managed-by cache and publishes after exit 0", func() {
+		ctx, stop := context.WithCancel(context.Background())
+		DeferCleanup(stop)
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:                 k8sClient.Scheme(),
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
+			Cache:                  cache.Options{ByObject: ManagedCacheByObject()},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		go func() {
+			defer GinkgoRecover()
+			Expect(mgr.Start(ctx)).To(Succeed())
+		}()
+		Expect(mgr.GetCache().WaitForCacheSync(ctx)).To(BeTrue())
+
+		const name = "cfg-cache"
+		cluster := newConfigCheckCluster(name)
+		Expect(k8sClient.Create(context.Background(), cluster)).To(Succeed())
+		DeferCleanup(func() { deleteConfigCheckObjects(context.Background(), name) })
+		Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, cluster)).To(Succeed())
+
+		r := newConfigCheckReconciler()
+		r.Client = mgr.GetClient()
+		r.APIReader = mgr.GetClient()
+		r.Scheme = mgr.GetScheme()
+
+		err = r.checkRenderedConfig(context.Background(), cluster, buildServerConfig(cluster))
+		var pending *configCheckPendingError
+		Expect(errors.As(err, &pending)).To(BeTrue())
+
+		checkName := configCheckName(cluster)
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: checkName, Namespace: "default"}, pod)).To(Succeed())
+		Expect(pod.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "valkey-operator"))
+		Expect(pod.Labels).To(HaveKeyWithValue(LabelConfigCheck, name))
+
+		Eventually(func() error {
+			return mgr.GetClient().Get(context.Background(), types.NamespacedName{Name: checkName, Namespace: "default"}, &corev1.Pod{})
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
+
+		markConfigCheckExit(context.Background(), checkName, 0, "")
+		Eventually(func() int32 {
+			got := &corev1.Pod{}
+			if err := mgr.GetClient().Get(context.Background(), types.NamespacedName{Name: checkName, Namespace: "default"}, got); err != nil {
+				return -1
+			}
+			term := terminatedConfigCheck(got)
+			if term == nil {
+				return -1
+			}
+			return term.ExitCode
+		}, 10*time.Second, 100*time.Millisecond).Should(Equal(int32(0)))
+
+		Expect(r.upsertConfigMap(context.Background(), cluster)).To(Succeed())
+		server := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: GetServerConfigMapName(name), Namespace: "default"}, server)).To(Succeed())
+		Expect(server.Data[configFileKey]).To(ContainSubstring("cluster-enabled yes"))
+		Expect(server.Annotations).To(HaveKeyWithValue(configCheckedImageKey, "valkey/valkey:9.0.0"))
 	})
 })
 

@@ -638,6 +638,10 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 	if err != nil {
 		return err
 	}
+	// Stamp the time before CONFIG SET. A restart between the SET and a
+	// later stamp would look older than the stamp and the old password
+	// could be dropped while that process still has the stale file.
+	setAt := time.Now().UTC()
 	if err := configClient.SetConfig(ctx, map[string]string{"primaryauth": string(secret.Data[replicationUser])}); err != nil {
 		return err
 	}
@@ -650,7 +654,7 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 		current.Annotations = map[string]string{}
 	}
 	current.Annotations[annotationPrimaryAuthHash] = sum
-	current.Annotations[annotationPrimaryAuthSetAt] = time.Now().UTC().Format(time.RFC3339Nano)
+	current.Annotations[annotationPrimaryAuthSetAt] = setAt.Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("record replication password: %w", err)
 	}

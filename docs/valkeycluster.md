@@ -71,9 +71,9 @@ Apply the image change and wait for the roll to finish before adding a version-g
 
 #### Config the image will not parse
 
-A directive the version map does not know about, including a typo, is still rendered into the candidate file. Before that file replaces the shared `valkey.conf`, the operator starts a one-shot pod with `spec.image` and asks `valkey-server` to load it. `FATAL CONFIG FILE ERROR` means the file is not published and the workload revision does not change. Example: `ACTOKEY: ACTOSTRING` on a Ready cluster leaves shard 0 on the previous file instead of crash-looping it. The `ServerConfig` condition is `False` with reason `ConfigRejected` until the spec parses. The check image has to provide `/bin/sh`, `grep`, `sleep`, and `valkey-server`. A distroless image cannot run the check, and the operator leaves the published file unchanged until the check can run.
+A directive the version map does not know about, including a typo, is still rendered into the candidate file. Before that file replaces the shared `valkey.conf`, the operator starts a one-shot pod with `spec.image` and asks `valkey-server` to load it. `FATAL CONFIG FILE ERROR` means the file is not published and the workload revision does not change. Example: `ACTOKEY: ACTOSTRING` on a Ready cluster leaves shard 0 on the previous file instead of crash-looping it. Failover and the rest of reconcile keep running against that file. The `ServerConfig` condition is `False` with reason `ConfigRejected` until the spec parses. The check image has to provide `/bin/sh`, `grep`, `sleep`, and `valkey-server`. A distroless image cannot run the check, and the operator leaves the published file unchanged until the check can run.
 
-The first publish waits for the same check. Nodes are not created on a file Valkey will not start.
+The first publish waits for the same check. Nodes are not created on a file Valkey will not start. The check pod is labeled `valkey.io/config-check`, not `valkey.io/cluster`, so it is not a member of the headless Service or the disruption budget.
 
 #### Constraints
 

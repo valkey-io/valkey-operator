@@ -74,7 +74,7 @@ Reports the parse check that gates publishing `valkey.conf`. Absent once the pub
 | `False` | The check is still running (`ConfigCheckPending`), or `spec.image` rejected the rendered file (`ConfigRejected`). |
 | Absent | The published `valkey.conf` matches the candidate. |
 
-A rejection leaves the previous file in place and does not roll. `Ready` stays as it was when a file is already published. On first create, `Ready` stays `False` until a file is published.
+A rejection leaves the previous file in place and does not roll. `Ready` stays as it was when a file is already published, and failover, scale, and the rest of reconcile keep running against that file. The unpublished candidate is not copied onto ValkeyNodes. On first create, reconcile waits and `Ready` stays `False` until a file is published.
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy

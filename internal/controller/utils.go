@@ -77,6 +77,10 @@ const (
 	// Node 0 is the initial primary; nodes 1+ are replicas. Together with
 	// LabelShardIndex this forms a unique selector per Deployment.
 	LabelNodeIndex = "valkey.io/node-index"
+	// LabelConfigCheck marks the one-shot parse pod and its candidate ConfigMap.
+	// It is not LabelCluster: that label is the headless Service selector, the
+	// PDB selector, and the set findPodSchedulingIssue lists.
+	LabelConfigCheck = "valkey.io/config-check"
 )
 
 const (

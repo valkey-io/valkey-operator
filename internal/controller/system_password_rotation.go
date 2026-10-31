@@ -75,6 +75,7 @@ const (
 
 	systemPasswordPhasePending = "pending"
 	systemPasswordPhaseCutover = "cutover"
+	systemPasswordEventHolding = "holding"
 
 	metricsExporterContainerName = "metrics-exporter"
 )
@@ -91,7 +92,8 @@ exec "$0" "$@" --primaryauth "$PRIMARY_AUTH"`, systemPasswordMountPath, replicat
 }
 
 func valkeyServerCommand(announceArgs []string) []string {
-	cmd := []string{shellPath, "-c", replicationAuthShell(), "valkey-server", "/config/valkey.conf"}
+	cmd := make([]string, 0, 5+len(announceArgs)+2)
+	cmd = append(cmd, shellPath, "-c", replicationAuthShell(), "valkey-server", "/config/valkey.conf")
 	cmd = append(cmd, announceArgs...)
 	cmd = append(cmd, "--primaryuser", replicationUser)
 	return cmd
@@ -219,9 +221,9 @@ func advanceSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, 
 	case "":
 		event, err = startSystemPasswordRotation(secret, users, signals)
 	case systemPasswordPhasePending:
-		event, err = promoteSystemPasswordRotation(secret, users, exporterEnabled, signals)
+		event = promoteSystemPasswordRotation(secret, users, exporterEnabled, signals)
 	case systemPasswordPhaseCutover:
-		event, err = finishSystemPasswordRotation(secret, exporterEnabled, signals)
+		event = finishSystemPasswordRotation(secret, exporterEnabled, signals)
 	default:
 		return "", fmt.Errorf("unknown system password rotation phase %q", secret.Annotations[annotationSystemPasswordPhase])
 	}
@@ -277,9 +279,9 @@ func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals 
 	return "started", nil
 }
 
-func promoteSystemPasswordRotation(secret *corev1.Secret, users []string, exporterEnabled bool, signals systemPasswordSignals) (string, error) {
+func promoteSystemPasswordRotation(secret *corev1.Secret, users []string, exporterEnabled bool, signals systemPasswordSignals) string {
 	if !signals.PasswordsLive {
-		return "", nil
+		return ""
 	}
 	for _, user := range users {
 		next := secret.Data[systemPasswordNextKey(user)]
@@ -299,13 +301,13 @@ func promoteSystemPasswordRotation(secret *corev1.Secret, users []string, export
 	stamp := signals.Now.Format(time.RFC3339Nano)
 	secret.Annotations[annotationSystemPasswordCutoverAt] = stamp
 	secret.Annotations[annotationSystemPasswordRotatedAt] = stamp
-	return "cutover", nil
+	return "cutover"
 }
 
-func finishSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, signals systemPasswordSignals) (string, error) {
+func finishSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, signals systemPasswordSignals) string {
 	cutoverAt, err := time.Parse(time.RFC3339Nano, secret.Annotations[annotationSystemPasswordCutoverAt])
 	if err != nil || signals.Now.Sub(cutoverAt) < systemPasswordCutoverGrace {
-		return "", nil
+		return ""
 	}
 	deleted := false
 	drop := func(user string, caughtUp bool) {
@@ -327,18 +329,18 @@ func finishSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, s
 	if !systemPasswordHeldExceptExporter(secret) && exporterPasswordHeld(secret) {
 		delete(secret.Annotations, annotationSystemPasswordPhase)
 		delete(secret.Annotations, annotationSystemPasswordCutoverAt)
-		return "holding", nil
+		return systemPasswordEventHolding
 	}
 	if systemPasswordHasSuffix(secret.Data, systemPasswordPreviousSuffix) || systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
 		if deleted {
-			return "holding", nil
+			return systemPasswordEventHolding
 		}
-		return "", nil
+		return ""
 	}
 	delete(secret.Annotations, annotationSystemPasswordPhase)
 	delete(secret.Annotations, annotationSystemPasswordCutoverAt)
 	delete(secret.Annotations, annotationExporterHoldSince)
-	return "complete", nil
+	return "complete"
 }
 
 func exporterPasswordHeld(secret *corev1.Secret) bool {
@@ -579,7 +581,7 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 	}
 	secret := &corev1.Secret{}
 	secretKey := types.NamespacedName{Name: getSystemPasswordSecretName(clusterName), Namespace: node.Namespace}
-	reader := client.Reader(r.APIReader)
+	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
@@ -632,7 +634,7 @@ func (r *ValkeyNodeReconciler) serverRestartedSincePrimaryAuth(ctx context.Conte
 		return false
 	}
 	pod := &corev1.Pod{}
-	reader := client.Reader(r.APIReader)
+	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
@@ -672,7 +674,7 @@ func (r *ValkeyClusterReconciler) recordSystemPasswordRotation(cluster *valkeyio
 	case "cutover":
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SystemPasswordRotationCutover", "ReconcileUsers",
 			"Nodes have loaded both system passwords. Clients are moving to the new ones. The old passwords stay valid until they have switched.")
-	case "holding":
+	case systemPasswordEventHolding:
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SystemPasswordRotationHolding", "ReconcileUsers",
 			"A client is still using a previous system password. That password stays accepted until the client has switched.")
 	case "complete":

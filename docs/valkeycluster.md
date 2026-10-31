@@ -187,7 +187,7 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 Each Valkey pod carries `valkey.io/role: primary` or `valkey.io/role: replica`, the role the operator last observed on that node. The operator updates it on the live pod, so a failover relabels pods without rolling them.
 
-The label follows the live role with a short delay: after a failover, pods are relabelled within a few seconds. It is not removed while a pod is unready, so a crashed primary keeps `primary` until it is Ready again and reports its new role. A new pod has no role label until it is Ready.
+The label follows the live role with a short delay: after a failover, pods are relabelled within a few seconds. It is not removed while a pod is unready, so a crashed primary keeps `primary` until it is Ready again and reports its new role. A new pod has no role label until it is Ready. When a primary's pod is deleted, for example by a drain, the shard can have no pod labelled `primary` until the new primary is relabelled.
 
 ### Graceful shutdown
 

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -1342,6 +1343,33 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 	})
 })
 
+// podPatchCounter counts Patch calls on Pods. Status patches go through the
+// status subresource client and are not counted.
+type podPatchCounter struct {
+	client.Client
+	podPatches int
+}
+
+func (c *podPatchCounter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		c.podPatches++
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+// podPatchFailer fails every Patch on a Pod, as a missing pods/patch
+// permission or a rejecting admission policy would.
+type podPatchFailer struct {
+	client.Client
+}
+
+func (c *podPatchFailer) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		return errors.New("pods is forbidden")
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
 var _ = Describe("ValkeyNode updateStatus role", func() {
 	var (
 		ctx  context.Context
@@ -1386,6 +1414,33 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		pod.Status.PodIP = "10.0.0.1"
 		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	}
+
+	podFor := func(node *valkeyiov1alpha1.ValkeyNode) *corev1.Pod {
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name + "-pod", Namespace: node.Namespace}, pod)).To(Succeed())
+		return pod
+	}
+
+	setPodReady := func(node *valkeyiov1alpha1.ValkeyNode, ready bool) {
+		pod := podFor(node)
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	}
+
+	resolvingRole := func(role string) *ValkeyNodeReconciler {
+		return &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return role
+			},
+		}
 	}
 
 	BeforeEach(func() {
@@ -1486,6 +1541,89 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.Status.Role).To(Equal(RolePrimary), "last-known role must not be blanked on transient failure")
+		Expect(podFor(node).Labels).To(HaveKeyWithValue(LabelRole, RolePrimary))
+	})
+
+	It("labels a ready pod with the resolved role", func() {
+		seedReadyWorkload(node)
+
+		_, err := resolvingRole(RolePrimary).updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(podFor(node).Labels).To(HaveKeyWithValue(LabelRole, RolePrimary))
+	})
+
+	It("relabels the pod when the role changes", func() {
+		seedReadyWorkload(node)
+
+		_, err := resolvingRole(RolePrimary).updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("resolving replica after a failover")
+		_, err = resolvingRole(RoleReplica).updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(podFor(node).Labels).To(HaveKeyWithValue(LabelRole, RoleReplica))
+	})
+
+	It("does not patch the pod when the label already matches", func() {
+		seedReadyWorkload(node)
+		r := resolvingRole(RolePrimary)
+		counter := &podPatchCounter{Client: k8sClient}
+		r.Client = counter
+
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(counter.podPatches).To(Equal(1))
+
+		_, err = r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		// An empty merge patch leaves resourceVersion alone, so count the calls.
+		Expect(counter.podPatches).To(Equal(1), "a matching label must not be patched again")
+	})
+
+	It("keeps the role label when the pod goes unready", func() {
+		seedReadyWorkload(node)
+		r := resolvingRole(RolePrimary)
+
+		_, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("marking the pod unready, as a crashed container would")
+		setPodReady(node, false)
+		_, err = r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Role).To(BeEmpty())
+		Expect(podFor(node).Labels).To(HaveKeyWithValue(LabelRole, RolePrimary),
+			"an unready primary must stay in the primary set")
+	})
+
+	It("still writes status and signals a retry when the label patch fails", func() {
+		seedReadyWorkload(node)
+		r := resolvingRole(RolePrimary)
+		r.Client = &podPatchFailer{Client: k8sClient}
+
+		retry, err := r.updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred(), "a label failure must not stop the reconcile")
+		Expect(retry).To(BeTrue())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Role).To(Equal(RolePrimary))
+		Expect(r.Recorder.(*events.FakeRecorder).Events).To(Receive(ContainSubstring("RoleLabelFailed")))
+	})
+
+	It("does not label a ready pod whose role has never resolved", func() {
+		seedReadyWorkload(node)
+
+		_, err := resolvingRole("").updateStatus(ctx, node)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(podFor(node).Labels).NotTo(HaveKey(LabelRole))
 	})
 
 	It("clears Role when the pod does not exist", func() {

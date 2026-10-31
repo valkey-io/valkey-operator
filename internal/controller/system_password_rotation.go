@@ -443,8 +443,10 @@ func containerMounts(container corev1.Container, path string) bool {
 }
 
 // replicationPasswordCaughtUp reports whether every node has CONFIG SET the
-// current replication password and every server container will read that
-// password from the mounted file the next time it starts.
+// current replication password, that process is still the one that received
+// it, and every server container will read the mounted file the next time it
+// starts. A container that started after the CONFIG SET may have read a stale
+// volume, and dropping the previous password would leave no way to repair it.
 func replicationPasswordCaughtUp(nodes []valkeyiov1alpha1.ValkeyNode, pods []corev1.Pod, current []byte) bool {
 	if len(current) == 0 {
 		return false
@@ -452,9 +454,13 @@ func replicationPasswordCaughtUp(nodes []valkeyiov1alpha1.ValkeyNode, pods []cor
 	if len(nodes) == 0 {
 		return true
 	}
+	byName := make(map[string]*corev1.Pod, len(pods))
+	for i := range pods {
+		byName[pods[i].Name] = &pods[i]
+	}
 	want := systemPasswordDigest(current)
 	for i := range nodes {
-		if nodes[i].Annotations[annotationPrimaryAuthHash] != want {
+		if nodes[i].Annotations[annotationPrimaryAuthHash] != want || !primaryAuthSurvivedRestart(&nodes[i], byName) {
 			return false
 		}
 	}
@@ -471,6 +477,27 @@ func replicationPasswordCaughtUp(nodes []valkeyiov1alpha1.ValkeyNode, pods []cor
 		}
 	}
 	return sawServer
+}
+
+// primaryAuthSurvivedRestart reports whether the running server started at or
+// before the recorded CONFIG SET. A later start may have loaded the mounted
+// file instead of the value that was set.
+func primaryAuthSurvivedRestart(node *valkeyiov1alpha1.ValkeyNode, pods map[string]*corev1.Pod) bool {
+	recorded, err := time.Parse(time.RFC3339Nano, node.Annotations[annotationPrimaryAuthSetAt])
+	if err != nil {
+		return false
+	}
+	pod := pods[node.Status.PodName]
+	if pod == nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != serverContainerName || status.State.Running == nil {
+			continue
+		}
+		return !status.State.Running.StartedAt.After(recorded)
+	}
+	return false
 }
 
 func (r *ValkeyClusterReconciler) uncachedReader() client.Reader {
@@ -595,7 +622,9 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 		return nil
 	}
 	sum := systemPasswordDigest(secret.Data[replicationUser])
-	if node.Annotations[annotationPrimaryAuthHash] == sum && !r.serverRestartedSincePrimaryAuth(ctx, node) {
+	if node.Annotations[annotationPrimaryAuthHash] == sum &&
+		node.Annotations[annotationPrimaryAuthSetAt] != "" &&
+		!r.serverRestartedSincePrimaryAuth(ctx, node) {
 		return nil
 	}
 	configClient, err := r.newConfigClient(ctx, r, node)

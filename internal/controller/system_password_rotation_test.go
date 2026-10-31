@@ -279,17 +279,34 @@ func TestExporterAndReplicationCaughtUp(t *testing.T) {
 	require.True(t, exporterPasswordCaughtUp(nil, cutover))
 
 	current := []byte("re-new")
-	node := valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-		annotationPrimaryAuthHash: systemPasswordDigest(current),
-	}}}
-	oldPod := corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+	setAt := time.Date(2026, 10, 30, 12, 5, 0, 0, time.UTC)
+	node := valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			annotationPrimaryAuthHash:  systemPasswordDigest(current),
+			annotationPrimaryAuthSetAt: setAt.Format(time.RFC3339Nano),
+		}},
+		Status: valkeyiov1alpha1.ValkeyNodeStatus{PodName: "p"},
+	}
+	oldPod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 		Name: serverContainerName, Command: []string{"valkey-server", "--primaryauth", "$(PRIMARY_AUTH)"},
+	}}}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  serverContainerName,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(setAt.Add(-time.Second))}},
 	}}}}
-	newPod := corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+	newPod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 		Name: serverContainerName, Command: valkeyServerCommand(nil),
+	}}}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  serverContainerName,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(setAt.Add(-time.Second))}},
 	}}}}
+	restarted := newPod.DeepCopy()
+	restarted.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(setAt.Add(time.Second))
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{node}, []corev1.Pod{oldPod}, current))
 	require.True(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{node}, []corev1.Pod{newPod}, current))
+	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{node}, []corev1.Pod{*restarted}, current))
+	unstamped := node.DeepCopy()
+	delete(unstamped.Annotations, annotationPrimaryAuthSetAt)
+	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{*unstamped}, []corev1.Pod{newPod}, current))
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{{}}, []corev1.Pod{newPod}, current))
 	require.True(t, replicationPasswordCaughtUp(nil, nil, current))
 }

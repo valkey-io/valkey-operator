@@ -302,6 +302,16 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// While a previous replication password is still accepted, point the
+	// running server at the current one. A restart reads the mounted file.
+	// This runs only after the ACL is live, so the primary already accepts
+	// the password CONFIG SET installs.
+	if err := r.applyReplicationPassword(ctx, node); err != nil {
+		log.Error(err, "failed to set the replication password")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "ReplicationPasswordApplyFailed", "ApplyReplicationPassword", "Failed to set the replication password: %v", err)
+		return ctrl.Result{}, err
+	}
+
 	// Reload the trust bundle live as well: a changed bundle never rolls the
 	// pod, and Valkey reads tls-ca-cert-file only when it starts or the TLS
 	// config is set. This runs only once the ACL is confirmed live (the

@@ -704,19 +704,24 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionExporterPasswordHeld is set while _exporter.previous is still
+	// accepted. Non-blocking: the other system passwords keep rotating.
+	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 )
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing                  = "Initializing"
-	ReasonReconciling                   = "Reconciling"
-	ReasonClusterHealthy                = "ClusterHealthy"
-	ReasonServiceError                  = "ServiceError"
-	ReasonConfigMapError                = "ConfigMapError"
-	ReasonValkeyNodeError               = "ValkeyNodeError"
-	ReasonValkeyNodeListError           = "ValkeyNodeListError"
-	ReasonAddingNodes                   = "AddingNodes"
-	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	// ReasonExporterNotRestarted is used with ConditionExporterPasswordHeld.
+	ReasonExporterNotRestarted          = "ExporterNotRestarted"
 	ReasonMissingShards                 = "MissingShards"
 	ReasonMissingReplicas               = "MissingReplicas"
 	ReasonReconcileComplete             = "ReconcileComplete"

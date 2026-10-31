@@ -84,7 +84,7 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 	}
 
 	return corev1.Container{
-		Name:         "metrics-exporter",
+		Name:         metricsExporterContainerName,
 		Image:        exporterImage,
 		Env:          env,
 		Args:         exporter.Args,

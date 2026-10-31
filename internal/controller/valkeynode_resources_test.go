@@ -102,11 +102,12 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
-		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
+	// Command. The password is read by the shell at process start. Kubelet
+	// must not expand it, or a rotation would stay on the value from the
+	// last container start.
+	assert.Equal(t, valkeyServerCommand([]string{"--cluster-announce-ip", "$(POD_IP)"}), c.Command)
+	assert.NotContains(t, c.Command, "$(PRIMARY_AUTH)")
+	assert.Contains(t, strings.Join(c.Command, "\n"), systemPasswordMountPath)
 
 	// Env
 	require.Len(t, c.Env, 2)

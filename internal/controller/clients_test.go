@@ -67,6 +67,16 @@ func newTestProvider(c client.Client, got *[]vclient.ClientOption) ClientProvide
 	return NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, recordNewClient(got)))
 }
 
+// configMapGetError fails every ConfigMap read and forwards the rest.
+type configMapGetError struct{ client.Client }
+
+func (c configMapGetError) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok {
+		return errors.New("apiserver timeout")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 func providerTestClient(t *testing.T, objs ...client.Object) client.WithWatch {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -195,6 +205,55 @@ func TestForCluster(t *testing.T) {
 			require.ErrorContains(t, err, "TLS config")
 			assert.Nil(t, c)
 		}
+		assert.Empty(t, got)
+	})
+
+	t.Run("unpublished candidate dials the TLS still on the node", func(t *testing.T) {
+		var got []vclient.ClientOption
+		cluster := newCluster(tlsOn)
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{},
+		}
+		published := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName("vc"), Namespace: "ns"},
+			Data:       map[string]string{configFileKey: "port 6379\n"},
+		}
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t), published, node), &got)
+		dial, err := p.ForCluster(ctx, cluster)
+		require.NoError(t, err)
+		_, err = dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Nil(t, got[0].TLSConfig)
+	})
+
+	t.Run("published file dials the cluster TLS", func(t *testing.T) {
+		var got []vclient.ClientOption
+		cluster := newCluster(tlsOn)
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "vc-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "vc"}},
+		}
+		published := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName("vc"), Namespace: "ns"},
+			Data:       map[string]string{configFileKey: buildServerConfig(cluster)},
+		}
+		p := newTestProvider(providerTestClient(t, operatorPasswordSecret(), testTLSSecret(t), published, node), &got)
+		dial, err := p.ForCluster(ctx, cluster)
+		require.NoError(t, err)
+		_, err = dial(ctx, "10.0.0.1:6379")
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].TLSConfig)
+	})
+
+	t.Run("a published config read error stops the scrape", func(t *testing.T) {
+		var got []vclient.ClientOption
+		base := providerTestClient(t, operatorPasswordSecret())
+		dial, err := newTestProvider(configMapGetError{Client: base}, &got).ForCluster(ctx, newCluster(nil))
+		require.ErrorContains(t, err, "published server configuration")
+		require.ErrorContains(t, err, "apiserver timeout")
+		assert.Nil(t, dial)
 		assert.Empty(t, got)
 	})
 

@@ -704,6 +704,11 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionServerConfig is False while the rendered valkey.conf is being
+	// checked with spec.image, or when that image rejected it. Absent once the
+	// published file matches the candidate. Ready is left True when a previous
+	// file is still being served.
+	ConditionServerConfig = "ServerConfig"
 )
 
 const (
@@ -739,6 +744,17 @@ const (
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
 	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	// ReasonConfigRejected means spec.image failed to parse the rendered
+	// valkey.conf. The published file was not replaced.
+	ReasonConfigRejected = "ConfigRejected"
+	// ReasonConfigCheckPending means the parse check has not finished.
+	ReasonConfigCheckPending = "ConfigCheckPending"
+	// ReasonConfigCheckError means the check pod could not be created or
+	// read. It is not ConfigCheckPending: that reason is the pod still running.
+	ReasonConfigCheckError = "ConfigCheckError"
+	// ReasonLogfileIgnored means spec.config.logfile was not published.
+	// The check pod cannot validate a path that exists only on the server pod.
+	ReasonLogfileIgnored = "LogfileIgnored"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

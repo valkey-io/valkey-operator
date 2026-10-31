@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -39,7 +40,10 @@ import (
 const (
 	scriptsHashKey = "valkey.io/script-hash"
 	configHashKey  = "valkey.io/config-hash"
-	configFileKey  = "valkey.conf"
+	// configCheckedImageKey is the spec.image that parsed the published file.
+	// An image change with the same bytes still has to be checked.
+	configCheckedImageKey = "valkey.io/config-checked-image"
+	configFileKey         = "valkey.conf"
 
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
@@ -213,6 +217,16 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 		})
 	}
 
+	for key := range cluster.Spec.Config {
+		if strings.EqualFold(key, "logfile") {
+			warnings = append(warnings, configWarning{
+				reason:  valkeyiov1alpha1.ReasonLogfileIgnored,
+				message: "spec.config.logfile is ignored in any capitalization; servers log to stdout so a path the check pod cannot open is not published",
+			})
+			break
+		}
+	}
+
 	if tls := cluster.GetTLS(); tls != nil {
 		certificateUser := tls.ClientAuthCertificateUser()
 		if minVersion, requiresVersion := tlsAuthClientsUserMinVersion[certificateUser]; requiresVersion &&
@@ -253,6 +267,20 @@ func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[str
 	return skipKeys
 }
 
+// suppressedUserConfigKeys are user directives omitted from valkey.conf.
+// logfile is one of them, in any capitalization: Valkey treats the key as
+// case-insensitive, and the check pod's /tmp is not the server pod's.
+// LOGFILE /tmp/valkey.log would pass the check and crash a read-only server.
+func suppressedUserConfigKeys(image string, userConfig map[string]string) map[string]struct{} {
+	skip := gatedUserKeysToSuppress(image, userConfig)
+	for key := range userConfig {
+		if strings.EqualFold(key, "logfile") {
+			skip[key] = struct{}{}
+		}
+	}
+	return skip
+}
+
 // renderServerConfig renders the full valkey.conf from the given user and base
 // config maps. User-provided config is written first and base config last, so
 // users cannot override key base directives (Valkey uses the last value in the
@@ -285,7 +313,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	excludeKeys := suppressedUserConfigKeys(cluster.Spec.Image, cluster.Spec.Config)
 	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
@@ -297,7 +325,7 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 // roll every pod (see config_rollhash_test.go).
 func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
 	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
+	maps.Copy(excludedKeys, suppressedUserConfigKeys(node.Spec.Image, node.Spec.Config))
 	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
 }
@@ -325,8 +353,18 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 
-	// Get the new server config
+	// Get the new server config. Ask spec.image to parse it before this ConfigMap
+	// is created or replaced. A file Valkey will not start must not be published:
+	// every node mounts this one object, and the workload revision rolls onto it.
 	newServerConfig := buildServerConfig(cluster)
+	if err := r.checkRenderedConfig(ctx, cluster, newServerConfig); err != nil {
+		var rejected *configRejectedError
+		var pending *configCheckPendingError
+		if errors.As(err, &rejected) || errors.As(err, &pending) {
+			return err
+		}
+		return &configCheckFailedError{err: err}
+	}
 
 	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
@@ -352,8 +390,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{
-				configHashKey:  newServerConfigHash,
-				scriptsHashKey: scriptsHash,
+				configHashKey:         newServerConfigHash,
+				scriptsHashKey:        scriptsHash,
+				configCheckedImageKey: effectiveImage(cluster.Spec.Image),
 			},
 		}
 		serverConfigMap.Data = map[string]string{
@@ -396,10 +435,13 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// annotation is always updated when the config changes — even when updatedScripts
 	// is true and would otherwise short-circuit the && below.
 	updatedConfig := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
+	// Stamp the image that just parsed this file. The bytes can be unchanged
+	// when only spec.image moved, and the next reconcile has to know that.
+	updatedImage := upsertAnnotation(serverConfigMap, configCheckedImageKey, effectiveImage(cluster.Spec.Image))
 
 	// If the generated config contents hash (from above) matches the hash of the current
 	// config contents, and we did not update the scripts contents, exit early
-	if !updatedScripts && !updatedConfig {
+	if !updatedScripts && !updatedConfig && !updatedImage {
 		log.V(1).Info("server config unchanged")
 		return nil
 	}

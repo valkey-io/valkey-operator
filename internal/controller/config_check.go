@@ -71,9 +71,10 @@ const (
 // and out of the operator ACL file. cluster-enabled is left as rendered:
 // appending cluster-enabled no would hide "replicaof directive not allowed in
 // cluster mode", which Valkey checks against the final value. bind 127.0.0.1
-// holds both the client port and the cluster bus on localhost. logfile ""
-// forces "Configuration loaded" onto the captured stdout. A rendered logfile,
-// including /dev/null, would hide that line and the check would time out.
+// holds both the client port and the cluster bus on localhost. logfile is not
+// overridden: Valkey opens the rendered path while loading, so a path it
+// cannot open still fails the check. The script also reads that file for
+// "Configuration loaded", and a process that stays up wrote it to /dev/null.
 // A directive Valkey rejects still fails on its own line, before these arguments.
 //
 // Exit 0: the log contains "Configuration loaded", so the file parsed.
@@ -91,6 +92,21 @@ if ! command -v valkey-server >/dev/null 2>&1 || ! command -v grep >/dev/null 2>
   exit 127
 fi
 log=/tmp/valkey-config-check.log
+# Last logfile directive wins, as it does in Valkey. Empty means stdout.
+logfile_path=
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    "#"*) continue ;;
+  esac
+  set -- $line
+  if [ "$1" = "logfile" ]; then
+    logfile_path=$2
+    logfile_path=${logfile_path#\"}
+    logfile_path=${logfile_path%\"}
+    logfile_path=${logfile_path#\'}
+    logfile_path=${logfile_path%\'}
+  fi
+done < /config/valkey.conf
 (
   valkey-server /config/valkey.conf \
     --daemonize no \
@@ -98,12 +114,18 @@ log=/tmp/valkey-config-check.log
     --bind 127.0.0.1 \
     --save "" \
     --aclfile "" \
-    --loglevel notice \
-    --logfile ""
+    --loglevel notice
 ) >"$log" 2>&1 &
 pid=$!
-loaded() { grep -q "Configuration loaded" "$log" 2>/dev/null; }
-fatal() { grep -q "FATAL CONFIG FILE ERROR" "$log" 2>/dev/null; }
+marker() {
+  grep -q "$1" "$log" 2>/dev/null && return 0
+  if [ -n "$logfile_path" ] && [ -f "$logfile_path" ]; then
+    grep -q "$1" "$logfile_path" 2>/dev/null && return 0
+  fi
+  return 1
+}
+loaded() { marker "Configuration loaded"; }
+fatal() { marker "FATAL CONFIG FILE ERROR"; }
 i=0
 while [ "$i" -lt 8 ]; do
   if fatal; then
@@ -137,7 +159,17 @@ while [ "$i" -lt 8 ]; do
   i=$((i + 1))
   sleep 1
 done
-kill "$pid" 2>/dev/null
+if kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  if fatal; then
+    cat "$log" >&2
+    exit 1
+  fi
+  # Still running, and not fatal: load finished. /dev/null discarded the
+  # marker, and a logfile Valkey could not open would have exited.
+  exit 0
+fi
 wait "$pid" 2>/dev/null
 if fatal; then
   cat "$log" >&2
@@ -167,6 +199,13 @@ type configCheckPendingError struct {
 	image  string
 	detail string
 }
+
+// configCheckFailedError is an error from running the check itself, such as
+// a check pod that cannot be created or read. Publishing errors are not this.
+type configCheckFailedError struct{ err error }
+
+func (e *configCheckFailedError) Error() string { return e.err.Error() }
+func (e *configCheckFailedError) Unwrap() error { return e.err }
 
 func (e *configCheckPendingError) Error() string {
 	msg := fmt.Sprintf("checking rendered valkey.conf with %s before writing it", e.image)

@@ -194,6 +194,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		var rejected *configRejectedError
 		var pending *configCheckPendingError
+		var checkFailed *configCheckFailedError
 		var reason string
 		switch {
 		case errors.As(err, &rejected):
@@ -202,7 +203,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		case errors.As(err, &pending):
 			configCheckAfter = configCheckPendingRequeue
 			reason = valkeyiov1alpha1.ReasonConfigCheckPending
-		default:
+		case errors.As(err, &checkFailed):
 			// A check pod that cannot be created (quota, missing RBAC) must
 			// not stop failover on a cluster that is already serving. A new
 			// cluster still waits: there is no file to keep serving.
@@ -214,6 +215,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			configCheckAfter = configCheckPendingRequeue
 			reason = valkeyiov1alpha1.ReasonConfigCheckError
+		default:
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
 		}
 		r.noteServerConfig(ctx, cluster, reason, err.Error())
 		// Nothing is served yet: do not create nodes on a file Valkey will not

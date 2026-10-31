@@ -67,6 +67,16 @@ func newTestProvider(c client.Client, got *[]vclient.ClientOption) ClientProvide
 	return NewClientProvider(c, c, valkey.NewPool(valkey.DefaultIdleTTL, recordNewClient(got)))
 }
 
+// configMapGetError fails every ConfigMap read and forwards the rest.
+type configMapGetError struct{ client.Client }
+
+func (c configMapGetError) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok {
+		return errors.New("apiserver timeout")
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 func providerTestClient(t *testing.T, objs ...client.Object) client.WithWatch {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -235,6 +245,16 @@ func TestForCluster(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].TLSConfig)
+	})
+
+	t.Run("a published config read error stops the scrape", func(t *testing.T) {
+		var got []vclient.ClientOption
+		base := providerTestClient(t, operatorPasswordSecret())
+		dial, err := newTestProvider(configMapGetError{Client: base}, &got).ForCluster(ctx, newCluster(nil))
+		require.ErrorContains(t, err, "published server configuration")
+		require.ErrorContains(t, err, "apiserver timeout")
+		assert.Nil(t, dial)
+		assert.Empty(t, got)
 	})
 
 	t.Run("missing operator password secret is an error", func(t *testing.T) {

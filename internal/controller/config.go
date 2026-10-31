@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -352,7 +353,12 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// every node mounts this one object, and the workload revision rolls onto it.
 	newServerConfig := buildServerConfig(cluster)
 	if err := r.checkRenderedConfig(ctx, cluster, newServerConfig); err != nil {
-		return err
+		var rejected *configRejectedError
+		var pending *configCheckPendingError
+		if errors.As(err, &rejected) || errors.As(err, &pending) {
+			return err
+		}
+		return &configCheckFailedError{err: err}
 	}
 
 	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)

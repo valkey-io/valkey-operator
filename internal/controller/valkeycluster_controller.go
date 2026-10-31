@@ -213,7 +213,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				return ctrl.Result{}, err
 			}
 			configCheckAfter = configCheckPendingRequeue
-			reason = valkeyiov1alpha1.ReasonConfigCheckPending
+			reason = valkeyiov1alpha1.ReasonConfigCheckError
 		}
 		r.noteServerConfig(ctx, cluster, reason, err.Error())
 		// Nothing is served yet: do not create nodes on a file Valkey will not

@@ -113,8 +113,11 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 		t.Fatalf("limits must match the fixed request, got %#v", container.Resources.Limits)
 	}
 	script := container.Command[2]
-	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") {
+	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") || !strings.Contains(script, "--loglevel notice") || !strings.Contains(script, "Configuration loaded") {
 		t.Fatalf("script does not ask valkey to parse: %s", script)
+	}
+	if strings.Contains(script, "\nexit 0\n") && !strings.Contains(script, "if loaded; then") {
+		t.Fatal("exit 0 must require Configuration loaded")
 	}
 	// cluster-enabled no would hide "replicaof directive not allowed in cluster mode".
 	if strings.Contains(script, "--cluster-enabled") {
@@ -589,7 +592,7 @@ var _ = Describe("unparsable spec.config", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, updated)).To(Succeed())
 		cond := meta.FindStatusCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionServerConfig)
 		Expect(cond).NotTo(BeNil())
-		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonConfigCheckPending))
+		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonConfigCheckError))
 		Expect(cond.Message).To(ContainSubstring("forbidden"))
 		Expect(updated.Status.State).NotTo(Equal(valkeyiov1alpha1.ClusterStateFailed))
 	})

@@ -749,6 +749,9 @@ const (
 	ReasonConfigRejected = "ConfigRejected"
 	// ReasonConfigCheckPending means the parse check has not finished.
 	ReasonConfigCheckPending = "ConfigCheckPending"
+	// ReasonConfigCheckError means the check pod could not be created or
+	// read. It is not ConfigCheckPending: that reason is the pod still running.
+	ReasonConfigCheckError = "ConfigCheckError"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

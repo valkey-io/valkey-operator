@@ -73,11 +73,11 @@ const (
 // holds both the client port and the cluster bus on localhost. A directive
 // Valkey rejects still fails on its own line, before these arguments.
 //
-// Exit 0: no FATAL CONFIG FILE ERROR (the process ran, or it died later for a
-// reason other than config parse). Exit 1: the image rejected the file.
-// Exit 127: valkey-server, grep, or sleep could not be executed. A missing
-// /bin/sh never reaches this script; containerd reports StartError and the
-// container exits 128.
+// Exit 0: the log contains "Configuration loaded", so the file parsed.
+// Exit 1: the image rejected the file. Exit 2: the process never proved
+// that it parsed (timeout, signal, OOM). Exit 127: valkey-server, grep, or
+// sleep could not be executed. A missing /bin/sh never reaches this script;
+// containerd reports StartError and the container exits 128.
 //
 // CONFIG INFO (#141) can replace this pod once the image can describe its own
 // settings. The rule stays the same: the binary decides, and a rejected file
@@ -94,36 +94,56 @@ log=/tmp/valkey-config-check.log
     --protected-mode no \
     --bind 127.0.0.1 \
     --save "" \
-    --aclfile ""
+    --aclfile "" \
+    --loglevel notice
 ) >"$log" 2>&1 &
 pid=$!
+loaded() { grep -q "Configuration loaded" "$log" 2>/dev/null; }
+fatal() { grep -q "FATAL CONFIG FILE ERROR" "$log" 2>/dev/null; }
 i=0
 while [ "$i" -lt 8 ]; do
-  if grep -q "FATAL CONFIG FILE ERROR" "$log" 2>/dev/null; then
+  if fatal; then
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     cat "$log" >&2
     exit 1
   fi
+  if loaded; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    exit 0
+  fi
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid"
     code=$?
-    if grep -q "FATAL CONFIG FILE ERROR" "$log" 2>/dev/null; then
+    if fatal; then
       cat "$log" >&2
       exit 1
+    fi
+    if loaded; then
+      exit 0
     fi
     if [ "$code" -eq 127 ]; then
       cat "$log" >&2
       exit 127
     fi
-    exit 0
+    cat "$log" >&2
+    exit 2
   fi
   i=$((i + 1))
   sleep 1
 done
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
-exit 0
+if fatal; then
+  cat "$log" >&2
+  exit 1
+fi
+if loaded; then
+  exit 0
+fi
+cat "$log" >&2
+exit 2
 `
 
 // serverConfigParsesFn, when set, replaces the in-cluster parse check.
@@ -582,16 +602,21 @@ func configCheckOwnedBy(obj client.Object, cluster *valkeyiov1alpha1.ValkeyClust
 // wakes reconcile. This interval only covers a missed watch.
 const configCheckPendingRequeue = 30 * time.Second
 
-// configCheckResources is a small fixed request and the same limit.
-// Copying spec.resources would leave an 8 second parse waiting on a
-// multi-gigabyte schedule hole. A namespace quota on limits.cpu or
-// limits.memory rejects a pod that sets only requests.
+// configCheckResources keeps a small request so the pod schedules, and a
+// 1 CPU limit so the 8 second parse is not capped at 10ms of CPU per
+// second. Memory stays 64Mi. Both limits are set so a quota on limits
+// does not reject the pod.
 func configCheckResources() corev1.ResourceRequirements {
-	req := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse("10m"),
-		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
 	}
-	return corev1.ResourceRequirements{Requests: req, Limits: req.DeepCopy()}
 }
 
 // configCheckPodSecurityContext starts from the cluster's pod security context.

@@ -70,8 +70,10 @@ const (
 // and out of the operator ACL file. cluster-enabled is left as rendered:
 // appending cluster-enabled no would hide "replicaof directive not allowed in
 // cluster mode", which Valkey checks against the final value. bind 127.0.0.1
-// holds both the client port and the cluster bus on localhost. A directive
-// Valkey rejects still fails on its own line, before these arguments.
+// holds both the client port and the cluster bus on localhost. logfile ""
+// forces "Configuration loaded" onto the captured stdout. A rendered logfile,
+// including /dev/null, would hide that line and the check would time out.
+// A directive Valkey rejects still fails on its own line, before these arguments.
 //
 // Exit 0: the log contains "Configuration loaded", so the file parsed.
 // Exit 1: the image rejected the file. Exit 2: the process never proved
@@ -95,7 +97,8 @@ log=/tmp/valkey-config-check.log
     --bind 127.0.0.1 \
     --save "" \
     --aclfile "" \
-    --loglevel notice
+    --loglevel notice \
+    --logfile ""
 ) >"$log" 2>&1 &
 pid=$!
 loaded() { grep -q "Configuration loaded" "$log" 2>/dev/null; }

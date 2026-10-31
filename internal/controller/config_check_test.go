@@ -113,7 +113,7 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 		t.Fatalf("limits must match the fixed request, got %#v", container.Resources.Limits)
 	}
 	script := container.Command[2]
-	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") || !strings.Contains(script, "--loglevel notice") || !strings.Contains(script, "Configuration loaded") {
+	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") || !strings.Contains(script, "--loglevel notice") || !strings.Contains(script, `--logfile ""`) || !strings.Contains(script, "Configuration loaded") {
 		t.Fatalf("script does not ask valkey to parse: %s", script)
 	}
 	if strings.Contains(script, "\nexit 0\n") && !strings.Contains(script, "if loaded; then") {

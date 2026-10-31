@@ -195,10 +195,10 @@ func TestExporterHoldDoesNotBlockTheNextRotation(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	secret := &corev1.Secret{
 		Data: map[string][]byte{
-			operatorUser:                            []byte("op-new"),
-			replicationUser:                         []byte("re-new"),
-			exporterUser:                            []byte("ex-new"),
-			systemPasswordPreviousKey(operatorUser): []byte("op-old"),
+			operatorUser:                               []byte("op-new"),
+			replicationUser:                            []byte("re-new"),
+			exporterUser:                               []byte("ex-new"),
+			systemPasswordPreviousKey(operatorUser):    []byte("op-old"),
 			systemPasswordPreviousKey(replicationUser): []byte("re-old"),
 			systemPasswordPreviousKey(exporterUser):    []byte("ex-old"),
 		},

@@ -51,6 +51,7 @@ const (
 	// (image pull, scheduling). A real rejection is terminal and is not deleted
 	// on that deadline.
 	configCheckExitRejected    = 1
+	configCheckExitUnproven    = 2
 	configCheckExitNotFound    = 127
 	configCheckExitStartError  = 128
 	configCheckPendingDeadline = 5 * time.Minute
@@ -281,6 +282,12 @@ func (r *ValkeyClusterReconciler) configCheckPodResult(ctx context.Context, clus
 	case configCheckExitNotFound, configCheckExitStartError:
 		return &configCheckPendingError{image: image, detail: "valkey-server, sh, grep, or sleep was not found in the image"}
 	default:
+		// Exit 2 is a parse that never proved itself (timeout, signal, OOM).
+		// Keep the pod until the deadline so the watch does not recreate it
+		// on the next pass.
+		if !configCheckPodStale(pod, time.Now()) {
+			return &configCheckPendingError{image: image, detail: fmt.Sprintf("config check exited %d", term.ExitCode)}
+		}
 		r.deleteConfigCheckPod(ctx, cluster)
 		return &configCheckPendingError{image: image, detail: fmt.Sprintf("config check exited %d", term.ExitCode)}
 	}

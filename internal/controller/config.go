@@ -216,6 +216,13 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 		})
 	}
 
+	if _, ok := cluster.Spec.Config["logfile"]; ok {
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonLogfileIgnored,
+			message: "spec.config.logfile is ignored; servers log to stdout so a path the check pod cannot open is not published",
+		})
+	}
+
 	if tls := cluster.GetTLS(); tls != nil {
 		certificateUser := tls.ClientAuthCertificateUser()
 		if minVersion, requiresVersion := tlsAuthClientsUserMinVersion[certificateUser]; requiresVersion &&
@@ -256,6 +263,18 @@ func gatedUserKeysToSuppress(image string, userConfig map[string]string) map[str
 	return skipKeys
 }
 
+// suppressedUserConfigKeys are user directives omitted from valkey.conf.
+// logfile is one of them: the check pod and the server pod do not share a
+// filesystem, and Valkey opens the final logfile path after parsing. A path
+// the server cannot create would otherwise pass the check and crash the pod.
+func suppressedUserConfigKeys(image string, userConfig map[string]string) map[string]struct{} {
+	skip := gatedUserKeysToSuppress(image, userConfig)
+	if _, ok := userConfig["logfile"]; ok {
+		skip["logfile"] = struct{}{}
+	}
+	return skip
+}
+
 // renderServerConfig renders the full valkey.conf from the given user and base
 // config maps. User-provided config is written first and base config last, so
 // users cannot override key base directives (Valkey uses the last value in the
@@ -288,7 +307,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	excludeKeys := suppressedUserConfigKeys(cluster.Spec.Image, cluster.Spec.Config)
 	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
@@ -300,7 +319,7 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 // roll every pod (see config_rollhash_test.go).
 func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
 	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
+	maps.Copy(excludedKeys, suppressedUserConfigKeys(node.Spec.Image, node.Spec.Config))
 	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
 }

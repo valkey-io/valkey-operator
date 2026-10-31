@@ -19,6 +19,9 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -346,6 +349,110 @@ func TestUnchangedFileWithANewImageStartsACheck(t *testing.T) {
 	}
 	if err := c.Get(ctx, types.NamespacedName{Name: configCheckName(cluster), Namespace: "ns"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("check pod created for an image the nodes already run: %v", err)
+	}
+}
+
+func TestBuildServerConfigDropsLogfile(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			Image:  "valkey/valkey:9.0.0",
+			Config: map[string]string{"logfile": "/var/log/valkey.log", "maxmemory": "1gb"},
+		},
+	}
+	rendered := buildServerConfig(cluster)
+	if strings.Contains(rendered, "logfile") {
+		t.Fatalf("logfile was published: %s", rendered)
+	}
+	if !strings.Contains(rendered, "maxmemory 1gb") {
+		t.Fatalf("other user config missing: %s", rendered)
+	}
+	var found bool
+	for _, warning := range versionGateConfigWarnings(cluster) {
+		if warning.reason == valkeyiov1alpha1.ReasonLogfileIgnored && strings.Contains(warning.message, "logfile") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a logfile warning")
+	}
+	with := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+		Image: cluster.Spec.Image, Config: cluster.Spec.Config,
+	}})
+	without := nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+		Image: cluster.Spec.Image, Config: map[string]string{"maxmemory": "1gb"},
+	}})
+	if with != without {
+		t.Fatalf("logfile changed the roll hash: %s %s", with, without)
+	}
+}
+
+func TestConfigCheckScriptRequiresConfigurationLoaded(t *testing.T) {
+	run := func(body string) error {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "valkey-server")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", configCheckScript)
+		cmd.Env = append(os.Environ(), "PATH="+dir+":/bin:/usr/bin")
+		return cmd.Run()
+	}
+	if err := run(`echo "Configuration loaded"; exit 0`); err != nil {
+		t.Fatalf("loaded file should exit 0: %v", err)
+	}
+	var exit *exec.ExitError
+	err := run(`echo "FATAL CONFIG FILE ERROR"; exit 1`)
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("fatal file should exit 1: %v", err)
+	}
+	err = run(`echo "ready"; exit 0`)
+	if !errors.As(err, &exit) || exit.ExitCode() != configCheckExitUnproven {
+		t.Fatalf("a process that never loaded should not publish: %v", err)
+	}
+}
+
+func TestConfigCheckExit2StaysUntilDeadline(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := valkeyiov1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns", UID: "uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: configCheckName(cluster), Namespace: "ns",
+		Labels:            configCheckLabels(cluster),
+		Annotations:       map[string]string{configCheckHashAnnotation: "h"},
+		CreationTimestamp: metav1.Now(),
+	}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  configCheckContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: configCheckExitUnproven}},
+	}}}}
+	if err := controllerutil.SetControllerReference(cluster, pod, scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	r := &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme}
+	err := r.configCheckPodResult(ctx, cluster, pod, "h", "img")
+	var pending *configCheckPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("fresh exit 2: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("fresh exit 2 deleted the pod: %v", err)
+	}
+
+	stale := pod.DeepCopy()
+	stale.CreationTimestamp = metav1.NewTime(time.Now().Add(-configCheckPendingDeadline - time.Second))
+	err = r.configCheckPodResult(ctx, cluster, stale, "h", "img")
+	if !errors.As(err, &pending) {
+		t.Fatalf("stale exit 2: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale exit 2 should delete the pod: %v", err)
 	}
 }
 

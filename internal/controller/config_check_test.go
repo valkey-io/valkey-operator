@@ -108,8 +108,9 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 		container.Resources.Requests.Memory().Cmp(wantRes.Requests[corev1.ResourceMemory]) != 0 {
 		t.Fatalf("fixed request %#v", container.Resources.Requests)
 	}
-	if !container.Resources.Limits.Memory().IsZero() {
-		t.Fatal("server memory limit must not be copied onto the check pod")
+	if container.Resources.Limits.Cpu().Cmp(wantRes.Limits[corev1.ResourceCPU]) != 0 ||
+		container.Resources.Limits.Memory().Cmp(wantRes.Limits[corev1.ResourceMemory]) != 0 {
+		t.Fatalf("limits must match the fixed request, got %#v", container.Resources.Limits)
 	}
 	script := container.Command[2]
 	if !strings.Contains(script, "FATAL CONFIG FILE ERROR") || !strings.Contains(script, "--aclfile") || !strings.Contains(script, "--bind 127.0.0.1") {
@@ -136,6 +137,11 @@ func TestNewConfigCheckPodParsesWithTheClusterImage(t *testing.T) {
 	}
 	if _, ok := pod.Labels[LabelCluster]; ok {
 		t.Fatal("config check pod must not carry the cluster label")
+	}
+	cluster.Labels = map[string]string{LabelCluster: cluster.Name}
+	copied := newConfigCheckPod(cluster, "abc")
+	if _, ok := copied.Labels[LabelCluster]; ok {
+		t.Fatal("a cluster metadata label must not put the check pod in the headless Service")
 	}
 	if container.SecurityContext.RunAsUser == nil || *container.SecurityContext.RunAsUser != configCheckUID {
 		t.Fatal("container should run as uid 999")
@@ -392,7 +398,7 @@ var _ = Describe("unparsable spec.config", func() {
 		r := newConfigCheckReconciler()
 		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+		Expect(result.RequeueAfter).To(Equal(configCheckPendingRequeue))
 
 		serverKey := types.NamespacedName{Name: GetServerConfigMapName(name), Namespace: "default"}
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, serverKey, &corev1.ConfigMap{}))).To(BeTrue())
@@ -485,14 +491,14 @@ var _ = Describe("unparsable spec.config", func() {
 
 		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+		Expect(result.RequeueAfter).To(Equal(configCheckPendingRequeue))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCheckName(cluster), Namespace: "default"}, &corev1.Pod{})).To(Succeed())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(name), Namespace: "default"}, &corev1.ConfigMap{}))).To(BeTrue())
 
 		// The same exit on the next pass still does not delete the pod.
 		result, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(2 * time.Second))
+		Expect(result.RequeueAfter).To(Equal(configCheckPendingRequeue))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: configCheckName(cluster), Namespace: "default"}, &corev1.Pod{})).To(Succeed())
 	})
 
@@ -542,6 +548,49 @@ var _ = Describe("unparsable spec.config", func() {
 		cond := meta.FindStatusCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionServerConfig)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonConfigRejected))
+		Expect(updated.Status.State).NotTo(Equal(valkeyiov1alpha1.ClusterStateFailed))
+	})
+
+	It("keeps reconciling a published cluster when the check cannot be created", func() {
+		ctx := context.Background()
+		const name = "cfg-forbid"
+		cluster := newConfigCheckCluster(name)
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() { deleteConfigCheckObjects(ctx, name) })
+
+		r := newConfigCheckReconciler()
+		serverConfigParsesFn = func(context.Context, *valkeyiov1alpha1.ValkeyCluster, string) error { return nil }
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+
+		nodeKey := types.NamespacedName{Name: valkeyNodeName(name, 0, 0), Namespace: "default"}
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, nodeKey, node)).To(Succeed())
+		before := node.Spec.Config
+
+		fresh := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, fresh)).To(Succeed())
+		fresh.Spec.Config = map[string]string{"ACTOKEY": "ACTOSTRING"}
+		Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
+
+		serverConfigParsesFn = func(context.Context, *valkeyiov1alpha1.ValkeyCluster, string) error {
+			return errors.New("pods is forbidden")
+		}
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+		// The node is not Ready in envtest, so that wait is shorter than the
+		// check backstop. Either way reconcile did not return the create error.
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		Expect(k8sClient.Get(ctx, nodeKey, node)).To(Succeed())
+		Expect(node.Spec.Config).NotTo(HaveKey("ACTOKEY"))
+		Expect(node.Spec.Config).To(Equal(before))
+
+		updated := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, updated)).To(Succeed())
+		cond := meta.FindStatusCondition(updated.Status.Conditions, valkeyiov1alpha1.ConditionServerConfig)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonConfigCheckPending))
+		Expect(cond.Message).To(ContainSubstring("forbidden"))
 		Expect(updated.Status.State).NotTo(Equal(valkeyiov1alpha1.ClusterStateFailed))
 	})
 

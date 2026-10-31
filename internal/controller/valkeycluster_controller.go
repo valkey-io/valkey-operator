@@ -39,9 +39,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const (
@@ -198,12 +200,20 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			configCheckAfter = 30 * time.Second
 			reason = valkeyiov1alpha1.ReasonConfigRejected
 		case errors.As(err, &pending):
-			configCheckAfter = 2 * time.Second
+			configCheckAfter = configCheckPendingRequeue
 			reason = valkeyiov1alpha1.ReasonConfigCheckPending
 		default:
-			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
-			_ = r.updateStatus(ctx, cluster, nil)
-			return ctrl.Result{}, err
+			// A check pod that cannot be created (quota, missing RBAC) must
+			// not stop failover on a cluster that is already serving. A new
+			// cluster still waits: there is no file to keep serving.
+			served, readErr := r.publishedServerConfig(ctx, cluster)
+			if readErr != nil || served == "" {
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+				_ = r.updateStatus(ctx, cluster, nil)
+				return ctrl.Result{}, err
+			}
+			configCheckAfter = configCheckPendingRequeue
+			reason = valkeyiov1alpha1.ReasonConfigCheckPending
 		}
 		r.noteServerConfig(ctx, cluster, reason, err.Error())
 		// Nothing is served yet: do not create nodes on a file Valkey will not
@@ -2053,6 +2063,11 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		// The check pod is owned by the cluster. Watching it wakes reconcile
+		// when the parse exits, instead of scraping on the pending interval.
+		Owns(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetLabels()[LabelConfigCheck] != ""
+		}))).
 		Named("valkeycluster").
 		Complete(r)
 }

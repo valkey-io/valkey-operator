@@ -550,7 +550,10 @@ func (r *ValkeyClusterReconciler) noteServerConfig(ctx context.Context, cluster 
 func configCheckLabels(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	// labels() carries app.kubernetes.io/managed-by. The manager cache
 	// selects on that label; without it Get never sees this object.
+	// Drop LabelCluster: a cluster that sets it on metadata.labels would
+	// otherwise put the check pod in the headless Service.
 	out := labels(cluster)
+	delete(out, LabelCluster)
 	out[LabelConfigCheck] = cluster.Name
 	return out
 }
@@ -574,15 +577,21 @@ func configCheckOwnedBy(obj client.Object, cluster *valkeyiov1alpha1.ValkeyClust
 		owner.APIVersion == valkeyiov1alpha1.GroupVersion.String()
 }
 
-// configCheckResources is a small fixed request. Copying spec.resources
-// would leave an 8 second parse waiting on a multi-gigabyte schedule hole.
+// configCheckPendingRequeue is the backstop while a check pod has not
+// exited. The cluster controller watches that pod, so the exit usually
+// wakes reconcile. This interval only covers a missed watch.
+const configCheckPendingRequeue = 30 * time.Second
+
+// configCheckResources is a small fixed request and the same limit.
+// Copying spec.resources would leave an 8 second parse waiting on a
+// multi-gigabyte schedule hole. A namespace quota on limits.cpu or
+// limits.memory rejects a pod that sets only requests.
 func configCheckResources() corev1.ResourceRequirements {
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("10m"),
-			corev1.ResourceMemory: resource.MustParse("64Mi"),
-		},
+	req := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("10m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
 	}
+	return corev1.ResourceRequirements{Requests: req, Limits: req.DeepCopy()}
 }
 
 // configCheckPodSecurityContext starts from the cluster's pod security context.

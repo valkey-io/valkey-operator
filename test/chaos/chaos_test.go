@@ -139,6 +139,7 @@ type Scenario struct {
 	Name                 string
 	LosesData            bool     // may lose data, skip verification and re-seed
 	LosesDataIfNoReplica bool     // loses data only when replicas == 0
+	LosesDataIfEvicted   bool     // loses data when its pods can be evicted (tolerations set) and AOF is off
 	DestroysReplicas     bool     // removes replicas' data, so a primary lost alongside has no copy left
 	IgnoresTargets       bool     // does not act on ctx.TargetShards, so they need not exist when it runs
 	DisabledByDefault    bool     // excluded unless explicitly listed in CHAOS_SCENARIOS
@@ -153,15 +154,19 @@ type Scenario struct {
 // another destroys its replicas, or when two steps kill primaries with fewer
 // than 2 replicas (the second can hit a promoted primary with an empty replica).
 // With AOF a killed node restarts with its keys, so only LosesData applies.
-func (s Scenario) losesData(lowestReplicas int, aof bool) bool {
+// evictions reports whether pods can be evicted (CHAOS_TOLERATION_SECONDS set).
+// An evicted pod gets a new emptyDir, so without AOF a shard whose pods are all
+// evicted together loses every copy, whatever its replica count.
+func (s Scenario) losesData(lowestReplicas int, aof, evictions bool) bool {
 	if len(s.Steps) == 0 {
-		return s.LosesData || (!aof && s.LosesDataIfNoReplica && lowestReplicas == 0)
+		return s.LosesData || (!aof && s.LosesDataIfNoReplica && lowestReplicas == 0) ||
+			(!aof && evictions && s.LosesDataIfEvicted)
 	}
 	var primaryKills int
 	var destroysReplicas bool
 	for _, name := range s.Steps {
 		step := scenarioByName(name)
-		if step.LosesData {
+		if step.LosesData || (!aof && evictions && step.LosesDataIfEvicted) {
 			return true
 		}
 		if step.LosesDataIfNoReplica {
@@ -192,11 +197,11 @@ var allScenarios = []Scenario{
 	{Name: "rolling-update", LosesDataIfNoReplica: true, IgnoresTargets: true, Inject: rollingUpdate},
 	{Name: "delete-recreate-cluster", LosesData: true, IgnoresTargets: true, Inject: deleteRecreateCluster},
 	{Name: "delete-controller-pod", IgnoresTargets: true, Inject: deleteControllerPod},
-	{Name: "pause-worker-node", DisabledByDefault: true, LosesData: true, Inject: pauseWorkerNode},
+	{Name: "pause-worker-node", DisabledByDefault: true, LosesDataIfEvicted: true, Inject: pauseWorkerNode},
 	{Name: "network-partition-primary", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: networkPartitionPrimary},
 	{Name: "network-partition-replica", DisabledByDefault: true, Inject: networkPartitionReplica},
 	{Name: "crash-primary", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: crashPrimary},
-	{Name: "crash-replica", DisabledByDefault: true, DestroysReplicas: true, Inject: crashReplica},
+	{Name: "crash-replica", DestroysReplicas: true, Inject: crashReplica},
 	{Name: "stop-worker-node", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: stopWorkerNode},
 	{Name: "start-worker-node", DisabledByDefault: true, IgnoresTargets: true, Inject: startWorkerNode},
 	{Name: "partition-worker-node", DisabledByDefault: true, LosesDataIfNoReplica: true, Inject: partitionNode},
@@ -673,7 +678,7 @@ spec:
 			logClusterState(clusterName, "default", "after")
 			expectNoControllerRestarts(fmt.Sprintf("in iteration %d", iteration))
 
-			if !scenario.losesData(ctx.LowestReplicas, aof) {
+			if !scenario.losesData(ctx.LowestReplicas, aof, tolerationSec > 0) {
 				By(fmt.Sprintf("Iteration %d: verifying test data integrity", iteration))
 				Eventually(func() error {
 					return verifyTestData(clusterName, "default", seededKeys)

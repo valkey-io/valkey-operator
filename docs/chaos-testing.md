@@ -100,7 +100,7 @@ Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, C
 | `partition-worker-node` | Network-isolates the Kind worker node hosting the primary and leaves it cut off; pair with `heal-worker-node` in a compound (disabled by default) |
 | `heal-worker-node` | Heals the node(s) `partition-worker-node` isolated this iteration (disabled by default) |
 | `crash-primary` | Crashes the primary's server process (DEBUG SEGFAULT) (disabled by default) |
-| `crash-replica` | Crashes a replica's server process (DEBUG SEGFAULT) (disabled by default) |
+| `crash-replica` | Crashes a replica's server process (DEBUG SEGFAULT) |
 | `scale-shards+scale-shards` | Scales shards, then scales them again while the first change is in progress |
 | `scale-replicas+delete-primary-pod` | Scales replicas, then deletes the primary pod of targeted shards |
 | `scale-shards+delete-controller-pod` | Scales shards, then kills the operator controller pod while the change is in progress |
@@ -109,7 +109,8 @@ Each run picks a random `cluster-node-timeout` in `[CHAOS_NODE_TIMEOUT_MIN_MS, C
 Scenarios that target replicas are skipped when `CHAOS_REPLICAS=0`.
 
 Scenarios marked "disabled by default" are excluded unless explicitly listed in `CHAOS_SCENARIOS`.
-They require `CHAOS_TOLERATION_SECONDS` to be set for meaningful eviction testing.
+The worker node and network partition scenarios require `CHAOS_TOLERATION_SECONDS` to be set for
+meaningful eviction testing.
 
 `stop-worker-node` and `start-worker-node` are a pair: `stop-worker-node` leaves the node
 down so other scenarios run while it is gone, and `start-worker-node` restarts it. Use
@@ -196,6 +197,7 @@ A compound is expected to lose data when:
   The second kill can hit the promoted primary, whose only replica is the restarted old primary, still empty.
 
 Replicas added by `scale-replicas` in the same iteration do not count, since they have not synced yet.
+`pause-worker-node` is expected to lose data only when `CHAOS_TOLERATION_SECONDS` is set and AOF is off: a pause past the eviction threshold evicts every pod on the worker, and a shard whose primary and replicas were all there loses every copy.
 With `CHAOS_PERSISTENCE=true` and AOF on, a killed node restarts with its keys, so only scenarios that always lose data (e.g. `delete-recreate-cluster`) are expected to.
 The test then checks the data and re-seeds only if keys were lost. Otherwise the data is verified, as after a single scenario.
 

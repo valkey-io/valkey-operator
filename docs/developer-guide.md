@@ -16,6 +16,7 @@ make build         # Build the manager binary (runs manifests, generate, fmt, ve
 make manifests     # Regenerate CRD manifests and RBAC from controller-runtime markers
 make generate      # Regenerate DeepCopy methods
 make test-e2e      # Run end-to-end tests in a Kind cluster (creates one if needed, tears it down after)
+make test-chaos    # Run chaos tests (see docs/chaos-testing.md)
 ```
 
 After modifying types in `api/v1alpha1/`, always run `make manifests generate` before testing.

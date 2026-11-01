@@ -82,6 +82,8 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= valkey-operator-test-e2e
+KIND_CLUSTER_CHAOS ?= valkey-operator-test-chaos
+KIND_WORKERS ?= 2
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -91,10 +93,18 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	}
 	@case "$$($(KIND) get clusters)" in \
 		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
+			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+			ACTUAL_WORKERS=$$($(KIND) get nodes --name $(KIND_CLUSTER) | grep -c worker); \
+			if [ "$$ACTUAL_WORKERS" != "$(KIND_WORKERS)" ]; then \
+				echo "ERROR: Cluster has $$ACTUAL_WORKERS worker(s) but KIND_WORKERS=$(KIND_WORKERS) was requested."; \
+				echo "       Delete the cluster first: kind delete cluster --name $(KIND_CLUSTER)"; \
+				exit 1; \
+			fi ;; \
 		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			echo '{"kind": "Cluster", "apiVersion": "kind.x-k8s.io/v1alpha4", "nodes": [{"role": "control-plane"}, {"role": "worker"}, {"role": "worker"}]}' | $(KIND) create cluster --name $(KIND_CLUSTER) --config - ;; \
+			echo "Creating Kind cluster '$(KIND_CLUSTER)' with $(KIND_WORKERS) workers..."; \
+			echo '{"kind":"Cluster","apiVersion":"kind.x-k8s.io/v1alpha4","nodes":[{"role":"control-plane"}' \
+				$$(for i in $$(seq 1 $(KIND_WORKERS)); do echo -n ',{"role":"worker"}'; done) \
+				']}' | $(KIND) create cluster --name $(KIND_CLUSTER) --config - ;; \
 	esac
 	@echo "Switching kubectl context to kind-$(KIND_CLUSTER)..."
 	@"$(KUBECTL)" config use-context kind-$(KIND_CLUSTER)
@@ -103,6 +113,12 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 30m
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-chaos
+test-chaos: manifests generate fmt vet ## Run chaos tests in separate cluster (runs until failure)
+	$(MAKE) setup-test-e2e KIND_CLUSTER=$(KIND_CLUSTER_CHAOS)
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER_CHAOS) go run github.com/onsi/ginkgo/v2/ginkgo --tags=chaos -v --timeout=24h ./test/chaos/
+	$(MAKE) cleanup-test-e2e KIND_CLUSTER=$(KIND_CLUSTER_CHAOS)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

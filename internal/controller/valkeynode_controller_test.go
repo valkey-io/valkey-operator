@@ -1818,7 +1818,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("does nothing when the node has no ACL secret", func() {
 		fake := &fakeConfigClient{}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(BeZero(), "must not open a client when there is no ACL to manage")
@@ -1826,7 +1826,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("treats a missing secret as nothing to apply", func() {
 		fake := &fakeConfigClient{}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(BeZero())
@@ -1837,7 +1837,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		// password hash untouched. The reload must not be skipped on that basis
 		// or those edits would never reach the server.
 		fake := &fakeConfigClient{aclHashes: desiredHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
@@ -1845,7 +1845,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("reports synced once the mounted file has caught up", func() {
 		fake := &fakeConfigClient{aclHashes: staleHashes, aclOnLoad: desiredHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1))
@@ -1854,7 +1854,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	It("reports not synced when the mounted aclfile is still stale", func() {
 		// aclOnLoad nil: the LOAD reads the pre-update file and changes nothing.
 		fake := &fakeConfigClient{aclHashes: staleHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeFalse(), "a premature LOAD must not be reported as applied")
 		Expect(fake.aclLoads).To(Equal(1))
@@ -1862,7 +1862,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("returns an error when ACL LOAD fails", func() {
 		fake := &fakeConfigClient{aclErr: fmt.Errorf("boom")}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
 	})

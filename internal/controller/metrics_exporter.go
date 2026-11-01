@@ -56,7 +56,7 @@ func generateMetricsExporterContainerDef(exporter valkeyiov1alpha1.ExporterSpec,
 	if tlsSpec != nil {
 		env = append(env, corev1.EnvVar{
 			Name:  "REDIS_EXPORTER_TLS_CA_CERT_FILE",
-			Value: fmt.Sprintf("%s/%s", tlsCertMountPath, tlsSecretKeyCA),
+			Value: nodeServerCAPath(tlsSpec),
 		})
 		if tlsSpec.RequiresClientCertificate() {
 			env = append(env,

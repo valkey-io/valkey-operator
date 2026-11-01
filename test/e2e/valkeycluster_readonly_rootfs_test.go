@@ -124,6 +124,26 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 		}
 		Eventually(verifyROFS).Should(Succeed())
 
+		By("verifying every pod's init container inherits the server's securityContext, exits 0, and the pod is Ready")
+		verifyInitROFS := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", noPersistClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}"+
+					":{.spec.initContainers[?(@.name=='server-init')].securityContext.readOnlyRootFilesystem}"+
+					":{.status.initContainerStatuses[?(@.name=='server-init')].state.terminated.exitCode}"+
+					":{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+				"-n", pssRestrictedNamespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			pods := utils.GetNonEmptyLines(output)
+			g.Expect(pods).NotTo(BeEmpty())
+			for _, pod := range pods {
+				// name:readOnlyRootFilesystem:exitCode:Ready
+				g.Expect(pod).To(MatchRegexp(`^[^:]+:true:0:True$`))
+			}
+		}
+		Eventually(verifyInitROFS).Should(Succeed())
+
 		By("verifying /data is backed by an emptyDir")
 		verifyEmptyDir := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pod",

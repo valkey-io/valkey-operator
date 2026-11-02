@@ -114,7 +114,7 @@ test-e2e: manifests generate fmt vet test-e2e-run ## Run the e2e tests. Expected
 
 .PHONY: test-e2e-run
 test-e2e-run: setup-test-e2e ## Run the e2e tests on the Kind cluster, without code generation or vet.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 30m
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 40m
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

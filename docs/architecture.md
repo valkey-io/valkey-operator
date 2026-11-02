@@ -25,13 +25,15 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 1. Ensures a ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
 2. Ensures a PVC (if persistence is configured)
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
-4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`, and copies `status.role` to the pod's `valkey.io/role` label
 
 #### Role resolution
 
 The ValkeyNode controller is the only writer of `status.role`, and always resolves it from the node's own server.
 
 In cluster mode the role comes from **slot ownership** on the `myself` line of CLUSTER NODES: a node owning at least one slot is `primary`, everything else is `replica`. INFO replication is used only in standalone mode, since a restarting cluster replica reports `role:master` (and the `master` flag) for several seconds before replication is re-established, whereas slot ownership stays correct throughout. The tradeoff is that a primary owning no slots — a new shard before slot assignment — reads as `replica` until slots are assigned.
+
+The controller copies `status.role` to the pod's `valkey.io/role` label with a patch on the live pod. The pod template does not carry the label, so a role change never rolls the workload. The label is written only while the pod is Ready and its role has resolved, and it is never removed: `status.role` clears on an unready pod, the label keeps its last value. An unready primary therefore stays in the set of `primary` pods, and after a failover two pods in a shard can both carry `primary` until the old one is Ready again. A replacement pod has no label until its first Ready reconcile. Deleting a primary's pod removes its label with it, so until the new primary's next resolution the shard has no pod labelled `primary`.
 
 Resolution is event-driven rather than tied to the reconcile cadence:
 
@@ -67,7 +69,7 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 
 ## Naming convention
 
-ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-index 0 is the *initial* primary; 1+ are replicas. After a failover, Valkey may promote a replica — the labels are not updated; the live role is always read from CLUSTER NODES. Labels `valkey.io/shard-index` and `valkey.io/node-index` are used by the reconciler to determine slot assignment vs. replication.
+ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-index 0 is the *initial* primary; 1+ are replicas. After a failover, Valkey may promote a replica. These labels are not updated: the live role is always read from CLUSTER NODES and published on the pod as `valkey.io/role`. Labels `valkey.io/shard-index` and `valkey.io/node-index` are used by the reconciler to determine slot assignment vs. replication.
 
 ## Config hash propagation
 

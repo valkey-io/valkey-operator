@@ -88,11 +88,12 @@ own_address() {
 }
 
 # promotable_replicas ID prints the replicas of primary ID that can take over,
-# as ip:port per line: not flagged fail or noaddr (unreachable) or nofailover.
+# as ip:port per line: not flagged fail or noaddr (unreachable). A nofailover
+# replica counts too: the operator promotes it with TAKEOVER.
 promotable_replicas() {
     awk -v me="$1" '
         $4 != me || $3 !~ /slave/ { next }
-        $3 ~ /(^|,)fail(,|$)/ || $3 ~ /noaddr/ || $3 ~ /nofailover/ { next }
+        $3 ~ /(^|,)fail(,|$)/ || $3 ~ /noaddr/ { next }
         {
             split($2, parts, "@")
             address = parts[1]                # ip:port

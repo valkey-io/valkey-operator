@@ -253,12 +253,12 @@ func TestServerStartScript(t *testing.T) {
 		assertSnapshotKept(t, r, true)
 	})
 
-	t.Run("a replica flagged nofailover does not count", func(t *testing.T) {
+	t.Run("a replica flagged nofailover is waited for, since the operator takes it over", func(t *testing.T) {
 		nofailover := replicaID + " 10.0.0.2:6379@16379,,tls-port=0,shard-id=abc slave,nofailover " + primaryID + " 0 1760000000000 1 connected\n"
-		r := runStartScript(t, primary+nofailover+vars, conf, stubCLI{})
-		assert.NotContains(t, r.out, "Previous run")
-		assert.True(t, r.nodeKept)
-		assert.Zero(t, r.cliCalls)
+		r := runStartScript(t, primary+nofailover+vars, conf, stubCLI{promotedAfter: 2})
+		assert.Contains(t, r.out, "Previous run was primary "+primaryID+" with a replica")
+		assert.Contains(t, r.out, "starting as a new node")
+		assert.False(t, r.nodeKept)
 	})
 
 	t.Run("a primary without a replica keeps its identity", func(t *testing.T) {

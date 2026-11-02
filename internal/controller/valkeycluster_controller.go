@@ -39,9 +39,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const (
@@ -90,7 +92,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -103,7 +105,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
-//     (upsertConfigMap).
+//     (upsertConfigMap). The rendered file is parsed by spec.image first. A
+//     file that does not parse is not written, and the workload revision is
+//     left unchanged.
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
@@ -130,7 +134,20 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
-func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
+func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) { //nolint:gocyclo
+	// A config check that has not published yet still has to be requeued, even
+	// when a later step returns its own interval. The shorter wait wins so a
+	// repair is not delayed behind the rejection backoff.
+	var configCheckAfter time.Duration
+	defer func() {
+		if err != nil || configCheckAfter == 0 {
+			return
+		}
+		if result.RequeueAfter == 0 || result.RequeueAfter > configCheckAfter {
+			result.RequeueAfter = configCheckAfter
+		}
+	}()
+
 	log := logf.FromContext(ctx)
 	log.V(1).Info("reconcile...")
 
@@ -170,10 +187,48 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// hold is set only when a file is already published and the candidate was
+	// not. Reconcile keeps going so failover and repair still run, and the
+	// candidate is not copied onto ValkeyNodes.
+	var hold *serverSpecHold
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
-		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+		var rejected *configRejectedError
+		var pending *configCheckPendingError
+		var checkFailed *configCheckFailedError
+		var reason string
+		switch {
+		case errors.As(err, &rejected):
+			configCheckAfter = 30 * time.Second
+			reason = valkeyiov1alpha1.ReasonConfigRejected
+		case errors.As(err, &pending):
+			configCheckAfter = configCheckPendingRequeue
+			reason = valkeyiov1alpha1.ReasonConfigCheckPending
+		case errors.As(err, &checkFailed):
+			// A check pod that cannot be created (quota, missing RBAC) must
+			// not stop failover on a cluster that is already serving. A new
+			// cluster still waits: there is no file to keep serving.
+			served, readErr := r.publishedServerConfig(ctx, cluster)
+			if readErr != nil || served == "" {
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+				_ = r.updateStatus(ctx, cluster, nil)
+				return ctrl.Result{}, err
+			}
+			configCheckAfter = configCheckPendingRequeue
+			reason = valkeyiov1alpha1.ReasonConfigCheckError
+		default:
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
+			_ = r.updateStatus(ctx, cluster, nil)
+			return ctrl.Result{}, err
+		}
+		r.noteServerConfig(ctx, cluster, reason, err.Error())
+		// Nothing is served yet: do not create nodes on a file Valkey will not
+		// start. A published file stays mounted, and the rest of reconcile
+		// repairs that cluster.
+		published, readErr := r.publishedServerConfig(ctx, cluster)
+		if readErr != nil || published == "" {
+			return ctrl.Result{RequeueAfter: configCheckAfter}, nil
+		}
+		hold = &serverSpecHold{}
 	}
 	configWarnings := make([]configWarning, 0, 2)
 	// Surface a ConfigurationWarning condition when an explicit
@@ -213,6 +268,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	if hold != nil && len(nodes.Items) > 0 {
+		hold.fallback = publishedServerInputsFrom(&nodes.Items[0])
+	}
 
 	// One cluster-state snapshot per reconcile, shared throughout reconcile
 	dial, err := r.ValkeyClients.ForCluster(ctx, cluster)
@@ -229,7 +287,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// which shard is waiting and why. It comes up as a typed error so the
 	// walk can stop at that node the way it stops at one mid-roll.
 	var deferred *rollDeferredError
-	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state)
+	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state, hold)
 	if errors.As(err, &deferred) {
 		err = nil
 	}
@@ -637,7 +695,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // It drives replica-first ordering and proactive failover. It is safe to reuse
 // across the loop: after an update we requeue immediately, re-scraping fresh
 // state before any further rolls.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, hold *serverSpecHold) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -670,7 +728,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, hold)
 			var deferred *rollDeferredError
 			if errors.As(err, &deferred) {
 				err = nil
@@ -721,13 +779,10 @@ const (
 // Returns a nodeResult signaling the outcome or required next action.
 // liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
 // and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string) (nodeResult, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string, hold *serverSpecHold) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
-	if err := setDesiredWorkloadRevision(desired); err != nil {
-		return nodeUnchanged, err
-	}
 
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -736,7 +791,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Load current node (if any) for failover decisions.
+	// Load current node (if any) for failover decisions and, while a candidate
+	// is unpublished, so its server spec is kept. The roll hash is derived
+	// from that spec; copying the candidate would roll pods onto a file that
+	// was not written.
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	currentExists := true
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
@@ -744,6 +802,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 			return nodeUnchanged, err
 		}
 		currentExists = false
+	}
+	if hold != nil && !hold.apply(desired, current, currentExists) {
+		return nodeUnchanged, nil
+	}
+	if err := setDesiredWorkloadRevision(desired); err != nil {
+		return nodeUnchanged, err
 	}
 
 	liveHash := ""
@@ -2004,6 +2068,11 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		// The check pod is owned by the cluster. Watching it wakes reconcile
+		// when the parse exits, instead of scraping on the pending interval.
+		Owns(&corev1.Pod{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetLabels()[LabelConfigCheck] != ""
+		}))).
 		Named("valkeycluster").
 		Complete(r)
 }

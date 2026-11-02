@@ -63,6 +63,18 @@ Common reasons when `Ready=False`:
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
 - `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
+- `ConfigCheckPending` – the rendered `valkey.conf` is still being parsed by `spec.image`, and no file has been published yet
+- `ConfigRejected` – `spec.image` rejected the rendered file before anything was published
+
+#### `ServerConfig`
+Reports the parse check that gates publishing `valkey.conf`. Absent once the published file matches the candidate.
+
+| Status | Meaning |
+|---|---|
+| `False` | The check is still running (`ConfigCheckPending`), or `spec.image` rejected the rendered file (`ConfigRejected`). |
+| Absent | The published `valkey.conf` matches the candidate. |
+
+A rejection leaves the previous file in place and does not roll. `Ready` stays as it was when a file is already published, and failover, scale, and the rest of reconcile keep running against that file. The unpublished candidate is not copied onto ValkeyNodes. On first create, reconcile waits and `Ready` stays `False` until a file is published.
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy

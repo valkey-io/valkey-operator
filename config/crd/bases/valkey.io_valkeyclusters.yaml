@@ -4085,6 +4085,7 @@ spec:
                   Valkey-specific condition types:
                   - "ClusterFormed": all nodes have joined and meet the shard/replica layout
                   - "SlotsAssigned": all 16384 hash slots are assigned to primaries
+                  - "Hibernated": the cluster is hibernated, or on its way down or back up
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -4173,6 +4174,7 @@ spec:
                 - Ready
                 - Degraded
                 - Failed
+                - Hibernated
                 type: string
             type: object
         required:

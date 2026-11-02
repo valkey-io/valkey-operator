@@ -12,6 +12,7 @@ These top-level fields in `.status` provide a high-level, human-readable summary
   - `Ready`: The cluster is healthy, fully functional, and serving traffic.
   - `Degraded`: The cluster is at least partially functional but is in an unhealthy state (e.g., a primary is down, not all replicas are available).
   - `Failed`: The operator has encountered a persistent error and cannot reach the desired state.
+  - `Hibernated`: Every Valkey pod is stopped on request through the `valkey.io/hibernate` annotation. See [`Hibernated`](#hibernated).
 
 - **`reason`**: A machine-readable, `CamelCase` string that provides a brief explanation for the current `state`.
 
@@ -63,6 +64,9 @@ Common reasons when `Ready=False`:
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
 - `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
+- `Hibernating` – the cluster is on its way down for hibernation; the message says which step it is at
+- `Hibernated` – every pod is stopped; see [`Hibernated`](#hibernated)
+- `Waking` – a hibernated cluster is starting, and replicas wait for their primary; see [`Hibernated`](#hibernated)
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy
@@ -82,6 +86,9 @@ Common reasons:
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
 - `ScaleInBlocked` – scale-in is waiting; see [`Ready`](#ready)
+- `Hibernating` – the cluster is on its way down for hibernation (with `status=True`)
+- `Hibernated` – every pod is stopped (with `status=False`)
+- `Waking` – replicas of a waking cluster wait for their primary (with `status=True`)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -153,6 +160,22 @@ Non-blocking warning when TLS is enabled and discovery still uses IP announce (d
 Common reasons:
 - `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
+#### `Hibernated`
+Reports hibernation, requested with the `valkey.io/hibernate: "true"` annotation. See [Hibernation](valkeycluster.md#hibernation).
+
+| Status | Meaning |
+|---|---|
+| `True` | Every Valkey pod is stopped. The cluster state is `Hibernated`. |
+| `False` | The cluster is on its way down, or waking. |
+| (absent) | Hibernation is not requested, or the cluster has woken and is healthy again. |
+
+Reasons:
+- `WaitingForHealthy` – hibernation is requested and waits for the cluster to be healthy, with no scale, slot migration or roll in flight. Also set when the operator backed off a descent, for example because a node stopped answering or a primary took a write after its replicas stopped; the message says why.
+- `Hibernating` – the cluster is on its way down. With persistence, writes are paused on the primaries until they stop. The message says which step it is at: waiting for replicas to catch up, saving, stopping the replicas, stopping the primaries.
+- `Hibernated` – every pod is stopped (`status=True`).
+- `SaveFailed` – a node could not save its data after three attempts. Writes are resumed, no pod was stopped, and hibernation is retried a minute later.
+- `Waking` – the annotation was removed and the pods are starting, primaries first; the message names the replicas that wait for their primary. The condition is removed once the cluster is healthy again.
+
 ---
 
 ### ValkeyNode conditions
@@ -170,6 +193,7 @@ Indicates whether the ValkeyNode pod is ready and the backing workload has compl
 Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
+- `Hibernated` – the workload is scaled to zero because the node's ValkeyCluster is hibernated.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -287,10 +311,11 @@ kubectl get valkeynode my-cluster-0-0 -o jsonpath='{.status.conditions[?(@.type=
 
 The high-level `state` is derived from conditions (priority order):
 
-1. `Degraded=True` → `state=Degraded`
-2. `Ready=True` → `state=Ready`
-3. `Progressing=True` → `state=Reconciling`
-4. `Ready=False` with no other stronger signal → `state=Failed`
+1. `Hibernated=True` → `state=Hibernated`
+2. `Degraded=True` → `state=Degraded`
+3. `Ready=True` → `state=Ready`
+4. `Progressing=True` → `state=Reconciling`
+5. `Ready=False` with no other stronger signal → `state=Failed`
 
 > **Note:** `Initializing` is the kubebuilder default for `status.state` and is visible briefly on a brand-new cluster before the controller first updates the status to `Reconciling`.
 
@@ -306,6 +331,9 @@ stateDiagram-v2
   Degraded --> Ready: Issues cleared / Degraded=False and Ready=True
   Reconciling --> Failed: Unrecoverable
   Degraded --> Failed: Unrecoverable
+  Ready --> Reconciling: valkey.io/hibernate set / Hibernating
+  Reconciling --> Hibernated: Every pod stopped / Hibernated=True
+  Hibernated --> Reconciling: Annotation removed / Waking
 ```
 
 ---
@@ -411,6 +439,17 @@ These events provide high-level status information about the cluster.
 | `WaitingForShards` | Normal | Waiting for shards to be created |
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
+
+### Hibernation events
+
+Progress is reported in the [`Hibernated`](#hibernated) condition; events are emitted on the ValkeyCluster only when something needs attention. See [Hibernation](valkeycluster.md#hibernation).
+
+| Event Type | Type | Description |
+|---|---|---|
+| `HibernationDataLoss` | Warning | The cluster has no persistence: its data is lost when the pods stop, and it wakes empty |
+| `SaveFailed` | Warning | A node could not save its data; writes are resumed and no pod was stopped |
+| `HibernationRestarted` | Warning | The descent backed off and starts over: the cluster is not whole, or a primary cannot follow its stopped replicas down holding the same data, in which case the replicas are started again |
+| `ReplicaStartedWithoutPrimary` | Warning | A replica started five minutes into the wake because its primary was still not running; it may take over |
 
 ### Live config events
 

@@ -342,6 +342,9 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonHibernated is the Ready reason while the node's workload
+	// is scaled to zero because its ValkeyCluster is hibernated.
+	ValkeyNodeReasonHibernated = "Hibernated"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

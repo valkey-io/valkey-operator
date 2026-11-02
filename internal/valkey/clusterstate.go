@@ -670,6 +670,11 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	return &node
 }
 
+// ParseInfo converts the reply of INFO to a map of its fields.
+func ParseInfo(s string) map[string]string {
+	return infoStringToMap(s)
+}
+
 // Convert a string containing INFO elements to a map.
 func infoStringToMap(s string) map[string]string {
 	m := map[string]string{}

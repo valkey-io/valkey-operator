@@ -697,6 +697,30 @@ func TestBuildContainersDef_DefaultImage(t *testing.T) {
 	assert.Equal(t, DefaultImage, containers[0].Image)
 }
 
+func TestBuildContainersDef_DefaultsPrivilegeEscalation(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Exporter.Enabled = boolPtr(true)
+	node.Spec.Containers = []corev1.Container{
+		{Name: "sidecar", Image: "side:1.0"},
+		{Name: "metrics-exporter", SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: boolPtr(true)}},
+	}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	byName := map[string]corev1.Container{}
+	for _, c := range containers {
+		byName[c.Name] = c
+	}
+	require.NotNil(t, byName["server"].SecurityContext.AllowPrivilegeEscalation)
+	assert.False(t, *byName["server"].SecurityContext.AllowPrivilegeEscalation)
+	assert.True(t, *byName["metrics-exporter"].SecurityContext.AllowPrivilegeEscalation, "explicit value kept")
+	assert.Nil(t, byName["sidecar"].SecurityContext, "user sidecar untouched")
+
+	node.Spec.Containers = []corev1.Container{{Name: "server", SecurityContext: &corev1.SecurityContext{Privileged: boolPtr(true)}}}
+	containers, err = buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Nil(t, containers[0].SecurityContext.AllowPrivilegeEscalation, "privileged container untouched")
+}
+
 func TestMergePatchContainers(t *testing.T) {
 	t.Run("patch overrides image of existing container", func(t *testing.T) {
 		base := []corev1.Container{{Name: "server", Image: "old:1.0"}}

@@ -392,7 +392,30 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		return nil, err
 	}
 	applyContainerAPIDefaults(merged)
+	defaultManagedPrivilegeEscalation(merged)
 	return merged, nil
+}
+
+// defaultManagedPrivilegeEscalation sets allowPrivilegeEscalation=false on the
+// operator-managed containers when unset, as mutating admission policies do.
+// Left unset, admission adds it to the template on every update, the template
+// hash never converges and the operator keeps failing primaries over (#547).
+// Explicit values, privileged containers and user sidecars are left alone.
+func defaultManagedPrivilegeEscalation(containers []corev1.Container) {
+	for i := range containers {
+		c := &containers[i]
+		if c.Name != "server" && c.Name != "metrics-exporter" {
+			continue
+		}
+		if c.SecurityContext == nil {
+			c.SecurityContext = &corev1.SecurityContext{}
+		}
+		sc := c.SecurityContext
+		if sc.AllowPrivilegeEscalation == nil && (sc.Privileged == nil || !*sc.Privileged) {
+			noEscalation := false
+			sc.AllowPrivilegeEscalation = &noEscalation
+		}
+	}
 }
 
 // applyContainerAPIDefaults fills the container fields the API server would

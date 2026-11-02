@@ -42,15 +42,13 @@ func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Conte
 	}
 	rc := &resourceClient{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Recorder: r.Recorder}
 	// Cluster mode (and any unknown future value) creates the cluster-wide PDB.
-	return reconcilePDB(ctx, rc, cluster, cluster.Name, cluster.Namespace, labels(cluster), mode != valkeyiov1alpha1.PDBModeDisabled)
+	return reconcilePDB(ctx, rc, cluster, pdbName(cluster), cluster.Namespace, labels(cluster), map[string]string{LabelCluster: cluster.Name}, mode != valkeyiov1alpha1.PDBModeDisabled)
 }
 
-// reconcilePDB keeps a maxUnavailable 1 PodDisruptionBudget over the pods labelled LabelCluster=name.
+// reconcilePDB keeps a maxUnavailable 1 PodDisruptionBudget named pdbResourceName over the pods matching selector.
 // When enabled is false it deletes any existing one instead.
-// Shared by the ValkeyCluster and Valkey controllers.
-func reconcilePDB(ctx context.Context, rc *resourceClient, owner client.Object, name, namespace string, labels map[string]string, enabled bool) error {
-	pdbResourceName := resourcePrefix + name
-
+// Shared by the ValkeyCluster, Valkey and ValkeySentinel controllers.
+func reconcilePDB(ctx context.Context, rc *resourceClient, owner client.Object, pdbResourceName, namespace string, labels, selector map[string]string, enabled bool) error {
 	if !enabled {
 		pdb := &policyv1.PodDisruptionBudget{}
 		err := rc.Get(ctx, client.ObjectKey{Name: pdbResourceName, Namespace: namespace}, pdb)
@@ -79,9 +77,7 @@ func reconcilePDB(ctx context.Context, rc *resourceClient, owner client.Object, 
 		existing.Spec.MaxUnavailable = &maxUnavailable
 		existing.Spec.MinAvailable = nil
 		existing.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				LabelCluster: name,
-			},
+			MatchLabels: selector,
 		}
 		return controllerutil.SetControllerReference(owner, existing, rc.Scheme)
 	})

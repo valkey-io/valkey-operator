@@ -160,14 +160,14 @@ Reports whether the operator-managed trust bundle `<cluster>-tls-trust` is in pl
 | Status | Meaning |
 |---|---|
 | `True` | The trust bundle holds the server root and every `clientAuth.ca` root. |
-| `False` | A source could not be read. The trust bundle keeps its last good contents; if none was ever written, nodes verify clients against the server secret's `ca.crt` alone. |
+| `False` | The trust bundle does not hold every `clientAuth.ca` root, for the reason given below. If a source could not be read, the bundle keeps its last good contents; if none was ever written, nodes verify clients against the server secret's `ca.crt` alone. |
 
 Common reasons:
 - `TrustBundleReady` – the trust bundle is up to date.
 - `TrustSourceNotFound` – a referenced Secret or ConfigMap, or its key, does not exist.
 - `TrustSourceInvalid` – a source's key holds neither PEM certificates nor a SPIFFE bundle with an X.509 authority.
 - `TrustBundleConflict` – a Secret named `<cluster>-tls-trust` exists but the cluster does not control it, or a spec field names that Secret as the server certificate or a `clientAuth.ca` source. The operator never adopts or writes it, and nodes stay on the server root.
-- `TrustBundlePending` – new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); the current bundle stays in place meanwhile. The server secret's current root is never held back.
+- `TrustBundlePending` – new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. Removed roots are dropped and the server secret's current root is added at once.
 
 ---
 

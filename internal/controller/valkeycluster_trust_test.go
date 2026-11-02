@@ -406,8 +406,50 @@ func TestReconcileTrustBundle(t *testing.T) {
 		_, err = r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
 		held, _ := trustSecret(t, c)
-		assert.Equal(t, s.Data, held.Data, "a client root arriving with it still waits")
+		assert.Equal(t, [][]byte{derOf(t, newer), derOf(t, clientCA)}, bundleDERs(t, held.Data[tlsSecretKeyCA]),
+			"the renewed root is written while a client root arriving with it waits")
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("drops a removed root at once while a root added with it waits", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		revoked := selfSignedCAPEM(t)
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), revoked...)),
+			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		added := selfSignedCAPEM(t)
+		require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), added...))))
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("holds client roots when the bundle is deleted while nodes mount it", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		mounting := nodeAt("c-0-0", "rev0")
+		mounting.Spec.TLS = &valkeyiov1alpha1.NodeTLSSpec{Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+			TrustBundle: &valkeyiov1alpha1.NodeTrustBundleRef{SecretName: "c-tls-trust"},
+		}}
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), aclAt("rev1"), mounting)
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name)
+		s, ok := trustSecret(t, c)
+		require.True(t, ok, "pods mount it, so it has to exist")
+		assert.Equal(t, [][]byte{derOf(t, serverCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, tlsConfigured(cluster).Reason)
+
+		mounting.Status.AppliedACLRevision = "rev1"
+		require.NoError(t, c.Update(ctx, mounting)) // no status subresource is registered on the fake
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ = trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
 	})
 
 	t.Run("adds a renewed server root to the last good bundle while a node is behind", func(t *testing.T) {
@@ -527,16 +569,29 @@ func TestReconcileTrustBundleConfigMapSources(t *testing.T) {
 	}
 }
 
-func TestAddedRoots(t *testing.T) {
+func TestWithoutNewRoots(t *testing.T) {
 	a, b, c := selfSignedCAPEM(t), selfSignedCAPEM(t), selfSignedCAPEM(t)
 	join := func(ps ...[]byte) []byte { return bytes.Join(ps, nil) }
-	assert.Equal(t, 0, addedRoots(join(a, b), join(a, b), nil), "unchanged")
-	assert.Equal(t, 0, addedRoots(join(a, b), a, nil), "only removed")
-	assert.Equal(t, 1, addedRoots(join(a, b), join(a, c), nil), "one replaced counts as one added")
-	assert.Equal(t, 2, addedRoots(nil, join(a, b), nil), "nothing before")
-	assert.Equal(t, 2, addedRoots([]byte("garbage"), join(a, b), nil), "an unreadable current bundle counts as empty")
-	assert.Equal(t, 0, addedRoots(a, join(c, a), c), "an exempt root is not counted")
-	assert.Equal(t, 1, addedRoots(a, join(c, a, b), c), "the rest still are")
+	for _, tc := range []struct {
+		desc                  string
+		current, next, exempt []byte
+		kept                  []byte
+		left                  int
+	}{
+		{desc: "unchanged", current: join(a, b), next: join(a, b), kept: join(a, b)},
+		{desc: "only removed", current: join(a, b), next: a, kept: a},
+		{desc: "one replaced leaves out the new one and drops the old", current: join(a, b), next: join(a, c), kept: a, left: 1},
+		{desc: "nothing before", next: join(a, b), left: 2},
+		{desc: "an unreadable current bundle counts as empty", current: []byte("garbage"), next: join(a, b), left: 2},
+		{desc: "an exempt root is kept", current: a, next: join(c, a), exempt: c, kept: join(c, a)},
+		{desc: "the rest are still left out", current: a, next: join(c, a, b), exempt: c, kept: join(c, a), left: 1},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			kept, left := withoutNewRoots(tc.current, tc.next, tc.exempt)
+			assert.Equal(t, string(tc.kept), string(kept))
+			assert.Equal(t, tc.left, left)
+		})
+	}
 }
 
 func TestWithTrustBundle(t *testing.T) {

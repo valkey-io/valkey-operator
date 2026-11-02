@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"maps"
@@ -144,10 +145,11 @@ func reservedTrustBundleNameUse(cluster *valkeyiov1alpha1.ValkeyCluster, name st
 	return ""
 }
 
-// addedRoots counts the certificates in next that are in neither current nor
-// exempt. A current bundle that does not parse counts as holding nothing, so
-// every root in next that is not exempt is new.
-func addedRoots(current, next, exempt []byte) int {
+// withoutNewRoots returns next without the certificates that are in neither
+// current nor exempt, and how many it left out. A current bundle that does not
+// parse counts as holding nothing, so every root in next that is not exempt is
+// new.
+func withoutNewRoots(current, next, exempt []byte) ([]byte, int) {
 	have := map[string]struct{}{}
 	for _, known := range [][]byte{current, exempt} {
 		if blocks, err := decodePEMStrict(known); err == nil {
@@ -158,15 +160,18 @@ func addedRoots(current, next, exempt []byte) int {
 	}
 	blocks, err := decodePEMStrict(next)
 	if err != nil {
-		return 0
+		return next, 0
 	}
-	added := 0
+	var kept []byte
+	left := 0
 	for _, b := range blocks {
 		if _, ok := have[string(b.Bytes)]; !ok {
-			added++
+			left++
+			continue
 		}
+		kept = append(kept, pem.EncodeToMemory(b)...)
 	}
-	return added
+	return kept, left
 }
 
 // nodesBehindAppliedACL names the cluster's ValkeyNodes whose running server has
@@ -197,6 +202,65 @@ func (r *ValkeyClusterReconciler) nodesBehindAppliedACL(ctx context.Context, clu
 	}
 	slices.Sort(pending)
 	return pending, nil
+}
+
+// nodesReferenceTrustBundle reports whether any of the cluster's ValkeyNodes
+// already mounts the named trust bundle Secret.
+func (r *ValkeyClusterReconciler) nodesReferenceTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
+		return false, err
+	}
+	for i := range nodes.Items {
+		tls := nodes.Items[i].Spec.TLS
+		if tls != nil && tls.Certificates.TrustBundle != nil && tls.Certificates.TrustBundle.SecretName == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// holdNewRoots returns the bundle to write now. A new clientAuth.ca root waits
+// until every node runs the current ACL. The ACL and the bundle are separate
+// mounted Secrets, so a container that restarts after its bundle mount refreshed
+// but before its ACL mount did would otherwise trust the new root under the old
+// ACL, for example a permissive default removed in the same update.
+//
+// Only those roots wait, so they are left out of what is written and everything
+// else in the bundle takes effect at once. A removed root stops being trusted.
+// The server secret's current root is added: holding it back would gain nothing,
+// since a node without a bundle trusts the server secret's ca.crt as the kubelet
+// refreshes it, and it would break the cluster bus while a node lags, because
+// peers present certificates renewed onto that root.
+//
+// The first bundle is not held, since nodes roll onto it with both mounts fresh.
+// A Secret deleted while nodes still mount it is not a first bundle: their pods
+// keep running and pick up its replacement through the mount, so it holds only
+// the server root until the ACL has caught up.
+//
+// It also returns how many roots wait and the nodes they wait for.
+func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, exists bool, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
+	if !exists {
+		referenced, err := r.nodesReferenceTrustBundle(ctx, cluster, name)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		if !referenced {
+			return bundle, 0, nil, nil
+		}
+	}
+	kept, held := withoutNewRoots(current, bundle, serverRoot)
+	if held == 0 {
+		return bundle, 0, nil, nil
+	}
+	behind, err := r.nodesBehindAppliedACL(ctx, cluster)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if len(behind) == 0 {
+		return bundle, 0, nil, nil
+	}
+	return kept, held, behind, nil
 }
 
 // writeTrustBundle creates the trust bundle Secret, or updates the existing
@@ -341,35 +405,20 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		return name, nil
 	}
 
-	// A bundle that gains a root waits until every node runs the current ACL.
-	// The ACL and the bundle are separate mounted Secrets, so a container that
-	// restarts after its bundle mount refreshed but before its ACL mount did
-	// would otherwise trust the new root under the old ACL, for example a
-	// permissive default removed in the same update. Only clientAuth.ca roots
-	// wait: a bundle that loses roots or stays the same is written at once, and
-	// so is the server secret's current root. Holding that back would gain
-	// nothing, since a node without a bundle trusts the server secret's ca.crt
-	// as the kubelet refreshes it, and it would break the cluster bus while a
-	// node lags: peers present certificates renewed onto that root.
-	if exists {
-		if added := addedRoots(existing.Data[tlsSecretKeyCA], bundle, sources[0].pem); added > 0 {
-			pending, err := r.nodesBehindAppliedACL(ctx, cluster)
-			if err != nil {
-				return "", err
-			}
-			if len(pending) > 0 {
-				setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending,
-					fmt.Sprintf("holding %d new root(s) until node(s) %s confirm the current ACL is live", added, strings.Join(pending, ", ")),
-					metav1.ConditionFalse)
-				return name, nil
-			}
-		}
+	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, exists, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem)
+	if err != nil {
+		return "", err
 	}
-
 	// Write based on that authoritative read rather than CreateOrUpdate, which
 	// would read through the cache again.
-	if err := r.writeTrustBundle(ctx, cluster, existing, exists, bundle); err != nil {
+	if err := r.writeTrustBundle(ctx, cluster, existing, exists, toWrite); err != nil {
 		return "", err
+	}
+	if held > 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending,
+			fmt.Sprintf("holding %d new root(s) until node(s) %s confirm the current ACL is live", held, strings.Join(behind, ", ")),
+			metav1.ConditionFalse)
+		return name, nil
 	}
 	msg := fmt.Sprintf("%s holds the server root and %d clientAuth.ca source(s): %s", name, len(sources)-1, describeTrustSources(sources[1:]))
 	setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundleReady, msg, metav1.ConditionTrue)

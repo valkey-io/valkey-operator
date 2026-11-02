@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -233,3 +234,299 @@ func TestBuildValkeyServerConfig(t *testing.T) {
 		t.Errorf("roll hash did not change after a non-live config edit")
 	}
 }
+
+func TestParseReplicationState(t *testing.T) {
+	primary := parseReplicationState("# Replication\r\nrole:master\r\nconnected_slaves:1\r\nmaster_failover_state:no-failover\r\nmaster_repl_offset:420\r\n")
+	if primary.role != RolePrimary || primary.offset != 420 || primary.failoverState != noFailover {
+		t.Errorf("primary parsed as %+v", primary)
+	}
+	replica := parseReplicationState("txt:# Replication\r\nrole:slave\r\nmaster_host:valkey-a-0-0-0.valkey-a.ns.svc.cluster.local\r\nmaster_port:6379\r\nmaster_link_status:up\r\nslave_repl_offset:418\r\n")
+	if replica.role != RoleReplica || replica.offset != 418 || !replica.linkUp || replica.primaryHost != "valkey-a-0-0-0.valkey-a.ns.svc.cluster.local" {
+		t.Errorf("replica parsed as %+v", replica)
+	}
+	if empty := parseReplicationState(""); empty.role != "" || empty.offset != -1 {
+		t.Errorf("empty info parsed as %+v", empty)
+	}
+}
+
+// testView builds a nodeView for planReplication tests. An empty role leaves the node unobserved.
+func testView(index int, role string, offset int64, primaryHost string) *nodeView {
+	node := &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{
+		Name:   valkeyNodeName("a", 0, index),
+		Labels: map[string]string{LabelNodeIndex: strconv.Itoa(index)},
+	}}
+	if role == "" {
+		return &nodeView{node: node}
+	}
+	return &nodeView{node: node, observed: true, state: replicationState{role: role, offset: offset, primaryHost: primaryHost, linkUp: primaryHost != "", failoverState: noFailover}}
+}
+
+func TestPlanReplication(t *testing.T) {
+	hostOf := func(node *valkeyiov1alpha1.ValkeyNode) string { return node.Name }
+	n0, n1, n2 := valkeyNodeName("a", 0, 0), valkeyNodeName("a", 0, 1), valkeyNodeName("a", 0, 2)
+	names := func(views []*nodeView) []string {
+		out := []string{}
+		for _, view := range views {
+			out = append(out, view.node.Name)
+		}
+		return out
+	}
+	tests := []struct {
+		name        string
+		views       []*nodeView
+		known       string
+		wantPrimary string
+		wantPromote string
+		wantRepoint []string
+		wantReason  string
+	}{
+		{
+			name:        "bootstrap picks the lowest index",
+			views:       []*nodeView{testView(0, RolePrimary, 0, ""), testView(1, RolePrimary, 0, ""), testView(2, RolePrimary, 0, "")},
+			wantPrimary: n0, wantRepoint: []string{n1, n2},
+		},
+		{
+			name:        "converged needs nothing",
+			views:       []*nodeView{testView(0, RolePrimary, 10, ""), testView(1, RoleReplica, 10, n0), testView(2, RoleReplica, 10, n0)},
+			known:       n0,
+			wantPrimary: n0, wantRepoint: []string{},
+		},
+		{
+			name:        "a restarted replica that came back as primary is repointed",
+			views:       []*nodeView{testView(0, RolePrimary, 10, ""), testView(1, RolePrimary, 0, ""), testView(2, RoleReplica, 10, n0)},
+			known:       n0,
+			wantPrimary: n0, wantRepoint: []string{n1},
+		},
+		{
+			name:       "an unreachable known primary blocks every change",
+			views:      []*nodeView{testView(0, "", 0, ""), testView(1, RolePrimary, 0, ""), testView(2, RoleReplica, 10, n0)},
+			known:      n0,
+			wantReason: planPrimaryNotReady, wantRepoint: []string{},
+		},
+		{
+			name:        "a completed failover moves the primary and repoints the rest",
+			views:       []*nodeView{testView(0, RoleReplica, 10, n1), testView(1, RolePrimary, 10, ""), testView(2, RoleReplica, 10, n0)},
+			known:       n0,
+			wantPrimary: n1, wantRepoint: []string{n2},
+		},
+		{
+			name:       "two primaries without a known one in either role is ambiguous",
+			views:      []*nodeView{testView(0, RoleReplica, 10, n2), testView(1, RolePrimary, 10, ""), testView(2, RolePrimary, 10, "")},
+			known:      n0,
+			wantReason: planMultiplePrimaries, wantRepoint: []string{},
+		},
+		{
+			name:        "no primary and every node reachable promotes the best-synced replica",
+			views:       []*nodeView{testView(0, RoleReplica, 5, n0), testView(1, RoleReplica, 9, n0), testView(2, RoleReplica, 7, n0)},
+			known:       n0,
+			wantPromote: n1, wantReason: planNoPrimary, wantRepoint: []string{},
+		},
+		{
+			name:       "no primary with an unreachable node does not promote",
+			views:      []*nodeView{testView(0, "", 0, ""), testView(1, RoleReplica, 9, n0), testView(2, RoleReplica, 7, n0)},
+			wantReason: planNoPrimary, wantRepoint: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := planReplication(tt.views, tt.known, hostOf)
+			gotPrimary, gotPromote := "", ""
+			if plan.primary != nil {
+				gotPrimary = plan.primary.node.Name
+			}
+			if plan.promote != nil {
+				gotPromote = plan.promote.node.Name
+			}
+			if gotPrimary != tt.wantPrimary || gotPromote != tt.wantPromote || plan.reason != tt.wantReason {
+				t.Errorf("primary=%q promote=%q reason=%q, want %q %q %q", gotPrimary, gotPromote, plan.reason, tt.wantPrimary, tt.wantPromote, tt.wantReason)
+			}
+			if got := names(plan.repoint); strings.Join(got, ",") != strings.Join(tt.wantRepoint, ",") {
+				t.Errorf("repoint = %v, want %v", got, tt.wantRepoint)
+			}
+		})
+	}
+
+	failing := []*nodeView{testView(0, RolePrimary, 10, ""), testView(1, RoleReplica, 10, n0)}
+	failing[0].state.failoverState = "waiting-for-sync"
+	if plan := planReplication(failing, n0, hostOf); plan.primary != nil || plan.reason != planFailoverRunning {
+		t.Errorf("a running FAILOVER must pause the plan, got %+v", plan)
+	}
+}
+
+func TestBestSyncedReplicaSkipsBrokenLinks(t *testing.T) {
+	primary := testView(0, RolePrimary, 10, "")
+	behind := testView(1, RoleReplica, 8, "p")
+	broken := testView(2, RoleReplica, 9, "p")
+	broken.state.linkUp = false
+	if got := bestSyncedReplica([]*nodeView{primary, behind, broken}, primary); got != behind {
+		t.Errorf("handoff target = %v, want the replica with a live link", got)
+	}
+}
+
+// fakeReplication stands in for a Valkey server in envtest.
+// replicaOf makes the node a replica with a live link, so the next reconcile sees replication converge.
+type fakeReplication struct {
+	states     map[string]replicationState
+	replicaOfs map[string]string
+	promoted   []string
+	failovers  []string
+}
+
+func (f *fakeReplication) state(_ context.Context, node *valkeyiov1alpha1.ValkeyNode) (replicationState, error) {
+	if s, ok := f.states[node.Name]; ok {
+		return s, nil
+	}
+	return replicationState{role: RolePrimary, offset: 0, failoverState: noFailover}, nil
+}
+
+func (f *fakeReplication) replicaOf(_ context.Context, node *valkeyiov1alpha1.ValkeyNode, host string) error {
+	f.replicaOfs[node.Name] = host
+	f.states[node.Name] = replicationState{role: RoleReplica, primaryHost: host, linkUp: true, failoverState: noFailover}
+	return nil
+}
+
+func (f *fakeReplication) promote(_ context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	f.promoted = append(f.promoted, node.Name)
+	return nil
+}
+
+func (f *fakeReplication) failoverTo(_ context.Context, primary *valkeyiov1alpha1.ValkeyNode, targetIP string) error {
+	f.failovers = append(f.failovers, primary.Name+"->"+targetIP)
+	return nil
+}
+
+var _ = Describe("Valkey replication", func() {
+	var (
+		ctx        context.Context
+		fake       *fakeReplication
+		reconciler *ValkeyReconciler
+		v          *valkeyiov1alpha1.Valkey
+		req        reconcile.Request
+	)
+
+	nodeKey := func(index int) types.NamespacedName {
+		return types.NamespacedName{Name: valkeyNodeName(v.Name, 0, index), Namespace: v.Namespace}
+	}
+
+	// markReady stands in for the ValkeyNode controller: the node reports ready with a pod.
+	markReady := func(index int) {
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, nodeKey(index), node)).To(Succeed())
+		node.Status.Ready = true
+		node.Status.PodName = valkeyNodeResourceName(node) + "-0"
+		node.Status.PodIP = "10.0.0." + strconv.Itoa(index+1)
+		node.Status.ObservedGeneration = node.Generation
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+	}
+
+	reconcileOnce := func() {
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	getValkey := func() *valkeyiov1alpha1.Valkey {
+		current := &valkeyiov1alpha1.Valkey{}
+		Expect(k8sClient.Get(ctx, req.NamespacedName, current)).To(Succeed())
+		return current
+	}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		fake = &fakeReplication{states: map[string]replicationState{}, replicaOfs: map[string]string{}}
+		reconciler = &ValkeyReconciler{
+			Client:            k8sClient,
+			APIReader:         k8sClient,
+			Scheme:            k8sClient.Scheme(),
+			Recorder:          events.NewFakeRecorder(100),
+			replicationClient: fake,
+		}
+		v = &valkeyiov1alpha1.Valkey{
+			ObjectMeta: metav1.ObjectMeta{Name: "replicated", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeySpec{Replicas: 2},
+		}
+		Expect(k8sClient.Create(ctx, v)).To(Succeed())
+		req = reconcile.Request{NamespacedName: types.NamespacedName{Name: v.Name, Namespace: v.Namespace}}
+
+		// envtest runs no garbage collector, so delete the children explicitly.
+		DeferCleanup(func() {
+			objs := []client.Object{
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: headlessServiceName(v.Name), Namespace: v.Namespace}},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(v.Name), Namespace: v.Namespace}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(v.Name), Namespace: v.Namespace}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getSystemPasswordSecretName(v.Name), Namespace: v.Namespace}},
+				&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: resourcePrefix + v.Name, Namespace: v.Namespace}},
+				v,
+			}
+			for index := range 3 {
+				objs = append(objs, &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeName(v.Name, 0, index), Namespace: v.Namespace}})
+			}
+			for _, obj := range objs {
+				_ = k8sClient.Delete(ctx, obj)
+			}
+		})
+	})
+
+	// bootstrap creates the nodes, marks them ready, and lets replication converge.
+	bootstrap := func() {
+		reconcileOnce()
+		for index := range 3 {
+			markReady(index)
+		}
+		reconcileOnce()
+		reconcileOnce()
+	}
+
+	It("creates one node per position and points the replicas at node 0", func() {
+		bootstrap()
+
+		primaryHost := valkeyNodeResourceName(&valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: nodeKey(0).Name}}) + "-0." + headlessServiceFQDN(v.Name, v.Namespace, valkeyiov1alpha1.DefaultClusterDomain)
+		Expect(fake.replicaOfs).To(Equal(map[string]string{nodeKey(1).Name: primaryHost, nodeKey(2).Name: primaryHost}))
+
+		status := getValkey().Status
+		Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateReady))
+		Expect(status.Primary).To(Equal(nodeKey(0).Name))
+		Expect(status.Replicas).To(BeEquivalentTo(2))
+		Expect(status.ReadyReplicas).To(BeEquivalentTo(2))
+		Expect(meta.IsStatusConditionTrue(status.Conditions, valkeyiov1alpha1.ConditionPrimaryElected)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(status.Conditions, valkeyiov1alpha1.ConditionReplicationHealthy)).To(BeTrue())
+
+		// With replicas the budget is created.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourcePrefix + v.Name, Namespace: v.Namespace}, &policyv1.PodDisruptionBudget{})).To(Succeed())
+	})
+
+	It("rolls replicas one at a time and hands the primary off before replacing it", func() {
+		bootstrap()
+		current := getValkey()
+		current.Spec.Image = "valkey/valkey:9.0.1"
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		imageOf := func(index int) string {
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, nodeKey(index), node)).To(Succeed())
+			return node.Spec.Image
+		}
+
+		reconcileOnce()
+		Expect([]string{imageOf(0), imageOf(1), imageOf(2)}).To(Equal([]string{"", "valkey/valkey:9.0.1", ""}))
+
+		markReady(1)
+		reconcileOnce()
+		Expect([]string{imageOf(0), imageOf(2)}).To(Equal([]string{"", "valkey/valkey:9.0.1"}))
+
+		markReady(2)
+		reconcileOnce()
+		Expect(imageOf(0)).To(BeEmpty(), "the primary is not replaced before the handoff")
+		Expect(fake.failovers).To(ConsistOf(nodeKey(0).Name + "->10.0.0.2"))
+	})
+
+	It("removes nodes above spec.replicas on scale-in", func() {
+		bootstrap()
+		current := getValkey()
+		current.Spec.Replicas = 1
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		reconcileOnce()
+		err := k8sClient.Get(ctx, nodeKey(2), &valkeyiov1alpha1.ValkeyNode{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+})

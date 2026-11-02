@@ -62,10 +62,9 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		sts.Status.CurrentRevision, sts.Status.UpdateRevision = "rev-1", "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 	}
-	// reconcileToLive runs Reconcile against a node whose workload envtest
-	// reports as rolled out and Ready, so the pass reaches the live steps, with
-	// cfg standing in for the Valkey server.
-	reconcileToLive := func(cfg *fakeConfigClient) (reconcile.Result, error) {
+	// runToLive runs Reconcile against a node whose workload envtest reports as
+	// rolled out with a Ready pod, with cfg standing in for the Valkey server.
+	runToLive := func(cfg *fakeConfigClient) (reconcile.Result, error) {
 		r = &ValkeyNodeReconciler{
 			Client:    k8sClient,
 			APIReader: k8sClient,
@@ -94,7 +93,12 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
-		result, err := r.Reconcile(ctx, req)
+		return r.Reconcile(ctx, req)
+	}
+	// reconcileToLive is runToLive for a node that ends Ready, so the pass
+	// reaches the live steps.
+	reconcileToLive := func(cfg *fakeConfigClient) (reconcile.Result, error) {
+		result, err := runToLive(cfg)
 		got := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, req.NamespacedName, got)).To(Succeed())
 		Expect(got.Status.Ready).To(BeTrue(), "the pass must reach the live steps for this test to mean anything")
@@ -173,6 +177,30 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonApplied))
+	})
+
+	It("records the revision and reloads while the per-node Service name is taken", func() {
+		node.Spec.Service = &valkeyiov1alpha1.ValkeyNodeServiceSpec{}
+		Expect(k8sClient.Update(ctx, node)).To(Succeed())
+		taken := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node), Namespace: node.Namespace},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"app": "mine"},
+				Ports:    []corev1.ServicePort{{Name: appName, Port: DefaultPort}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, taken)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, taken) }()
+
+		cfg := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"old"}}, aclOnLoad: desired}
+		_, err := runToLive(cfg)
+		Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+		Expect(current().Status.Ready).To(BeFalse())
+		Expect(cfg.params).To(HaveKeyWithValue("tls-ca-cert-file", "/tls/ca.crt"))
+		Expect(appliedRevision()).To(Equal(revision))
+		cond := trustCondition()
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("reports a failed reload and retries it at a fixed cadence", func() {

@@ -170,6 +170,7 @@ Indicates whether the ValkeyNode pod is ready and the backing workload has compl
 Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
+- `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.

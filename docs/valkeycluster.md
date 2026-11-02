@@ -13,6 +13,7 @@
 - [Config](#config)
 - [Containers](#containers)
 - [Default images](#default-images)
+- [Hibernation](#hibernation)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
@@ -762,6 +763,37 @@ While the cluster is paused the operator creates, updates and deletes nothing th
 The operator otherwise does not change objects it does not render itself, and the pause is the exception: it copies the annotation onto every ValkeyNode the cluster owns, and the ValkeyNode controller skips a node that carries it, so the StatefulSet or Deployment, `CONFIG SET` and `ACL LOAD` stay as they are as well. When the cluster resumes, the operator removes the annotation from all of its ValkeyNodes, including one you set on a node by hand. On resume, the cluster controller defers its normal work for one second to give node controllers a turn to refresh Pod IPs and readiness that stayed frozen during the pause. To pause a single node of a running cluster, pause the whole cluster.
 
 A standalone ValkeyNode, one with no ValkeyCluster, takes the same annotation on itself.
+
+### Hibernation
+
+```yaml
+metadata:
+  annotations:
+    valkey.io/hibernate: "true"
+```
+
+The annotation stops every Valkey pod of the cluster and keeps everything else: the `ValkeyCluster`, its ValkeyNodes, ConfigMaps, Services, Secrets, PodDisruptionBudget and PVCs. Each node's StatefulSet or Deployment is scaled to zero. Only the exact value `"true"` hibernates. Any other value, or removing the annotation, wakes the cluster.
+
+Hibernation starts once the cluster is healthy, so a scale, a slot migration or a roll that is in flight finishes first, including a slot migration the operator did not start. With `persistence` the operator then makes sure that every node of a shard stops holding the same data, so a replica that is promoted on wake, for example because its primary is slow to schedule, loses no acknowledged write:
+
+1. Writes are paused on every primary (`CLIENT PAUSE WRITE`), and the operator waits until every replica has reached its primary's replication offset. Clients writing in the meantime block until the primary stops, and then see their connection close: a write is either acknowledged and kept, or never acknowledged.
+2. Every node saves: `BGSAVE`, or `BGREWRITEAOF` when `appendonly` is `yes`, since a node then loads the AOF on start. The operator waits until each one reports its whole dataset on disk.
+3. The operator records each primary's data point on its ValkeyNode (`valkey.io/hibernate-data-point`) and stops the replicas first, so that no failover runs while the cluster goes down.
+4. Once the replica pods are gone, the operator checks that each primary still holds the recorded data point, and stops the primaries. Writes stay paused until they are gone.
+
+If a node cannot save after three attempts, writes resume, no pod is stopped, the `Hibernated` condition reports `HibernationSaveFailed`, and hibernation is retried a minute later. If a primary took a write after its replicas stopped, for example because the operator was stopped for longer than the two minutes a pause lasts, the stopped pods are started again, primaries first as on a wake, and hibernation starts over once the cluster is healthy, rather than stop a primary ahead of its replicas. Every step is read back from the cluster on each pass, so an operator restart resumes where it left off.
+
+Waking starts the primaries first, and the replicas of a shard once its primary serves again: it is ready, the members reach it at its new address, and none of them suspects it to be failing. Every pod comes back with a new IP while each node's `nodes.conf` still lists the old ones, so for a while the primaries look failed to their peers; a replica started then could win an election against a primary that is already acknowledging writes, and those writes would be dropped when the primary syncs from it. If a primary is still not running after five minutes, its replicas start anyway, with a `ReplicaStartedWithoutPrimary` warning event: a primary that is not up acknowledges no write, and its replicas hold the same data, so one of them may take over. A primary that runs but is still suspected keeps its replicas waiting. The cluster then becomes `Ready` as after any full restart. Each wake step runs after the operator has reconciled the Service, PodDisruptionBudget, ACL Secret, ConfigMap and TLS trust bundle and listed the ValkeyNodes, and only while every node accepts the operator's password. An error in any of these that persists blocks the wake, and the replicas that still wait stay stopped until it is fixed; the `Ready` condition reports it. Asking for hibernation again while replicas still wait finishes the wake first, so that no replica starts ahead of its primary; the new descent then starts once the cluster is healthy.
+
+Without `persistence` there is no data to keep: pods are stopped without pausing or saving, the operator records a `HibernationDataLoss` warning event, and every pod starts at once on wake, as a new, empty cluster.
+
+The operator reports progress in the `Hibernated` condition, and the cluster state is `Hibernated` once every pod is stopped. See [`Hibernated`](status-conditions.md#hibernated).
+
+While the cluster is hibernated the operator keeps reconciling its Service, PodDisruptionBudget, ACL Secret and ConfigMap. Changes to ValkeyNodes, such as a scale or a roll, wait until the cluster wakes. When it wakes, before any pod starts, the operator writes the cluster's current spec to the existing ValkeyNodes, so a change made while it slept, such as another TLS certificate Secret, is what the pods start with and needs no roll. Adding or removing nodes still waits until the cluster is back.
+
+The operator otherwise does not change objects it does not render itself, and hibernation is an exception: it sets `valkey.io/hibernate` and `valkey.io/hibernate-data-point` on the ValkeyNodes the cluster owns, and removes both when the cluster wakes, including any you set on a node by hand. The ValkeyNode controller scales a node's workload to zero only while the node carries `valkey.io/hibernate: "true"` and is owned by a ValkeyCluster; on a standalone ValkeyNode the annotation has no effect.
+
+The operator user needs `CLIENT PAUSE`, `CLIENT UNPAUSE`, `BGSAVE` and `BGREWRITEAOF` for this, and the operator grants them through its ACL.
 
 ## Architecture
 

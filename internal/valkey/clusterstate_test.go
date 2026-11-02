@@ -1472,3 +1472,41 @@ func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 		t.Fatalf("INFO failure should leave replication fields unknown, got %v", node.Info)
 	}
 }
+
+func TestClusterState_HasPeerAtOldAddress(t *testing.T) {
+	node := func(id, address, clusterNodes string) *NodeState {
+		return &NodeState{Id: id, Address: address, nodes: ParseClusterNodes(clusterNodes)}
+	}
+	state := func(nodes ...*NodeState) *ClusterState {
+		return &ClusterState{Shards: []*ShardState{{Id: "s1", PrimaryId: "aaa", Nodes: nodes}}}
+	}
+
+	// Right after a restart the old entry is not suspected yet, so
+	// FindStaleAddressPeers does not see it.
+	a := node("aaa", "10.0.1.1",
+		"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+			"bbb 10.0.0.2:6379@16379 master - 0 0 2 connected\n")
+	b := node("bbb", "10.0.1.2", "bbb 10.0.1.2:6379@16379 myself,master - 0 0 2 connected\n")
+	if !state(a, b).HasPeerAtOldAddress() {
+		t.Error("an unsuspected entry at the old address must count")
+	}
+	if n := len(state(a, b).FindStaleAddressPeers()); n != 0 {
+		t.Fatalf("test premise: FindStaleAddressPeers waits for fail?, got %d", n)
+	}
+
+	healed := node("aaa", "10.0.1.1",
+		"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+			"bbb 10.0.1.2:6379@16379 master - 0 0 2 connected\n")
+	if state(healed, b).HasPeerAtOldAddress() {
+		t.Error("every peer at its current address")
+	}
+
+	// A peer the scrape did not reach, such as a replica that is still
+	// stopped, says nothing about addresses.
+	stopped := node("aaa", "10.0.1.1",
+		"aaa 10.0.1.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"+
+			"ccc 10.0.0.3:6379@16379 slave aaa 0 0 1 connected\n")
+	if state(stopped).HasPeerAtOldAddress() {
+		t.Error("an entry for a node that was not scraped must not count")
+	}
+}

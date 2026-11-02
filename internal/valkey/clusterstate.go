@@ -673,6 +673,30 @@ func (s *ClusterState) FindStaleAddressPeers() []StaleAddressPeer {
 	return stale
 }
 
+// HasPeerAtOldAddress reports whether a scraped node lists another scraped
+// node at an address other than the one it was scraped at. Unlike
+// FindStaleAddressPeers it does not wait for the entry to be flagged failing:
+// right after a restart, a peer that moved is listed at its old address and
+// not yet suspected, though the two cannot reach each other.
+func (s *ClusterState) HasPeerAtOldAddress() bool {
+	all := s.AllNodes()
+	live := make(map[string]*NodeState, len(all))
+	for _, node := range all {
+		live[node.Id] = node
+	}
+	for _, viewer := range all {
+		for _, entry := range viewer.nodes {
+			if entry.IsMyself() {
+				continue
+			}
+			if peer, ok := live[entry.Id]; ok && (entry.HasNoAddress() || entry.Host != peer.Address) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetFailingNodes returns the peer-table entries this node considers failing.
 //
 // Only "fail" and "noaddr" count here, deliberately not "fail?": the caller
@@ -792,6 +816,11 @@ func requiredScrapeString(res vclient.ValkeyResult) (string, error) {
 		return "", fmt.Errorf("empty reply")
 	}
 	return s, nil
+}
+
+// ParseInfo converts the reply of INFO to a map of its fields.
+func ParseInfo(s string) map[string]string {
+	return infoStringToMap(s)
 }
 
 // Convert a string containing INFO elements to a map.

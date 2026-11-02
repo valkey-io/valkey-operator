@@ -76,7 +76,7 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonServiceError, err)
 	}
 
-	if err := reconcilePDB(ctx, rc, v, v.Name, v.Namespace, labels, v.Spec.PodDisruptionBudgetEnabled()); err != nil {
+	if err := reconcilePDB(ctx, rc, v, resourcePrefix+v.Name, v.Namespace, labels, map[string]string{LabelCluster: v.Name}, v.Spec.PodDisruptionBudgetEnabled()); err != nil {
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonPodDisruptionBudgetError, err)
 	}
 

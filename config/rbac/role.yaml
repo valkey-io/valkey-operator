@@ -72,6 +72,7 @@ rules:
   - valkeyclusters
   - valkeynodes
   - valkeys
+  - valkeysentinels
   verbs:
   - create
   - delete
@@ -86,6 +87,7 @@ rules:
   - valkeyclusters/finalizers
   - valkeynodes/finalizers
   - valkeys/finalizers
+  - valkeysentinels/finalizers
   verbs:
   - update
 - apiGroups:
@@ -94,6 +96,7 @@ rules:
   - valkeyclusters/status
   - valkeynodes/status
   - valkeys/status
+  - valkeysentinels/status
   verbs:
   - get
   - patch

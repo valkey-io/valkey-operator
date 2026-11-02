@@ -26,7 +26,8 @@ The work ships in the phases laid out in #387. Phase 1 is split into slices.
 | CRD | `Valkey` types, CEL validation, `spec.replicas` pinned to 0 ([#390](https://github.com/valkey-io/valkey-operator/pull/390)) | In review |
 | Standalone controller | One primary through one `ValkeyNode`, children, status | This document |
 | Replication | `spec.replicas > 0`, `REPLICAOF` wiring, per-node governing Services, boot-time discovery init container | Not started |
-| Sentinel | `spec.failover`, `ValkeySentinel`, monitor registration, planned failover | Not started |
+| Sentinel pods | `ValkeySentinel` CRD, StatefulSet with `OnDelete` and a quorum-gated roll, Service, ConfigMap, PDB, Sentinel command layer | In progress |
+| Sentinel registration | `spec.failover`, `valkeySelector`, monitor registration, `_sentinel` user, planned failover | Not started |
 
 `spec.replicas` is pinned to 0 by CEL until replication lands. Relaxing a rule later is backwards compatible. Adding one later would not be.
 

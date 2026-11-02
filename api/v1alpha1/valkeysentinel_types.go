@@ -51,6 +51,24 @@ const (
 	ValkeySentinelStateFailed ValkeySentinelState = "Failed"
 )
 
+// Condition reasons specific to ValkeySentinel.
+const (
+	// ReasonSentinelsReady means every Sentinel pod is ready on the current revision.
+	ReasonSentinelsReady = "SentinelsReady"
+	// ReasonWaitingForSentinels means some Sentinel pods are not ready yet.
+	ReasonWaitingForSentinels = "WaitingForSentinels"
+	// ReasonRollingSentinels means pods on an old revision are being replaced one at a time.
+	ReasonRollingSentinels = "RollingSentinels"
+	// ReasonRollBlocked means a pending roll is held because replacing a pod now could break quorum.
+	ReasonRollBlocked = "RollBlocked"
+	// ReasonStatefulSetError means the StatefulSet could not be created or updated.
+	ReasonStatefulSetError = "StatefulSetError"
+	// ReasonQuorumUnavailable means SENTINEL CKQUORUM failed for at least one monitor.
+	ReasonQuorumUnavailable = "QuorumUnavailable"
+	// ReasonEvenSentinelReplicas warns that an even replica count adds a failure domain without lowering the majority.
+	ReasonEvenSentinelReplicas = "EvenSentinelReplicas"
+)
+
 // SentinelNetworkingSpec groups how clients and peers reach a ValkeySentinel.
 type SentinelNetworkingSpec struct {
 	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under (kubelet --cluster-domain).

@@ -99,6 +99,8 @@ func sentinelTLSServerName(s *valkeyiov1alpha1.ValkeySentinel) string {
 
 // sentinelBaseConfig returns the directives the operator owns in sentinel.conf.
 // The per-pod "sentinel announce-ip" is owned too, but the start script appends it.
+//
+//nolint:goconst
 func sentinelBaseConfig(s *valkeyiov1alpha1.ValkeySentinel) map[string]string {
 	port := strconv.Itoa(valkey.SentinelPort)
 	config := map[string]string{

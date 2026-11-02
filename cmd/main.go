@@ -273,9 +273,10 @@ func main() {
 	}
 
 	if err := (&controller.ValkeyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("valkey-controller"),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorder("valkey-controller"),
+		ValkeyClients: valkeyClients,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "Valkey")
 		os.Exit(1)

@@ -18,8 +18,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -35,13 +38,23 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
-// ValkeyReconciler reconciles a standalone Valkey: one primary, no replicas.
+// ValkeyReconciler reconciles a Valkey: one primary plus spec.replicas replicas, outside cluster mode.
+// The operator wires replication itself, and nobody promotes a replica automatically when the primary fails.
 type ValkeyReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	Recorder  events.EventRecorder
+	APIReader     client.Reader
+	Scheme        *runtime.Scheme
+	Recorder      events.EventRecorder
+	ValkeyClients ClientProvider
+
+	// replicationClient, when set, replaces the Valkey connection used for replication commands.
+	// Tests set it because envtest has no running Valkey server.
+	replicationClient replicationClient
 }
+
+// valkeyReplicationRequeue paces reconciles while replication converges.
+// Replication commands change nothing in Kubernetes, so no watch event reports their effect.
+const valkeyReplicationRequeue = 5 * time.Second
 
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeys,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeys/status,verbs=get;update;patch
@@ -88,12 +101,71 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonConfigMapError, err)
 	}
 
-	node, err := reconcileStandaloneNode(ctx, rc, v)
+	nodes, err := r.ensureValkeyNodes(ctx, rc, v)
 	if err != nil {
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonValkeyNodeError, err)
 	}
 
+	var result ctrl.Result
+	if len(nodes) == 1 && v.Spec.Replicas == 0 {
+		if err := r.reconcileStandalone(ctx, rc, v, nodes[0]); err != nil {
+			return r.failChild(ctx, v, valkeyiov1alpha1.ReasonValkeyNodeError, err)
+		}
+	} else {
+		result, err = r.reconcileReplicated(ctx, rc, v, nodes)
+		if err != nil {
+			return r.failChild(ctx, v, valkeyiov1alpha1.ReasonReplicationCmdError, err)
+		}
+	}
+	setACLDegraded(v, nodes)
+
+	if err := r.updateStatus(ctx, v); err != nil {
+		return ctrl.Result{}, err
+	}
+	log.V(1).Info("reconcile done")
+	return result, nil
+}
+
+// ensureValkeyNodes creates every missing node from index 0 to spec.replicas and returns all nodes the Valkey controls, ordered by index.
+// Nodes above spec.replicas are returned too, so the caller can hand off their role before removing them.
+func (r *ValkeyReconciler) ensureValkeyNodes(ctx context.Context, rc *resourceClient, v *valkeyiov1alpha1.Valkey) ([]*valkeyiov1alpha1.ValkeyNode, error) {
+	nodes, err := listValkeyNodes(ctx, r.Client, v)
+	if err != nil {
+		return nil, err
+	}
+	present := map[int]bool{}
+	for _, node := range nodes {
+		present[valkeyNodeIndex(node)] = true
+	}
+	created := false
+	for index := 0; index <= int(v.Spec.Replicas); index++ {
+		if present[index] {
+			continue
+		}
+		if _, err := createValkeyNode(ctx, rc, v, index); err != nil {
+			return nil, err
+		}
+		created = true
+	}
+	if !created {
+		return nodes, nil
+	}
+	return listValkeyNodes(ctx, r.Client, v)
+}
+
+// reconcileStandalone keeps the single node of a Valkey with no replicas up to date and derives its status.
+func (r *ValkeyReconciler) reconcileStandalone(ctx context.Context, rc *resourceClient, v *valkeyiov1alpha1.Valkey, node *valkeyiov1alpha1.ValkeyNode) error {
+	if valkeyNodeChanged(v, node) {
+		if err := updateValkeyNode(ctx, rc, v, node); err != nil {
+			return err
+		}
+	}
+
 	v.Status.Primary = node.Name
+	v.Status.Replicas = 0
+	v.Status.ReadyReplicas = 0
+	meta.RemoveStatusCondition(&v.Status.Conditions, valkeyiov1alpha1.ConditionPrimaryElected)
+	meta.RemoveStatusCondition(&v.Status.Conditions, valkeyiov1alpha1.ConditionReplicationHealthy)
 	if node.Status.Ready {
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonInstanceHealthy, "Instance is healthy", metav1.ConditionTrue)
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
@@ -102,21 +174,24 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionFalse)
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionTrue)
 	}
+	return nil
+}
 
-	// A node whose ACL the operator cannot apply leaves the declared users out of Valkey.
-	// The instance would otherwise read as healthy with an ACL that is not in effect.
-	if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied); c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
-		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed, fmt.Sprintf("ACL not applied on %s", node.Name), metav1.ConditionTrue)
-	} else {
+// setACLDegraded marks the Valkey Degraded while any node cannot apply its ACL.
+// Such a node leaves the declared users out of Valkey, so the instance would otherwise read as healthy with an ACL that is not in effect.
+func setACLDegraded(v *valkeyiov1alpha1.Valkey, nodes []*valkeyiov1alpha1.ValkeyNode) {
+	var failed []string
+	for _, node := range nodes {
+		c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
+			failed = append(failed, node.Name)
+		}
+	}
+	if len(failed) == 0 {
 		meta.RemoveStatusCondition(&v.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		return
 	}
-
-	// The node's status changes requeue this Valkey through Owns, so no periodic requeue is needed.
-	if err := r.updateStatus(ctx, v); err != nil {
-		return ctrl.Result{}, err
-	}
-	log.V(1).Info("reconcile done")
-	return ctrl.Result{}, nil
+	setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed, fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
 }
 
 // failChild records a child resource error as Ready=False and returns the error for a retry.
@@ -140,9 +215,8 @@ func (r *ValkeyReconciler) updateStatus(ctx context.Context, v *valkeyiov1alpha1
 
 	current.Status.Conditions = v.Status.Conditions
 	current.Status.Primary = v.Status.Primary
-	// Replicas exclude the primary, and a standalone Valkey has none.
-	current.Status.Replicas = 0
-	current.Status.ReadyReplicas = 0
+	current.Status.Replicas = v.Status.Replicas
+	current.Status.ReadyReplicas = v.Status.ReadyReplicas
 	current.Status.ObservedGeneration = v.Generation
 
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
@@ -185,6 +259,9 @@ func (r *ValkeyReconciler) updateStatus(ctx context.Context, v *valkeyiov1alpha1
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.ValkeyClients == nil {
+		return errors.New("Valkey reconciler has no ClientProvider")
+	}
 	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.Valkey{}).

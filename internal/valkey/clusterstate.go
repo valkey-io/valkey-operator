@@ -646,13 +646,13 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		if err != nil {
 			log.Error(err, "command failed: INFO")
 		}
-		node.Info = infoStringToMap(info)
+		node.Info = InfoStringToMap(info)
 
 		cinfo, err := results[3].ToString()
 		if err != nil {
 			log.Error(err, "command failed: CLUSTER INFO")
 		}
-		node.ClusterInfo = infoStringToMap(cinfo)
+		node.ClusterInfo = InfoStringToMap(cinfo)
 
 		cnodes, err := results[4].ToString()
 		if err != nil {
@@ -670,8 +670,8 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	return &node
 }
 
-// Convert a string containing INFO elements to a map.
-func infoStringToMap(s string) map[string]string {
+// InfoStringToMap converts a string containing INFO elements to a map.
+func InfoStringToMap(s string) map[string]string {
 	m := map[string]string{}
 	// Remove the encoding string included in a verbatim string.
 	for line := range strings.SplitSeq(strings.TrimPrefix(s, "txt:"), "\r\n") {

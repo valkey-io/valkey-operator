@@ -348,6 +348,26 @@ func (s ValkeySpec) PodDisruptionBudgetEnabled() bool {
 	return s.Replicas > 0
 }
 
+// Condition types a Valkey reports on top of Ready, Progressing and Degraded.
+const (
+	// ConditionPrimaryElected is True when exactly one node is the primary every other node follows.
+	ConditionPrimaryElected = "PrimaryElected"
+	// ConditionReplicationHealthy is True when every replica is ready and its link to the primary is up.
+	ConditionReplicationHealthy = "ReplicationHealthy"
+)
+
+// Reasons a Valkey reports on its replication conditions.
+const (
+	ReasonPrimaryElected      = "PrimaryElected"
+	ReasonPrimaryNotReady     = "PrimaryNotReady"
+	ReasonMultiplePrimaries   = "MultiplePrimaries"
+	ReasonNoPrimary           = "NoPrimary"
+	ReasonFailoverInProgress  = "FailoverInProgress"
+	ReasonReplicasInSync      = "ReplicasInSync"
+	ReasonReplicasNotSynced   = "ReplicasNotSynced"
+	ReasonReplicationCmdError = "ReplicationCommandError"
+)
+
 // +kubebuilder:object:root=true
 
 // ValkeyList contains a list of Valkey.

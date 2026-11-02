@@ -178,7 +178,7 @@ func TestBuildValkeyNode(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "vk", Namespace: "ns", Labels: map[string]string{LabelCluster: "user-value"}},
 				Spec:       tt.spec,
 			}
-			node := buildValkeyNode(v)
+			node := buildValkeyNode(v, 0)
 
 			if node.Name != valkeyNodeName("vk", 0, 0) {
 				t.Errorf("name = %q", node.Name)
@@ -227,9 +227,9 @@ func TestBuildValkeyServerConfig(t *testing.T) {
 	}
 
 	// The node's pod roll hash must change when a non-live key changes.
-	before := nodeServerConfigRollHash(buildValkeyNode(v))
+	before := nodeServerConfigRollHash(buildValkeyNode(v, 0))
 	v.Spec.Config["appendonly"] = "yes"
-	if nodeServerConfigRollHash(buildValkeyNode(v)) == before {
+	if nodeServerConfigRollHash(buildValkeyNode(v, 0)) == before {
 		t.Errorf("roll hash did not change after a non-live config edit")
 	}
 }

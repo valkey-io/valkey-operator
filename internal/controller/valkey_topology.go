@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -144,10 +145,8 @@ func (r *ValkeyReconciler) scaleInValkeyNodes(ctx context.Context, rc *resourceC
 	if len(extra) == 0 {
 		return "", nil
 	}
-	for _, view := range extra {
-		if view == primary {
-			return r.handOffPrimary(ctx, v, primary, kept)
-		}
+	if slices.Contains(extra, primary) {
+		return r.handOffPrimary(ctx, v, primary, kept)
 	}
 	for _, view := range extra {
 		if err := rc.Delete(ctx, view.node); client.IgnoreNotFound(err) != nil {

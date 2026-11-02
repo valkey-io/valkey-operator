@@ -57,7 +57,9 @@ func TestOperatorCommands(t *testing.T) {
 		"CLUSTER REPLICATE",
 		"CLUSTER SET-CONFIG-EPOCH",
 		"CONFIG SET",
+		"FAILOVER",
 		"INFO",
+		"REPLICAOF",
 	}
 	assert.ElementsMatch(t, want, got)
 }

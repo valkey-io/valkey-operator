@@ -50,10 +50,25 @@ var _ = Describe("Valkey CEL validation", func() {
 		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
 	})
 
-	It("rejects replicas above zero until replication lands", func() {
-		err := k8sClient.Create(ctx, valkeyFor("val-replicated", 1))
+	It("admits replicas above zero on a StatefulSet", func() {
+		valkey := valkeyFor("val-replicated", 2)
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	It("rejects replicas above zero on a Deployment", func() {
+		valkey := valkeyFor("val-replicated-deploy", 1)
+		valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
+		err := k8sClient.Create(ctx, valkey)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("replication is not implemented yet"))
+		Expect(err.Error()).To(ContainSubstring("requires workloadType StatefulSet"))
+	})
+
+	It("admits a standalone instance on a Deployment", func() {
+		valkey := valkeyFor("val-standalone-deploy", 0)
+		valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
 	})
 
 	Describe("spec.config", func() {

@@ -265,7 +265,7 @@ func TestPlanReplication(t *testing.T) {
 	hostOf := func(node *valkeyiov1alpha1.ValkeyNode) string { return node.Name }
 	n0, n1, n2 := valkeyNodeName("a", 0, 0), valkeyNodeName("a", 0, 1), valkeyNodeName("a", 0, 2)
 	names := func(views []*nodeView) []string {
-		out := []string{}
+		out := make([]string, 0, len(views))
 		for _, view := range views {
 			out = append(out, view.node.Name)
 		}
@@ -457,11 +457,11 @@ var _ = Describe("Valkey replication", func() {
 				&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: resourcePrefix + v.Name, Namespace: v.Namespace}},
 				v,
 			}
-			for index := range 3 {
-				objs = append(objs, &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeName(v.Name, 0, index), Namespace: v.Namespace}})
-			}
 			for _, obj := range objs {
 				_ = k8sClient.Delete(ctx, obj)
+			}
+			for index := range 3 {
+				_ = k8sClient.Delete(ctx, &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeName(v.Name, 0, index), Namespace: v.Namespace}})
 			}
 		})
 	})

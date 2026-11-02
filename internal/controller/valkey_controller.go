@@ -260,7 +260,7 @@ func (r *ValkeyReconciler) updateStatus(ctx context.Context, v *valkeyiov1alpha1
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.ValkeyClients == nil {
-		return errors.New("Valkey reconciler has no ClientProvider")
+		return errors.New("no ClientProvider set on the Valkey reconciler")
 	}
 	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).

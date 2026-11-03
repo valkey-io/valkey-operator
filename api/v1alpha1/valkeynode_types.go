@@ -193,7 +193,43 @@ type NodeTLSSpec struct {
 	// cluster-owned nodes the ValkeyCluster controller copies
 	// spec.networking.tls.clientAuth here.
 	// +optional
-	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+	ClientAuth *NodeTLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// NodeTLSClientAuthSpec is the resolved client certificate authentication for
+// a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
+// controller merges spec.networking.tls.clientAuth.ca into a Secret and
+// references it from certificates.trustBundle.
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+type NodeTLSClientAuthSpec struct {
+	// Mode controls whether clients must authenticate with a TLS certificate.
+	// Maps to `tls-auth-clients`. Defaults to `Optional`.
+	// +kubebuilder:default=Optional
+	// +optional
+	Mode TLSAuthClients `json:"mode,omitempty"`
+
+	// CertificateUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+	// `Disabled`, which leaves the directive unset.
+	// +kubebuilder:default=Disabled
+	// +optional
+	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+}
+
+// EffectiveMode returns mode, defaulting to Optional when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveMode() TLSAuthClients {
+	if s == nil || s.Mode == "" {
+		return TLSAuthClientsOptional
+	}
+	return s.Mode
+}
+
+// EffectiveCertificateUser returns certificateUser, defaulting to Disabled when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveCertificateUser() TLSAuthClientsUser {
+	if s == nil || s.CertificateUser == "" {
+		return TLSAuthClientsUserDisabled
+	}
+	return s.CertificateUser
 }
 
 // ClientAuthMode returns the effective client-auth mode for t.

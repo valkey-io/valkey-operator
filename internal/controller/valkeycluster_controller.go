@@ -71,6 +71,9 @@ type ValkeyClusterReconciler struct {
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
+
+	// hibernation holds the per-process progress of hibernating clusters.
+	hibernation hibernationTracker
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -111,6 +114,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //     and once none is mid-roll the phases below run to repair it.
 //   - Build the Valkey cluster state by connecting to each node and scraping
 //     CLUSTER INFO / CLUSTER NODES.
+//   - Hibernate or wake the cluster when the valkey.io/hibernate annotation
+//     asks for it (reconcileHibernation, reconcileWake; see hibernate.go).
+//     Once a descent has started, the steps below do not run.
 //   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
 //     is lost (promoteOrphanedReplicas).
 //   - Forget stale nodes that no longer have a backing ValkeyNode.
@@ -223,6 +229,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	state := r.scrapeClusterState(ctx, nodes, dial)
+
+	// Hibernation takes over from here once its descent has started; until
+	// then the steps below run, so in-flight work finishes first. Waking
+	// unmarks the nodes, primaries first, and the steps below bring the pods
+	// back once the replicas are started too.
+	if hibernationRequested(cluster) {
+		if result, handled, err := r.reconcileHibernation(ctx, cluster, nodes, state); handled || err != nil {
+			return result, err
+		}
+	} else if result, handled, err := r.reconcileWake(ctx, cluster, nodes, state); handled || err != nil {
+		return result, err
+	}
 
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says
@@ -496,6 +514,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
+	r.finishWake(ctx, cluster)
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		log.Error(err, statusUpdateFailedMsg)
@@ -503,6 +522,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.V(1).Info("reconcile done")
+	// A requested hibernation starts on the next pass, now that the cluster
+	// is healthy, or once its retry delay after a failed save is over.
+	if hibernationRequested(cluster) {
+		if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionHibernated); c != nil && c.Reason == valkeyiov1alpha1.ReasonHibernationSaveFailed {
+			return ctrl.Result{RequeueAfter: hibernationRetryAfter}, nil
+		}
+		return ctrl.Result{RequeueAfter: hibernationStepRequeue}, nil
+	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
@@ -1638,8 +1665,13 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 	degradedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	hibernatedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionHibernated)
 
 	switch {
+	case hibernatedCondition != nil && hibernatedCondition.Status == metav1.ConditionTrue:
+		current.Status.State = valkeyiov1alpha1.ClusterStateHibernated
+		current.Status.Reason = hibernatedCondition.Reason
+		current.Status.Message = hibernatedCondition.Message
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
 		current.Status.State = valkeyiov1alpha1.ClusterStateDegraded
 		current.Status.Reason = degradedCondition.Reason

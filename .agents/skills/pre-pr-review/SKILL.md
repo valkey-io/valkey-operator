@@ -15,7 +15,7 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
 
    Derive `<slug>` from the branch name: lowercase it, replace each run of characters outside `a-z0-9` with `-`, trim to 40 characters, strip leading and trailing `-`. `feat/Zone-Pinning` becomes `feat-zone-pinning`. The cluster is `review-<slug>`.
 2. **Understand the change.** Read `git diff <base>` (commits plus uncommitted changes) and `git log <base>..HEAD`. `git diff` leaves out untracked files, which the image still builds from, so also read each file `git ls-files --others --exclude-standard` lists that belongs to the change, and include them in step 4's review. For each issue referenced in the commit messages (`Fixes #n`, `Closes #n`), read it with `gh issue view <n> --repo valkey-io/valkey-operator --comments` when `gh` is installed; otherwise ask the contributor for the issue and its repro steps. Done when you can list (a) every behaviour the diff changes, each with a scenario that exercises it, including one that reproduces the issue's original failure, and (b) the cluster shape those scenarios need: node count, zone labels, cert-manager.
-3. **Fast checks.** Run `make lint test`. Record pass or fail, and the failing output, for the report. Continue to step 4 on failure.
+3. **Fast checks.** Run `make lint test`, then `hack/check-copyright.sh <base>`, CI's check that new Go files carry the current year in their header. The script reads committed files only, so on a dirty run also check the header of each new uncommitted Go file. Record pass or fail, and the failing output, for the report. Continue to step 4 on failure.
 
    `make test` runs `manifests generate fmt`, so it rewrites files the contributor forgot to regenerate or format. Compare `git status --porcelain` with `/tmp/review-<slug>-status.before` and `git diff | sha256sum` with `/tmp/review-<slug>-diff.before`; the hash catches a rewrite of a file that was already modified, whose status line reads ` M` both times. Run `git diff` on anything that changed. Report these files that make changed as a "fix first" finding: CI's generated-code check fails on them. Repeat this check after step 6.
 4. **Start the static review in the background.** On Claude Code, invoke the `code-review` skill on the diff at `medium` effort. On other agents, use the agent's own review command, or dispatch a subagent to review `git diff <base>` for correctness bugs. When the diff touches `api/`, a `*_types.go`, or `config/crd/`, also apply every item of the [API checklist](#api-checklist) to those files. The findings feed steps 7 and 9.
@@ -60,10 +60,12 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
    cp config/manager/kustomization.yaml /tmp/review-<slug>-kustomization.yaml.bak
    trap 'cp /tmp/review-<slug>-kustomization.yaml.bak config/manager/kustomization.yaml' EXIT
    make undeploy
-   KIND_CLUSTER=review-<slug> CERT_MANAGER_INSTALL_SKIP=true go test -tags=e2e ./test/e2e/ -v -ginkgo.label-filter "<label> || <label>"
+   KIND_CLUSTER=review-<slug> CERT_MANAGER_INSTALL_SKIP=true \
+     E2E_MANAGER_IMAGE=valkey-operator:review-<slug> E2E_SKIP_IMAGE_BUILD=true \
+     go test -tags=e2e ./test/e2e/ -v -timeout 40m -ginkgo.label-filter "<label> || <label>"
    ```
 
-   BeforeSuite runs `make deploy`, which rewrites `kustomization.yaml`; the trap restores it as in step 6. Several labels run for longer than a default tool timeout, so run this block in the background or with a long timeout. Drop `CERT_MANAGER_INSTALL_SKIP=true` when a selected label needs TLS. Record pass or fail per label.
+   `E2E_MANAGER_IMAGE` reuses the image from step 6 instead of building another; pass the newest tag when step 7 rebuilt (`-r2`, ...). The 40-minute timeout matches `make test-e2e-run`; at Go's 10-minute default the process can die before AfterSuite cleans up. BeforeSuite runs `make deploy`, which rewrites `kustomization.yaml`; the trap restores it as in step 6. Several labels run for longer than a default tool timeout, so run this block in the background or with a long timeout. Drop `CERT_MANAGER_INSTALL_SKIP=true` when a selected label needs TLS. Record pass or fail per label.
 9. **Report.** Run `git check-ignore -q .review`. If it succeeds, write `.review/<slug>.md`. Otherwise the branch predates the ignore rule, so write `/tmp/review-<slug>.md` and say so in the output. Sections, in order:
    1. Verdict: "ready to open" or "fix first", with the reasons
    2. Change summary
@@ -105,6 +107,6 @@ Apply each item to the changed API types and CRDs. The [Kubernetes API conventio
 
 ## Gotchas
 
-- `make test-e2e` chains `cleanup-test-e2e`, which deletes the kind cluster mid-review; step 8 runs `go test` directly. The suite brings its own operator: BeforeSuite builds an image, creates `valkey-operator-system` (failing if it exists), and runs `make deploy`; AfterSuite runs `make undeploy` and `make uninstall`, removing the review deployment, the CRDs and every CR.
+- `make test-e2e` chains `cleanup-test-e2e`, which deletes the kind cluster mid-review; step 8 runs `go test` directly. The suite brings its own operator: BeforeSuite builds an image (unless `E2E_SKIP_IMAGE_BUILD=true`), loads it into kind, creates `valkey-operator-system` (failing if it exists), and runs `make deploy`; AfterSuite runs `make undeploy` and `make uninstall`, removing the review deployment, the CRDs and every CR.
 - Tag images with something other than `latest`: `:latest` implies `imagePullPolicy: Always`, which breaks kind-loaded images.
 - TLS-related changes need cert-manager in the cluster. The e2e suite installs it; see `test/e2e/e2e_suite_test.go`.

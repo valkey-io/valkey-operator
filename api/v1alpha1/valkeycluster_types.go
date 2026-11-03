@@ -539,6 +539,9 @@ type TLSClientAuthSpec struct {
 	// a changed bundle live, without a restart. SPIRE's
 	// bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
 	// or `bundle.crt`).
+	//
+	// Setting this requires `spec.users` to declare the `default` user, since
+	// a client whose certificate names no ACL user is logged in as `default`.
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=atomic
 	// +optional
@@ -881,6 +884,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || (has(self.spec.users) && self.spec.users.exists(u, u.name == 'default'))",message="clientAuth.ca requires spec.users to declare the default user: it widens who can log in as default, so state its access, for example {name: default, enabled: false}"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

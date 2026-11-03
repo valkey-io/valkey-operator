@@ -85,7 +85,7 @@ If you use an AI coding agent, the repo ships a `pre-pr-review` skill at [`.agen
 
 You need Docker, [kind](https://kind.sigs.k8s.io/), and the Go toolchain from the [Developer Guide](./docs/developer-guide.md). [`gh`](https://cli.github.com/) is optional; the skill uses it to read linked issues. The kind cluster stays up afterwards, and the skill prints the command to delete it.
 
-In Claude Code or Kiro, run `/pre-pr-review`; they find the skill through symlinks in `.claude/skills/` and `.kiro/skills/`. Codex reads `.agents/skills/` directly. For other agents, symlink the skill directory into the agent's skills directory, or ask the agent to read and follow `.agents/skills/pre-pr-review/SKILL.md`. The check is optional, and CI runs the e2e suite on every PR either way. PRs that have been through it, with its recommendations acted on, get reviewed faster.
+In your coding agent, run `/pre-pr-review` or ask it to run the `pre-pr-review` skill. If your agent doesn't find the skill, symlink the skill directory into the agent's skills directory, or ask the agent to read and follow `.agents/skills/pre-pr-review/SKILL.md`. The check is optional, and CI runs the e2e suite on every PR either way. PRs that have been through it, with its recommendations acted on, get reviewed faster.
 
 We'll review your PR as soon as possible. Be patient and responsive to feedback.
 

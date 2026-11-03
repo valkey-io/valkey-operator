@@ -160,7 +160,7 @@ Reports whether the operator-managed trust bundle `<cluster>-tls-trust` is in pl
 | Status | Meaning |
 |---|---|
 | `True` | The trust bundle holds the server root and every `clientAuth.ca` root. |
-| `False` | The trust bundle does not hold every `clientAuth.ca` root, for the reason given below. If a source could not be read, the bundle keeps its last good contents; if none was ever written, nodes verify clients against the server secret's `ca.crt` alone. |
+| `False` | The trust bundle does not hold every `clientAuth.ca` root, for the reason given below. If a source could not be read, the bundle keeps its last good contents; if no node uses the bundle yet, nodes verify clients against the server secret's `ca.crt` alone. |
 
 Common reasons:
 - `TrustBundleReady` – the trust bundle is up to date.

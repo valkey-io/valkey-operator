@@ -371,5 +371,12 @@ spec:
 			phase, logs := whoami(trustedPodName, clientCertSecret)
 			g.Expect(phase).To(Equal("Failed"), "a certificate from the removed CA must not connect: %s", logs)
 		}, 10*time.Minute, 15*time.Second).Should(Succeed())
+
+		By("waiting for the unused trust bundle to be deleted")
+		Eventually(func(g Gomega) {
+			out, err := utils.Run(exec.Command("kubectl", "get", "secret", clusterName+"-tls-trust", "--ignore-not-found", "-o", "name"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })

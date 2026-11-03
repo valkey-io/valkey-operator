@@ -4257,6 +4257,17 @@ spec:
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
             || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
             ? self.spec.replicas : 0)) <= 61'
+        - message: 'clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed
+            trust bundle'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
+            || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s,
+            !has(s.secretName) || s.secretName != self.metadata.name + ''-tls-trust'')'
+        - message: 'certificates.server.secretName cannot be <name>-tls-trust while
+            clientAuth.ca is set: it is the operator-managed trust bundle'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
+            || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca)
+            == 0 || self.spec.networking.tls.certificates.server.secretName != self.metadata.name
+            + ''-tls-trust'''
     served: true
     storage: true
     subresources:

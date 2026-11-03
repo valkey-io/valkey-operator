@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -72,9 +73,20 @@ func newTrustReconciler(t *testing.T, objs ...client.Object) (*ValkeyClusterReco
 	scheme := runtime.NewScheme()
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	rec := events.NewFakeRecorder(10)
 	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: rec}, c, rec
+}
+
+// nodeOnTrustBundle is a ValkeyNode of cluster c that references c's trust bundle.
+func nodeOnTrustBundle(name string) *valkeyiov1alpha1.ValkeyNode {
+	return &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{TLS: &valkeyiov1alpha1.NodeTLSSpec{Certificates: valkeyiov1alpha1.NodeTLSCertificates{
+			TrustBundle: &valkeyiov1alpha1.NodeTrustBundleRef{SecretName: "c-tls-trust"},
+		}}},
+	}
 }
 
 func trustSecret(t *testing.T, c client.Client) (*corev1.Secret, bool) {
@@ -105,6 +117,74 @@ func (c labelFilteredClient) Get(ctx context.Context, key client.ObjectKey, obj 
 		return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name)
 	}
 	return nil
+}
+
+func TestDeleteUnusedTrustBundle(t *testing.T) {
+	ctx := context.Background()
+	serverCA := selfSignedCAPEM(t)
+	clientCA := selfSignedCAPEM(t)
+	projected := []corev1.Volume{{Name: "tls", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "c-tls-trust"}}}},
+	}}}}
+	rolledNode := func(workloadType valkeyiov1alpha1.WorkloadType) *valkeyiov1alpha1.ValkeyNode {
+		return &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: workloadType},
+		}
+	}
+	podWith := func(phase corev1.PodPhase, volumes []corev1.Volume) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
+			Spec:       corev1.PodSpec{Volumes: volumes},
+			Status:     corev1.PodStatus{Phase: phase},
+		}
+	}
+	template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: projected}}
+
+	for desc, tc := range map[string]struct {
+		objs []client.Object
+		kept bool
+	}{
+		"nothing is left using it":   {objs: []client.Object{rolledNode(valkeyiov1alpha1.WorkloadTypeStatefulSet)}},
+		"a node still references it": {objs: []client.Object{nodeOnTrustBundle("c-0-0")}, kept: true},
+		"a StatefulSet template still mounts it": {kept: true, objs: []client.Object{
+			rolledNode(valkeyiov1alpha1.WorkloadTypeStatefulSet),
+			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-0-0", Namespace: "ns"}, Spec: appsv1.StatefulSetSpec{Template: template}},
+		}},
+		"a Deployment template still mounts it": {kept: true, objs: []client.Object{
+			rolledNode(valkeyiov1alpha1.WorkloadTypeDeployment),
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-0-0", Namespace: "ns"}, Spec: appsv1.DeploymentSpec{Template: template}},
+		}},
+		"a running pod still mounts it": {objs: []client.Object{podWith(corev1.PodRunning, projected)}, kept: true},
+		"a pending pod still mounts it": {objs: []client.Object{podWith(corev1.PodPending, projected)}, kept: true},
+		"only a finished pod mounts it": {objs: []client.Object{podWith(corev1.PodFailed, projected)}},
+		"a running pod mounts it directly": {kept: true, objs: []client.Object{podWith(corev1.PodRunning, []corev1.Volume{
+			{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "c-tls-trust"}}},
+		})}},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			cluster := trustTestCluster("client-ca")
+			r, c, _ := newTrustReconciler(t, append(tc.objs, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))...)
+			_, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+
+			cluster.Spec.Networking.TLS.ClientAuth.CA = nil
+			name, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+			assert.Empty(t, name)
+			_, exists := trustSecret(t, c)
+			assert.Equal(t, tc.kept, exists)
+		})
+	}
+
+	t.Run("leaves a Secret of that name the cluster does not control", func(t *testing.T) {
+		theirs := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "c-tls-trust", Namespace: "ns"}}
+		r, c, _ := newTrustReconciler(t, theirs)
+		_, err := r.reconcileTrustBundle(ctx, trustTestCluster())
+		require.NoError(t, err)
+		_, exists := trustSecret(t, c)
+		assert.True(t, exists)
+	})
 }
 
 func TestReconcileTrustBundle(t *testing.T) {
@@ -203,7 +283,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 	} {
 		t.Run("keeps the last good bundle when a source is "+desc, func(t *testing.T) {
 			cluster := trustTestCluster("client-ca")
-			r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))
+			r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
 			_, err := r.reconcileTrustBundle(ctx, cluster)
 			require.NoError(t, err)
 			good, _ := trustSecret(t, c)
@@ -226,9 +306,27 @@ func TestReconcileTrustBundle(t *testing.T) {
 		})
 	}
 
+	t.Run("does not fall back on a bundle no node references", func(t *testing.T) {
+		cluster := trustTestCluster("old-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("old-ca", clientCA))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		left, _ := trustSecret(t, c)
+
+		cluster.Spec.Networking.TLS.ClientAuth.CA = []valkeyiov1alpha1.TrustSource{{SecretName: "missing-ca"}}
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Empty(t, name, "nodes must not start trusting the roots of an earlier clientAuth.ca")
+		after, _ := trustSecret(t, c)
+		assert.Equal(t, left.Data, after.Data)
+		cond := tlsConfigured(cluster)
+		require.NotNil(t, cond)
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, cond.Reason)
+	})
+
 	t.Run("adds a renewed server root to the last good bundle while a source is broken", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
-		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
 		_, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
 
@@ -454,11 +552,14 @@ func TestReconcileTrustBundle(t *testing.T) {
 
 	t.Run("adds a renewed server root to the last good bundle while a node is behind", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
-		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA),
-			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
+		node := nodeOnTrustBundle("c-0-0")
+		node.Status.AppliedACLRevision = "rev1"
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), aclAt("rev1"), node)
 		_, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
 
+		node.Status.AppliedACLRevision = "rev0"
+		require.NoError(t, c.Update(ctx, node)) // no status subresource is registered on the fake
 		require.NoError(t, c.Delete(ctx, caSecret("client-ca", nil)))
 		renewed := selfSignedCAPEM(t)
 		require.NoError(t, c.Update(ctx, caSecret("server-tls", renewed)))

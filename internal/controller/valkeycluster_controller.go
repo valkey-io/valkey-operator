@@ -879,27 +879,31 @@ func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context
 }
 
 func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	template, err := livePodTemplate(ctx, r.Client, node)
+	if err != nil || template == nil {
+		return "", err
+	}
+	return podTemplateRollHash(*template), nil
+}
+
+// livePodTemplate returns the pod template of a node's workload, or nil when
+// the workload does not exist.
+func livePodTemplate(ctx context.Context, reader client.Reader, node *valkeyiov1alpha1.ValkeyNode) (*corev1.PodTemplateSpec, error) {
 	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		dep := &appsv1.Deployment{}
-		if err := r.Get(ctx, key, dep); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", nil
-			}
-			return "", err
+		if err := reader.Get(ctx, key, dep); err != nil {
+			return nil, client.IgnoreNotFound(err)
 		}
-		return podTemplateRollHash(dep.Spec.Template), nil
+		return &dep.Spec.Template, nil
 	default:
 		// StatefulSet or empty (CRD default).
 		sts := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, key, sts); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", nil
-			}
-			return "", err
+		if err := reader.Get(ctx, key, sts); err != nil {
+			return nil, client.IgnoreNotFound(err)
 		}
-		return podTemplateRollHash(sts.Spec.Template), nil
+		return &sts.Spec.Template, nil
 	}
 }
 

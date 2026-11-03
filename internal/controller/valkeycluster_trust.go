@@ -204,6 +204,93 @@ func (r *ValkeyClusterReconciler) nodesBehindAppliedACL(ctx context.Context, clu
 	return pending, nil
 }
 
+// podMountsSecret reports whether a pod spec has a volume sourcing the Secret.
+func podMountsSecret(spec *corev1.PodSpec, name string) bool {
+	for i := range spec.Volumes {
+		volume := &spec.Volumes[i]
+		if volume.Secret != nil && volume.Secret.SecretName == name {
+			return true
+		}
+		if volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.Secret != nil && source.Secret.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trustBundleInUse reports whether anything could still need the named trust
+// bundle Secret. A ValkeyNode's spec is not enough: it drops the reference as
+// soon as the cluster stops asking for it, while its workload keeps the old
+// template until its roll is authorised and its pod runs until replaced. A pod
+// created from that template would never start without the Secret. Pods that
+// have finished are not counted, since they never start again. Everything is
+// read through the APIReader, because the answer decides a deletion.
+func (r *ValkeyClusterReconciler) trustBundleInUse(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
+	inCluster := []client.ListOption{client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	if err := r.APIReader.List(ctx, nodes, inCluster...); err != nil {
+		return false, err
+	}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if tls := node.Spec.TLS; tls != nil && tls.Certificates.TrustBundle != nil && tls.Certificates.TrustBundle.SecretName == name {
+			return true, nil
+		}
+		template, err := livePodTemplate(ctx, r.APIReader, node)
+		if err != nil {
+			return false, err
+		}
+		if template != nil && podMountsSecret(&template.Spec, name) {
+			return true, nil
+		}
+	}
+	pods := &corev1.PodList{}
+	if err := r.APIReader.List(ctx, pods, inCluster...); err != nil {
+		return false, err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if podMountsSecret(&pod.Spec, name) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// deleteUnusedTrustBundle deletes the trust bundle Secret this cluster controls
+// once clientAuth.ca is empty and the nodes have rolled off it. A Secret of that
+// name it does not control is left alone.
+func (r *ValkeyClusterReconciler) deleteUnusedTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	name := getTrustBundleSecretName(cluster.Name)
+	secret := &corev1.Secret{}
+	// Through the cache: this runs on every reconcile of a cluster without
+	// clientAuth.ca, and a bundle the operator wrote carries the label the
+	// cache selects on.
+	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(secret, cluster) {
+		return nil
+	}
+	inUse, err := r.trustBundleInUse(ctx, cluster, name)
+	if err != nil || inUse {
+		return err
+	}
+	if err := r.Delete(ctx, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	logf.FromContext(ctx).Info("deleted the unused trust bundle", "secret", name)
+	return nil
+}
+
 // nodesReferenceTrustBundle reports whether any of the cluster's ValkeyNodes
 // already mounts the named trust bundle Secret.
 func (r *ValkeyClusterReconciler) nodesReferenceTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
@@ -332,18 +419,19 @@ func (r *ValkeyClusterReconciler) refreshServerRootInFallback(ctx context.Contex
 //
 // When a source is missing or invalid, the trust Secret is left at its last
 // good roots and TLSConfigured=False reports why: writing a partial bundle
-// would silently lock out every client the dropped root signed. If no trust
-// Secret has been written yet, nodes keep the server root, so a typo in
-// clientAuth.ca never leaves a pod waiting on a volume that does not exist.
+// would silently lock out every client the dropped root signed. If no node
+// references a trust Secret yet, nodes keep the server root, so a typo in
+// clientAuth.ca never leaves a pod waiting on a volume that does not exist, and
+// a Secret left from an earlier clientAuth.ca is not mistaken for last good.
 // Only a Secret this cluster controls counts as written: one created by
 // anyone else under the same name is never trusted.
 //
-// The trust Secret is not deleted when clientAuth.ca is emptied: pods still
-// mount it until they roll. It is garbage-collected with the cluster.
+// When clientAuth.ca is emptied, the trust Secret stays until the nodes have
+// rolled off it, then it is deleted.
 func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	if len(cluster.GetTLS().ClientAuthCA()) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
-		return "", nil
+		return "", r.deleteUnusedTrustBundle(ctx, cluster)
 	}
 
 	name := getTrustBundleSecretName(cluster.Name)
@@ -397,6 +485,13 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		}
 		r.reportTrustSourceError(ctx, cluster, reason, strings.TrimPrefix(err.Error(), errTrustSourceInvalid.Error()+": "))
 		if !exists {
+			return "", nil
+		}
+		referenced, err := r.nodesReferenceTrustBundle(ctx, cluster, name)
+		if err != nil {
+			return "", err
+		}
+		if !referenced {
 			return "", nil
 		}
 		if err := r.refreshServerRootInFallback(ctx, cluster, existing); err != nil {

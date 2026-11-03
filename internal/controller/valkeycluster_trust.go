@@ -127,24 +127,6 @@ func (r *ValkeyClusterReconciler) readTrustSource(ctx context.Context, namespace
 	return src, nil
 }
 
-// reservedTrustBundleNameUse reports, as a condition message, any spec field
-// that names the operator-managed trust bundle Secret as one of its own
-// inputs, or "" when none does. Writing the bundle would replace that Secret's
-// contents, deleting a server certificate and key, or would merge the bundle
-// into itself.
-func reservedTrustBundleNameUse(cluster *valkeyiov1alpha1.ValkeyCluster, name string) string {
-	tls := cluster.GetTLS()
-	if tls.Certificates.Server.SecretName == name {
-		return fmt.Sprintf("certificates.server.secretName %q is reserved for the operator-managed trust bundle; use another name", name)
-	}
-	for i, src := range tls.ClientAuthCA() {
-		if src.SecretName == name {
-			return fmt.Sprintf("clientAuth.ca[%d].secretName %q is reserved for the operator-managed trust bundle; use another name", i, name)
-		}
-	}
-	return ""
-}
-
 // withoutNewRoots returns next without the certificates that are in neither
 // current nor exempt, and how many it left out. A current bundle that does not
 // parse counts as holding nothing, so every root in next that is not exempt is
@@ -291,22 +273,6 @@ func (r *ValkeyClusterReconciler) deleteUnusedTrustBundle(ctx context.Context, c
 	return nil
 }
 
-// nodesReferenceTrustBundle reports whether any of the cluster's ValkeyNodes
-// already mounts the named trust bundle Secret.
-func (r *ValkeyClusterReconciler) nodesReferenceTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
-		return false, err
-	}
-	for i := range nodes.Items {
-		tls := nodes.Items[i].Spec.TLS
-		if tls != nil && tls.Certificates.TrustBundle != nil && tls.Certificates.TrustBundle.SecretName == name {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // holdNewRoots returns the bundle to write now. A new clientAuth.ca root waits
 // until every node runs the current ACL. The ACL and the bundle are separate
 // mounted Secrets, so a container that restarts after its bundle mount refreshed
@@ -328,11 +294,11 @@ func (r *ValkeyClusterReconciler) nodesReferenceTrustBundle(ctx context.Context,
 // It also returns how many roots wait and the nodes they wait for.
 func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, exists bool, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
 	if !exists {
-		referenced, err := r.nodesReferenceTrustBundle(ctx, cluster, name)
+		inUse, err := r.trustBundleInUse(ctx, cluster, name)
 		if err != nil {
 			return nil, 0, nil, err
 		}
-		if !referenced {
+		if !inUse {
 			return bundle, 0, nil, nil
 		}
 	}
@@ -435,10 +401,6 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 	}
 
 	name := getTrustBundleSecretName(cluster.Name)
-	if msg := reservedTrustBundleNameUse(cluster, name); msg != "" {
-		r.reportTrustSourceError(ctx, cluster, valkeyiov1alpha1.ReasonTrustBundleConflict, msg)
-		return "", nil
-	}
 	existing := &corev1.Secret{}
 	exists := true
 	// Read through the APIReader, not the cache: the cache holds only Secrets
@@ -487,11 +449,11 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		if !exists {
 			return "", nil
 		}
-		referenced, err := r.nodesReferenceTrustBundle(ctx, cluster, name)
+		inUse, err := r.trustBundleInUse(ctx, cluster, name)
 		if err != nil {
 			return "", err
 		}
-		if !referenced {
+		if !inUse {
 			return "", nil
 		}
 		if err := r.refreshServerRootInFallback(ctx, cluster, existing); err != nil {

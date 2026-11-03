@@ -397,7 +397,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 			c.Spec.Networking.TLS.ClientAuth.CA[0].SecretName = "c-tls-trust"
 		},
 	} {
-		t.Run("refuses "+field+" naming the trust bundle", func(t *testing.T) {
+		t.Run("leaves the Secret alone when "+field+" names the trust bundle", func(t *testing.T) {
 			cluster := trustTestCluster("client-ca")
 			mutate(cluster)
 			serverSecret := &corev1.Secret{
@@ -414,8 +414,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 			assert.Equal(t, []byte("key"), s.Data[tlsSecretKeyKey], "the certificate and key must survive")
 			cond := tlsConfigured(cluster)
 			require.NotNil(t, cond)
-			assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleConflict, cond.Reason)
-			assert.Contains(t, cond.Message, field)
+			assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleConflict, cond.Reason, "a Secret the cluster does not control is refused, should admission have been bypassed")
 		})
 	}
 

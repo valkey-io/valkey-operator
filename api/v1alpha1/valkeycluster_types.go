@@ -786,8 +786,7 @@ const (
 	ReasonTrustSourceInvalid = "TrustSourceInvalid"
 	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
 	// a Secret named <cluster>-tls-trust exists but this cluster does not
-	// control it, or when a spec field names that Secret as one of its own
-	// inputs. Nodes stay on the server root.
+	// control it. Nodes stay on the server root.
 	ReasonTrustBundleConflict = "TrustBundleConflict"
 	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
 	// new roots are held back until every node confirms the current ACL. The

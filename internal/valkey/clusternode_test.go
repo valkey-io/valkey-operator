@@ -125,6 +125,18 @@ func TestParseClusterNodes(t *testing.T) {
 			t.Error("noaddr alone should not report as failing")
 		}
 	})
+
+	t.Run("nofailover flag", func(t *testing.T) {
+		raw := "r1 10.0.0.2:6379@16379 myself,slave,nofailover p1 0 0 1 connected\n" +
+			"p1 10.0.0.1:6379@16379 master,fail - 0 0 1 disconnected\n"
+		nodes := ParseClusterNodes(raw)
+		if !nodes[0].IsAutomaticFailoverDisabled() {
+			t.Error("expected nofailover flag")
+		}
+		if nodes[1].IsAutomaticFailoverDisabled() {
+			t.Error("a fail flag should not report as nofailover")
+		}
+	})
 }
 
 // Owned slots and in-flight markers must stay in separate fields: conflating
@@ -233,6 +245,7 @@ func TestFindMyself(t *testing.T) {
 		myself := FindMyself(ParseClusterNodes(raw))
 		if myself == nil {
 			t.Fatal("expected a myself entry")
+			return
 		}
 		if myself.Id != "abc123" {
 			t.Errorf("expected abc123, got %q", myself.Id)

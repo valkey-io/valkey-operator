@@ -58,9 +58,11 @@ Common reasons when `Ready=False`:
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
+  - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
 - `MissingShards` – waiting for all shards to be created
 - `MissingReplicas` – waiting for all replicas to be created
 - `PodUnschedulable` – Kubernetes cannot schedule one or more Valkey pods
+- `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
 
 Common reasons when `Ready=True`:
 - `ClusterHealthy` – Cluster is healthy
@@ -79,6 +81,7 @@ Common reasons:
 - `AddingNodes` – adding nodes to the cluster
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
+- `ScaleInBlocked` – scale-in is waiting; see [`Ready`](#ready)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -135,6 +138,8 @@ Indicates the operator accepted a spec value it considers risky, rather than rej
 Common reasons:
 - `GracePeriodTooShort` – `spec.terminationGracePeriodSeconds` is below the recommended minimum for the graceful failover on shutdown (`cluster-manual-failover-timeout` plus a buffer). The value is still applied.
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
+- `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
+- `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -206,7 +211,7 @@ This condition is only set when the node is ready and there are allowlisted conf
 | `False` | `CONFIG SET` failed; the running config may not match `spec.config`. The cluster controller will not advance past this node until the condition is `True`. |
 
 Common reasons when `LiveConfigApplied=False`:
-- `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the exact error.
+- `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
 
 Common reasons when `LiveConfigApplied=True`:
 - `Applied` – Live config applied successfully.
@@ -225,12 +230,30 @@ This condition is set once the node is ready and mounts an ACL Secret. An edit r
 
 Common reasons when `ACLApplied=False`:
 - `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
-- `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the exact error.
+- `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
 
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
 
-> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff. Once the condition is `True`, the node records the revision it confirmed in `status.appliedACLRevision`.
+
+#### `TrustBundleApplied`
+Indicates whether the running Valkey process has loaded the trust bundle named by `spec.tls.certificates.trustBundle` as its `tls-ca-cert-file`. The bundle is reloaded live, with `CONFIG SET tls-ca-cert-file` on its unchanged path, so a changed bundle takes effect for new connections without a pod roll.
+
+This condition is set once the node is ready, its ACL is applied, and it has a trust bundle. It is absent on a node without one.
+
+| Status | Meaning |
+|---|---|
+| `True` | The mounted trust bundle was reloaded in the last reconcile. |
+| `False` | The reload failed. The server keeps the roots it last loaded. |
+
+Common reasons when `TrustBundleApplied=False`:
+- `ApplyFailed` – `CONFIG SET tls-ca-cert-file` returned an error, for example because the mounted `ca.crt` is malformed. The message field contains the current error.
+
+Common reasons when `TrustBundleApplied=True`:
+- `Applied` – the mounted trust bundle is loaded.
+
+> **Note:** On a failed reload the node controller emits a `TrustBundleReloadFailed` warning event and retries every 10 seconds, not with exponential backoff, so a fixed bundle is picked up within one retry of the mounted file refreshing.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
@@ -348,6 +371,7 @@ These events are emitted during scale-in operations.
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain slots from excess shards |
+| `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, an excess ValkeyNode still owns slots, or an unreachable excess primary is kept while some slots are unassigned |
 
 ### Proactive failover events
 
@@ -366,7 +390,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 
 | Event Type | Type | Description |
 |---|---|---|
-| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER` after quorum loss |
+| `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
 
 ### Maintenance events
 
@@ -395,6 +419,7 @@ These events are emitted during live configuration application on ValkeyNode res
 | Event Type | Type | Description |
 |---|---|---|
 | `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
+| `TrustBundleReloadFailed` | Warning | Reloading a node's trust bundle failed; the `TrustBundleApplied` condition is set to `False` and the reload is retried every 10 seconds |
 
 ### Users/ACL events
 

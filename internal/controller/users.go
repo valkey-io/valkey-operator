@@ -81,7 +81,8 @@ var (
 			"+role",                      // current replication role
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
-		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +client -wait +scard +llen +hlen +get +eval +slowlog +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
+		// plus +command|info and +commandlog|len: redis_exporter probes for COMMANDLOG with COMMAND INFO (v1.89.0+) and reads COMMANDLOG LEN (Valkey 8.1+).
+		exporterUser: "-@all +@connection +memory -readonly +strlen +config|get +xinfo +pfcount -quit +zcard +type +xlen -readwrite -command +command|info +client -wait +scard +llen +hlen +get +eval +slowlog +commandlog|len +cluster|info +cluster|slots +cluster|nodes -hello -echo +info +latency +scan -reset -auth -asking",
 
 		replicationUser: strings.Join([]string{
 			"-@all +psync +sync +replconf +ping", // the ACL rawstring for replication is taken from Valkey documentation: https://valkey.io/topics/acl/#acl-rules-for-sentinel-and-replicas; +sync is required for dual-channel replication

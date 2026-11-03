@@ -263,6 +263,30 @@ spec:
 				}
 			}).Should(Succeed())
 
+			By("verifying the exporter reads COMMANDLOG without ACL denials")
+			Eventually(func(g Gomega) {
+				url := fmt.Sprintf("http://%s:9121/metrics", podIP)
+				cmd := exec.Command("kubectl", "exec", curlPodName, "--",
+					"curl", "-s", url)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get metrics")
+				g.Expect(out).To(ContainSubstring("redis_commandlog_slow_length"),
+					"Should contain COMMANDLOG metrics")
+
+				cmd = exec.Command("kubectl", "get", "pods",
+					"-l", "valkey.io/cluster="+valkeyName,
+					"-o", "jsonpath={.items[0].metadata.name}")
+				podName, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get pod name")
+				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName),
+					"-c", "server", "--", "valkey-cli", "INFO", "errorstats")
+				stats, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to get errorstats")
+				g.Expect(stats).To(ContainSubstring("# Errorstats"))
+				g.Expect(stats).NotTo(ContainSubstring("errorstat_NOPERM"),
+					"The _exporter ACL refused a command the exporter sends")
+			}).Should(Succeed())
+
 			By("Verifying /health endpoint is accessible")
 			Eventually(func(g Gomega) {
 				url := fmt.Sprintf("http://%s:9121/health", podIP)

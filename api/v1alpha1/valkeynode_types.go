@@ -106,6 +106,7 @@ type ValkeyNodeSpec struct {
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// TLS configuration for the node
@@ -123,6 +124,18 @@ type ValkeyNodeSpec struct {
 	// When set, this overrides the default PodSecurityContext.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ServiceAccountName is the name of the Kubernetes ServiceAccount used by
+	// the ValkeyNode pod.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// PodMetadata adds labels and annotations to the ValkeyNode pod.
+	// +optional
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 
 	// TerminationGracePeriodSeconds is the pod termination grace period, set by
 	// the ValkeyCluster controller so the graceful CLUSTER FAILOVER on SIGTERM
@@ -162,11 +175,13 @@ type NodeTLSSpec struct {
 	// ServerName is the hostname used for TLS verification when connecting
 	// to the pod IP. For cluster-owned nodes this is
 	// spec.networking.tls.serverName, or
-	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset.
+	// valkey-<cluster>.<ns>.svc.<clusterDomain> if that is unset. When this
+	// field is empty on a node with the valkey.io/cluster label, the node
+	// controller verifies against that default name.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', starting and ending with an alphanumeric)"
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots mounted into the node pod.
@@ -209,6 +224,25 @@ type NodeTLSCertificates struct {
 	// `tls.crt` and `tls.key`.
 	// +kubebuilder:validation:Required
 	Server NodeCertificateRef `json:"server"`
+
+	// TrustBundle, when set, replaces the server secret's `ca.crt` as the
+	// trust root Valkey verifies clients and peers against
+	// (`tls-ca-cert-file`). It must therefore include the root the server
+	// certificate chains to. The node reloads it live when its contents
+	// change, once its ACL is confirmed live. Probes and the metrics exporter
+	// keep verifying the server against the server secret's `ca.crt`.
+	// +optional
+	TrustBundle *NodeTrustBundleRef `json:"trustBundle,omitempty"`
+}
+
+// NodeTrustBundleRef references a Secret holding PEM CA certificates under key
+// `ca.crt`.
+type NodeTrustBundleRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // NodeCertificateRef references a certificate and its private key held in a
@@ -253,6 +287,12 @@ type ValkeyNodeStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// AppliedACLRevision is the revision of the operator-managed aclfile that
+	// the running server was last confirmed to hold, recorded as ACLApplied
+	// becomes True.
+	// +optional
+	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
 }
 
 const (
@@ -274,9 +314,16 @@ const (
 	// is a hash of the managed ACL (see aclRevisionUser); permission-only
 	// edits are therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
+	// ValkeyNodeConditionTrustBundleApplied indicates that the server has
+	// reloaded the mounted trust bundle (Spec.TLS.Certificates.TrustBundle) as
+	// its tls-ca-cert-file. The bundle is reloaded live, without a pod roll,
+	// once ACLApplied is True. A failed reload leaves the server on the roots it
+	// last loaded and is retried at a fixed interval. The condition is absent on
+	// a node without a trust bundle.
+	ValkeyNodeConditionTrustBundleApplied = "TrustBundleApplied"
 	// ValkeyNodeReasonApplied, ValkeyNodeReasonPendingPropagation and
-	// ValkeyNodeReasonApplyFailed are the reasons ACLApplied and
-	// LiveConfigApplied carry. The distinction matters to anything aggregating
+	// ValkeyNodeReasonApplyFailed are the reasons ACLApplied, LiveConfigApplied
+	// and TrustBundleApplied carry. The distinction matters to anything aggregating
 	// them: propagation is the normal state after an edit and clears itself once
 	// the mounted file catches up, while a failed apply does not clear on its own.
 	ValkeyNodeReasonApplied            = "Applied"

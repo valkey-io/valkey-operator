@@ -21,10 +21,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	vclient "github.com/valkey-io/valkey-go"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -89,9 +90,8 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	Eventually(func() error {
-		return testEnv.Stop()
-	}, time.Minute, time.Second).Should(Succeed())
+	err := testEnv.Stop()
+	Expect(err).NotTo(HaveOccurred())
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
@@ -115,4 +115,12 @@ func getFirstFoundEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+// testValkeyClients returns a provider for a reconciler built directly in a
+// spec, reading secrets through c. Its pool is closed when the spec ends.
+func testValkeyClients(c client.Client) ClientProvider {
+	pool := valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient)
+	DeferCleanup(pool.Close)
+	return NewClientProvider(c, c, pool)
 }

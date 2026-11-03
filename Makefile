@@ -3,7 +3,7 @@ IMG                  ?= controller:latest
 VERSION              ?= $(if $(findstring :,$(IMG)),$(lastword $(subst :, ,$(IMG))),latest)
 CONTAINER_IMAGE_NAME ?= $(IMG)
 
-export GOTOOLCHAIN ?= go1.25.0+auto
+export GOTOOLCHAIN ?= go$(shell cat .go-version)+auto
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -83,6 +83,15 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= valkey-operator-test-e2e
 
+# E2E label buckets for the parallel CI matrix (one matrix job per label).
+# The catch-all job is derived below. Labels must be single words.
+E2E_BUCKETS ?= cluster-lifecycle security spec-update valkeynode
+
+# Catch-all filter matching every test not covered by a bucket above, e.g. "!( a || b || c )".
+empty :=
+space := $(empty) $(empty)
+E2E_CATCHALL := !( $(subst $(space),$(space)||$(space),$(strip $(E2E_BUCKETS))) )
+
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
@@ -100,13 +109,26 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@"$(KUBECTL)" config use-context kind-$(KIND_CLUSTER)
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 30m
+test-e2e: manifests generate fmt vet test-e2e-run ## Run the e2e tests. Expected an isolated environment using Kind.
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-run
+test-e2e-run: setup-test-e2e ## Run the e2e tests on the Kind cluster, without code generation or vet.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter "${TEST_LABELS}" -timeout 40m
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: test-e2e-matrix
+test-e2e-matrix: ## Emit the e2e matrix as JSON objects {name, filter} for the CI matrix
+	@jq -nc --arg catchall "$(E2E_CATCHALL)" \
+		'[$$ARGS.positional[] | {name: ("\"" + . + "\""), filter: .}] + [{name: "remaining tests", filter: $$catchall}]' \
+		--args $(E2E_BUCKETS)
+
+.PHONY: test-e2e-verify-buckets
+test-e2e-verify-buckets: ## Verify every e2e test runs in exactly one matrix job
+	@hack/verify-e2e-buckets.sh '$(E2E_CATCHALL)' $(E2E_BUCKETS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -133,9 +155,11 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# Override BASE_IMAGE to build from another registry, e.g.
+# make docker-build IMG=<img> BASE_IMAGE=docker.io/library/golang:1.26
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" -t ${CONTAINER_IMAGE_NAME} .
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" -t ${CONTAINER_IMAGE_NAME} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -154,7 +178,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name valkey-operator-builder
 	$(CONTAINER_TOOL) buildx use valkey-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" --tag ${CONTAINER_IMAGE_NAME} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) --build-arg "VERSION_LDFLAGS=$(VERSION_LDFLAGS)" --tag ${CONTAINER_IMAGE_NAME} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm valkey-operator-builder
 	rm Dockerfile.cross
 
@@ -206,7 +230,7 @@ GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
-CONTROLLER_TOOLS_VERSION ?= v0.21.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -218,7 +242,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.13.1
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -244,7 +268,7 @@ $(ENVTEST): $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
+$(GOLANGCI_LINT): $(LOCALBIN) Makefile .go-version .golangci.yml .custom-gcl.yml
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 	@test -f .custom-gcl.yml && { \
 		echo "Building custom golangci-lint with plugins..." && \

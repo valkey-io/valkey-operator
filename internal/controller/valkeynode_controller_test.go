@@ -195,6 +195,50 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "valkey-node"))
 		})
 
+		It("applies podMetadata to the pod template and keeps it out of the selector", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				PodMetadata: &valkeyiov1alpha1.EmbeddedObjectMetadata{
+					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data"},
+					Annotations: map[string]string{"example.com/owner": "data"},
+				},
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			By("creating the StatefulSet with the pod metadata")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "data"))
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(LabelCluster, resourceName))
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue("example.com/owner", "data"))
+			Expect(sts.Spec.Selector.MatchLabels).NotTo(HaveKey("team"))
+			selector := sts.Spec.Selector.DeepCopy()
+
+			By("changing a pod label, which the immutable selector must not follow")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.PodMetadata.Labels["team"] = "platform"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue("team", "platform"))
+			Expect(sts.Spec.Selector).To(Equal(selector))
+
+			By("leaving the StatefulSet alone on a no-op reconcile")
+			updatedResourceVersion := sts.ResourceVersion
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(updatedResourceVersion))
+		})
+
 		It("should not update the StatefulSet on reconciles when nothing changed", func() {
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -332,6 +376,39 @@ var _ = Describe("ValkeyNode Controller", func() {
 			sts2 := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
 			Expect(sts2.ResourceVersion).To(Equal(rvAfterFirst), "StatefulSet should not be updated when nothing changed")
+		})
+
+		It("should settle when serviceAccountName is set", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				ServiceAccountName: "my-sa",
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(100),
+			}
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Spec.Template.Spec.DeprecatedServiceAccount).To(Equal("my-sa"),
+				"the API server mirrors serviceAccountName into the deprecated field")
+
+			By("matching the live template hash to the desired workload revision")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			desiredRev, err := computeWorkloadRevision(node)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(desiredRev))
+
+			By("leaving the StatefulSet alone on a no-op reconcile")
+			rvAfterFirst := sts.ResourceVersion
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.ResourceVersion).To(Equal(rvAfterFirst))
 		})
 
 		It("should create a PVC before reconciling the StatefulSet when persistence is enabled", func() {
@@ -817,7 +894,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 						// Keep the pod to the server container so the assertions
 						// below are about the workload, not the exporter.
-						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: boolPtr(false)},
+						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 					},
 				})).To(Succeed())
 			}
@@ -1073,6 +1150,41 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			Expect(rolled).To(BeFalse())
 		})
 
+		It("returns false when a recreated StatefulSet still runs the adopted pod", func() {
+			// A new StatefulSet starts with currentRevision == updateRevision, so
+			// only UpdatedReplicas shows the adopted pod is on an older revision.
+			r := makeReconciler()
+			replicas := int32(1)
+			stsNameAdopt := types.NamespacedName{Name: "valkey-" + nodeName + "-adopt", Namespace: ns}
+			nodeAdopt := makeNode(nodeName+"-adopt", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsNameAdopt.Name, Namespace: stsNameAdopt.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeAdopt.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeAdopt.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			Expect(k8sClient.Get(ctx, stsNameAdopt, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 0
+			sts.Status.CurrentRevision = "rev-new"
+			sts.Status.UpdateRevision = "rev-new"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeAdopt)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+		})
+
 		It("returns true when fully rolled out", func() {
 			r := makeReconciler()
 			replicas := int32(1)
@@ -1096,6 +1208,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.ObservedGeneration = sts.Generation
 			sts.Status.Replicas = 1
 			sts.Status.ReadyReplicas = 1
+			sts.Status.UpdatedReplicas = 1
 			sts.Status.CurrentRevision = "rev-1"
 			sts.Status.UpdateRevision = "rev-1"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
@@ -1255,6 +1368,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		sts.Status.ObservedGeneration = sts.Generation
 		sts.Status.Replicas = 1
 		sts.Status.ReadyReplicas = 1
+		sts.Status.UpdatedReplicas = 1
 		sts.Status.CurrentRevision = "rev-1"
 		sts.Status.UpdateRevision = "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
@@ -1494,12 +1608,136 @@ var _ = Describe("setLiveConfigCondition", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
 	})
+
+	It("does not write status when only the local port changes", func() {
+		By("setting LiveConfigApplied=False with a first failure message")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("failing again with the same error shape but a different local port")
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
+	})
+
+	It("writes status when the message changes beyond the local address", func() {
+		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
+		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvBefore := updated.ResourceVersion
+
+		for _, message := range []string{
+			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
+			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
+		} {
+			Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
+			cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal(message))
+			rvBefore = updated.ResourceVersion
+		}
+	})
+})
+
+var _ = Describe("setACLCondition", func() {
+	var (
+		node *valkeyiov1alpha1.ValkeyNode
+		r    *ValkeyNodeReconciler
+		ctx  context.Context
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		node = &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "setaclcond-test",
+				Namespace: "default",
+			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		r = &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+		}
+	})
+
+	AfterEach(func() {
+		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+	})
+
+	It("does not write status when only the local port changes", func() {
+		By("setting ACLApplied=False with a first failure message")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("failing again with the same error shape but a different local port")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
+	})
+
+	It("writes status when the message changes beyond the local address", func() {
+		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvBefore := updated.ResourceVersion
+
+		for _, message := range []string{
+			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
+			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
+		} {
+			Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
+			cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal(message))
+			rvBefore = updated.ResourceVersion
+		}
+	})
+
+	It("writes status when the reason changes", func() {
+		By("setting ACLApplied=False with ApplyFailed")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		rvAfterFirst := updated.ResourceVersion
+
+		By("transitioning to PendingPropagation, which must reach status")
+		Expect(r.setACLCondition(ctx, node, metav1.ConditionFalse, "PendingPropagation", "waiting")).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.ResourceVersion).NotTo(Equal(rvAfterFirst), "a reason change must still be written")
+		cond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal("PendingPropagation"))
+	})
 })
 
 type fakeConfigClient struct {
 	params map[string]string
 	err    error
-	closed bool
 
 	// aclHashes is the server's current user -> password hashes, as ACL USERS
 	// and ACL GETUSER would report them.
@@ -1546,8 +1784,6 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 	return normalizeHashes(slices.Clone(hashes)), nil
 }
 
-func (f *fakeConfigClient) Close() { f.closed = true }
-
 var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	ctx := context.Background()
 
@@ -1582,7 +1818,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("does nothing when the node has no ACL secret", func() {
 		fake := &fakeConfigClient{}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(""))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(BeZero(), "must not open a client when there is no ACL to manage")
@@ -1590,7 +1826,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("treats a missing secret as nothing to apply", func() {
 		fake := &fakeConfigClient{}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith("does-not-exist"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(BeZero())
@@ -1601,16 +1837,15 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		// password hash untouched. The reload must not be skipped on that basis
 		// or those edits would never reach the server.
 		fake := &fakeConfigClient{aclHashes: desiredHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1), "the reload is unconditional")
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("reports synced once the mounted file has caught up", func() {
 		fake := &fakeConfigClient{aclHashes: staleHashes, aclOnLoad: desiredHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.aclLoads).To(Equal(1))
@@ -1619,7 +1854,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	It("reports not synced when the mounted aclfile is still stale", func() {
 		// aclOnLoad nil: the LOAD reads the pre-update file and changes nothing.
 		fake := &fakeConfigClient{aclHashes: staleHashes}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeFalse(), "a premature LOAD must not be reported as applied")
 		Expect(fake.aclLoads).To(Equal(1))
@@ -1627,10 +1862,9 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("returns an error when ACL LOAD fails", func() {
 		fake := &fakeConfigClient{aclErr: fmt.Errorf("boom")}
-		synced, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 })
 
@@ -1641,7 +1875,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 
 	ctx := context.Background()
 
-	It("applies only allowlisted keys and closes the client", func() {
+	It("applies only allowlisted keys", func() {
 		fake := &fakeConfigClient{}
 		r := &ValkeyNodeReconciler{
 			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
@@ -1655,7 +1889,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeTrue())
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("returns an error when CONFIG SET fails", func() {
@@ -1668,7 +1901,6 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
 		Expect(applied).To(BeFalse())
-		Expect(fake.closed).To(BeTrue())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -53,8 +54,8 @@ const (
 type RolePoller struct {
 	// Client is cache-backed, so the per-tick List calls cost nothing.
 	Client client.Client
-	// APIReader is uncached, used only to read the TLS secret when scraping.
-	APIReader client.Reader
+	// ValkeyClients returns the pooled client for each node a pass scrapes.
+	ValkeyClients ClientProvider
 	// Interval is how often live state is sampled. Zero means
 	// DefaultRolePollInterval.
 	Interval time.Duration
@@ -63,8 +64,7 @@ type RolePoller struct {
 
 	// scrapeFunc, when set, overrides how the poller reads live cluster state.
 	// Tests inject a fake (envtest has no running Valkey server); production
-	// leaves it nil and dials through scrapeClusterState. This is also the seam
-	// where pooled clients replace per-tick connections.
+	// leaves it nil and dials through ValkeyClients.
 	scrapeFunc func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState
 
 	// backoff tracks consecutive scrape failures per node. Entries are pruned
@@ -90,6 +90,9 @@ func (p *RolePoller) NeedLeaderElection() bool {
 // Start runs the poll loop until the context is cancelled. It satisfies
 // manager.Runnable.
 func (p *RolePoller) Start(ctx context.Context) error {
+	if p.ValkeyClients == nil && p.scrapeFunc == nil {
+		return errors.New("role poller has no ClientProvider")
+	}
 	interval := p.Interval
 	if interval <= 0 {
 		interval = DefaultRolePollInterval
@@ -223,7 +226,6 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	if state == nil {
 		return
 	}
-	defer state.CloseClients()
 
 	for _, node := range candidates {
 		key := client.ObjectKeyFromObject(node)
@@ -261,19 +263,19 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 }
 
 // scrape reads live cluster state, through scrapeFunc when a test has injected
-// one. Fetching the operator password is what can fail here; without it every
-// connection would be rejected, so the pass is skipped rather than dialled.
+// one. Without the operator password every connection would be rejected, so
+// the pass is skipped rather than dialled.
 func (p *RolePoller) scrape(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, addresses []string) *valkey.ClusterState {
 	if p.scrapeFunc != nil {
 		return p.scrapeFunc(ctx, cluster, addresses)
 	}
-	password, err := fetchSystemUserPassword(ctx, operatorUser, p.Client, cluster.Name, cluster.Namespace)
+	dial, err := p.ValkeyClients.ForCluster(ctx, cluster)
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("skipping role poll, operator password unavailable",
 			"cluster", cluster.Name, "namespace", cluster.Namespace, "err", err)
 		return nil
 	}
-	return scrapeClusterState(ctx, p.APIReader, cluster, addresses, operatorUser, password)
+	return valkey.GetClusterState(ctx, addresses, DefaultPort, dial)
 }
 
 // emit pushes a reconcile trigger for the node, dropping it if the channel is
@@ -318,14 +320,17 @@ func (p *RolePoller) recordFailure(key types.NamespacedName, now time.Time) {
 // This mirrors the slot-ownership rule the ValkeyNode controller applies in
 // parseClusterNodesRole: the shard's primary is the node that owns slots, so a
 // slot-less master (a node still being added, or one that has just given up its
-// slots) is not reported as a primary. Such a node sits in PendingNodes rather
-// than a shard, so it resolves to "" here and is simply not compared.
+// slots) is not reported as a primary. It either sits in PendingNodes or heads
+// a shard without slots, and resolves to "" here so it is simply not compared.
 func liveRoleForAddress(state *valkey.ClusterState, address string) string {
 	shard := state.FindShardForAddress(address)
 	if shard == nil {
 		return ""
 	}
 	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
+		if len(shard.Slots) == 0 {
+			return ""
+		}
 		return RolePrimary
 	}
 	return RoleReplica

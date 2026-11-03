@@ -33,6 +33,8 @@ type trustSource struct {
 	ref    string
 	pem    []byte
 	format string
+	// key is the bundle Secret key that holds this source's last good copy.
+	key string
 }
 
 // pemBlockCertificate is the PEM block type of an X.509 certificate.

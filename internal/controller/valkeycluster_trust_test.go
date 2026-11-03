@@ -119,7 +119,7 @@ func (c labelFilteredClient) Get(ctx context.Context, key client.ObjectKey, obj 
 	return nil
 }
 
-func TestDeleteUnusedTrustBundle(t *testing.T) {
+func TestRetireTrustBundle(t *testing.T) {
 	ctx := context.Background()
 	serverCA := selfSignedCAPEM(t)
 	clientCA := selfSignedCAPEM(t)
@@ -172,10 +172,58 @@ func TestDeleteUnusedTrustBundle(t *testing.T) {
 			name, err := r.reconcileTrustBundle(ctx, cluster)
 			require.NoError(t, err)
 			assert.Empty(t, name)
-			_, exists := trustSecret(t, c)
+			s, exists := trustSecret(t, c)
 			assert.Equal(t, tc.kept, exists)
+			if tc.kept {
+				assert.Equal(t, [][]byte{derOf(t, serverCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]), "only the server root is trusted while nodes roll")
+				assert.Len(t, s.Data, 2, "ca.crt and the server root's copy")
+			}
 		})
 	}
+
+	t.Run("writes a renewed server root while nodes roll off the bundle", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		renewed := selfSignedCAPEM(t)
+		require.NoError(t, c.Update(ctx, caSecret("server-tls", renewed)))
+		cluster.Spec.Networking.TLS.ClientAuth.CA = nil
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, renewed)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+	})
+
+	t.Run("keeps the server root's copy while nodes roll off and the server secret is broken", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		require.NoError(t, c.Delete(ctx, caSecret("server-tls", nil)))
+		cluster.Spec.Networking.TLS.ClientAuth.CA = nil
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+	})
+
+	t.Run("leaves the bundle as it is when TLS is removed while nodes roll off it", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		before, _ := trustSecret(t, c)
+
+		cluster.Spec.Networking = nil
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		after, ok := trustSecret(t, c)
+		require.True(t, ok)
+		assert.Equal(t, before.Data, after.Data)
+	})
 
 	t.Run("leaves a Secret of that name the cluster does not control", func(t *testing.T) {
 		theirs := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "c-tls-trust", Namespace: "ns"}}
@@ -324,7 +372,169 @@ func TestReconcileTrustBundle(t *testing.T) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, cond.Reason)
 	})
 
-	t.Run("adds a renewed server root to the last good bundle while a source is broken", func(t *testing.T) {
+	aclAt := func(revision string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "internal-c-acl", Namespace: "ns"},
+			Data:       map[string][]byte{aclFilename: []byte("user " + aclRevisionUser + " off resetchannels -@all #" + revision + "\n")},
+		}
+	}
+	otherCA := selfSignedCAPEM(t)
+	entries := func(names ...string) []valkeyiov1alpha1.TrustSource {
+		out := make([]valkeyiov1alpha1.TrustSource, 0, len(names))
+		for _, n := range names {
+			out = append(out, valkeyiov1alpha1.TrustSource{SecretName: n})
+		}
+		return out
+	}
+	// brokenB starts from a bundle holding ca-a and ca-b, on a mounted node, with ca-b then deleted.
+	brokenB := func(t *testing.T) (*ValkeyClusterReconciler, client.Client, *valkeyiov1alpha1.ValkeyCluster) {
+		t.Helper()
+		cluster := trustTestCluster("ca-a", "ca-b")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", clientCA), caSecret("ca-b", otherCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		require.NoError(t, c.Delete(ctx, caSecret("ca-b", nil)))
+		return r, c, cluster
+	}
+	roots := func(t *testing.T, c client.Client) [][]byte {
+		t.Helper()
+		s, ok := trustSecret(t, c)
+		require.True(t, ok)
+		return bundleDERs(t, s.Data[tlsSecretKeyCA])
+	}
+
+	t.Run("revokes an entry removed from the spec while another source is broken", func(t *testing.T) {
+		r, c, cluster := brokenB(t)
+		cluster.Spec.Networking.TLS.ClientAuth.CA = entries("ca-b")
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, otherCA)}, roots(t, c))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("drops a broken entry once it leaves the spec", func(t *testing.T) {
+		r, c, cluster := brokenB(t)
+		cluster.Spec.Networking.TLS.ClientAuth.CA = entries("ca-a")
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, roots(t, c))
+		s, _ := trustSecret(t, c)
+		assert.NotContains(t, s.Data, trustSourceKey(valkeyiov1alpha1.TrustSource{SecretName: "ca-b"}), "its copy goes with it")
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("revokes a root removed from a readable source while another is broken", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a", "ca-b")
+		revoked := selfSignedCAPEM(t)
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", append(append([]byte{}, clientCA...), revoked...)), caSecret("ca-b", otherCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		require.NoError(t, c.Delete(ctx, caSecret("ca-b", nil)))
+		require.NoError(t, c.Update(ctx, caSecret("ca-a", clientCA)))
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, otherCA)}, roots(t, c))
+	})
+
+	t.Run("follows a readable source's new root while another is broken", func(t *testing.T) {
+		r, c, cluster := brokenB(t)
+		added := selfSignedCAPEM(t)
+		require.NoError(t, c.Update(ctx, caSecret("ca-a", append(append([]byte{}, clientCA...), added...))))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, added), derOf(t, otherCA)}, roots(t, c))
+	})
+
+	t.Run("holds that new root while a node is behind, and reports the broken source", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a", "ca-b")
+		node := nodeOnTrustBundle("c-0-0")
+		node.Status.AppliedACLRevision = "rev1"
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", clientCA), caSecret("ca-b", otherCA), aclAt("rev1"), node)
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		node.Status.AppliedACLRevision = "rev0"
+		require.NoError(t, c.Update(ctx, node)) // no status subresource is registered on the fake
+		require.NoError(t, c.Delete(ctx, caSecret("ca-b", nil)))
+		require.NoError(t, c.Update(ctx, caSecret("ca-a", append(append([]byte{}, clientCA...), selfSignedCAPEM(t)...))))
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, otherCA)}, roots(t, c))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("keeps a root moved to another entry while a source is broken", func(t *testing.T) {
+		r, c, cluster := brokenB(t)
+		require.NoError(t, c.Create(ctx, caSecret("ca-moved", clientCA)))
+		cluster.Spec.Networking.TLS.ClientAuth.CA = entries("ca-moved", "ca-b")
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, otherCA)}, roots(t, c))
+	})
+
+	t.Run("drops the roots of an entry edited to a name that does not exist", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		cluster.Spec.Networking.TLS.ClientAuth.CA = entries("ca-typo")
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name)
+		assert.Equal(t, [][]byte{derOf(t, serverCA)}, roots(t, c))
+		cond := tlsConfigured(cluster)
+		require.NotNil(t, cond)
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, cond.Reason)
+		assert.Contains(t, cond.Message, "ca-typo")
+	})
+
+	t.Run("keeps the server root when the server secret is renamed to one that cannot be read", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		cluster.Spec.Networking.TLS.Certificates.Server.SecretName = "server-tls-next"
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, roots(t, c))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("recreates a bundle deleted while nodes mount it and a source is broken", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), nodeOnTrustBundle("c-0-0"))
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name, "nodes must not roll off the bundle because of this")
+		assert.Equal(t, [][]byte{derOf(t, serverCA)}, roots(t, c))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("keeps nodes on the bundle when it cannot be rebuilt without a server root", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a")
+		r, c, _ := newTrustReconciler(t, caSecret("ca-a", clientCA), nodeOnTrustBundle("c-0-0"))
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, "c-tls-trust", name)
+		_, exists := trustSecret(t, c)
+		assert.False(t, exists)
+	})
+
+	t.Run("treats a damaged copy as no copy", func(t *testing.T) {
+		r, c, cluster := brokenB(t)
+		s, _ := trustSecret(t, c)
+		s.Data[trustSourceKey(valkeyiov1alpha1.TrustSource{SecretName: "ca-b"})] = []byte("garbage")
+		require.NoError(t, c.Update(ctx, s))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, roots(t, c))
+	})
+
+	t.Run("replaces the server root with a renewed one while a source is broken", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
 		_, err := r.reconcileTrustBundle(ctx, cluster)
@@ -338,8 +548,8 @@ func TestReconcileTrustBundle(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "c-tls-trust", name)
 		s, _ := trustSecret(t, c)
-		assert.Equal(t, [][]byte{derOf(t, renewed), derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]),
-			"the renewed server root is added and no last-good root is dropped")
+		assert.Equal(t, [][]byte{derOf(t, renewed), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]),
+			"the broken source keeps its last good root and the old server root goes, as on a healthy reconcile")
 		cond := tlsConfigured(cluster)
 		require.NotNil(t, cond)
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, cond.Reason, "the broken source is still reported")
@@ -436,17 +646,18 @@ func TestReconcileTrustBundle(t *testing.T) {
 
 	// A cluster whose aclfile is at revision rev1, with one node that has
 	// confirmed it and one that has not.
-	aclAt := func(revision string) *corev1.Secret {
-		return &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "internal-c-acl", Namespace: "ns"},
-			Data:       map[string][]byte{aclFilename: []byte("user " + aclRevisionUser + " off resetchannels -@all #" + revision + "\n")},
-		}
-	}
 	nodeAt := func(name, revision string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
 			Status:     valkeyiov1alpha1.ValkeyNodeStatus{AppliedACLRevision: revision},
 		}
+	}
+
+	// mountBundle moves a node onto the bundle, as the rolls after its first write do.
+	mountBundle := func(t *testing.T, c client.Client, node *valkeyiov1alpha1.ValkeyNode) {
+		t.Helper()
+		node.Spec.TLS = nodeOnTrustBundle(node.Name).Spec.TLS
+		require.NoError(t, c.Update(ctx, node))
 	}
 
 	t.Run("holds new roots until every node confirms the current ACL", func(t *testing.T) {
@@ -455,8 +666,10 @@ func TestReconcileTrustBundle(t *testing.T) {
 		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA),
 			aclAt("rev1"), nodeAt("c-0-0", "rev1"), behind)
 		_, err := r.reconcileTrustBundle(ctx, cluster)
-		require.NoError(t, err, "the first write is never held: nodes roll onto it with both mounts fresh")
+		require.NoError(t, err, "a bundle nothing mounts is never held: nodes roll onto it with both mounts fresh")
 		first, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, first.Data[tlsSecretKeyCA]))
+		mountBundle(t, c, behind)
 
 		added := selfSignedCAPEM(t)
 		require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), added...))))
@@ -464,7 +677,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "c-tls-trust", name, "nodes keep the current bundle")
 		held, _ := trustSecret(t, c)
-		assert.Equal(t, first.Data, held.Data, "the new root is not written yet")
+		assert.Equal(t, first.Data[tlsSecretKeyCA], held.Data[tlsSecretKeyCA], "the new root is not written yet")
 		cond := tlsConfigured(cluster)
 		require.NotNil(t, cond)
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, cond.Reason)
@@ -480,12 +693,29 @@ func TestReconcileTrustBundle(t *testing.T) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
 	})
 
-	t.Run("writes a renewed server root at once while a node is behind", func(t *testing.T) {
+	t.Run("does not hold new roots for a bundle nothing mounts", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA),
 			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
 		_, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
+
+		added := selfSignedCAPEM(t)
+		require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), added...))))
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		s, _ := trustSecret(t, c)
+		assert.Equal(t, [][]byte{derOf(t, serverCA), derOf(t, clientCA), derOf(t, added)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("writes a renewed server root at once while a node is behind", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		behind := nodeAt("c-0-0", "rev0")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), aclAt("rev1"), behind)
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		mountBundle(t, c, behind)
 
 		renewed := selfSignedCAPEM(t)
 		require.NoError(t, c.Update(ctx, caSecret("server-tls", renewed)))
@@ -511,10 +741,11 @@ func TestReconcileTrustBundle(t *testing.T) {
 	t.Run("drops a removed root at once while a root added with it waits", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		revoked := selfSignedCAPEM(t)
-		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), revoked...)),
-			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
+		behind := nodeAt("c-0-0", "rev0")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), revoked...)), aclAt("rev1"), behind)
 		_, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
+		mountBundle(t, c, behind)
 
 		added := selfSignedCAPEM(t)
 		require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), added...))))
@@ -527,10 +758,8 @@ func TestReconcileTrustBundle(t *testing.T) {
 
 	t.Run("holds client roots when the bundle is deleted while nodes mount it", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
-		mounting := nodeAt("c-0-0", "rev0")
-		mounting.Spec.TLS = &valkeyiov1alpha1.NodeTLSSpec{Certificates: valkeyiov1alpha1.NodeTLSCertificates{
-			TrustBundle: &valkeyiov1alpha1.NodeTrustBundleRef{SecretName: "c-tls-trust"},
-		}}
+		mounting := nodeOnTrustBundle("c-0-0")
+		mounting.Status.AppliedACLRevision = "rev0"
 		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), aclAt("rev1"), mounting)
 		name, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
@@ -549,7 +778,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
 	})
 
-	t.Run("adds a renewed server root to the last good bundle while a node is behind", func(t *testing.T) {
+	t.Run("writes a renewed server root while a source is broken and a node is behind", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		node := nodeOnTrustBundle("c-0-0")
 		node.Status.AppliedACLRevision = "rev1"
@@ -565,16 +794,17 @@ func TestReconcileTrustBundle(t *testing.T) {
 		_, err = r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
 		s, _ := trustSecret(t, c)
-		assert.Equal(t, [][]byte{derOf(t, renewed), derOf(t, serverCA), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
+		assert.Equal(t, [][]byte{derOf(t, renewed), derOf(t, clientCA)}, bundleDERs(t, s.Data[tlsSecretKeyCA]))
 	})
 
 	t.Run("writes a bundle that only loses roots at once", func(t *testing.T) {
 		cluster := trustTestCluster("client-ca")
 		extra := selfSignedCAPEM(t)
-		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), extra...)),
-			aclAt("rev1"), nodeAt("c-0-0", "rev0"))
+		behind := nodeAt("c-0-0", "rev0")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", append(append([]byte{}, clientCA...), extra...)), aclAt("rev1"), behind)
 		_, err := r.reconcileTrustBundle(ctx, cluster)
 		require.NoError(t, err)
+		mountBundle(t, c, behind)
 
 		require.NoError(t, c.Update(ctx, caSecret("client-ca", clientCA)))
 		_, err = r.reconcileTrustBundle(ctx, cluster)
@@ -592,6 +822,35 @@ func TestReconcileTrustBundle(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, tlsConfigured(cluster))
 	})
+
+	t.Run("leaves the bundle and the condition alone when reading a source fails transiently", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		before, _ := trustSecret(t, c)
+
+		r.APIReader = sourceErrorReader{Reader: c, name: "client-ca", err: errors.New("connection refused")}
+		_, err = r.reconcileTrustBundle(ctx, cluster)
+		require.Error(t, err)
+		after, _ := trustSecret(t, c)
+		assert.Equal(t, before.Data, after.Data)
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
+	})
+}
+
+// sourceErrorReader fails reads of one object and passes the rest through.
+type sourceErrorReader struct {
+	client.Reader
+	name string
+	err  error
+}
+
+func (r sourceErrorReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if key.Name == r.name {
+		return r.err
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 func TestReconcileTrustBundleConfigMapSources(t *testing.T) {

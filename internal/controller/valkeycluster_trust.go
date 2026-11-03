@@ -17,8 +17,9 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -51,23 +52,65 @@ var errTrustSourceNotFound = errors.New("trust source not found")
 // errTrustSourceInvalid marks a source whose contents are not a valid bundle.
 var errTrustSourceInvalid = errors.New("trust source invalid")
 
-// readTrustSources reads the server secret's ca.crt and then each
-// clientAuth.ca entry, in that order, converting a SPIFFE bundle to PEM. The
-// server root comes first and is always present, since peers verify each
-// other's server certificates on the cluster bus and replication links against
-// the same file. User Secrets and ConfigMaps are not in the operator's cache,
-// so they are read through the APIReader.
-func (r *ValkeyClusterReconciler) readTrustSources(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) ([]trustSource, error) {
-	refs := append([]valkeyiov1alpha1.TrustSource{serverTrustSource(cluster)}, cluster.GetTLS().ClientAuthCA()...)
-	sources := make([]trustSource, 0, len(refs))
-	for _, ref := range refs {
-		src, err := r.readTrustSource(ctx, cluster.Namespace, ref)
-		if err != nil {
-			return nil, err
-		}
-		sources = append(sources, src)
+// trustBundleServerKey holds the server root's last good copy in the bundle
+// Secret. It is fixed rather than named after the server secret, so renaming
+// that secret to one that cannot be read yet does not lose the root the cluster
+// bus depends on.
+const trustBundleServerKey = "source-server"
+
+// trustSourceKey names the bundle Secret key that holds a clientAuth.ca entry's
+// last good copy. It is a hash because a key cannot hold a resource name and a
+// key name in full.
+func trustSourceKey(ref valkeyiov1alpha1.TrustSource) string {
+	key := ref.Key
+	if key == "" {
+		key = tlsSecretKeyCA
 	}
-	return sources, nil
+	sum := sha256.Sum256([]byte(ref.ConfigMapName + "\x00" + ref.SecretName + "\x00" + key))
+	return "source-" + hex.EncodeToString(sum[:])
+}
+
+// resolveTrustSources returns what each source contributes to the bundle: the
+// server secret's ca.crt and then each clientAuth.ca entry, in that order. A
+// source that is missing or invalid contributes its last good copy from stored,
+// or nothing if it has none, and the first such failure is returned as broken.
+// An entry no longer in the spec is not read, so its roots leave the bundle even
+// while another source is broken. The server root comes first and is always
+// wanted, since peers verify each other's server certificates on the cluster bus
+// and replication links against the same file. User Secrets and ConfigMaps are
+// not in the operator's cache, so they are read through the APIReader. Any other
+// read failure is transient and returned as err.
+func (r *ValkeyClusterReconciler) resolveTrustSources(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, stored map[string][]byte) (sources []trustSource, broken, err error) {
+	refs := append([]valkeyiov1alpha1.TrustSource{serverTrustSource(cluster)}, cluster.GetTLS().ClientAuthCA()...)
+	sources = make([]trustSource, 0, len(refs))
+	for i, ref := range refs {
+		key := trustBundleServerKey
+		if i > 0 {
+			key = trustSourceKey(ref)
+		}
+		src, readErr := r.readTrustSource(ctx, cluster.Namespace, ref)
+		if readErr == nil {
+			if _, mergeErr := mergeTrustBundle([]trustSource{src}); mergeErr != nil {
+				readErr = fmt.Errorf("%w: %w", errTrustSourceInvalid, mergeErr)
+			}
+		}
+		if readErr == nil {
+			src.key = key
+			sources = append(sources, src)
+			continue
+		}
+		if !errors.Is(readErr, errTrustSourceNotFound) && !errors.Is(readErr, errTrustSourceInvalid) {
+			return nil, nil, readErr
+		}
+		if broken == nil {
+			broken = readErr
+		}
+		last := trustSource{ref: "the last good copy", pem: stored[key], key: key}
+		if _, mergeErr := mergeTrustBundle([]trustSource{last}); mergeErr == nil {
+			sources = append(sources, last)
+		}
+	}
+	return sources, broken, nil
 }
 
 // serverTrustSource is the server secret's ca.crt, the first source of every
@@ -247,10 +290,12 @@ func (r *ValkeyClusterReconciler) trustBundleInUse(ctx context.Context, cluster 
 	return false, nil
 }
 
-// deleteUnusedTrustBundle deletes the trust bundle Secret this cluster controls
-// once clientAuth.ca is empty and the nodes have rolled off it. A Secret of that
-// name it does not control is left alone.
-func (r *ValkeyClusterReconciler) deleteUnusedTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+// retireTrustBundle handles the trust bundle Secret this cluster controls once
+// clientAuth.ca is empty. While anything can still mount it, it holds only the
+// server root, so a root removed from the spec stops being trusted before the
+// nodes reach their rolls, and a renewed server root still reaches them. Then it
+// is deleted. A Secret of that name it does not control is left alone.
+func (r *ValkeyClusterReconciler) retireTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 	name := getTrustBundleSecretName(cluster.Name)
 	secret := &corev1.Secret{}
 	// Through the cache: this runs on every reconcile of a cluster without
@@ -263,14 +308,28 @@ func (r *ValkeyClusterReconciler) deleteUnusedTrustBundle(ctx context.Context, c
 		return nil
 	}
 	inUse, err := r.trustBundleInUse(ctx, cluster, name)
-	if err != nil || inUse {
+	if err != nil {
 		return err
 	}
-	if err := r.Delete(ctx, secret); err != nil {
-		return client.IgnoreNotFound(err)
+	if !inUse {
+		if err := r.Delete(ctx, secret); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		logf.FromContext(ctx).Info("deleted the unused trust bundle", "secret", name)
+		return nil
 	}
-	logf.FromContext(ctx).Info("deleted the unused trust bundle", "secret", name)
-	return nil
+	if cluster.GetTLS() == nil {
+		return nil
+	}
+	sources, _, err := r.resolveTrustSources(ctx, cluster, secret.Data)
+	if err != nil || len(sources) == 0 {
+		return err
+	}
+	bundle, err := mergeTrustBundle(sources)
+	if err != nil {
+		return err
+	}
+	return r.writeTrustBundle(ctx, cluster, secret, true, bundle, sources)
 }
 
 // holdNewRoots returns the bundle to write now. A new clientAuth.ca root waits
@@ -286,24 +345,22 @@ func (r *ValkeyClusterReconciler) deleteUnusedTrustBundle(ctx context.Context, c
 // refreshes it, and it would break the cluster bus while a node lags, because
 // peers present certificates renewed onto that root.
 //
-// The first bundle is not held, since nodes roll onto it with both mounts fresh.
-// A Secret deleted while nodes still mount it is not a first bundle: their pods
+// A bundle nothing mounts is not held, since nodes roll onto it with both mounts
+// fresh. A Secret deleted while nodes still mount it is not that case: their pods
 // keep running and pick up its replacement through the mount, so it holds only
 // the server root until the ACL has caught up.
 //
 // It also returns how many roots wait and the nodes they wait for.
-func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, exists bool, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
-	if !exists {
-		inUse, err := r.trustBundleInUse(ctx, cluster, name)
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		if !inUse {
-			return bundle, 0, nil, nil
-		}
-	}
+func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
 	kept, held := withoutNewRoots(current, bundle, serverRoot)
 	if held == 0 {
+		return bundle, 0, nil, nil
+	}
+	inUse, err := r.trustBundleInUse(ctx, cluster, name)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if !inUse {
 		return bundle, 0, nil, nil
 	}
 	behind, err := r.nodesBehindAppliedACL(ctx, cluster)
@@ -318,9 +375,10 @@ func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *val
 
 // writeTrustBundle creates the trust bundle Secret, or updates the existing
 // one read through the APIReader, so that it holds bundle and carries the
-// operator's labels. The caller has already refused a Secret this cluster
+// operator's labels, with each source's last good copy under its own key. Pods
+// project only ca.crt. The caller has already refused a Secret this cluster
 // does not control.
-func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, existing *corev1.Secret, exists bool, bundle []byte) error {
+func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, existing *corev1.Secret, exists bool, bundle []byte, sources []trustSource) error {
 	name := getTrustBundleSecretName(cluster.Name)
 	secret := existing
 	if !exists {
@@ -333,6 +391,9 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 	maps.Copy(secret.Labels, baseLabels(cluster.Name, "tls-trust"))
 	secret.Type = corev1.SecretTypeOpaque
 	secret.Data = map[string][]byte{tlsSecretKeyCA: bundle}
+	for _, src := range sources {
+		secret.Data[src.key] = src.pem
+	}
 	if err := controllerutil.SetControllerReference(cluster, secret, r.Scheme); err != nil {
 		return fmt.Errorf("owning trust bundle secret %q: %w", name, err)
 	}
@@ -354,50 +415,26 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 	return nil
 }
 
-// refreshServerRootInFallback keeps a last-good bundle in step with the
-// server certificate while a clientAuth.ca source is broken: nodes verify
-// peers against the same file, so a server certificate renewed onto a new CA
-// would otherwise break the cluster bus. It writes the current server root
-// followed by every root already in the bundle, so nothing is dropped. It is
-// best effort: if the server secret cannot be read either, the bundle is left
-// as it is. Like the server root in a fresh bundle, it does not wait for the
-// ACL (see reconcileTrustBundle).
-func (r *ValkeyClusterReconciler) refreshServerRootInFallback(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, existing *corev1.Secret) error {
-	server, err := r.readTrustSource(ctx, cluster.Namespace, serverTrustSource(cluster))
-	if err != nil {
-		return nil
-	}
-	merged, err := mergeTrustBundle([]trustSource{server, {ref: "the last good bundle", pem: existing.Data[tlsSecretKeyCA]}})
-	if err != nil || bytes.Equal(merged, existing.Data[tlsSecretKeyCA]) {
-		return nil
-	}
-	existing.Data[tlsSecretKeyCA] = merged
-	if err := r.Update(ctx, existing); err != nil {
-		return fmt.Errorf("adding the current server root to trust bundle secret %q: %w", existing.Name, err)
-	}
-	logf.FromContext(ctx).Info("added the current server root to the last good trust bundle", "secret", existing.Name)
-	return nil
-}
-
 // reconcileTrustBundle writes <cluster>-tls-trust when clientAuth.ca is set and
 // returns the name of the Secret nodes should reference as their trust bundle,
 // or "" when they should keep the server secret's ca.crt.
 //
-// When a source is missing or invalid, the trust Secret is left at its last
-// good roots and TLSConfigured=False reports why: writing a partial bundle
-// would silently lock out every client the dropped root signed. If no node
-// references a trust Secret yet, nodes keep the server root, so a typo in
-// clientAuth.ca never leaves a pod waiting on a volume that does not exist, and
-// a Secret left from an earlier clientAuth.ca is not mistaken for last good.
-// Only a Secret this cluster controls counts as written: one created by
-// anyone else under the same name is never trusted.
+// When a source is missing or invalid, it keeps the last good roots stored for
+// it and TLSConfigured=False reports why: dropping them would silently lock out
+// every client they signed. The other sources stay current, so a root removed
+// from one, or an entry removed from the spec, is not trusted any longer. An
+// entry whose name or key is edited counts as removed, so a typo there refuses
+// its clients until it is fixed. If nothing mounts the trust Secret yet, nodes
+// keep the server root, so a typo in clientAuth.ca never leaves a pod waiting on
+// a volume that does not exist, and a Secret left from an earlier clientAuth.ca
+// is not mistaken for last good. Only a Secret this cluster controls counts as
+// written: one created by anyone else under the same name is never trusted.
 //
-// When clientAuth.ca is emptied, the trust Secret stays until the nodes have
-// rolled off it, then it is deleted.
+// When clientAuth.ca is emptied, see retireTrustBundle.
 func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	if len(cluster.GetTLS().ClientAuthCA()) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
-		return "", r.deleteUnusedTrustBundle(ctx, cluster)
+		return "", r.retireTrustBundle(ctx, cluster)
 	}
 
 	name := getTrustBundleSecretName(cluster.Name)
@@ -427,28 +464,17 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		return "", nil
 	}
 
-	sources, err := r.readTrustSources(ctx, cluster)
-	var bundle []byte
-	if err == nil {
-		if bundle, err = mergeTrustBundle(sources); err != nil {
-			err = fmt.Errorf("%w: %w", errTrustSourceInvalid, err)
-		}
-	}
+	sources, broken, err := r.resolveTrustSources(ctx, cluster, existing.Data)
 	if err != nil {
-		var reason string
-		switch {
-		case errors.Is(err, errTrustSourceNotFound):
+		// A transient read failure: retry rather than report a bad source.
+		return "", err
+	}
+	if broken != nil {
+		reason := valkeyiov1alpha1.ReasonTrustSourceInvalid
+		if errors.Is(broken, errTrustSourceNotFound) {
 			reason = valkeyiov1alpha1.ReasonTrustSourceNotFound
-		case errors.Is(err, errTrustSourceInvalid):
-			reason = valkeyiov1alpha1.ReasonTrustSourceInvalid
-		default:
-			// A transient read failure: retry rather than report a bad source.
-			return "", err
 		}
-		r.reportTrustSourceError(ctx, cluster, reason, strings.TrimPrefix(err.Error(), errTrustSourceInvalid.Error()+": "))
-		if !exists {
-			return "", nil
-		}
+		r.reportTrustSourceError(ctx, cluster, reason, strings.TrimPrefix(broken.Error(), errTrustSourceInvalid.Error()+": "))
 		inUse, err := r.trustBundleInUse(ctx, cluster, name)
 		if err != nil {
 			return "", err
@@ -456,20 +482,28 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		if !inUse {
 			return "", nil
 		}
-		if err := r.refreshServerRootInFallback(ctx, cluster, existing); err != nil {
-			return "", err
+		// Without a server root the bundle cannot be rebuilt, and nodes cannot
+		// usefully roll off it either: leave things as they are.
+		if len(sources) == 0 || sources[0].key != trustBundleServerKey {
+			return name, nil
 		}
-		return name, nil
 	}
 
-	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, exists, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem)
+	bundle, err := mergeTrustBundle(sources)
+	if err != nil {
+		return "", err
+	}
+	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem)
 	if err != nil {
 		return "", err
 	}
 	// Write based on that authoritative read rather than CreateOrUpdate, which
 	// would read through the cache again.
-	if err := r.writeTrustBundle(ctx, cluster, existing, exists, toWrite); err != nil {
+	if err := r.writeTrustBundle(ctx, cluster, existing, exists, toWrite, sources); err != nil {
 		return "", err
+	}
+	if broken != nil {
+		return name, nil
 	}
 	if held > 0 {
 		setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending,

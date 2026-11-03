@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -837,6 +838,118 @@ func TestReconcileTrustBundle(t *testing.T) {
 		assert.Equal(t, before.Data, after.Data)
 		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
 	})
+}
+
+// refusingClient fails every write with err and passes reads through.
+type refusingClient struct {
+	client.Client
+	err error
+}
+
+func (c refusingClient) Create(context.Context, client.Object, ...client.CreateOption) error {
+	return c.err
+}
+
+func (c refusingClient) Update(context.Context, client.Object, ...client.UpdateOption) error {
+	return c.err
+}
+
+func (c refusingClient) Delete(context.Context, client.Object, ...client.DeleteOption) error {
+	return c.err
+}
+
+func TestTrustBundleWriteRefused(t *testing.T) {
+	ctx := context.Background()
+	serverCA := selfSignedCAPEM(t)
+	clientCA := selfSignedCAPEM(t)
+	otherCA := selfSignedCAPEM(t)
+	secrets := schema.GroupResource{Resource: "secrets"}
+	refusals := map[string]error{
+		"invalid":   apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "c-tls-trust", nil),
+		"too large": apierrors.NewRequestEntityTooLargeError("too large"),
+		"forbidden": apierrors.NewForbidden(secrets, "c-tls-trust", errors.New("denied by policy")),
+	}
+
+	for desc, refusal := range refusals {
+		t.Run("keeps the bundle in use and carries on when "+desc, func(t *testing.T) {
+			cluster := trustTestCluster("client-ca")
+			r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), nodeOnTrustBundle("c-0-0"))
+			_, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+			before, _ := trustSecret(t, c)
+
+			require.NoError(t, c.Update(ctx, caSecret("client-ca", append(append([]byte{}, clientCA...), otherCA...))))
+			r.Client = refusingClient{Client: c, err: refusal}
+			name, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err, "a refusal must not stop the reconcile")
+			assert.Equal(t, "c-tls-trust", name)
+			after, _ := trustSecret(t, c)
+			assert.Equal(t, before.Data, after.Data)
+			cond := tlsConfigured(cluster)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionFalse, cond.Status)
+			assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleRejected, cond.Reason)
+		})
+	}
+
+	t.Run("keeps nodes on the server root when nothing mounts the bundle", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))
+		r.Client = refusingClient{Client: c, err: refusals["invalid"]}
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+		assert.Empty(t, name)
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleRejected, tlsConfigured(cluster).Reason)
+	})
+
+	t.Run("keeps reporting a broken source, with one event", func(t *testing.T) {
+		cluster := trustTestCluster("ca-a", "ca-b")
+		r, c, rec := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("ca-a", clientCA), caSecret("ca-b", otherCA), nodeOnTrustBundle("c-0-0"))
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.NoError(t, err)
+
+		require.NoError(t, c.Delete(ctx, caSecret("ca-b", nil)))
+		require.NoError(t, c.Update(ctx, caSecret("ca-a", append(append([]byte{}, clientCA...), selfSignedCAPEM(t)...))))
+		r.Client = refusingClient{Client: c, err: refusals["invalid"]}
+		for range 2 {
+			_, err = r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+		}
+		assert.Equal(t, valkeyiov1alpha1.ReasonTrustSourceNotFound, tlsConfigured(cluster).Reason)
+		assert.Len(t, rec.Events, 1)
+	})
+
+	t.Run("returns any other write failure so it is retried", func(t *testing.T) {
+		cluster := trustTestCluster("client-ca")
+		r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))
+		r.Client = refusingClient{Client: c, err: apierrors.NewConflict(secrets, "c-tls-trust", errors.New("modified"))}
+		_, err := r.reconcileTrustBundle(ctx, cluster)
+		require.Error(t, err)
+	})
+
+	for desc, nodes := range map[string][]client.Object{
+		"rewriting": {nodeOnTrustBundle("c-0-0")},
+		"deleting":  nil,
+	} {
+		t.Run("reports a failure "+desc+" a retired bundle and carries on", func(t *testing.T) {
+			cluster := trustTestCluster("client-ca")
+			r, c, rec := newTrustReconciler(t, append(nodes, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA))...)
+			_, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+			before, _ := trustSecret(t, c)
+
+			cluster.Spec.Networking.TLS.ClientAuth.CA = nil
+			r.Client = refusingClient{Client: c, err: errors.New("connection refused")}
+			name, err := r.reconcileTrustBundle(ctx, cluster)
+			require.NoError(t, err)
+			assert.Empty(t, name, "nodes still roll off it")
+			after, ok := trustSecret(t, c)
+			require.True(t, ok)
+			assert.Equal(t, before.Data, after.Data)
+			require.Len(t, rec.Events, 1)
+			assert.Contains(t, <-rec.Events, "TrustBundleRetireFailed")
+		})
+	}
 }
 
 // sourceErrorReader fails reads of one object and passes the rest through.

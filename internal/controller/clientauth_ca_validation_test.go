@@ -22,7 +22,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -111,6 +114,41 @@ var _ = Describe("clientAuth.ca validation", func() {
 		c.Spec.Networking.TLS.Certificates.Server.SecretName = "ca-ok-server-tls-trust"
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, c)).To(Succeed())
+	})
+
+	It("reports a bundle over the Secret size limit and carries on", func() {
+		// One source under the limit, but over it once stored next to the
+		// merged bundle.
+		var roots []byte
+		for len(roots) < 600*1024 {
+			roots = append(roots, selfSignedCAPEM(GinkgoT())...)
+		}
+		secret := func(name string, data []byte) *corev1.Secret {
+			return &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Data:       map[string][]byte{tlsSecretKeyCA: data},
+			}
+		}
+		server, source := secret("too-large-server", selfSignedCAPEM(GinkgoT())), secret("too-large-source", roots)
+		Expect(k8sClient.Create(ctx, server)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, server)).To(Succeed()) })
+		Expect(k8sClient.Create(ctx, source)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, source)).To(Succeed()) })
+
+		cluster := clientAuthCACluster("too-large", valkeyiov1alpha1.TLSAuthClientsRequired, 0)
+		cluster.Spec.Networking.TLS.Certificates.Server.SecretName = server.Name
+		cluster.Spec.Networking.TLS.ClientAuth.CA = []valkeyiov1alpha1.TrustSource{{SecretName: source.Name}}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, cluster)).To(Succeed()) })
+
+		r := &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(10)}
+		name, err := r.reconcileTrustBundle(ctx, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(name).To(BeEmpty())
+		cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonTrustBundleRejected))
+		Expect(cond.Message).NotTo(ContainSubstring("BEGIN CERTIFICATE"))
 	})
 
 	It("rejects more than 16 entries", func() {

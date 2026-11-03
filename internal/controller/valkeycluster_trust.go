@@ -290,6 +290,14 @@ func (r *ValkeyClusterReconciler) trustBundleInUse(ctx context.Context, cluster 
 	return false, nil
 }
 
+// isWriteRefused reports whether the API server refused a write in a way that
+// retrying will not fix until something else changes: the object is invalid, for
+// example over the size limit, or an admission policy or RBAC denies it. A
+// conflict or a timeout is not one of these.
+func isWriteRefused(err error) bool {
+	return apierrors.IsInvalid(err) || apierrors.IsRequestEntityTooLargeError(err) || apierrors.IsForbidden(err)
+}
+
 // retireTrustBundle handles the trust bundle Secret this cluster controls once
 // clientAuth.ca is empty. While anything can still mount it, it holds only the
 // server root, so a root removed from the spec stops being trusted before the
@@ -434,7 +442,14 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	if len(cluster.GetTLS().ClientAuthCA()) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
-		return "", r.retireTrustBundle(ctx, cluster)
+		// Reported, not returned: a failure here must not stop the reconcile,
+		// since that would also stop the nodes rolling off the bundle. It is
+		// tried again on the next reconcile.
+		if err := r.retireTrustBundle(ctx, cluster); err != nil {
+			logf.FromContext(ctx).Error(err, "failed to retire the trust bundle")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "TrustBundleRetireFailed", "RetireTrustBundle", "Failed to retire the trust bundle: %v", err)
+		}
+		return "", nil
 	}
 
 	name := getTrustBundleSecretName(cluster.Name)
@@ -500,7 +515,23 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 	// Write based on that authoritative read rather than CreateOrUpdate, which
 	// would read through the cache again.
 	if err := r.writeTrustBundle(ctx, cluster, existing, exists, toWrite, sources); err != nil {
-		return "", err
+		if !isWriteRefused(err) {
+			return "", err
+		}
+		// Returning this would stop the reconcile, rolls and repairs included,
+		// on a growing backoff until the source is fixed. A broken source stays
+		// the one reported: reporting both would repeat both events every time.
+		if broken == nil {
+			r.reportTrustSourceError(ctx, cluster, valkeyiov1alpha1.ReasonTrustBundleRejected, err.Error())
+		}
+		inUse, err := r.trustBundleInUse(ctx, cluster, name)
+		if err != nil {
+			return "", err
+		}
+		if !inUse {
+			return "", nil
+		}
+		return name, nil
 	}
 	if broken != nil {
 		return name, nil

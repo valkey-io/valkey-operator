@@ -792,6 +792,11 @@ const (
 	// new roots are held back until every node confirms the current ACL. The
 	// trust Secret keeps its current roots meanwhile.
 	ReasonTrustBundlePending = "TrustBundlePending"
+	// ReasonTrustBundleRejected is used with ConditionTLSConfigured=False when
+	// the API server refuses to store the trust Secret, for example because it
+	// is over the size limit or an admission policy denies it. The trust Secret
+	// keeps its current contents and the rest of the reconcile carries on.
+	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
 const (

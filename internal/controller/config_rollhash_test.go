@@ -178,6 +178,13 @@ func TestBaseConfigGatesShutdownOnSigterm(t *testing.T) {
 }
 
 func TestSystemUserAclGatesRulesByVersion(t *testing.T) {
+	owner := map[string]string{ // each gated rule and the system user that holds it
+		"+cluster|getslotmigrations": operatorUser,
+		"+cluster|migrateslots":      operatorUser,
+		"+cluster|syncslots":         replicationUser,
+		"+commandlog|len":            exporterUser,
+	}
+	assert.Len(t, owner, len(versionGatedAclRules))
 	cases := map[string][]string{ // image -> rules that must be absent
 		"valkey/valkey:9.0.0":  nil,
 		"valkey/valkey:latest": nil,
@@ -185,13 +192,10 @@ func TestSystemUserAclGatesRulesByVersion(t *testing.T) {
 		"valkey/valkey:8.0.12": {"+cluster|migrateslots", "+cluster|getslotmigrations", "+cluster|syncslots", "+commandlog|len"},
 	}
 	for image, absent := range cases {
-		all := make([]string, 0, 64)
-		for _, user := range systemUsers {
-			all = append(all, strings.Fields(systemUserAcl(user, image))...)
+		for rule, user := range owner {
+			got := slices.Contains(strings.Fields(systemUserAcl(user, image)), rule)
+			assert.Equal(t, !slices.Contains(absent, rule), got, "%s %s %s", image, user, rule)
 		}
-		for rule := range versionGatedAclRules {
-			assert.Equal(t, !slices.Contains(absent, rule), slices.Contains(all, rule), "%s %s", image, rule)
-		}
-		assert.Contains(t, all, "+cluster|failover", image)
+		assert.Contains(t, strings.Fields(systemUserAcl(operatorUser, image)), "+cluster|failover", image)
 	}
 }

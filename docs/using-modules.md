@@ -63,7 +63,7 @@ metadata:
   name: my-cluster
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   containers:
     - name: server
       image: valkey-customized:1.0

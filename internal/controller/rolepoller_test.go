@@ -139,7 +139,7 @@ var _ = Describe("RolePoller", func() {
 
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 1},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 1},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 

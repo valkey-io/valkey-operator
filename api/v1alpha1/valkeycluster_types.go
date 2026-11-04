@@ -239,8 +239,8 @@ type ZonePinning struct {
 	// zones[(shardIndex + nodeIndex) % len(zones)], so each shard's pods walk
 	// the list from a different starting point, and while there are at least
 	// as many zones as shards, primaries land in distinct zones as a side
-	// effect. When replicas+1 exceeds the zone count, some members of a shard
-	// necessarily share a zone.
+	// effect. When replicasPerShard+1 exceeds the zone count, some members of
+	// a shard necessarily share a zone.
 	//
 	// Adding shards or replicas never moves an existing pod, because a pod's
 	// indices never change. Changing this list would move nearly all of them,
@@ -272,6 +272,7 @@ type ZonePinning struct {
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.replicas) && has(self.replicasPerShard))",message="replicas and replicasPerShard cannot both be set: replicas is deprecated, remove it (set it to null) in the same update that sets replicasPerShard"
 //
 // node.spread: reject primaries and pods both Required (they would render duplicate hostname DoNotSchedule constraints).
 // +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="node.spread.primaries and node.spread.pods cannot both be Required: they render duplicate kubernetes.io/hostname DoNotSchedule topology spread constraints"
@@ -324,9 +325,16 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Shards int32 `json:"shards"`
 
-	// The number of replicas for each shard group.
+	// Deprecated: use replicasPerShard, which has the same meaning. A spec
+	// cannot set both. This field is removed in v1beta1.
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// The number of replicas in each shard, in addition to its primary.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReplicasPerShard int32 `json:"replicasPerShard,omitempty"`
 
 	// Override resource requirements for the Valkey container in each pod
 	// +optional
@@ -667,6 +675,16 @@ func (c *ValkeyCluster) GetClusterDomain() string {
 	return c.Spec.Networking.ClusterDomain
 }
 
+// GetReplicasPerShard returns spec.replicasPerShard, or the deprecated
+// spec.replicas when replicasPerShard is unset. CEL rejects a spec that sets
+// both, and an unset field reads as 0, so the non-zero field wins.
+func (c *ValkeyCluster) GetReplicasPerShard() int32 {
+	if c.Spec.ReplicasPerShard != 0 {
+		return c.Spec.ReplicasPerShard
+	}
+	return c.Spec.Replicas
+}
+
 // PrefersHostnameAnnounce reports whether discovery announces hostnames.
 func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
 	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
@@ -761,7 +779,7 @@ const (
 	ConditionSlotsAssigned = "SlotsAssigned"
 	// ConditionConfigurationWarning flags a spec value the operator accepted but
 	// considers risky, for example a terminationGracePeriodSeconds too short for
-	// graceful failover.
+	// graceful failover, or a deprecated field.
 	ConditionConfigurationWarning = "ConfigurationWarning"
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
@@ -832,6 +850,7 @@ const (
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
 	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	ReasonDeprecatedField               = "DeprecatedField"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
@@ -849,21 +868,22 @@ const (
 // stamps each pod with a controller-revision-hash label of the StatefulSet
 // name plus an 11-character suffix, and label values stop at 63 characters,
 // so a StatefulSet name longer than 52 never gets a pod. The rule counts the
-// digits of the highest shard index (shards - 1) and node index (replicas),
-// so a scale-out that pushes an index into more digits is rejected too. A
-// Deployment carries no such label; there the headless Service valkey-<name>,
-// a DNS label of at most 63 characters, is the limit, until the indexes grow
-// enough for the ValkeyNode name <name>-<shard>-<node>, which every pod
-// carries as its app.kubernetes.io/instance label value, to reach 63 first.
+// digits of the highest shard index (shards - 1) and node index
+// (replicasPerShard), so a scale-out that pushes an index into more digits is
+// rejected too. A Deployment carries no such label; there the headless Service
+// valkey-<name>, a DNS label of at most 63 characters, is the limit, until the
+// indexes grow enough for the ValkeyNode name <name>-<shard>-<node>, which
+// every pod carries as its app.kubernetes.io/instance label value, to reach 63
+// first.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
-// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
-// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != self.metadata.name + '-tls-trust')",message="clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed trust bundle"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != self.metadata.name + '-tls-trust'",message="certificates.server.secretName cannot be <name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
 type ValkeyCluster struct {

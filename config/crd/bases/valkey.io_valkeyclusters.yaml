@@ -2448,7 +2448,15 @@ spec:
                     type: object
                 type: object
               replicas:
-                description: The number of replicas for each shard group.
+                description: |-
+                  Deprecated: use replicasPerShard, which has the same meaning. A spec
+                  cannot set both. This field is removed in v1beta1.
+                format: int32
+                minimum: 0
+                type: integer
+              replicasPerShard:
+                description: The number of replicas in each shard, in addition to
+                  its primary.
                 format: int32
                 minimum: 0
                 type: integer
@@ -3745,8 +3753,8 @@ spec:
                               zones[(shardIndex + nodeIndex) % len(zones)], so each shard's pods walk
                               the list from a different starting point, and while there are at least
                               as many zones as shards, primaries land in distinct zones as a side
-                              effect. When replicas+1 exceeds the zone count, some members of a shard
-                              necessarily share a zone.
+                              effect. When replicasPerShard+1 exceeds the zone count, some members of
+                              a shard necessarily share a zone.
 
                               Adding shards or replicas never moves an existing pod, because a pod's
                               indices never change. Changing this list would move nearly all of them,
@@ -3988,6 +3996,10 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
+            - message: 'replicas and replicasPerShard cannot both be set: replicas
+                is deprecated, remove it (set it to null) in the same update that
+                sets replicasPerShard'
+              rule: '!(has(self.replicas) && has(self.replicasPerShard))'
             - message: 'node.spread.primaries and node.spread.pods cannot both be
                 Required: they render duplicate kubernetes.io/hostname DoNotSchedule
                 topology spread constraints'
@@ -4245,8 +4257,9 @@ spec:
             must stay within 52 characters, because Kubernetes appends an 11-character
             controller-revision-hash to it in a pod label limited to 63 characters'
           rule: '(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
-            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
-            ? self.spec.replicas : 0)) <= 43'
+            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard)
+            ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas
+            : 0))) <= 43'
         - message: 'metadata.name is too long: the headless Service name valkey-<name>
             must stay within 63 characters'
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
@@ -4255,8 +4268,9 @@ spec:
             is the app.kubernetes.io/instance label value of its pod and must stay
             within 63 characters'
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
-            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
-            ? self.spec.replicas : 0)) <= 61'
+            || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard)
+            ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas
+            : 0))) <= 61'
         - message: 'clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed
             trust bundle'
           rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)

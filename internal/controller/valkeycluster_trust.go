@@ -42,7 +42,7 @@ import (
 // getTrustBundleSecretName is the operator-managed Secret holding the merged
 // trust roots that nodes load as tls-ca-cert-file.
 func getTrustBundleSecretName(clusterName string) string {
-	return clusterName + "-tls-trust"
+	return resourcePrefix + clusterName + "-tls-trust"
 }
 
 // errTrustSourceNotFound marks a source Secret, or its ca.crt key, that does
@@ -423,7 +423,7 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 	return nil
 }
 
-// reconcileTrustBundle writes <cluster>-tls-trust when clientAuth.ca is set and
+// reconcileTrustBundle writes valkey-<cluster>-tls-trust when clientAuth.ca is set and
 // returns the name of the Secret nodes should reference as their trust bundle,
 // or "" when they should keep the server secret's ca.crt.
 //

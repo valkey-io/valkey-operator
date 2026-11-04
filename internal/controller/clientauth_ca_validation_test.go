@@ -85,17 +85,18 @@ var _ = Describe("clientAuth.ca validation", func() {
 
 	It("rejects a Secret source naming the cluster's trust bundle", func() {
 		c := clientAuthCACluster("ca-bad-reserved", valkeyiov1alpha1.TLSAuthClientsRequired, 2)
-		c.Spec.Networking.TLS.ClientAuth.CA[1].SecretName = "ca-bad-reserved-tls-trust"
+		c.Spec.Networking.TLS.ClientAuth.CA[1].SecretName = "valkey-ca-bad-reserved-tls-trust"
 		err := k8sClient.Create(ctx, c)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("clientAuth.ca cannot name <name>-tls-trust"))
+		Expect(err.Error()).To(ContainSubstring("clientAuth.ca cannot name valkey-<name>-tls-trust"))
 	})
 
-	It("accepts another cluster's trust bundle and a ConfigMap of the reserved name", func() {
+	It("accepts another cluster's trust bundle, a name without the prefix, and a ConfigMap of the reserved name", func() {
 		c := clientAuthCACluster("ca-ok-reserved", valkeyiov1alpha1.TLSAuthClientsRequired, 0)
 		c.Spec.Networking.TLS.ClientAuth.CA = []valkeyiov1alpha1.TrustSource{
-			{SecretName: "other-tls-trust"},
-			{ConfigMapName: "ca-ok-reserved-tls-trust"},
+			{SecretName: "valkey-other-tls-trust"},
+			{SecretName: "ca-ok-reserved-tls-trust"},
+			{ConfigMapName: "valkey-ca-ok-reserved-tls-trust"},
 		}
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, c)).To(Succeed())
@@ -103,15 +104,15 @@ var _ = Describe("clientAuth.ca validation", func() {
 
 	It("rejects a server certificate Secret naming the trust bundle while clientAuth.ca is set", func() {
 		c := clientAuthCACluster("ca-bad-server", valkeyiov1alpha1.TLSAuthClientsRequired, 1)
-		c.Spec.Networking.TLS.Certificates.Server.SecretName = "ca-bad-server-tls-trust"
+		c.Spec.Networking.TLS.Certificates.Server.SecretName = "valkey-ca-bad-server-tls-trust"
 		err := k8sClient.Create(ctx, c)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("certificates.server.secretName cannot be <name>-tls-trust"))
+		Expect(err.Error()).To(ContainSubstring("certificates.server.secretName cannot be valkey-<name>-tls-trust"))
 	})
 
 	It("accepts that server certificate Secret name without clientAuth.ca", func() {
 		c := clientAuthCACluster("ca-ok-server", valkeyiov1alpha1.TLSAuthClientsRequired, 0)
-		c.Spec.Networking.TLS.Certificates.Server.SecretName = "ca-ok-server-tls-trust"
+		c.Spec.Networking.TLS.Certificates.Server.SecretName = "valkey-ca-ok-server-tls-trust"
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, c)).To(Succeed())
 	})

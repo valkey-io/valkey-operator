@@ -53,7 +53,7 @@ const (
 )
 
 // ACLUserPassword configures password authentication for a user.
-// +kubebuilder:validation:XValidation:message="secret is only used when type is Secret",rule="!has(self.secret) || !has(self.type) || self.type == 'Secret'"
+// +kubebuilder:validation:XValidation:message="secret is only used when type is Secret",rule="!has(self.secret) || !has(self.type) || self.type == 'Secret'",fieldPath=".secret",reason="FieldValueForbidden"
 type ACLUserPassword struct {
 	// How the user authenticates with a password
 	// +kubebuilder:default=Secret
@@ -80,7 +80,7 @@ type ACLPermissions struct {
 	Channels ChannelsAclSpec `json:"channels,omitempty"`
 
 	// Raw ACL for (additional) permissions. Appended to anything generated.
-	// +kubebuilder:validation:Pattern=`^[^\r\n]*$`
+	// +kubebuilder:validation:Pattern=`^[^\r\n]*\n?$`
 	// +optional
 	RawAcl string `json:"permissions,omitempty"`
 }
@@ -121,7 +121,10 @@ func (u ACLUserSpec) PasswordType() ACLPasswordType {
 type UserAclSpec struct {
 
 	// Username
-	// +kubebuilder:required:message=A username is required
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[^\s]+$`
 	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
 	Name string `json:"name"`
 

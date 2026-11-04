@@ -69,6 +69,12 @@ var _ = Describe("spec.acl validation", func() {
 
 	legacyUser := valkeyiov1alpha1.UserAclSpec{Name: "bob", Enabled: true, NoPassword: true}
 
+	legacyUsers := func(users ...valkeyiov1alpha1.UserAclSpec) func(*valkeyiov1alpha1.ValkeyClusterSpec) {
+		return func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
+			s.Users = users //nolint:staticcheck // legacy spec.users
+		}
+	}
+
 	readBack := func(cluster *valkeyiov1alpha1.ValkeyCluster) valkeyiov1alpha1.ACLUserSpec {
 		got := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, got)).To(Succeed())
@@ -164,6 +170,7 @@ var _ = Describe("spec.acl validation", func() {
 				},
 			}))
 			Expect(err).To(HaveOccurred(), "password.type %s", typ)
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].password.secret: Forbidden"))
 			Expect(err.Error()).To(ContainSubstring("secret is only used when type is Secret"))
 		}
 	})
@@ -210,6 +217,32 @@ var _ = Describe("spec.acl validation", func() {
 		}))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].permissions"))
+	})
+
+	It("accepts a trailing newline in permissions", func() {
+		_, err := create(aclUsers(valkeyiov1alpha1.ACLUserSpec{
+			Name:           "alice",
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+ping\n"},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		legacy := legacyUser
+		legacy.RawAcl = "+ping\n"
+		_, err = create(legacyUsers(legacy))
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("rejects invalid legacy usernames", func() {
+		for _, name := range []string{"", "bad name", "eve\nuser _injected on nopass +@all ~*", "tab\tname", strings.Repeat("a", 129)} {
+			legacy := legacyUser
+			legacy.Name = name
+			_, err := create(legacyUsers(legacy))
+			Expect(err).To(HaveOccurred(), "name %q", name)
+			Expect(err.Error()).To(ContainSubstring("spec.users[0].name"), "name %q", name)
+		}
+		legacy := legacyUser
+		legacy.Name = strings.Repeat("a", 128)
+		_, err := create(legacyUsers(legacy))
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("rejects whitespace in key and channel patterns", func() {

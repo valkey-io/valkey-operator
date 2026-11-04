@@ -159,13 +159,15 @@ spec:
                               type: string
                           type: object
                           x-kubernetes-validations:
-                          - message: secret is only used when type is Secret
+                          - fieldPath: .secret
+                            message: secret is only used when type is Secret
+                            reason: FieldValueForbidden
                             rule: '!has(self.secret) || !has(self.type) || self.type
                               == ''Secret'''
                         permissions:
                           description: Raw ACL for (additional) permissions. Appended
                             to anything generated.
-                          pattern: ^[^\r\n]*$
+                          pattern: ^[^\r\n]*\n?$
                           type: string
                         state:
                           default: Enabled
@@ -3991,6 +3993,9 @@ spec:
                       type: object
                     name:
                       description: Username
+                      maxLength: 128
+                      minLength: 1
+                      pattern: ^[^\s]+$
                       type: string
                       x-kubernetes-validations:
                       - message: Username cannot start with '_'
@@ -4018,7 +4023,7 @@ spec:
                     permissions:
                       description: Raw ACL for (additional) permissions. Appended
                         to anything generated.
-                      pattern: ^[^\r\n]*$
+                      pattern: ^[^\r\n]*\n?$
                       type: string
                     resetpass:
                       default: false

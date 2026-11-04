@@ -584,8 +584,8 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)
-- `spec.users` and `spec.acl.users` cannot both be set. An empty `acl.users: []` next to a non-empty `spec.users` is accepted, and the legacy list is used
-- Usernames are 1 to 128 characters with no whitespace. `permissions` cannot contain a newline, and key and channel patterns cannot contain whitespace
+- `spec.users` and `spec.acl.users` cannot both be non-empty. An empty list in one is accepted next to a non-empty list in the other, and the non-empty list is used
+- Usernames are 1 to 128 characters with no whitespace. `permissions` cannot contain a newline except a single trailing one, and key and channel patterns cannot contain whitespace
 - `password.secret` is only valid with `password.type: Secret`
 
 #### Migrating from `spec.users`

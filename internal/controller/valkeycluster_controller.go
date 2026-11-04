@@ -175,6 +175,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+
+	// Written before any ValkeyNode references it, so a pod never starts
+	// against a trust bundle volume that does not exist yet.
+	trustBundle, err := r.reconcileTrustBundle(ctx, cluster)
+	if err != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonTrustBundleError, err.Error(), metav1.ConditionFalse)
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{}, err
+	}
 	configWarnings := make([]configWarning, 0, 2)
 	// Surface a ConfigurationWarning condition when an explicit
 	// terminationGracePeriodSeconds is too short for the graceful failover on
@@ -230,7 +239,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// which shard is waiting and why. It comes up as a typed error so the
 	// walk can stop at that node the way it stops at one mid-roll.
 	var deferred *rollDeferredError
-	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state)
+	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
 	if errors.As(err, &deferred) {
 		err = nil
 	}
@@ -588,6 +597,12 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 		},
 	}
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		// SetControllerReference already rejects another controller. This
+		// error names the ValkeyNode. A free name is still created.
+		// Another cluster object with the same name is not enough.
+		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
+			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
+		}
 		svc.Labels = labels(cluster)
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		// ClusterIP is immutable after creation; preserve the existing value on updates.
@@ -638,7 +653,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 // It drives replica-first ordering and proactive failover. It is safe to reuse
 // across the loop: after an update we requeue immediately, re-scraping fresh
 // state before any further rolls.
-func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState) (bool, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, trustBundle string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	nodesPerShard := 1 + int(cluster.Spec.Replicas)
@@ -671,7 +686,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
 			var deferred *rollDeferredError
 			if errors.As(err, &deferred) {
 				err = nil
@@ -722,10 +737,11 @@ const (
 // Returns a nodeResult signaling the outcome or required next action.
 // liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
 // and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string) (nodeResult, error) {
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string, trustBundle string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
+	withTrustBundle(desired, trustBundle)
 	if err := setDesiredWorkloadRevision(desired); err != nil {
 		return nodeUnchanged, err
 	}
@@ -870,27 +886,31 @@ func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context
 }
 
 func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
+	template, err := livePodTemplate(ctx, r.Client, node)
+	if err != nil || template == nil {
+		return "", err
+	}
+	return podTemplateRollHash(*template), nil
+}
+
+// livePodTemplate returns the pod template of a node's workload, or nil when
+// the workload does not exist.
+func livePodTemplate(ctx context.Context, reader client.Reader, node *valkeyiov1alpha1.ValkeyNode) (*corev1.PodTemplateSpec, error) {
 	key := client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		dep := &appsv1.Deployment{}
-		if err := r.Get(ctx, key, dep); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", nil
-			}
-			return "", err
+		if err := reader.Get(ctx, key, dep); err != nil {
+			return nil, client.IgnoreNotFound(err)
 		}
-		return podTemplateRollHash(dep.Spec.Template), nil
+		return &dep.Spec.Template, nil
 	default:
 		// StatefulSet or empty (CRD default).
 		sts := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, key, sts); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", nil
-			}
-			return "", err
+		if err := reader.Get(ctx, key, sts); err != nil {
+			return nil, client.IgnoreNotFound(err)
 		}
-		return podTemplateRollHash(sts.Spec.Template), nil
+		return &sts.Spec.Template, nil
 	}
 }
 
@@ -953,7 +973,7 @@ func nodeTLSFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alph
 				SecretName: tlsSpec.Certificates.Server.SecretName,
 			},
 		},
-		ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+		ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
 			Mode:            tlsSpec.ClientAuthMode(),
 			CertificateUser: tlsSpec.ClientAuthCertificateUser(),
 		},
@@ -1093,8 +1113,19 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TerminationGracePeriodSeconds: gracePeriod,
 			PreferredEndpointType:         preferredEndpoint,
 			ClusterDomain:                 clusterDomain,
+			Service:                       nodeServiceFromCluster(cluster),
 		},
 	}
+}
+
+// nodeServiceFromCluster copies the cluster opt-in onto the node.
+// Nil clears it. The cluster writes one node spec per reconcile, so turning
+// the field off removes Services one node at a time.
+func nodeServiceFromCluster(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.ValkeyNodeServiceSpec {
+	if !cluster.PerNodeServicesEnabled() {
+		return nil
+	}
+	return &valkeyiov1alpha1.ValkeyNodeServiceSpec{}
 }
 
 // nodeAddresses returns the pod IPs of every node that has one. Nodes still

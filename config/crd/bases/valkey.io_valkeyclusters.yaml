@@ -2076,7 +2076,7 @@ spec:
               networking:
                 description: |-
                   Networking groups how clients and peers reach cluster nodes (TLS,
-                  in-cluster discovery announce, and later external access).
+                  in-cluster discovery announce, per-node Services, and later external access).
                 properties:
                   clusterDomain:
                     default: cluster.local
@@ -2103,6 +2103,12 @@ spec:
                         - IP
                         - Hostname
                         type: string
+                    type: object
+                  perNodeServices:
+                    description: |-
+                      PerNodeServices opts in to one ClusterIP Service per node.
+                      Omit it to create none. Each Service selects that one pod.
+                      Announce settings are unchanged.
                     type: object
                   tls:
                     description: TLS configuration for the cluster.
@@ -2136,6 +2142,64 @@ spec:
                           ClientAuth configures client certificate authentication. When omitted,
                           mode defaults to `Optional` and certificateUser defaults to `Disabled`.
                         properties:
+                          ca:
+                            description: |-
+                              CA lists additional trust roots for verifying client certificates, for
+                              clients whose certificates are issued by a different CA than the server
+                              certificate. Each entry names a Secret or a ConfigMap, and the key in it
+                              holding the roots (default `ca.crt`) as PEM certificates or a SPIFFE
+                              trust bundle.
+
+                              The operator merges the server secret's `ca.crt` with the roots under
+                              each entry's key, in list order and without duplicates, into the
+                              operator-managed `<cluster>-tls-trust` Secret, and nodes verify clients
+                              and peers against that bundle. The server root always stays in the
+                              bundle, since peers present the server certificate on the cluster bus
+                              and replication links.
+
+                              The operator re-reads these sources on every reconcile, and nodes reload
+                              a changed bundle live, without a restart. SPIRE's
+                              bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
+                              or `bundle.crt`).
+                            items:
+                              description: |-
+                                TrustSource references CA certificates held in a Secret or a ConfigMap.
+                                Exactly one of secretName and configMapName must be set.
+                              properties:
+                                configMapName:
+                                  description: |-
+                                    ConfigMapName is the name of a ConfigMap holding the roots, as SPIRE and
+                                    trust-manager publish bundles.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                key:
+                                  default: ca.crt
+                                  description: |-
+                                    Key is the key holding the roots. Defaults to `ca.crt`. Its contents are
+                                    either PEM certificates or a SPIFFE trust bundle (a JWK Set, as SPIRE
+                                    publishes under `bundle.spiffe`); the operator tells them apart by their
+                                    content and, for a SPIFFE bundle, uses the `x5c` certificate of every
+                                    key whose `use` is `x509-svid`.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[-._a-zA-Z0-9]+$
+                                  type: string
+                                secretName:
+                                  description: |-
+                                    SecretName is the name of a Secret holding the roots. The Secret type
+                                    does not matter.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of secretName and configMapName
+                                  must be set
+                                rule: has(self.secretName) != has(self.configMapName)
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: atomic
                           certificateUser:
                             default: Disabled
                             description: |-
@@ -2168,6 +2232,10 @@ spec:
                             Valkey ignores client certificates in that mode'
                           rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
                             has(self.certificateUser) && self.certificateUser != ''Disabled'')'
+                        - message: 'ca has no effect when mode=Disabled: Valkey ignores
+                            client certificates in that mode'
+                          rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
+                            has(self.ca) && size(self.ca) > 0)'
                       serverName:
                         description: |-
                           ServerName is the hostname used for TLS verification when the operator
@@ -4340,6 +4408,22 @@ spec:
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
             || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
             ? self.spec.replicas : 0)) <= 61'
+        - message: 'metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node>
+            must stay within 63 characters'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.perNodeServices)
+            || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) +
+            size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63'
+        - message: 'clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed
+            trust bundle'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
+            || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s,
+            !has(s.secretName) || s.secretName != self.metadata.name + ''-tls-trust'')'
+        - message: 'certificates.server.secretName cannot be <name>-tls-trust while
+            clientAuth.ca is set: it is the operator-managed trust bundle'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
+            || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca)
+            == 0 || self.spec.networking.tls.certificates.server.secretName != self.metadata.name
+            + ''-tls-trust'''
     served: true
     storage: true
     subresources:

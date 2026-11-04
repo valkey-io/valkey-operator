@@ -123,7 +123,7 @@ var _ = Describe("TLS client auth admission rules", Label("tls", "cel"), func() 
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 				TLS: &valkeyiov1alpha1.NodeTLSSpec{
 					Certificates: valkeyiov1alpha1.NodeTLSCertificates{Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "tls-secret"}},
-					ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+					ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
 						Mode:            valkeyiov1alpha1.TLSAuthClientsDisabled,
 						CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserCN,
 					},

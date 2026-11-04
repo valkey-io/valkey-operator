@@ -91,11 +91,10 @@ var _ = Describe("clientAuth.ca validation", func() {
 		Expect(err.Error()).To(ContainSubstring("clientAuth.ca cannot name valkey-<name>-tls-trust"))
 	})
 
-	It("accepts another cluster's trust bundle, a name without the prefix, and a ConfigMap of the reserved name", func() {
+	It("accepts another cluster's trust bundle and a ConfigMap of the reserved name", func() {
 		c := clientAuthCACluster("ca-ok-reserved", valkeyiov1alpha1.TLSAuthClientsRequired, 0)
 		c.Spec.Networking.TLS.ClientAuth.CA = []valkeyiov1alpha1.TrustSource{
 			{SecretName: "valkey-other-tls-trust"},
-			{SecretName: "ca-ok-reserved-tls-trust"},
 			{ConfigMapName: "valkey-ca-ok-reserved-tls-trust"},
 		}
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())

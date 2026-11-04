@@ -388,8 +388,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 					return fake, nil
 				},
 			}
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
 			Expect(fake.aclLoads).To(Equal(1))
 			Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 
@@ -459,8 +460,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 				},
 			}
 
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
 			Expect(fake.aclLoads).To(Equal(1))
 
 			updated := &valkeyiov1alpha1.ValkeyNode{}
@@ -472,8 +474,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 			fake.aclOnLoad = map[string][]string{"bob": {"bbb"}}
 
-			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			result, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
 			Expect(fake.aclLoads).To(Equal(2))
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())

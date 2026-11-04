@@ -193,8 +193,9 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		defer func() { _ = k8sClient.Delete(ctx, taken) }()
 
 		cfg := &fakeConfigClient{aclHashes: map[string][]string{"alice": {"old"}}, aclOnLoad: desired}
-		_, err := runToLive(cfg)
-		Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+		result, err := runToLive(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(30 * time.Second))
 		Expect(current().Status.Ready).To(BeFalse())
 		Expect(cfg.params).To(HaveKeyWithValue("tls-ca-cert-file", "/tls/ca.crt"))
 		Expect(appliedRevision()).To(Equal(revision))

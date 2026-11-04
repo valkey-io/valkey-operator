@@ -237,8 +237,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// A Service error sets status.ready false while the pod can still be up.
-	// Apply live config, ACL and the trust bundle in that case, then return
-	// the Service error. A pod that is not up has nothing to dial.
+	// Apply live config, ACL and the trust bundle in that case, then requeue.
+	// A pod that is not up has nothing to dial, so that path returns the error.
 	if serviceErr != nil {
 		up, err := r.podUp(ctx, node)
 		if err != nil {
@@ -256,7 +256,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return result, err
 	}
 	if serviceErr != nil {
-		return ctrl.Result{}, serviceErr
+		log.Error(serviceErr, "per-node Service not ready, requeuing")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances

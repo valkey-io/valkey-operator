@@ -168,7 +168,7 @@ type ValkeyNodeSpec struct {
 
 	// Service is set by the ValkeyCluster controller from
 	// spec.networking.perNodeServices. When set, this node has one ClusterIP
-	// Service. Empty means no Service.
+	// Service. Unset means no Service.
 	// +optional
 	Service *ValkeyNodeServiceSpec `json:"service,omitempty"`
 }

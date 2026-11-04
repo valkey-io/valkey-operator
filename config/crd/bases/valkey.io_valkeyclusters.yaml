@@ -1949,7 +1949,7 @@ spec:
               networking:
                 description: |-
                   Networking groups how clients and peers reach cluster nodes (TLS,
-                  in-cluster discovery announce, and later external access).
+                  in-cluster discovery announce, per-node Services, and later external access).
                 properties:
                   clusterDomain:
                     default: cluster.local
@@ -1976,6 +1976,12 @@ spec:
                         - IP
                         - Hostname
                         type: string
+                    type: object
+                  perNodeServices:
+                    description: |-
+                      PerNodeServices opts in to one ClusterIP Service per node.
+                      Omit it to create none. Each Service selects that one pod.
+                      Announce settings are unchanged.
                     type: object
                   tls:
                     description: TLS configuration for the cluster.
@@ -4257,6 +4263,11 @@ spec:
           rule: '!(has(self.spec.workloadType) && self.spec.workloadType == ''Deployment'')
             || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas)
             ? self.spec.replicas : 0)) <= 61'
+        - message: 'metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node>
+            must stay within 63 characters'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.perNodeServices)
+            || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) +
+            size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63'
         - message: 'clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed
             trust bundle'
           rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)

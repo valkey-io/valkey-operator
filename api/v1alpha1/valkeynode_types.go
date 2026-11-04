@@ -165,7 +165,16 @@ type ValkeyNodeSpec struct {
 	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// Service is set by the ValkeyCluster controller from
+	// spec.networking.perNodeServices. When set, this node has one ClusterIP
+	// Service. Unset means no Service.
+	// +optional
+	Service *ValkeyNodeServiceSpec `json:"service,omitempty"`
 }
+
+// ValkeyNodeServiceSpec is empty. Presence turns the node's ClusterIP Service on.
+type ValkeyNodeServiceSpec struct{}
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
 // ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this
@@ -378,6 +387,8 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
+	ValkeyNodeReasonServiceError = "ServiceError"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

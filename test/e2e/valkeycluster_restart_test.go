@@ -61,7 +61,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   persistence:
     size: 1Gi
   config:

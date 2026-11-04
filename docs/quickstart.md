@@ -34,7 +34,7 @@ metadata:
   name: my-cluster
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
 EOF
 ```
 

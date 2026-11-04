@@ -4,7 +4,7 @@ metadata:
   name: cluster-sample
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   config:
     maxmemory: 50mb
     maxmemory-policy: allkeys-lfu

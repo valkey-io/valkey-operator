@@ -110,7 +110,7 @@ metadata:
 spec:
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -362,7 +362,7 @@ metadata:
 spec:
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -573,7 +573,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:

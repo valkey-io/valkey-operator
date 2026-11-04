@@ -394,7 +394,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, singleNodeClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -743,7 +743,7 @@ metadata:
   name: %s
 spec:
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, baseShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
 			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
@@ -866,7 +866,7 @@ metadata:
   name: %s
 spec:
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, initialShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scalein.yaml")
 			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
@@ -1022,7 +1022,7 @@ metadata:
   name: valkeycluster-degraded-status-test
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
 `
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-degraded.yaml")
@@ -1154,7 +1154,7 @@ metadata:
   name: %[1]s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   users:
     - name: default
       enabled: true
@@ -1421,7 +1421,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   workloadType: StatefulSet
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -1455,7 +1455,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, addClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1483,7 +1483,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   persistence:
     size: 1Gi
 `, shrinkClusterName)
@@ -1517,7 +1517,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1599,7 +1599,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "%s"
@@ -1647,7 +1647,7 @@ metadata:
   name: %s
 spec:
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1723,7 +1723,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1793,7 +1793,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     zone:
       spread:
@@ -1880,7 +1880,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1919,7 +1919,7 @@ metadata:
   name: %s
 spec:
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1998,7 +1998,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2014,7 +2014,7 @@ spec:
 
 			By("scaling to 1 replica")
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2047,7 +2047,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2136,7 +2136,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2301,7 +2301,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2433,7 +2433,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)

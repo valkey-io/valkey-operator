@@ -115,7 +115,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 2
+  replicasPerShard: 2
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -141,7 +141,7 @@ spec:
 
 			By("scaling replicas from 2 to 1, which puts shard 0's primary out of range")
 			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -244,7 +244,7 @@ metadata:
   name: %s
 spec:
   shards: 4
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -327,7 +327,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   config:
     cluster-replica-no-failover: "yes"
 `, clusterName))

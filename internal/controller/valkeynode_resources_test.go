@@ -509,7 +509,7 @@ func TestRefuseDesiredSTSCreate(t *testing.T) {
 func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 	base := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 0},
 	}
 
 	t.Run("default IP leaves PreferredEndpointType empty and still sets ClusterDomain", func(t *testing.T) {
@@ -1277,10 +1277,10 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards:       3,
-			Replicas:     1,
-			Image:        "valkey/valkey:9.1.0",
-			WorkloadType: valkeyv1.WorkloadTypeStatefulSet,
+			Shards:           3,
+			ReplicasPerShard: 1,
+			Image:            "valkey/valkey:9.1.0",
+			WorkloadType:     valkeyv1.WorkloadTypeStatefulSet,
 			Persistence: &valkeyv1.PersistenceSpec{
 				Size:             resource.MustParse("10Gi"),
 				StorageClassName: &storageClassName,
@@ -1345,7 +1345,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 func TestBuildClusterValkeyNode_NodeSpreadDefaultsRenderNothing(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)
@@ -1359,7 +1359,7 @@ func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1388,7 +1388,7 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				Affinity:                  &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}},
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
@@ -1414,7 +1414,7 @@ func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1445,7 +1445,7 @@ func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
 				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
@@ -1717,7 +1717,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
 				Zone: &valkeyv1.ZoneScheduling{
@@ -1746,7 +1746,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)

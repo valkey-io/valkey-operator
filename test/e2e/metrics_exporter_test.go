@@ -52,7 +52,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: true
     resources:
@@ -313,7 +313,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: false
 `, valkeyName)

@@ -7,7 +7,7 @@ metadata:
   name: cluster-sample-topology-spread
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:

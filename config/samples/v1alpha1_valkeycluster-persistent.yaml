@@ -4,6 +4,6 @@ metadata:
   name: cluster-persistent-sample
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   persistence:
     size: 1Gi

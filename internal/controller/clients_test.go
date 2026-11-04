@@ -240,7 +240,7 @@ func TestForNode(t *testing.T) {
 		},
 	}
 	mTLS := tlsOn.DeepCopy()
-	mTLS.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
+	mTLS.ClientAuth = &valkeyiov1alpha1.NodeTLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
 
 	t.Run("no pod IP is an error", func(t *testing.T) {
 		var got []vclient.ClientOption
@@ -404,7 +404,7 @@ func TestForNodeRebuildsOnTLSChange(t *testing.T) {
 			spec.ServerName = "other.ns.svc"
 		},
 		"client certificate required": func(_ *testing.T, _ client.Client, spec *valkeyiov1alpha1.NodeTLSSpec) {
-			spec.ClientAuth = &valkeyiov1alpha1.TLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
+			spec.ClientAuth = &valkeyiov1alpha1.NodeTLSClientAuthSpec{Mode: valkeyiov1alpha1.TLSAuthClientsRequired}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

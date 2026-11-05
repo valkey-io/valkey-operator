@@ -166,6 +166,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.reconcileUsersAcl(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, err.Error(), metav1.ConditionFalse)
+		if errors.Is(err, errSystemPasswordSecretMissing) {
+			// A refused regeneration leaves the operator unable to manage
+			// the cluster until the Secret is restored, which is a
+			// degradation with its own reason rather than a generic
+			// users ACL error. The healthy reconcile path removes the
+			// condition again once the Secret is back.
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonSystemPasswordMissing, err.Error(), metav1.ConditionTrue)
+		}
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}

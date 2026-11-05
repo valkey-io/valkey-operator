@@ -1,0 +1,249 @@
+# ConfigMap wrapping the dashboard in docs/dashboards/valkey-operator.json for
+# kube-prometheus-stack / grafana-operator's "sidecar watches ConfigMaps"
+# auto-discovery convention (grafana_dashboard: "1"). Keep the two files in sync.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valkey-operator-grafana-dashboard
+  namespace: system
+  labels:
+    app.kubernetes.io/name: valkey-operator
+    app.kubernetes.io/managed-by: kustomize
+    grafana_dashboard: "1"
+data:
+  valkey-operator.json: |
+    {
+      "title": "Valkey Operator",
+      "uid": "valkey-operator",
+      "schemaVersion": 39,
+      "version": 1,
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "tags": ["valkey", "valkey-operator"],
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {}
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(valkey_operator_cluster_shards, target_namespace)",
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" }
+          },
+          {
+            "name": "cluster",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(valkey_operator_cluster_shards{target_namespace=~\"$namespace\"}, valkey_cluster)",
+            "refresh": 2,
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        { "type": "row", "title": "Operator: cluster health", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100 },
+
+        {
+          "type": "stat",
+          "title": "Cluster state",
+          "id": 1,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "expr": "valkey_operator_cluster_state_info{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"} == 1",
+              "legendFormat": "{{valkey_cluster}}: {{state}}",
+              "instant": true
+            }
+          ],
+          "options": { "textMode": "name", "colorMode": "background" },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": [
+              { "matcher": { "id": "byRegexp", "options": ".*: Ready$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Reconciling$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Initializing$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Degraded$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+              { "matcher": { "id": "byRegexp", "options": ".*: Failed$" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+            ]
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Ready shards vs desired shards",
+          "id": 2,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 9, "x": 6, "y": 1 },
+          "targets": [
+            { "expr": "valkey_operator_cluster_shards_desired{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: desired shards" },
+            { "expr": "valkey_operator_cluster_shards{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: observed shards" },
+            { "expr": "valkey_operator_cluster_shards_ready{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}", "legendFormat": "{{valkey_cluster}}: ready shards" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Failovers (rate over 30m, by type)",
+          "id": 3,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 9, "x": 15, "y": 1 },
+          "targets": [
+            { "expr": "increase(valkey_operator_failovers_total{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}[30m])", "legendFormat": "{{valkey_cluster}}: {{type}}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars" } } }
+        },
+
+        { "type": "row", "title": "Operator: reconciliation internals", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 101 },
+        {
+          "type": "timeseries",
+          "title": "Slot migration batches completed (rate)",
+          "id": 4,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 10 },
+          "targets": [
+            { "expr": "rate(valkey_operator_slot_migration_batches_total{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}[5m])", "legendFormat": "{{valkey_cluster}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "RolePoller triggers (rate)",
+          "id": 5,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 10 },
+          "targets": [
+            { "expr": "rate(valkey_operator_role_triggers_total{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}[5m])", "legendFormat": "{{valkey_cluster}}: triggered" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "RolePoller triggers dropped (should stay at 0)",
+          "id": 6,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 10 },
+          "targets": [
+            { "expr": "increase(valkey_operator_role_triggers_dropped_total{target_namespace=~\"$namespace\",valkey_cluster=~\"$cluster\"}[5m])", "legendFormat": "{{valkey_cluster}}" }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+        },
+
+        { "type": "row", "title": "Per-node: health (metrics-exporter / redis_exporter)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }, "id": 102 },
+        {
+          "type": "stat",
+          "title": "Nodes up",
+          "id": 7,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 5, "w": 4, "x": 0, "y": 18 },
+          "targets": [
+            { "expr": "sum(redis_up{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"})" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Memory used vs maxmemory, per pod",
+          "id": 8,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 10, "x": 4, "y": 18 },
+          "targets": [
+            { "expr": "redis_memory_used_bytes{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}", "legendFormat": "{{pod}}: used" },
+            { "expr": "redis_memory_max_bytes{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"} > 0", "legendFormat": "{{pod}}: max" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Memory fragmentation ratio",
+          "id": 9,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 10, "x": 14, "y": 18 },
+          "targets": [
+            { "expr": "redis_mem_fragmentation_ratio{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}", "legendFormat": "{{pod}}" }
+          ]
+        },
+
+        { "type": "row", "title": "Per-node: traffic and replication", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }, "id": 103 },
+        {
+          "type": "timeseries",
+          "title": "Connected clients, per pod",
+          "id": 10,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 27 },
+          "targets": [
+            { "expr": "redis_connected_clients{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}", "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Commands processed (ops/sec), per pod",
+          "id": 11,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 27 },
+          "targets": [
+            { "expr": "rate(redis_commands_processed_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m])", "legendFormat": "{{pod}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Connected replicas, per primary pod",
+          "id": 12,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 27 },
+          "targets": [
+            { "expr": "redis_connected_slaves{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}", "legendFormat": "{{pod}}" }
+          ]
+        },
+
+        { "type": "row", "title": "Per-node: keyspace and persistence", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }, "id": 104 },
+        {
+          "type": "timeseries",
+          "title": "Keyspace hit ratio, per pod",
+          "id": 13,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 35 },
+          "targets": [
+            {
+              "expr": "rate(redis_keyspace_hits_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m]) / (rate(redis_keyspace_hits_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m]) + rate(redis_keyspace_misses_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m]))",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Evicted / expired keys (rate), per pod",
+          "id": 14,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 35 },
+          "targets": [
+            { "expr": "rate(redis_evicted_keys_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m])", "legendFormat": "{{pod}}: evicted" },
+            { "expr": "rate(redis_expired_keys_total{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}[5m])", "legendFormat": "{{pod}}: expired" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Seconds since last RDB save, per pod",
+          "id": 15,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 35 },
+          "targets": [
+            { "expr": "time() - redis_rdb_last_save_timestamp_seconds{valkey_cluster=~\"$cluster\",target_namespace=~\"$namespace\"}", "legendFormat": "{{pod}}" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        }
+      ]
+    }

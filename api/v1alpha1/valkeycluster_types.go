@@ -378,7 +378,7 @@ type ValkeyClusterSpec struct {
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// Networking groups how clients and peers reach cluster nodes (TLS,
-	// in-cluster discovery announce, and later external access).
+	// in-cluster discovery announce, per-node Services, and later external access).
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
 
@@ -442,7 +442,16 @@ type NetworkingSpec struct {
 	// TLS configuration for the cluster.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+
+	// PerNodeServices opts in to one ClusterIP Service per node.
+	// Omit it to create none. Each Service selects that one pod.
+	// Announce settings are unchanged.
+	// +optional
+	PerNodeServices *PerNodeServicesSpec `json:"perNodeServices,omitempty"`
 }
+
+// PerNodeServicesSpec is empty. Presence turns per-node Services on.
+type PerNodeServicesSpec struct{}
 
 // DiscoverySpec configures how nodes announce themselves for in-cluster clients.
 type DiscoverySpec struct {
@@ -493,6 +502,7 @@ const (
 // TLSClientAuthSpec configures client certificate authentication for incoming
 // TLS connections.
 // +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.ca) && size(self.ca) > 0)",message="ca has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
 type TLSClientAuthSpec struct {
 	// Mode controls whether clients must authenticate with a TLS certificate.
 	// `Required` enforces mTLS, `Optional` allows both authenticated and
@@ -511,6 +521,59 @@ type TLSClientAuthSpec struct {
 	// +kubebuilder:default=Disabled
 	// +optional
 	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+
+	// CA lists additional trust roots for verifying client certificates, for
+	// clients whose certificates are issued by a different CA than the server
+	// certificate. Each entry names a Secret or a ConfigMap, and the key in it
+	// holding the roots (default `ca.crt`) as PEM certificates or a SPIFFE
+	// trust bundle.
+	//
+	// The operator merges the server secret's `ca.crt` with the roots under
+	// each entry's key, in list order and without duplicates, into the
+	// operator-managed `valkey-<cluster>-tls-trust` Secret, and nodes verify clients
+	// and peers against that bundle. The server root always stays in the
+	// bundle, since peers present the server certificate on the cluster bus
+	// and replication links.
+	//
+	// The operator re-reads these sources on every reconcile, and nodes reload
+	// a changed bundle live, without a restart. SPIRE's
+	// bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
+	// or `bundle.crt`).
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	CA []TrustSource `json:"ca,omitempty"`
+}
+
+// TrustSource references CA certificates held in a Secret or a ConfigMap.
+// Exactly one of secretName and configMapName must be set.
+// +kubebuilder:validation:XValidation:rule="has(self.secretName) != has(self.configMapName)",message="exactly one of secretName and configMapName must be set"
+type TrustSource struct {
+	// SecretName is the name of a Secret holding the roots. The Secret type
+	// does not matter.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// ConfigMapName is the name of a ConfigMap holding the roots, as SPIRE and
+	// trust-manager publish bundles.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ConfigMapName string `json:"configMapName,omitempty"`
+
+	// Key is the key holding the roots. Defaults to `ca.crt`. Its contents are
+	// either PEM certificates or a SPIFFE trust bundle (a JWK Set, as SPIRE
+	// publishes under `bundle.spiffe`); the operator tells them apart by their
+	// content and, for a SPIFFE bundle, uses the `x5c` certificate of every
+	// key whose `use` is `x509-svid`.
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // EffectiveMode returns mode, defaulting to Optional when unset.
@@ -566,6 +629,14 @@ func (t *TLSSpec) ClientAuthCertificateUser() TLSAuthClientsUser {
 	return t.ClientAuth.EffectiveCertificateUser()
 }
 
+// ClientAuthCA returns the additional client trust sources for t, or nil.
+func (t *TLSSpec) ClientAuthCA() []TrustSource {
+	if t == nil || t.ClientAuth == nil {
+		return nil
+	}
+	return t.ClientAuth.CA
+}
+
 // TLSCertificates groups the certificate slots for a ValkeyCluster. Today
 // `server` is the only slot; the trust-source, outbound-identity and
 // control-plane-identity slots land in later phases of #360.
@@ -608,6 +679,11 @@ func (c *ValkeyCluster) GetClusterDomain() string {
 // PrefersHostnameAnnounce reports whether discovery announces hostnames.
 func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
 	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
+}
+
+// PerNodeServicesEnabled reports whether per-node ClusterIP Services are requested.
+func (c *ValkeyCluster) PerNodeServicesEnabled() bool {
+	return c != nil && c.Spec.Networking != nil && c.Spec.Networking.PerNodeServices != nil
 }
 
 // CertificateSource references a certificate and its private key. Today the
@@ -704,6 +780,37 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionTLSConfigured reports whether the operator-managed TLS trust
+	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
+	// non-empty.
+	ConditionTLSConfigured = "TLSConfigured"
+)
+
+const (
+	// ReasonTrustBundleReady is used with ConditionTLSConfigured=True when
+	// valkey-<cluster>-tls-trust holds the server root and every clientAuth.ca root.
+	ReasonTrustBundleReady = "TrustBundleReady"
+	// ReasonTrustSourceNotFound is used with ConditionTLSConfigured=False when
+	// a source Secret or ConfigMap, or its configured key, does not exist. The
+	// trust Secret keeps its last good roots.
+	ReasonTrustSourceNotFound = "TrustSourceNotFound"
+	// ReasonTrustSourceInvalid is used with ConditionTLSConfigured=False when a
+	// source's key holds neither PEM certificates nor a SPIFFE bundle with an
+	// X.509 authority. The trust Secret keeps its last good roots.
+	ReasonTrustSourceInvalid = "TrustSourceInvalid"
+	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
+	// a Secret named valkey-<cluster>-tls-trust exists but this cluster does not
+	// control it. Nodes stay on the server root.
+	ReasonTrustBundleConflict = "TrustBundleConflict"
+	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
+	// new roots are held back until every node confirms the current ACL. The
+	// trust Secret keeps its current roots meanwhile.
+	ReasonTrustBundlePending = "TrustBundlePending"
+	// ReasonTrustBundleRejected is used with ConditionTLSConfigured=False when
+	// the API server refuses to store the trust Secret, for example because it
+	// is over the size limit or an admission policy denies it. The trust Secret
+	// keeps its current contents and the rest of the reconcile carries on.
+	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
 const (
@@ -728,6 +835,7 @@ const (
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"
 	ReasonRebalanceFailed               = "RebalanceFailed"
+	ReasonScaleInBlocked                = "ScaleInBlocked"
 	ReasonACLApplyFailed                = "ACLApplyFailed"
 	ReasonUsersAclError                 = "UsersACLError"
 	ReasonUpdatingNodes                 = "UpdatingNodes"
@@ -741,6 +849,9 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonTrustBundleError is used with ConditionReady when the operator
+	// cannot read a trust source or write valkey-<cluster>-tls-trust.
+	ReasonTrustBundleError = "TrustBundleError"
 )
 
 // +kubebuilder:object:root=true
@@ -767,6 +878,9 @@ const (
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

@@ -3269,6 +3269,12 @@ spec:
                   ServerConfigMapName specifies the name of the ConfigMap that contains the
                   scripts, and Valkey config for the ValkeyNode.
                 type: string
+              service:
+                description: |-
+                  Service is set by the ValkeyCluster controller from
+                  spec.networking.perNodeServices. When set, this node has one ClusterIP
+                  Service. Unset means no Service.
+                type: object
               serviceAccountName:
                 description: |-
                   ServiceAccountName is the name of the Kubernetes ServiceAccount used by
@@ -3306,6 +3312,23 @@ spec:
                         required:
                         - secretName
                         type: object
+                      trustBundle:
+                        description: |-
+                          TrustBundle, when set, replaces the server secret's `ca.crt` as the
+                          trust root Valkey verifies clients and peers against
+                          (`tls-ca-cert-file`). It must therefore include the root the server
+                          certificate chains to. The node reloads it live when its contents
+                          change, once its ACL is confirmed live. Probes and the metrics exporter
+                          keep verifying the server against the server secret's `ca.crt`.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                     required:
                     - server
                     type: object
@@ -3320,10 +3343,8 @@ spec:
                         default: Disabled
                         description: |-
                           CertificateUser configures how Valkey maps an authenticated client
-                          certificate to an ACL user. Set to `CN` to use the certificate's Common Name
-                          (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
-                          certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
-                          Defaults to `Disabled`, which leaves the directive unset.
+                          certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+                          `Disabled`, which leaves the directive unset.
                         enum:
                         - CN
                         - URI
@@ -3333,10 +3354,7 @@ spec:
                         default: Optional
                         description: |-
                           Mode controls whether clients must authenticate with a TLS certificate.
-                          `Required` enforces mTLS, `Optional` allows both authenticated and
-                          unauthenticated clients, and `Disabled` turns client certificate processing
-                          off entirely.
-                          Defaults to `Optional`.
+                          Maps to `tls-auth-clients`. Defaults to `Optional`.
                         enum:
                         - Required
                         - Optional
@@ -3629,6 +3647,12 @@ spec:
           status:
             description: ValkeyNodeStatus defines the observed state of ValkeyNode.
             properties:
+              appliedACLRevision:
+                description: |-
+                  AppliedACLRevision is the revision of the operator-managed aclfile that
+                  the running server was last confirmed to hold, recorded as ACLApplied
+                  becomes True.
+                type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:

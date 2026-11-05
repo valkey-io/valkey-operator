@@ -412,6 +412,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))
 	}
 
+	// A preStop the user sets on the server container replaces the default
+	// one. The strategic merge would otherwise keep both handlers, and
+	// Kubernetes rejects a hook with more than one.
+	if userSetsPreStop(node.Spec.Containers) {
+		containers[0].Lifecycle = nil
+	}
+
 	merged, err := mergePatchContainers(containers, node.Spec.Containers)
 	if err != nil {
 		return nil, err
@@ -558,6 +565,17 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	}}
 	applyContainerAPIDefaults(c)
 	return c[0]
+}
+
+// userSetsPreStop reports whether patches give the server container a
+// preStop handler of their own.
+func userSetsPreStop(patches []corev1.Container) bool {
+	for _, c := range patches {
+		if c.Name == serverContainerName && c.Lifecycle != nil && c.Lifecycle.PreStop != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // preStopCommand runs script when it exists and exits 0 otherwise.

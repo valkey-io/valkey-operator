@@ -214,7 +214,7 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 When a primary's pod is deleted outside the operator (a node drain, an eviction, a preemption or `kubectl delete pod`), the primary hands its slots to a replica before it exits, so the shard is not left without a writer.
 
-A preStop hook does the handoff first. It sends the online replica with the highest replication offset a plain `CLUSTER FAILOVER` and waits up to `cluster-manual-failover-timeout` for the primary to become a replica. The primary is still up at that point and votes for its replica, so this works whatever the shard count. The hook does nothing on a replica, on a primary without an online replica, or on a primary the operator has already failed over before a roll.
+A preStop hook does the handoff first. It sends the online replica with the highest replication offset a plain `CLUSTER FAILOVER` and waits up to `cluster-manual-failover-timeout` for the primary to become a replica. The primary is still up at that point and votes for its replica, so this works whatever the shard count. The hook does nothing on a replica, on a primary without an online replica, or on a primary the operator has already failed over before a roll. A preStop hook you set on the `server` container through `spec.containers` replaces this one.
 
 If the hook's handoff does not finish, the primary's `SIGTERM` handling is the fallback: the `shutdown-on-sigterm failover` server config, set by default on Valkey 9.0+, starts a forced failover as the server shuts down. That one needs a majority of the other slot-owning primaries to vote, so it cannot succeed in a cluster with fewer than three shards.
 

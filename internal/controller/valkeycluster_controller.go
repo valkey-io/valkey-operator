@@ -155,6 +155,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// Every status write below sends status.failback whole, so take it from
+	// the stored object before the first one rather than from the cache.
+	r.refreshFailbackStatus(ctx, cluster)
+
 	// During deletion (e.g. a foreground cascading delete, where the garbage
 	// collector removes dependents before the cluster itself) reconciling would
 	// recreate the very children being deleted and deadlock the delete
@@ -283,7 +287,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// was already ready when its INFO was read.
 	readyBefore := r.readyServerContainers(ctx, nodes)
 	state := r.scrapeClusterState(ctx, nodes, dial)
-	r.refreshFailbackStatus(ctx, cluster)
 	trackFailback(cluster, state, nodes, nowFn())
 
 	// A node that rejects the operator's password is missing from state, so
@@ -588,7 +591,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// has ended, then re-read the topology.
 		for _, f := range cluster.Status.Failback {
 			if r.maybeFailback(ctx, cluster, state, nodes, int(f.Shard), false) {
-				_ = r.updateStatus(ctx, cluster, state)
+				// Surface a lost write so a failed attempt cannot skip backoff.
+				if err := r.updateStatus(ctx, cluster, state); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
 		}

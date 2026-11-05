@@ -46,14 +46,14 @@ var _ = Describe("failover.failback validation", func() {
 		Expect(c.Spec.Failover.Failback.QuietPeriodSeconds).To(Equal(new(int32(300))))
 	})
 
-	It("accepts Disabled and a zero quiet period", func() {
-		c := cluster("failback-disabled", &valkeyiov1alpha1.FailbackSpec{Mode: valkeyiov1alpha1.FailbackDisabled, QuietPeriodSeconds: new(int32(0))})
+	It("accepts Disabled and a 10s quiet period", func() {
+		c := cluster("failback-disabled", &valkeyiov1alpha1.FailbackSpec{Mode: valkeyiov1alpha1.FailbackDisabled, QuietPeriodSeconds: new(int32(10))})
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, c) }()
 	})
 
-	It("rejects a negative quiet period", func() {
-		err := k8sClient.Create(ctx, cluster("failback-negative", &valkeyiov1alpha1.FailbackSpec{QuietPeriodSeconds: new(int32(-1))}))
+	It("rejects a quiet period under 10s", func() {
+		err := k8sClient.Create(ctx, cluster("failback-short", &valkeyiov1alpha1.FailbackSpec{QuietPeriodSeconds: new(int32(9))}))
 		Expect(err).To(MatchError(ContainSubstring("quietPeriodSeconds")))
 	})
 

@@ -349,6 +349,38 @@ func TestBuildValkeyNodePodTemplateSpec_PreStopHook(t *testing.T) {
 	assert.Contains(t, cm.Data, preStopScriptKey, "a standalone ValkeyNode ships the script too")
 }
 
+func TestBuildValkeyNodePodTemplateSpec_UserPreStopReplacesDefault(t *testing.T) {
+	build := func(lifecycle *corev1.Lifecycle) *corev1.Lifecycle {
+		node := newTestValkeyNode("mynode", "test-ns")
+		node.Spec.Containers = []corev1.Container{{Name: serverContainerName, Lifecycle: lifecycle}}
+		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		require.NoError(t, err)
+		return pts.Spec.Containers[0].Lifecycle
+	}
+
+	t.Run("a sleep handler is kept on its own", func(t *testing.T) {
+		got := build(&corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: 5}}})
+		require.NotNil(t, got)
+		require.NotNil(t, got.PreStop)
+		assert.Nil(t, got.PreStop.Exec, "a hook may carry one handler only")
+		assert.Equal(t, int64(5), got.PreStop.Sleep.Seconds)
+	})
+
+	t.Run("an exec handler replaces the default command", func(t *testing.T) {
+		got := build(&corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}})
+		require.NotNil(t, got)
+		assert.Equal(t, []string{"true"}, got.PreStop.Exec.Command)
+	})
+
+	t.Run("a postStart-only patch keeps the default preStop", func(t *testing.T) {
+		got := build(&corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}})
+		require.NotNil(t, got)
+		require.NotNil(t, got.PreStop)
+		assert.Equal(t, preStopCommand("/scripts/prestop-failover.sh"), got.PreStop.Exec.Command)
+		assert.NotNil(t, got.PostStart)
+	})
+}
+
 func TestPreStopCommand(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "prestop-failover.sh")

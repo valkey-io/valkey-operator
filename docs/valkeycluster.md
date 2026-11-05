@@ -248,7 +248,7 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 
 `shards` sets the number of shards, and `replicasPerShard` sets the number of replicas in each shard in addition to its primary. A shard follows the [Valkey definition](https://valkey.io/commands/cluster-shards/): one primary and its replicas, serving the same slots. `replicasPerShard` defaults to 0.
 
-#### Migrating from `replicas`
+#### Migrating from `spec.replicas`
 
 `replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster that still sets it gets a `ConfigurationWarning` condition with reason `DeprecatedField`. The API server rejects a spec that sets both fields.
 

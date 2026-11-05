@@ -45,6 +45,8 @@ func configCluster(name string, config map[string]string) *valkeyiov1alpha1.Valk
 
 const reservedKeyMessage = "must not set operator-owned keys"
 
+const keyFormatMessage = "keys may contain only letters, digits"
+
 var _ = Describe("ValkeyCluster spec.config validation", func() {
 	ctx := context.Background()
 
@@ -71,6 +73,27 @@ var _ = Describe("ValkeyCluster spec.config validation", func() {
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 	})
+
+	It("admits a module config key with a dot", func() {
+		cluster := configCluster("cfg-module", map[string]string{"search.timeout": "500"})
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+	})
+
+	// Valkey trims and unquotes each config line, so these keys would reach it as an operator-owned key.
+	DescribeTable("rejects keys Valkey would trim or unquote",
+		func(key string) {
+			err := k8sClient.Create(ctx, configCluster("cfg-format", map[string]string{key: "7000"}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(keyFormatMessage))
+		},
+		Entry("double quoted", `"port"`),
+		Entry("single quoted", `'port'`),
+		Entry("leading space", " port"),
+		Entry("trailing space", "port "),
+		Entry("tab padded", "\tport"),
+		Entry("embedded space", "port x"),
+	)
 
 	It("admits an absent config", func() {
 		cluster := configCluster("cfg-absent", nil)

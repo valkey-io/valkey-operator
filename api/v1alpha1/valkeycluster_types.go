@@ -412,12 +412,17 @@ type ValkeyClusterSpec struct {
 	//
 	// Keys are lowercased before comparison, because Valkey treats configuration keys case-insensitively.
 	//
-	// MaxProperties exists because the rule below cannot be admitted without it.
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// Valkey trims and unquotes each config line before reading its key, so a key such as "port" or " port" would pass the check above and still reach Valkey as port.
+	// The '.' keeps module configs such as search.<name> valid.
+	//
+	// MaxProperties exists because the rules below cannot be admitted without it.
 	// The API server costs a CEL rule against the largest map the schema allows.
 	// It is set high deliberately, because raising a bound later is backwards compatible while lowering one locks out anyone already above it.
 	// Valkey has roughly 200 directives in total, so 1000 cannot realistically be reached.
 	// +kubebuilder:validation:MaxProperties=1000
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

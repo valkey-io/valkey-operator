@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 
 	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
@@ -175,7 +174,7 @@ func TestMaybeFailback(t *testing.T) {
 	}
 
 	t.Run("waits for the quiet period", func(t *testing.T) {
-		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: ptr.To[int32](60)}), false)
+		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: new(int32(60))}), false)
 		assert.False(t, run(c, t0.Add(59*time.Second), false))
 		assert.Empty(t, targets)
 		assert.True(t, run(c, t0.Add(60*time.Second), false))
@@ -190,7 +189,7 @@ func TestMaybeFailback(t *testing.T) {
 	})
 
 	t.Run("the roll walk leaves other failovers to the quiet period", func(t *testing.T) {
-		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: ptr.To[int32](0)}), false)
+		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: new(int32(0))}), false)
 		assert.False(t, run(c, t0, true))
 		assert.True(t, run(c, t0, false))
 	})
@@ -204,7 +203,7 @@ func TestMaybeFailback(t *testing.T) {
 	t.Run("a failed attempt backs off for a quiet period", func(t *testing.T) {
 		failErr = errors.New("timed out")
 		t.Cleanup(func() { failErr = nil })
-		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: ptr.To[int32](60)}), true)
+		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: new(int32(60))}), true)
 		assert.True(t, run(c, t0.Add(time.Hour), false))
 		require.Len(t, c.Status.Failback, 1)
 		assert.False(t, c.Status.Failback[0].AfterRoll)

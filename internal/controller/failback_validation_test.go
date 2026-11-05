@@ -22,7 +22,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -44,17 +43,17 @@ var _ = Describe("failover.failback validation", func() {
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, c) }()
 		Expect(c.Spec.Failover.Failback.Mode).To(Equal(valkeyiov1alpha1.FailbackEnabled))
-		Expect(c.Spec.Failover.Failback.QuietPeriodSeconds).To(Equal(ptr.To[int32](300)))
+		Expect(c.Spec.Failover.Failback.QuietPeriodSeconds).To(Equal(new(int32(300))))
 	})
 
 	It("accepts Disabled and a zero quiet period", func() {
-		c := cluster("failback-disabled", &valkeyiov1alpha1.FailbackSpec{Mode: valkeyiov1alpha1.FailbackDisabled, QuietPeriodSeconds: ptr.To[int32](0)})
+		c := cluster("failback-disabled", &valkeyiov1alpha1.FailbackSpec{Mode: valkeyiov1alpha1.FailbackDisabled, QuietPeriodSeconds: new(int32(0))})
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, c) }()
 	})
 
 	It("rejects a negative quiet period", func() {
-		err := k8sClient.Create(ctx, cluster("failback-negative", &valkeyiov1alpha1.FailbackSpec{QuietPeriodSeconds: ptr.To[int32](-1)}))
+		err := k8sClient.Create(ctx, cluster("failback-negative", &valkeyiov1alpha1.FailbackSpec{QuietPeriodSeconds: new(int32(-1))}))
 		Expect(err).To(MatchError(ContainSubstring("quietPeriodSeconds")))
 	})
 

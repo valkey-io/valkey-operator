@@ -132,7 +132,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// LivenessProbe
 	require.NotNil(t, c.LivenessProbe)
-	assert.Equal(t, int32(5), c.LivenessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.LivenessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.FailureThreshold)
 	assert.Equal(t, int32(5), c.LivenessProbe.TimeoutSeconds)
@@ -140,7 +140,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// ReadinessProbe
 	require.NotNil(t, c.ReadinessProbe)
-	assert.Equal(t, int32(5), c.ReadinessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.ReadinessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.FailureThreshold)
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
@@ -517,6 +517,7 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		assert.Empty(t, n.Spec.PreferredEndpointType)
 		assert.Equal(t, valkeyv1.DefaultClusterDomain, n.Spec.ClusterDomain)
 		assert.Equal(t, "c", n.Labels[LabelCluster])
+		assert.Nil(t, n.Spec.Service)
 	})
 
 	t.Run("IP with custom ClusterDomain still sets ClusterDomain", func(t *testing.T) {
@@ -538,6 +539,15 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		n := buildClusterValkeyNode(c, 0, 0)
 		assert.Equal(t, valkeyv1.PreferredEndpointTypeHostname, n.Spec.PreferredEndpointType)
 		assert.Equal(t, "example.local", n.Spec.ClusterDomain)
+		assert.Nil(t, n.Spec.Service)
+	})
+
+	t.Run("perNodeServices is copied onto the node", func(t *testing.T) {
+		c := base.DeepCopy()
+		c.Spec.Networking = &valkeyv1.NetworkingSpec{PerNodeServices: &valkeyv1.PerNodeServicesSpec{}}
+		n := buildClusterValkeyNode(c, 1, 2)
+		assert.NotNil(t, n.Spec.Service)
+		assert.Equal(t, "valkey-c-1-2", valkeyNodeResourceName(n))
 	})
 }
 
@@ -795,7 +805,7 @@ func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
 				Certificates: valkeyv1.NodeTLSCertificates{
 					Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
 				},
-				ClientAuth: &valkeyv1.TLSClientAuthSpec{
+				ClientAuth: &valkeyv1.NodeTLSClientAuthSpec{
 					Mode:            tc.authClients,
 					CertificateUser: tc.authClientsUser,
 				},
@@ -1116,7 +1126,7 @@ func TestBuildExporterContainer(t *testing.T) {
 			Certificates: valkeyv1.NodeTLSCertificates{
 				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
 			},
-			ClientAuth: &valkeyv1.TLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
+			ClientAuth: &valkeyv1.NodeTLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
 		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)

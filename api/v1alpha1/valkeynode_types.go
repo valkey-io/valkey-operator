@@ -165,7 +165,16 @@ type ValkeyNodeSpec struct {
 	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// Service is set by the ValkeyCluster controller from
+	// spec.networking.perNodeServices. When set, this node has one ClusterIP
+	// Service. Unset means no Service.
+	// +optional
+	Service *ValkeyNodeServiceSpec `json:"service,omitempty"`
 }
+
+// ValkeyNodeServiceSpec is empty. Presence turns the node's ClusterIP Service on.
+type ValkeyNodeServiceSpec struct{}
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
 // ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this
@@ -193,7 +202,43 @@ type NodeTLSSpec struct {
 	// cluster-owned nodes the ValkeyCluster controller copies
 	// spec.networking.tls.clientAuth here.
 	// +optional
-	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+	ClientAuth *NodeTLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// NodeTLSClientAuthSpec is the resolved client certificate authentication for
+// a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
+// controller merges spec.networking.tls.clientAuth.ca into a Secret and
+// references it from certificates.trustBundle.
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+type NodeTLSClientAuthSpec struct {
+	// Mode controls whether clients must authenticate with a TLS certificate.
+	// Maps to `tls-auth-clients`. Defaults to `Optional`.
+	// +kubebuilder:default=Optional
+	// +optional
+	Mode TLSAuthClients `json:"mode,omitempty"`
+
+	// CertificateUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+	// `Disabled`, which leaves the directive unset.
+	// +kubebuilder:default=Disabled
+	// +optional
+	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+}
+
+// EffectiveMode returns mode, defaulting to Optional when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveMode() TLSAuthClients {
+	if s == nil || s.Mode == "" {
+		return TLSAuthClientsOptional
+	}
+	return s.Mode
+}
+
+// EffectiveCertificateUser returns certificateUser, defaulting to Disabled when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveCertificateUser() TLSAuthClientsUser {
+	if s == nil || s.CertificateUser == "" {
+		return TLSAuthClientsUserDisabled
+	}
+	return s.CertificateUser
 }
 
 // ClientAuthMode returns the effective client-auth mode for t.
@@ -342,6 +387,8 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
+	ValkeyNodeReasonServiceError = "ServiceError"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

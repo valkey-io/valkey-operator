@@ -38,7 +38,7 @@ import (
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
-var _ = Describe("ValkeyCluster", Ordered, func() {
+var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 	var valkeyClusterName string
 
 	// After each test, check for failures and collect logs, events,
@@ -1410,7 +1410,7 @@ var _ = Describe("ValkeyCluster spec propagation", func() {
 		}
 	})
 
-	Context("workloadType immutability", func() {
+	Context("workloadType immutability", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-immutable-e2e"
 
 		It("rejects a change to workloadType after creation", func() {
@@ -1443,7 +1443,7 @@ spec:
 		})
 	})
 
-	Context("persistence mutation rules", func() {
+	Context("persistence mutation rules", Label("spec-update"), func() {
 		const addClusterName = "valkeycluster-persistence-add-e2e"
 		const shrinkClusterName = "valkeycluster-persistence-shrink-e2e"
 
@@ -1908,7 +1908,7 @@ spec:
 		})
 	})
 
-	Context("rolling update", func() {
+	Context("rolling update", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-rolling-e2e"
 
 		It("propagates spec changes one node at a time and returns to Ready", func() {
@@ -1982,7 +1982,7 @@ spec:
 		})
 	})
 
-	Context("single-node cluster scale-up", func() {
+	Context("single-node cluster scale-up", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-scaleup-e2e"
 
 		AfterEach(func() {
@@ -2091,7 +2091,7 @@ spec:
 		})
 	})
 
-	Context("live ACL propagation", func() {
+	Context("live ACL propagation", Label("security"), func() {
 		const clusterName = "valkeycluster-live-acl-e2e"
 		const usersSecret = "valkey-live-acl-users"
 		const aclClientPod = "live-acl-client"
@@ -2278,7 +2278,7 @@ spec:
 		})
 	})
 
-	Context("acl-hash annotation migration", func() {
+	Context("acl-hash annotation migration", Label("security"), func() {
 		const clusterName = "valkeycluster-aclhash-migration-e2e"
 		const usersSecret = "valkey-aclhash-users"
 		const (

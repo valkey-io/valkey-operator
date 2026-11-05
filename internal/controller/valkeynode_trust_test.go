@@ -39,7 +39,7 @@ func trustTestNode(trustBundle string) *valkeyv1.ValkeyNode {
 		Certificates: valkeyv1.NodeTLSCertificates{
 			Server: valkeyv1.NodeCertificateRef{SecretName: "server-tls"},
 		},
-		ClientAuth: &valkeyv1.TLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
+		ClientAuth: &valkeyv1.NodeTLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
 	}
 	if trustBundle != "" {
 		node.Spec.TLS.Certificates.TrustBundle = &valkeyv1.NodeTrustBundleRef{SecretName: trustBundle}

@@ -75,6 +75,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
 	}
+	preStop, err := scripts.ReadFile("scripts/" + preStopScriptKey)
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded %s: %w", preStopScriptKey, err)
+	}
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -88,6 +92,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"readiness-check.sh":    string(readiness),
 			initScriptKey:           string(initScript),
 			primaryHandoffScriptKey: string(primaryHandoff),
+			preStopScriptKey: string(preStop),
 		},
 	}, nil
 }
@@ -364,6 +369,16 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 					},
 				},
 			},
+			// Hand a primary's slots to a replica before SIGTERM, while the
+			// primary can still vote for it. A ConfigMap without the script
+			// (an external one on a standalone ValkeyNode) skips the hook.
+			Lifecycle: &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: preStopCommand(scriptsMountPath + "/" + preStopScriptKey),
+					},
+				},
+			},
 			ReadinessProbe: &corev1.Probe{
 				PeriodSeconds:    5,
 				FailureThreshold: 5,
@@ -586,6 +601,11 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	}}
 	applyContainerAPIDefaults(c)
 	return c[0]
+}
+
+// preStopCommand runs script when it exists and exits 0 otherwise.
+func preStopCommand(script string) []string {
+	return []string{shellPath, "-c", fmt.Sprintf(`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi`, script, shellPath)}
 }
 
 // initContainerCommand runs script when it exists and exits 0 otherwise. An

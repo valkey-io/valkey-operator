@@ -444,10 +444,11 @@ type ClusterFailoverSpec struct {
 // FailbackSpec configures primary failback.
 //
 // A shard fails back with a graceful CLUSTER FAILOVER sent to its node-index 0
-// member once that member is a Ready replica in sync with the primary and the
-// cluster is otherwise healthy. When the operator moved the primary itself to
-// roll a pod, the shard fails back as soon as the rolled member has synced.
-// After any other failover it waits for QuietPeriodSeconds first.
+// member once that member is a Ready replica in sync with the primary. When the
+// operator moved the primary itself to roll a pod, the shard fails back as soon
+// as the rolled member has synced, while the roll goes on. After any other
+// failover it waits until the member has stayed synced for QuietPeriodSeconds
+// and the rest of the cluster is healthy.
 type FailbackSpec struct {
 	// Mode turns failback on or off. Defaults to Enabled.
 	// +kubebuilder:default=Enabled
@@ -457,9 +458,10 @@ type FailbackSpec struct {
 	// QuietPeriodSeconds is how long the node-index 0 member has to stay a
 	// synced replica before the shard fails back to it after a failover the
 	// operator did not start. It keeps a member that keeps restarting from
-	// taking the primary role back each time it comes up. Defaults to 300.
+	// taking the primary role back each time it comes up, and it is also the
+	// wait after a failed attempt. Defaults to 300.
 	// +kubebuilder:default=300
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=10
 	// +optional
 	QuietPeriodSeconds *int32 `json:"quietPeriodSeconds,omitempty"`
 }

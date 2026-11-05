@@ -244,9 +244,9 @@ A shard fails back when its `node-index=0` member is a Ready replica in sync wit
 - During a roll, the operator moves the primary away itself before rolling the `node-index=0` pod. It fails the shard back as soon as the rolled pod has synced, without a quiet period. The roll does not wait for that sync and goes on to the next shard in the meantime.
 - After any other failover, for example when the `node-index=0` pod was deleted or its node failed, the operator waits until the member has stayed in sync for `quietPeriodSeconds` and the whole cluster is healthy. One shard fails back per reconcile. A member that restarts or loses its replication link starts the quiet period again, so a pod that keeps restarting does not take the primary role back each time it comes up.
 
-If a failback attempt fails, the shard waits a full quiet period before the next one. `status.failback` lists the shards whose primary is away from `node-index=0`, and the `PrimaryDisplaced` condition says what failback is waiting for. See [status conditions](status-conditions.md#primarydisplaced).
+If a failback attempt fails, the shard waits a full quiet period, counted from the failure, before the next one. `status.failback` lists the shards whose primary is away from `node-index=0`, and the `PrimaryDisplaced` condition says what failback is waiting for. See [status conditions](status-conditions.md#primarydisplaced).
 
-`mode: Disabled` leaves the primary wherever the last failover put it. `quietPeriodSeconds` defaults to 300 and can be 0.
+`mode: Disabled` leaves the primary wherever the last failover put it. `quietPeriodSeconds` defaults to 300 and must be at least 10.
 
 ### Private image registries
 

@@ -63,7 +63,9 @@ func failbackCandidate(state *valkey.ClusterState, shardIndex int, nodes *valkey
 		return shard, nil, true
 	}
 	for _, replica := range shard.GetSyncedReplicas(state) {
-		if replica.Address == node0.Status.PodIP {
+		// The shard groups members by CLUSTER MYSHARDID, so also check that
+		// node-index 0 replicates the current primary and not a former one.
+		if replica.Address == node0.Status.PodIP && replica.PrimaryIdFromSelf() == shard.PrimaryId {
 			return shard, replica, true
 		}
 	}
@@ -129,6 +131,14 @@ func failbackDue(cluster *valkeyiov1alpha1.ValkeyCluster, f *valkeyiov1alpha1.Sh
 	return true, time.Time{}
 }
 
+// restartedSince reports whether node's server started after since, which a
+// restart between two reconciles leaves as the only trace. An unreadable
+// uptime counts as no restart.
+func restartedSince(node *valkey.NodeState, since, now time.Time) bool {
+	uptime, err := strconv.ParseInt(node.Info["uptime_in_seconds"], 10, 64)
+	return err == nil && now.Add(-time.Duration(uptime)*time.Second).After(since)
+}
+
 // trackFailback refreshes status.failback from the live state: it adds the
 // shards whose primary moved away from node-index 0, drops the ones that are
 // back, and starts or clears each shard's quiet period clock. A shard whose
@@ -162,7 +172,7 @@ func trackFailback(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.Cluste
 			switch {
 			case target == nil:
 				f.SyncedSince = nil
-			case f.SyncedSince == nil:
+			case f.SyncedSince == nil || restartedSince(target, f.SyncedSince.Time, now):
 				f.SyncedSince = &metav1.Time{Time: now}
 			}
 		}
@@ -218,10 +228,11 @@ func (r *ValkeyClusterReconciler) maybeFailback(ctx context.Context, cluster *va
 	log := logf.FromContext(ctx)
 	log.Info("failing shard back to its node-index 0 member", "shardIndex", shardIndex, "target", target.Address, "afterRoll", f.AfterRoll)
 	if err := failbackFn(ctx, r.Recorder, cluster, shard, target); err != nil {
-		// Back off: the next attempt waits for a full quiet period.
+		// Back off: the next attempt waits for a full quiet period, counted
+		// from the failure rather than from before the handover timed out.
 		log.Info("failback did not complete", "shardIndex", shardIndex, "err", err)
 		f.AfterRoll = false
-		f.SyncedSince = &metav1.Time{Time: now}
+		f.SyncedSince = &metav1.Time{Time: nowFn()}
 		return true
 	}
 	removeFailbackStatus(cluster, shardIndex)

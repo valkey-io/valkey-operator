@@ -49,9 +49,19 @@ func failbackNodes(node0Ready bool) *valkeyv1.ValkeyNodeList {
 }
 
 // failbackState is the shard with its primary at primaryIP and the other
-// member a replica whose replication link is link.
+// member a replica of it whose replication link is link and whose server has
+// been up for an hour.
 func failbackState(primaryIP, link string) *valkey.ClusterState {
+	return failbackStateFollowing(primaryIP, link, "primary", 3600)
+}
+
+// failbackStateFollowing is failbackState with the replica naming follows as
+// its primary and reporting uptime seconds.
+func failbackStateFollowing(primaryIP, link, follows string, uptime int) *valkey.ClusterState {
 	other := map[string]string{"10.0.0.1": "10.0.0.2", "10.0.0.2": "10.0.0.1"}[primaryIP]
+	replica := &valkey.NodeState{Address: other, Id: "replica", Flags: []string{"slave"},
+		Info: map[string]string{"master_link_status": link, "uptime_in_seconds": strconv.Itoa(uptime)}}
+	replica.SetClusterNodesForTesting("replica " + other + ":6379@16379 myself,slave " + follows + " 0 0 1 connected\n")
 	return &valkey.ClusterState{
 		Shards: []*valkey.ShardState{{
 			Id:        "shard-a",
@@ -59,7 +69,7 @@ func failbackState(primaryIP, link string) *valkey.ClusterState {
 			Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 			Nodes: []*valkey.NodeState{
 				{Address: primaryIP, Id: "primary", Flags: []string{"master"}},
-				{Address: other, Id: "replica", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": link}},
+				replica,
 			},
 		}},
 	}
@@ -85,6 +95,7 @@ func TestFailbackCandidate(t *testing.T) {
 		{"node-index 0 is a synced replica", failbackState("10.0.0.2", "up"), true, true, true},
 		{"node-index 0 is not synced", failbackState("10.0.0.2", "down"), true, true, false},
 		{"node-index 0 is not Ready", failbackState("10.0.0.2", "up"), false, true, false},
+		{"node-index 0 follows a former primary", failbackStateFollowing("10.0.0.2", "up", "former", 3600), true, true, false},
 		{"primary unknown", &valkey.ClusterState{}, true, false, false},
 		{"no state", nil, true, false, false},
 	} {
@@ -125,6 +136,9 @@ func TestTrackFailback(t *testing.T) {
 
 	trackFailback(c, failbackState("10.0.0.2", "up"), nodes, t0.Add(time.Minute))
 	assert.Equal(t, t0, c.Status.Failback[0].SyncedSince.Time, "a synced member keeps its clock")
+
+	trackFailback(c, failbackStateFollowing("10.0.0.2", "up", "primary", 20), nodes, t0.Add(90*time.Second))
+	assert.Equal(t, t0.Add(90*time.Second), c.Status.Failback[0].SyncedSince.Time, "a restart between two reconciles restarts the clock")
 
 	trackFailback(c, failbackState("10.0.0.2", "down"), nodes, t0.Add(2*time.Minute))
 	assert.Nil(t, c.Status.Failback[0].SyncedSince, "losing sync resets the clock")
@@ -193,9 +207,9 @@ func TestMaybeFailback(t *testing.T) {
 	})
 
 	t.Run("the roll walk leaves other failovers to the quiet period", func(t *testing.T) {
-		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: new(int32(0))}), false)
-		assert.False(t, run(c, t0, true))
-		assert.True(t, run(c, t0, false))
+		c := synced(failbackCluster(&valkeyv1.FailbackSpec{QuietPeriodSeconds: new(int32(10))}), false)
+		assert.False(t, run(c, t0.Add(10*time.Second), true))
+		assert.True(t, run(c, t0.Add(10*time.Second), false))
 	})
 
 	t.Run("disabled", func(t *testing.T) {

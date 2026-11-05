@@ -2071,9 +2071,10 @@ spec:
                           QuietPeriodSeconds is how long the node-index 0 member has to stay a
                           synced replica before the shard fails back to it after a failover the
                           operator did not start. It keeps a member that keeps restarting from
-                          taking the primary role back each time it comes up. Defaults to 300.
+                          taking the primary role back each time it comes up, and it is also the
+                          wait after a failed attempt. Defaults to 300.
                         format: int32
-                        minimum: 0
+                        minimum: 10
                         type: integer
                     type: object
                 type: object

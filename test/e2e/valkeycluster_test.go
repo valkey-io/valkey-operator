@@ -2615,9 +2615,11 @@ spec:
 
 			By("waiting for the restarted node-index 0 member to take the primary role back")
 			Eventually(failedBack, 5*time.Minute, 2*time.Second).Should(Succeed())
-			normal, _, err := utils.GetEvents(clusterName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(normal).To(HaveKey("FailbackCompleted"))
+			Eventually(func(g Gomega) {
+				normal, _, err := utils.GetEvents(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(normal).To(HaveKey("FailbackCompleted"))
+			}, time.Minute, 2*time.Second).Should(Succeed())
 
 			By("rolling the cluster, which moves the primary away before rolling node-index 0")
 			_, err = utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName, "--type=merge",

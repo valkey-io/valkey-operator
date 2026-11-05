@@ -264,11 +264,7 @@ Applying an edited manifest works only if the apply removes `replicas`. Two case
 
 A Go program built against an older `api/v1alpha1` drops `replicasPerShard` when it reads and then updates a ValkeyCluster, because its type does not have the field. Update such programs before you migrate.
 
-The rename does not create, delete, or restart any pod.
-
-> **Before you roll back the operator**
->
-> An operator release without `replicasPerShard` reads 0 replicas from a migrated cluster and deletes every ValkeyNode with node index 1 or higher, including a replica that became primary after a failover. This applies to a full downgrade and to a rollback of only the operator Deployment, for example `helm rollback`. Before either, switch every cluster back to `replicas` with the reverse patch while the current CRD is still installed.
+The rename does not create, delete, or restart any pod. An operator release that does not know `replicasPerShard` reads 0 replicas from a migrated cluster and deletes every ValkeyNode with node index 1 or higher.
 
 ### Scheduling
 

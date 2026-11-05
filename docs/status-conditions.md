@@ -700,7 +700,7 @@ Events:
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary def456 (shard 1)
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary ghi789 (shard 2)
   Normal  ReplicasAttached   14m   valkeycluster-controller  Attached 3 replica node(s)
-  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready with 3 shards and 1 replicas per shard
+  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready: shards 3, replicasPerShard 1
 ```
 
 ### How to read it

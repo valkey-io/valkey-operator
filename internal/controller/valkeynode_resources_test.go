@@ -372,6 +372,20 @@ func TestBuildValkeyNodePodTemplateSpec_UserPreStopReplacesDefault(t *testing.T)
 		assert.Equal(t, []string{"true"}, got.PreStop.Exec.Command)
 	})
 
+	t.Run("only the last server patch counts, as in the merge", func(t *testing.T) {
+		node := newTestValkeyNode("mynode", "test-ns")
+		node.Spec.Containers = []corev1.Container{
+			{Name: serverContainerName, Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: 5}}}},
+			{Name: serverContainerName, Env: []corev1.EnvVar{{Name: "X", Value: "1"}}},
+		}
+		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+		require.NoError(t, err)
+		got := pts.Spec.Containers[0].Lifecycle
+		require.NotNil(t, got)
+		require.NotNil(t, got.PreStop)
+		assert.Equal(t, preStopCommand("/scripts/prestop-failover.sh"), got.PreStop.Exec.Command)
+	})
+
 	t.Run("a postStart-only patch keeps the default preStop", func(t *testing.T) {
 		got := build(&corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}})
 		require.NotNil(t, got)

@@ -192,7 +192,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// only when the cluster first enters the warning state.
 	rec := recommendedGracePeriodSeconds(cluster)
 	if g := cluster.Spec.TerminationGracePeriodSeconds; g != nil && *g < rec {
-		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for cluster-manual-failover-timeout; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
+		msg := fmt.Sprintf("spec.terminationGracePeriodSeconds (%ds) is below the recommended %ds for two cluster-manual-failover-timeouts; SIGKILL may interrupt the graceful failover on shutdown", *g, rec)
 		configWarnings = append(configWarnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonGracePeriodTooShort,
 			message: msg,
@@ -914,8 +914,8 @@ func livePodTemplate(ctx context.Context, reader client.Reader, node *valkeyiov1
 }
 
 const (
-	// gracePeriodBufferSeconds is added on top of cluster-manual-failover-timeout
-	// so the SIGTERM-triggered failover has headroom to finish before SIGKILL.
+	// gracePeriodBufferSeconds is added on top of the failover time so the
+	// handoff has headroom to finish before SIGKILL.
 	gracePeriodBufferSeconds = 10
 	// defaultFailoverTimeoutSeconds mirrors the Valkey default for
 	// cluster-manual-failover-timeout (5000ms).
@@ -940,9 +940,11 @@ func failoverTimeoutSeconds(config map[string]string) int64 {
 }
 
 // recommendedGracePeriodSeconds is the smallest terminationGracePeriodSeconds
-// that lets a SIGTERM-triggered failover finish before SIGKILL.
+// that lets both handoffs finish before SIGKILL: the preStop hook's failover
+// and, when that one does not complete, the SIGTERM-triggered one. They share
+// the grace period, so each gets a cluster-manual-failover-timeout.
 func recommendedGracePeriodSeconds(cluster *valkeyiov1alpha1.ValkeyCluster) int64 {
-	return failoverTimeoutSeconds(cluster.Spec.Config) + gracePeriodBufferSeconds
+	return 2*failoverTimeoutSeconds(cluster.Spec.Config) + gracePeriodBufferSeconds
 }
 
 // effectiveGracePeriodSeconds is the grace period the operator applies to the

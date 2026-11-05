@@ -212,9 +212,13 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 ### Graceful shutdown
 
-On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+.
+When a primary's pod is deleted outside the operator (a node drain, an eviction, a preemption or `kubectl delete pod`), the primary hands its slots to a replica before it exits, so the shard is not left without a writer.
 
-The handoff runs inside the pod's termination grace period. With defaults there is comfortable margin: the Kubernetes default `terminationGracePeriodSeconds` is 30s and the Valkey default `cluster-manual-failover-timeout` is 5s, so the failover completes well before `SIGKILL`. If you raise `cluster-manual-failover-timeout`, the operator raises the derived `terminationGracePeriodSeconds` to match; see [Termination grace period](#termination-grace-period).
+A preStop hook does the handoff first. It sends the online replica with the highest replication offset a plain `CLUSTER FAILOVER` and waits up to `cluster-manual-failover-timeout` for the primary to become a replica. The primary is still up at that point and votes for its replica, so this works whatever the shard count. The hook does nothing on a replica, on a primary without an online replica, or on a primary the operator has already failed over before a roll.
+
+If the hook's handoff does not finish, the primary's `SIGTERM` handling is the fallback: the `shutdown-on-sigterm failover` server config, set by default on Valkey 9.0+, starts a forced failover as the server shuts down. That one needs a majority of the other slot-owning primaries to vote, so it cannot succeed in a cluster with fewer than three shards.
+
+Both run inside the pod's termination grace period. With defaults there is comfortable margin: the Kubernetes default `terminationGracePeriodSeconds` is 30s and the Valkey default `cluster-manual-failover-timeout` is 5s. If you raise `cluster-manual-failover-timeout`, the operator raises the derived `terminationGracePeriodSeconds` to match; see [Termination grace period](#termination-grace-period).
 
 ### Termination grace period
 
@@ -222,9 +226,9 @@ The handoff runs inside the pod's termination grace period. With defaults there 
 terminationGracePeriodSeconds: 60
 ```
 
-`terminationGracePeriodSeconds` sets the pod termination grace period for the Valkey nodes. On `SIGTERM` a primary gracefully fails its slots over to a replica, and that handover has to finish before Kubernetes sends `SIGKILL`, so the grace period must be at least `cluster-manual-failover-timeout` plus some headroom.
+`terminationGracePeriodSeconds` sets the pod termination grace period for the Valkey nodes. A primary fails its slots over to a replica in its preStop hook and, if that does not finish, again on `SIGTERM` (see [Graceful shutdown](#graceful-shutdown)). Both handoffs have to finish before Kubernetes sends `SIGKILL`, so the grace period must be at least twice `cluster-manual-failover-timeout` plus some headroom.
 
-When omitted, the operator picks a safe value: the larger of the Kubernetes default (30s) and `cluster-manual-failover-timeout` (default 5s) plus a 10s buffer. With defaults that stays at 30s. Raising `cluster-manual-failover-timeout` pulls the derived grace period up with it.
+When omitted, the operator picks a safe value: the larger of the Kubernetes default (30s) and twice `cluster-manual-failover-timeout` (default 5s) plus a 10s buffer. With defaults that stays at 30s. Raising `cluster-manual-failover-timeout` pulls the derived grace period up with it.
 
 An explicit value is honoured as-is, even if it is below the recommended minimum. In that case the operator sets a `ConfigurationWarning` condition (reason `GracePeriodTooShort`) on the `ValkeyCluster` and emits an event when the cluster first enters that state, rather than silently overriding the value. The value must be a positive integer; the CRD rejects zero or negative values.
 

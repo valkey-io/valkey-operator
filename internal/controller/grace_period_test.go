@@ -39,10 +39,10 @@ func TestFailoverTimeoutSeconds(t *testing.T) {
 
 func TestRecommendedGracePeriodSeconds(t *testing.T) {
 	c := &valkeyiov1alpha1.ValkeyCluster{}
-	assert.Equal(t, int64(15), recommendedGracePeriodSeconds(c)) // 5s default + 10s buffer
+	assert.Equal(t, int64(20), recommendedGracePeriodSeconds(c)) // 2 x 5s default + 10s buffer
 
 	c.Spec.Config = map[string]string{"cluster-manual-failover-timeout": "60000"}
-	assert.Equal(t, int64(70), recommendedGracePeriodSeconds(c)) // 60s + 10s buffer
+	assert.Equal(t, int64(130), recommendedGracePeriodSeconds(c)) // 2 x 60s + 10s buffer
 }
 
 func TestEffectiveGracePeriodSeconds(t *testing.T) {
@@ -59,7 +59,7 @@ func TestEffectiveGracePeriodSeconds(t *testing.T) {
 
 	t.Run("unset with a long timeout pulls the grace period up", func(t *testing.T) {
 		c := clusterWith(nil, map[string]string{"cluster-manual-failover-timeout": "60000"})
-		assert.Equal(t, int64(70), effectiveGracePeriodSeconds(c))
+		assert.Equal(t, int64(130), effectiveGracePeriodSeconds(c))
 	})
 
 	t.Run("an explicit value is honoured", func(t *testing.T) {
@@ -100,6 +100,6 @@ func TestBuildClusterValkeyNodeGracePeriod(t *testing.T) {
 	t.Run("a long failover timeout pulls the derived value above the default", func(t *testing.T) {
 		node := buildClusterValkeyNode(cluster(nil, map[string]string{"cluster-manual-failover-timeout": "60000"}), 0, 0)
 		require.NotNil(t, node.Spec.TerminationGracePeriodSeconds)
-		assert.Equal(t, int64(70), *node.Spec.TerminationGracePeriodSeconds)
+		assert.Equal(t, int64(130), *node.Spec.TerminationGracePeriodSeconds)
 	})
 }

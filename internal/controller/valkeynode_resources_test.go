@@ -332,6 +332,45 @@ func TestInitContainerCommand(t *testing.T) {
 	assert.Contains(t, out, "ran")
 }
 
+func TestBuildValkeyNodePodTemplateSpec_PreStopHook(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	server := pts.Spec.Containers[0]
+	require.NotNil(t, server.Lifecycle)
+	require.NotNil(t, server.Lifecycle.PreStop)
+	require.NotNil(t, server.Lifecycle.PreStop.Exec)
+	assert.Equal(t, preStopCommand("/scripts/prestop-failover.sh"), server.Lifecycle.PreStop.Exec.Command)
+
+	cm, err := buildValkeyNodeConfigMap(node)
+	require.NoError(t, err)
+	assert.Contains(t, cm.Data, preStopScriptKey, "a standalone ValkeyNode ships the script too")
+}
+
+func TestPreStopCommand(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "prestop-failover.sh")
+	run := func() (string, int) {
+		cmd := preStopCommand(script)
+		out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return string(out), exitErr.ExitCode()
+		}
+		require.NoError(t, err)
+		return string(out), 0
+	}
+
+	_, code := run()
+	assert.Equal(t, 0, code, "a ConfigMap without the script skips the hook")
+
+	require.NoError(t, os.WriteFile(script, []byte("echo ran\n"), 0o644))
+	out, code := run()
+	assert.Equal(t, 0, code)
+	assert.Contains(t, out, "ran")
+}
+
 func TestInitScript(t *testing.T) {
 	out, err := exec.Command("sh", filepath.Join("scripts", "init.sh")).CombinedOutput()
 	require.NoError(t, err, "init.sh must succeed: %s", out)

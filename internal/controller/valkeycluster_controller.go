@@ -724,7 +724,8 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			}
 		}
 		// Every member of the shard is settled. When the roll moved its primary
-		// away, hand it back before rolling the next shard.
+		// away and node-index 0 has synced, hand it back now. The roll does not
+		// wait for that sync: the next pass that finds it synced fails back.
 		if r.maybeFailback(ctx, cluster, clusterState, nodes, shardIndex, true) {
 			return true, nil
 		}

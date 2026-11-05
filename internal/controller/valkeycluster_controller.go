@@ -675,7 +675,7 @@ func (r *ValkeyClusterReconciler) attachPendingNodes(ctx context.Context, cluste
 // The walk returns on the first node that is not Ready, and slot assignment
 // waits until every later primary exists. Nodes that the walk has not reached
 // have to be created on that return, or a partial create never finishes.
-func (r *ValkeyClusterReconciler) createMissingValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string) error {
+func (r *ValkeyClusterReconciler) createMissingValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string, trustBundle string) error {
 	log := logf.FromContext(ctx)
 	created := 0
 	for shardIndex := range int(cluster.Spec.Shards) {
@@ -689,7 +689,7 @@ func (r *ValkeyClusterReconciler) createMissingValkeyNodes(ctx context.Context, 
 			if !apierrors.IsNotFound(err) {
 				return err
 			}
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
 			if err != nil {
 				return err
 			}
@@ -783,7 +783,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// replaces a pod does: rebalance would otherwise use this pass's
 		// snapshot of the pod that Kubernetes is about to delete.
 		if clusterState != nil && !shardExistsInTopology(clusterState, shardIndex, nodes) && len(unassignedSlots) == 0 {
-			created, hold, err := r.reconcileSlotlessShard(ctx, cluster, shardIndex, nodesPerShard, nodes, clusterState, liveHashes)
+			created, hold, err := r.reconcileSlotlessShard(ctx, cluster, shardIndex, nodesPerShard, nodes, clusterState, liveHashes, trustBundle)
 			if err != nil {
 				return false, err
 			}
@@ -811,7 +811,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				// has caught up (#552), and this return is before Reconcile
 				// reaches the later phases. Create what the walk has not
 				// reached, repair stale peer addresses, then attach.
-				if err := r.createMissingValkeyNodes(ctx, cluster, nodesPerShard, nodes, clusterState, liveHashes); err != nil {
+				if err := r.createMissingValkeyNodes(ctx, cluster, nodesPerShard, nodes, clusterState, liveHashes, trustBundle); err != nil {
 					return false, err
 				}
 				healed := 0
@@ -862,7 +862,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 // replacement does: rebalance must not use the snapshot of the pod that is
 // leaving. created is how many ValkeyNodes this shard added. hold is true
 // while a replacement is still in progress.
-func (r *ValkeyClusterReconciler) reconcileSlotlessShard(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string) (created int, hold bool, err error) {
+func (r *ValkeyClusterReconciler) reconcileSlotlessShard(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodesPerShard int, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, liveHashes map[string]string, trustBundle string) (created int, hold bool, err error) {
 	log := logf.FromContext(ctx)
 	for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
 		name := valkeyNodeName(cluster.Name, shardIndex, nodeIndex)
@@ -875,7 +875,7 @@ func (r *ValkeyClusterReconciler) reconcileSlotlessShard(ctx context.Context, cl
 		} else if !apierrors.IsNotFound(err) {
 			return created, false, err
 		}
-		result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes)
+		result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
 		var deferred *rollDeferredError
 		if errors.As(err, &deferred) {
 			err = nil

@@ -669,9 +669,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	for shardIndex := range int(cluster.Spec.Shards) {
 		// If rolls are in progress but the primary of an active shard cannot be
 		// identified from cluster state, skip it rather than roll in an unknown order.
-		// New shards (not yet in the topology) are exempt — they need creation, not rolling.
-		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
-			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 {
+		// New shards (not yet in the topology, and not a dropped scrape of a
+		// shard that still owns slots) are exempt — they need creation, not rolling.
+		// A dropped scrape removes the shard from the topology. Index order would
+		// then roll a primary that failover promoted off node index 0 first.
+		if clusterState != nil && primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 &&
+			(shardExistsInTopology(clusterState, shardIndex, nodes) || shardUnreadableButServing(clusterState, shardIndex, nodes)) {
 			// Skip this shard only, never the whole reconcile: the later phases
 			// (MEET/ADDSLOTSRANGE/REPLICATE, forgetStaleNodes, handleScaleIn,
 			// rebalance) are what make an unidentifiable primary identifiable

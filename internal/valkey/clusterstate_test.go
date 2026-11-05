@@ -1356,6 +1356,62 @@ func TestGetClusterStateReleasesSlotsOfAReplacedPrimary(t *testing.T) {
 	}
 }
 
+// A restart moved the primary and CLUSTER INFO then failed, so the node stays
+// out of the topology. Peers still list the old address. The id answered, so
+// those ranges stay occupied instead of being handed to a pending primary.
+func TestGetClusterStateKeepsSlotsOfAnAnsweredPrimaryAtAStaleAddress(t *testing.T) {
+	moved := healthyScrape()
+	moved[0] = blobResult("ghi")
+	moved[1] = blobResult("shard-ghi")
+	moved[3] = valkeyErrorResult("NOPERM this user has no permissions to run the 'cluster' command")
+	moved[4] = blobResult("ghi 10.0.0.4:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n")
+
+	peerLines := "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 8192-16383\n"
+	for _, tc := range []struct {
+		name       string
+		addresses  []string
+		jklAddress string
+	}{
+		{name: "old address gone", addresses: []string{"10.0.0.1", "10.0.0.4", "10.0.0.5"}, jklAddress: "10.0.0.5"},
+		{name: "old address reused", addresses: []string{"10.0.0.1", "10.0.0.4", "10.0.0.3"}, jklAddress: "10.0.0.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viewer := healthyScrape()
+			viewer[4] = blobResult(peerLines + "jkl " + tc.jklAddress + ":6379@16379 master - 0 0 3 connected\n")
+			pending := []vclient.ValkeyResult{
+				blobResult("jkl"),
+				blobResult("shard-new"),
+				blobResult("role:master\r\n"),
+				blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\ncluster_size:2\r\n"),
+				blobResult("jkl " + tc.jklAddress + ":6379@16379 myself,master - 0 0 3 connected\n" + peerLines),
+			}
+			state := GetClusterState(context.Background(), tc.addresses, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379":         viewer,
+				"10.0.0.4:6379":         moved,
+				tc.jklAddress + ":6379": pending,
+			}))
+
+			if state.FindNodeById("ghi") != nil {
+				t.Fatal("incomplete primary scrape must not join the topology")
+			}
+			if !state.NodeAnswered("ghi") {
+				t.Fatal("primary answered CLUSTER MYID and must not look gone")
+			}
+			if got := state.GetUnassignedSlots(); len(got) != 0 {
+				t.Fatalf("slots of the answered primary were reported unassigned: %v", got)
+			}
+			if len(state.PendingNodes) != 1 || state.PendingNodes[0].Id != "jkl" {
+				t.Fatalf("pending replacement = %+v, want jkl", state.PendingNodes)
+			}
+			if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // A live replica still follows a primary whose pod is gone, or whose address
 // now answers as a new id. The ranges stay on the replica's shard. Releasing
 // them makes that shard look empty, and scale-in deletes the replica without

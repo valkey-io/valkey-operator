@@ -326,15 +326,18 @@ func (s *ClusterState) shardByID(id string) *ShardState {
 // Persistence does not promote that replica, so releasing the ranges deletes
 // the remaining copy before a slot move.
 //
-// With no such replica, the ranges are held only while the entry's address is
-// still a pod this pass set out to scrape and no scraped node answered there
-// under another id. A primary that is merely slow or briefly unreachable keeps
-// its slots, whatever flags its peers put on it. A primary whose pod is gone,
-// or whose address now belongs to a pod with a new id, is not coming back: its
-// ranges return to the free set so the replacement can take them. Holding them
-// would strand the slots whenever fail? cannot become fail, which is every
-// cluster with replicas: 0 and two shards, where the one surviving primary
-// cannot form a failure majority.
+// With no such replica, the ranges are held while the id itself answered this
+// pass, or while the entry's address is still a pod this pass set out to
+// scrape and no scraped node answered there under another id. An answered id
+// keeps its ranges when a restart moved it and peers still name the old
+// address: that address is not a target, but the process is live, and the
+// slots are not free for a pending primary. A primary that is merely slow or
+// briefly unreachable keeps its slots, whatever flags its peers put on it. A
+// primary whose pod is gone, or whose address now belongs to a pod with a new
+// id, is not coming back: its ranges return to the free set so the replacement
+// can take them. Holding them would strand the slots whenever fail? cannot
+// become fail, which is every cluster with replicas: 0 and two shards, where
+// the one surviving primary cannot form a failure majority.
 func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}, liveByAddress map[string]string) bool {
 	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 || entry.Host == "" {
 		return false
@@ -343,6 +346,11 @@ func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[st
 		return false
 	}
 	if s.HasReplicaOf(entry.Id) {
+		return true
+	}
+	// CLUSTER MYID succeeded and a later command was dropped. Peers can still
+	// name the address from before the restart. The id is live either way.
+	if s.NodeAnswered(entry.Id) {
 		return true
 	}
 	if _, isPod := s.targets[entry.Host]; !isPod {

@@ -256,6 +256,36 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *va
 	return false
 }
 
+// shardUnreadableButServing reports that a pod in this shard answered and its
+// own slot table lists ranges, but the scrape was dropped. The shard is
+// already serving. It is not a new shard: with the primary at a non-zero node
+// index, index order would roll that primary first.
+func shardUnreadableButServing(state *valkey.ClusterState, shardIndex int, nodes *valkeyv1.ValkeyNodeList) bool {
+	if state == nil {
+		return false
+	}
+	serving := make(map[string]struct{})
+	for _, inc := range state.IncompleteScrapes() {
+		if inc.OwnsSlots && inc.Address != "" {
+			serving[inc.Address] = struct{}{}
+		}
+	}
+	if len(serving) == 0 {
+		return false
+	}
+	si := strconv.Itoa(shardIndex)
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+			continue
+		}
+		if _, ok := serving[n.Status.PodIP]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // findShardPrimary scans all pods with the given shard-index label and returns
 // the Valkey node ID + IP of whichever pod is currently the slot-bearing
 // primary, regardless of its node-index label. This handles the post-failover

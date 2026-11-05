@@ -381,3 +381,30 @@ func TestDeleteExcessValkeyNodesKeepsPeerReportedOwner(t *testing.T) {
 	assert.Empty(t, kept)
 	assert.False(t, nodeExists(t, r.Client, other))
 }
+
+// TestDeleteExcessValkeyNodesKeepsAnsweredOwnerAtItsCurrentAddress: peers
+// still name the old address, and every slot is accounted for on the scraped
+// primary. The pod that answered as the slot owner is the one scale-in must
+// keep.
+func TestDeleteExcessValkeyNodesKeepsAnsweredOwnerAtItsCurrentAddress(t *testing.T) {
+	inSpec := primaryNode(0)
+	excess := primaryNode(3)
+	excess.Status.PodIP = "10.0.0.4"
+	r, cluster, recorder := scaleInReconciler(t, inSpec, excess)
+	shard := primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383})
+	shard.Nodes[0].SetClusterNodesForTesting(
+		"p0 10.0.0.0:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
+			"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 8192-16383\n",
+	)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard}}
+	state.SetTargetsForTesting("10.0.0.0", "10.0.0.4")
+	state.NoteAnsweredForTesting("ghi", true)
+	state.NoteIncompleteForTesting("10.0.0.4", "ghi", true)
+
+	deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, excess))
+	require.NoError(t, err)
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-3-0"}, kept)
+	assert.True(t, nodeExists(t, r.Client, excess))
+	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Excess ValkeyNode c-3-0 still owns slots according to a peer; waiting for drain")
+}

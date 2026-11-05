@@ -1405,7 +1405,7 @@ func TestGetClusterStateKeepsSlotsOfAnAnsweredPrimaryAtAStaleAddress(t *testing.
 			if len(state.PendingNodes) != 1 || state.PendingNodes[0].Id != "jkl" {
 				t.Fatalf("pending replacement = %+v, want jkl", state.PendingNodes)
 			}
-			if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+			if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3", "10.0.0.4"}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
 			}
 		})

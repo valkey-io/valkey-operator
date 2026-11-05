@@ -381,8 +381,10 @@ func slotCount(ranges []SlotsRange) int {
 	return n
 }
 
-// unscrapedSlotOwners returns ids and announced addresses of primaries this
-// pass did not scrape that a peer table still shows owning slots.
+// unscrapedSlotOwners returns ids and addresses of primaries this pass did
+// not scrape that a peer table still shows owning slots. A restart can move
+// the process while peers still name the old address, so the address that
+// answered as that id is included too.
 func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 	ids := make(map[string]struct{})
 	var hosts []string
@@ -404,6 +406,19 @@ func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 			seenHost[entry.Host] = struct{}{}
 			hosts = append(hosts, entry.Host)
 		}
+	}
+	for _, inc := range s.incomplete {
+		if inc.Id == "" || inc.Address == "" {
+			continue
+		}
+		if _, ok := ids[inc.Id]; !ok {
+			continue
+		}
+		if _, ok := seenHost[inc.Address]; ok {
+			continue
+		}
+		seenHost[inc.Address] = struct{}{}
+		hosts = append(hosts, inc.Address)
 	}
 	return ids, hosts
 }
@@ -428,7 +443,8 @@ func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
 }
 
 // UnscrapedSlotOwnerHosts returns addresses of primaries this pass did not
-// scrape whose peer-table lines still list owned slots.
+// scrape whose peer-table lines still list owned slots, including the
+// address an answered id moved to.
 func (s *ClusterState) UnscrapedSlotOwnerHosts() []string {
 	_, hosts := s.unscrapedSlotOwners()
 	return hosts

@@ -538,7 +538,7 @@ type TLSClientAuthSpec struct {
 	//
 	// The operator merges the server secret's `ca.crt` with the roots under
 	// each entry's key, in list order and without duplicates, into the
-	// operator-managed `<cluster>-tls-trust` Secret, and nodes verify clients
+	// operator-managed `valkey-<cluster>-tls-trust` Secret, and nodes verify clients
 	// and peers against that bundle. The server root always stays in the
 	// bundle, since peers present the server certificate on the cluster bus
 	// and replication links.
@@ -813,7 +813,7 @@ const (
 
 const (
 	// ReasonTrustBundleReady is used with ConditionTLSConfigured=True when
-	// <cluster>-tls-trust holds the server root and every clientAuth.ca root.
+	// valkey-<cluster>-tls-trust holds the server root and every clientAuth.ca root.
 	ReasonTrustBundleReady = "TrustBundleReady"
 	// ReasonTrustSourceNotFound is used with ConditionTLSConfigured=False when
 	// a source Secret or ConfigMap, or its configured key, does not exist. The
@@ -824,7 +824,7 @@ const (
 	// X.509 authority. The trust Secret keeps its last good roots.
 	ReasonTrustSourceInvalid = "TrustSourceInvalid"
 	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
-	// a Secret named <cluster>-tls-trust exists but this cluster does not
+	// a Secret named valkey-<cluster>-tls-trust exists but this cluster does not
 	// control it. Nodes stay on the server root.
 	ReasonTrustBundleConflict = "TrustBundleConflict"
 	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
@@ -878,7 +878,7 @@ const (
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
 	// ReasonTrustBundleError is used with ConditionReady when the operator
-	// cannot read a trust source or write <cluster>-tls-trust.
+	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"
 )
 
@@ -907,8 +907,8 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != self.metadata.name + '-tls-trust')",message="clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed trust bundle"
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != self.metadata.name + '-tls-trust'",message="certificates.server.secretName cannot be <name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

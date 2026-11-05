@@ -3996,9 +3996,10 @@ spec:
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
-            - message: 'replicas and replicasPerShard cannot both be set: replicas
-                is deprecated, remove it (set it to null) in the same update that
-                sets replicasPerShard'
+            - fieldPath: .replicasPerShard
+              message: 'spec.replicas is deprecated and cannot be combined with spec.replicasPerShard:
+                remove spec.replicas (set it to null) in the same update'
+              reason: FieldValueForbidden
               rule: '!(has(self.replicas) && has(self.replicasPerShard))'
             - message: 'node.spread.primaries and node.spread.pods cannot both be
                 Required: they render duplicate kubernetes.io/hostname DoNotSchedule

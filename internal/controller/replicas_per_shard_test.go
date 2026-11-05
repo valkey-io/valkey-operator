@@ -34,7 +34,7 @@ import (
 )
 
 var _ = Describe("spec.replicasPerShard and the deprecated spec.replicas", func() {
-	const bothSet = "replicas and replicasPerShard cannot both be set"
+	const bothSet = "spec.replicas is deprecated and cannot be combined with spec.replicasPerShard"
 
 	ctx := context.Background()
 

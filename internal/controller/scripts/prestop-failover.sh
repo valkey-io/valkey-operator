@@ -13,6 +13,7 @@
 #        Default Valkey port is 6379.
 
 port=${1:-"6379"}
+started=$(date +%s)
 
 # Run a command with a DURATION (seconds) timeout. Polls every 0.1s; on timeout
 # sends SIGTERM then SIGKILL. Returns the command's exit code, or 124 on timeout.
@@ -94,8 +95,9 @@ fi
 replica_ip=${target% *}
 replica_port=${target##* }
 
-# Wait for as long as the replica may take: cluster-manual-failover-timeout,
-# rounded up to seconds, plus a second for the role change to show.
+# The hook runs for at most cluster-manual-failover-timeout, rounded up to
+# seconds, plus a second, counted from its start, so the rest of the grace
+# period stays for the SIGTERM fallback. Each valkey-cli call is cut at 2s.
 timeout_ms=$(cli localhost "$port" CONFIG GET cluster-manual-failover-timeout | tr -d '\r' | sed -n 2p)
 case "$timeout_ms" in
     ''|*[!0-9]*) timeout_ms=5000 ;;
@@ -107,9 +109,9 @@ if [ "$reply" != "OK" ]; then
     log "CLUSTER FAILOVER on $replica_ip:$replica_port failed: $reply"
     exit 0
 fi
-log "asked $replica_ip:$replica_port to take over, waiting up to ${wait_s}s"
+deadline=$(( started + wait_s ))
+log "asked $replica_ip:$replica_port to take over, waiting until ${wait_s}s after the hook started"
 
-deadline=$(( $(date +%s) + wait_s ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if [ "$(local_role)" = "slave" ]; then
         log "handed the primary role to $replica_ip:$replica_port"

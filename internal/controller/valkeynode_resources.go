@@ -568,11 +568,12 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 }
 
 // userSetsPreStop reports whether patches give the server container a
-// preStop handler of their own.
+// preStop handler of their own. Like mergePatchContainers, it looks at the
+// last patch for the server container only.
 func userSetsPreStop(patches []corev1.Container) bool {
-	for _, c := range patches {
-		if c.Name == serverContainerName && c.Lifecycle != nil && c.Lifecycle.PreStop != nil {
-			return true
+	for _, c := range slices.Backward(patches) {
+		if c.Name == serverContainerName {
+			return c.Lifecycle != nil && c.Lifecycle.PreStop != nil
 		}
 	}
 	return false

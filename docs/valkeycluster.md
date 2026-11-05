@@ -76,9 +76,11 @@ The operator owns the keys below and rejects them in `config`. It sets each one 
 ```
 aclfile
 cluster-allow-replica-migration
+cluster-announce-hostname
 cluster-announce-ip
 cluster-config-file
 cluster-enabled
+cluster-preferred-endpoint-type
 cluster-replica-validity-factor
 dir
 port
@@ -87,6 +89,7 @@ primaryuser
 protected-mode
 shutdown-on-sigterm
 tls-auth-clients
+tls-auth-clients-user
 tls-ca-cert-file
 tls-cert-file
 tls-cluster

@@ -876,8 +876,7 @@ func (r *ValkeyClusterReconciler) reconcileSlotlessShard(ctx context.Context, cl
 			return created, false, err
 		}
 		result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
-		var deferred *rollDeferredError
-		if errors.As(err, &deferred) {
+		if _, ok := errors.AsType[*rollDeferredError](err); ok {
 			err = nil
 		}
 		if err != nil {

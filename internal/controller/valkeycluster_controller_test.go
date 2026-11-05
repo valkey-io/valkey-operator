@@ -1939,6 +1939,25 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(filterEvents(collectEvents(fakeRecorder), "StaleAddressesHealed")).To(HaveLen(1))
 	})
 
+	It("promotes orphaned replicas while a not-ready pod holds the roll", func() {
+		By("creating all nodes and marking them ready, then dropping one replica")
+		createAllNodes()
+		markAllReady()
+		setNotReady(node01)
+
+		promoted := 0
+		r.promoteOrphanedReplicasFn = func(_ context.Context, _ *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (reconcile.Result, bool) {
+			promoted++
+			Expect(state).NotTo(BeNil())
+			return reconcile.Result{}, true
+		}
+
+		requeue, err := reconcileNodesWithState(&valkey.ClusterState{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue(), "the not-ready replica still pauses the roll")
+		Expect(promoted).To(Equal(1), "orphan recovery runs on the pause, before Reconcile would reach it")
+	})
+
 	It("marks the cluster degraded when attaching during a pause fails", func() {
 		createAllNodes()
 		markAllReady()

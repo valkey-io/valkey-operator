@@ -72,11 +72,13 @@ type ValkeyClusterReconciler struct {
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
 
-	// healStaleAddressPeersFn and attachPendingNodesFn stand in for the
-	// methods of the same name. Nil calls the method. Tests set the field on
-	// the reconciler they built instead of swapping a package variable.
-	healStaleAddressPeersFn func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int
-	attachPendingNodesFn    func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) error
+	// healStaleAddressPeersFn, attachPendingNodesFn, and
+	// promoteOrphanedReplicasFn stand in for the methods of the same name.
+	// Nil calls the method. Tests set the field on the reconciler they built
+	// instead of swapping a package variable.
+	healStaleAddressPeersFn   func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int
+	attachPendingNodesFn      func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) error
+	promoteOrphanedReplicasFn func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool)
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -810,7 +812,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				// Pause the roll. A replacement replica is not Ready until it
 				// has caught up (#552), and this return is before Reconcile
 				// reaches the later phases. Create what the walk has not
-				// reached, repair stale peer addresses, then attach.
+				// reached, repair stale peer addresses, attach, then promote
+				// orphaned replicas. attachPendingNodes cannot take over a
+				// dead primary in another shard.
 				if err := r.createMissingValkeyNodes(ctx, cluster, nodesPerShard, nodes, clusterState, liveHashes, trustBundle); err != nil {
 					return false, err
 				}
@@ -831,6 +835,13 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				}
 				if attachErr != nil {
 					setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, attachErr.Error(), metav1.ConditionTrue)
+				}
+				promote := r.promoteOrphanedReplicas
+				if r.promoteOrphanedReplicasFn != nil {
+					promote = r.promoteOrphanedReplicasFn
+				}
+				if _, handled := promote(ctx, cluster, clusterState); handled {
+					log.V(1).Info("promoted an orphaned replica while a roll is paused")
 				}
 				if result == nodeDeferred {
 					return true, deferred
@@ -1967,7 +1978,7 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // is left entirely to Valkey.
 // Returns (result, true) if it acted and reconcile should requeue.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil {
+	if cluster.Spec.Persistence != nil || state == nil {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)

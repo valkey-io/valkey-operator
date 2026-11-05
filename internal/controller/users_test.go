@@ -52,6 +52,9 @@ func TestBuildAclFileContents(t *testing.T) {
 		"charlie": "user charlie off nopass +@admin",
 		"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
 		"edward":  "user edward on +@admin",
+		"frank":   "user frank on nopass db=0,1 +@all",
+		"grace":   "user grace on nopass resetdbs +@all",
+		"henry":   "user henry on nopass alldbs +@all",
 	}
 
 	// UsersAcl
@@ -111,18 +114,134 @@ func TestBuildAclFileContents(t *testing.T) {
 				Allow: []string{"@admin"},
 			},
 		},
+		{
+			// db= clears alldbs on its own, so unlike channels it must not be
+			// preceded by a reset directive. The exact-match assertion below
+			// is what pins that: a stray "resetdbs" would fail the comparison.
+			Name:       "frank",
+			Enabled:    true,
+			NoPassword: true,
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{
+				IDs: []int32{0, 1},
+			},
+			Commands: valkeyiov1alpha1.CommandsAclSpec{
+				Allow: []string{"@all"},
+			},
+		},
+		{
+			Name:       "grace",
+			Enabled:    true,
+			NoPassword: true,
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{
+				ResetDbs: true,
+			},
+			Commands: valkeyiov1alpha1.CommandsAclSpec{
+				Allow: []string{"@all"},
+			},
+		},
+		{
+			// Rendering-only expectation. alldbs is every user's default, so
+			// what the operator writes here produces a user indistinguishable
+			// from one with no databases block; this pins the rendered bytes,
+			// not anything observable on the server.
+			Name:       "henry",
+			Enabled:    true,
+			NoPassword: true,
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{
+				AllDbs: true,
+			},
+			Commands: valkeyiov1alpha1.CommandsAclSpec{
+				Allow: []string{"@all"},
+			},
+		},
 	}
 
 	// iterate over the users
 	for _, user := range users {
 
 		userName := user.Name
-		acl := buildUserAcl(user, passwords[userName])
+		acl := buildUserAcl(user, passwords[userName], true)
 		expected := expecteds[userName]
 
 		if strings.TrimSpace(acl) != expected {
 			t.Errorf("%s ACL Failed. Expected '%s'; got '%s'", userName, expected, acl)
 		}
+	}
+}
+
+func TestBuildUserAcl_DatabasesVersionGate(t *testing.T) {
+	// On an image that predates the db= directives the renderer must drop them
+	// silently: emitting them would make ACL LOAD fail for the whole file, and
+	// rejecting the spec is not the contract (see aclVersionGateWarnings).
+	for name, databases := range map[string]valkeyiov1alpha1.DatabasesAclSpec{
+		"ids":      {IDs: []int32{0, 1}},
+		"allDbs":   {AllDbs: true},
+		"resetDbs": {ResetDbs: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			user := valkeyiov1alpha1.UserAclSpec{
+				Name:       "frank",
+				Enabled:    true,
+				NoPassword: true,
+				Databases:  databases,
+				Commands:   valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
+			}
+
+			acl := strings.TrimSpace(buildUserAcl(user, nil, false))
+
+			assert.Equal(t, "user frank on nopass +@all", acl)
+			assert.NotContains(t, acl, "db=")
+			assert.NotContains(t, acl, "alldbs")
+			assert.NotContains(t, acl, "resetdbs")
+		})
+	}
+}
+
+func TestBuildUserAcl_DatabasesPrecedence(t *testing.T) {
+	// CEL rejects these combinations at admission, so they are unreachable
+	// through the API. The renderer still has to pick exactly one directive
+	// rather than emit two contradictory ones, for any object that predates
+	// the CEL rules or arrives through a client that skips validation.
+	tests := map[string]struct {
+		databases valkeyiov1alpha1.DatabasesAclSpec
+		expected  string
+	}{
+		"resetDbs wins over allDbs": {
+			databases: valkeyiov1alpha1.DatabasesAclSpec{AllDbs: true, ResetDbs: true},
+			expected:  "user frank on nopass resetdbs +@all",
+		},
+		"resetDbs wins over ids": {
+			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}, ResetDbs: true},
+			expected:  "user frank on nopass resetdbs +@all",
+		},
+		"allDbs wins over ids": {
+			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}, AllDbs: true},
+			expected:  "user frank on nopass alldbs +@all",
+		},
+		"empty ids renders no directive": {
+			// db= with no id is a syntax error that breaks ACL LOAD for the
+			// entire file, so an empty list must render nothing at all.
+			databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}},
+			expected:  "user frank on nopass +@all",
+		},
+		"unset renders no directive": {
+			databases: valkeyiov1alpha1.DatabasesAclSpec{},
+			expected:  "user frank on nopass +@all",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			user := valkeyiov1alpha1.UserAclSpec{
+				Name:       "frank",
+				Enabled:    true,
+				NoPassword: true,
+				Databases:  tc.databases,
+				Commands:   valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
+			}
+
+			assert.Equal(t, tc.expected, strings.TrimSpace(buildUserAcl(user, nil, true)))
+		})
 	}
 }
 

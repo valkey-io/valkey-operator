@@ -480,3 +480,118 @@ var _ = Describe("Discovery managed config", func() {
 		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 })
+
+var _ = Describe("ACL databases version gate", Label("acl-databases"), func() {
+	newUsersCluster := func(image string, users ...valkeyiov1alpha1.UserAclSpec) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Image: image,
+				Users: users,
+			},
+		}
+	}
+
+	gatedUser := func(name string) valkeyiov1alpha1.UserAclSpec {
+		return valkeyiov1alpha1.UserAclSpec{
+			Name:      name,
+			Enabled:   true,
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}},
+		}
+	}
+
+	It("names the affected user, the required version, and the detected version", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].reason).To(Equal(valkeyiov1alpha1.ReasonUnsupportedAclDirective))
+		Expect(warnings[0].message).To(ContainSubstring("spec.users[dbuser].databases"))
+		// The full prerelease floor, not just "9.1.0": "9.1.0" is a substring of
+		// "9.1.0-rc1", so asserting the shorter form would still pass if the
+		// floor were changed, making this blind to that regression.
+		Expect(warnings[0].message).To(ContainSubstring("9.1.0-rc1"))
+		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
+	})
+
+	It("says so when the detected version cannot be determined", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:latest", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("no version could be detected from spec.image \"valkey/valkey:latest\""))
+	})
+
+	It("names the default image when spec.image is empty", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("default image"))
+		Expect(warnings[0].message).To(ContainSubstring(DefaultImage))
+		Expect(warnings[0].message).NotTo(ContainSubstring("spec.image"))
+	})
+
+	It("stays silent when no user sets databases", func() {
+		plain := valkeyiov1alpha1.UserAclSpec{Name: "alice", Enabled: true}
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", plain))).To(BeEmpty())
+	})
+
+	It("returns nothing when the image supports the directives", func() {
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.1.0", gatedUser("dbuser")))).To(BeEmpty())
+	})
+
+	It("accepts the 9.1 release candidate, matching the config gate's floor", func() {
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.1.0-rc1", gatedUser("dbuser")))).To(BeEmpty())
+	})
+
+	It("names every affected user once, sorted and comma-joined", func() {
+		cluster := newUsersCluster("valkey/valkey:9.0.0",
+			gatedUser("zoe"),
+			valkeyiov1alpha1.UserAclSpec{Name: "alice", Enabled: true},
+			gatedUser("bob"),
+		)
+
+		warnings := aclVersionGateWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("spec.users[bob,zoe].databases"))
+		Expect(warnings[0].message).NotTo(ContainSubstring("alice"))
+	})
+
+	It("warns for allDbs and resetDbs too, not just ids", func() {
+		for _, databases := range []valkeyiov1alpha1.DatabasesAclSpec{
+			{AllDbs: true},
+			{ResetDbs: true},
+		} {
+			user := valkeyiov1alpha1.UserAclSpec{Name: "dbuser", Enabled: true, Databases: databases}
+			Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", user))).To(HaveLen(1))
+		}
+	})
+
+	It("does not warn for a user whose databases block is empty", func() {
+		// An explicitly empty block renders nothing, so there is nothing to
+		// drop and nothing to warn about.
+		user := valkeyiov1alpha1.UserAclSpec{
+			Name:      "dbuser",
+			Enabled:   true,
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}},
+		}
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", user))).To(BeEmpty())
+	})
+
+	It("warns exactly when the rendered ACL drops the directive", func() {
+		// aclVersionGateWarnings promises to report exactly what appendDatabasesAcl
+		// drops. Render and warn from the same spec so the two cannot drift, e.g.
+		// a new DatabasesAclSpec field rendered but missed by hasDatabasesDirective.
+		for _, image := range []string{"valkey/valkey:9.0.0", "valkey/valkey:9.1.0"} {
+			for _, databases := range []valkeyiov1alpha1.DatabasesAclSpec{
+				{IDs: []int32{0}},
+				{AllDbs: true},
+				{ResetDbs: true},
+				{IDs: []int32{}},
+			} {
+				user := valkeyiov1alpha1.UserAclSpec{Name: "dbuser", Enabled: true, NoPassword: true, Databases: databases}
+				cluster := newUsersCluster(image, user)
+
+				full := buildUserAcl(user, nil, true)
+				gated := buildUserAcl(user, nil, databasesAclSupported(cluster.Spec.Image))
+				dropped := full != gated
+
+				Expect(aclVersionGateWarnings(cluster) != nil).To(Equal(dropped), "image %s, databases %+v", image, databases)
+			}
+		}
+	})
+})

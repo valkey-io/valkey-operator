@@ -52,6 +52,12 @@ type UserAclSpec struct {
 	// +optional
 	Channels ChannelsAclSpec `json:"channels,omitempty"`
 
+	// Database restrictions. Requires Valkey 9.1+; on older images the
+	// directives are dropped from the rendered ACL and a ConfigurationWarning
+	// condition is set on the cluster.
+	// +optional
+	Databases DatabasesAclSpec `json:"databases,omitempty"`
+
 	// Raw ACL for (additional) permissions. Appended to anything generated.
 	// +optional
 	RawAcl string `json:"permissions,omitempty"`
@@ -105,4 +111,48 @@ type ChannelsAclSpec struct {
 	// Pub/Sub channel patterns - maps to Valkey: &pattern
 	// +optional
 	Patterns []string `json:"patterns,omitempty"`
+}
+
+// DatabasesAclSpec scopes a user to specific logical databases.
+//
+// Note that this operator always runs Valkey in cluster mode, where the number
+// of databases is governed by the cluster-databases directive and defaults to
+// 1. On a default cluster db 0 is the only database that exists, so ids: [0]
+// restricts nothing, and any selection that omits db 0 denies the user
+// everything. Raise cluster-databases through spec.config before relying on
+// this field.
+//
+// ids is guarded with has() in every rule below because it is optional: in CRD
+// CEL, referencing an absent optional field errors and fails validation for the
+// whole object. allDbs and resetDbs are always present after defaulting, so
+// they need no guard.
+// +kubebuilder:validation:XValidation:message="databases.ids and databases.allDbs are mutually exclusive",rule="!(has(self.ids) && self.allDbs)"
+// +kubebuilder:validation:XValidation:message="databases.ids and databases.resetDbs are mutually exclusive",rule="!(has(self.ids) && self.resetDbs)"
+// +kubebuilder:validation:XValidation:message="databases.allDbs and databases.resetDbs are mutually exclusive",rule="!(self.allDbs && self.resetDbs)"
+type DatabasesAclSpec struct {
+
+	// Specific database IDs this user is allowed to access; maps to Valkey: db=0,1,2
+	// Selecting ids clears Valkey's default alldbs grant on its own, so no
+	// separate reset is needed. At least one id is required: Valkey rejects an
+	// id-less db= as a syntax error.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=0
+	IDs []int32 `json:"ids,omitempty"`
+
+	// Allow this user to access all databases; maps to Valkey: alldbs
+	// This is already Valkey's default for every user, so setting it changes
+	// nothing on the server: the resulting user is indistinguishable from one
+	// that omits this block entirely. It is accepted as a way to state the
+	// intent explicitly.
+	// Whether alldbs is echoed back by ACL LIST depends on the server version
+	// (9.1.0 prints it for every user; later 9.1.x omit it as the default), so
+	// do not rely on its presence or absence either way.
+	// +kubebuilder:default=false
+	AllDbs bool `json:"allDbs,omitempty"`
+
+	// Clear the allowed databases and the alldbs flag; maps to Valkey: resetdbs
+	// The user cannot access any database until ids or allDbs is set.
+	// +kubebuilder:default=false
+	ResetDbs bool `json:"resetDbs,omitempty"`
 }

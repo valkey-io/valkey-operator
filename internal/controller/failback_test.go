@@ -134,7 +134,11 @@ func TestTrackFailback(t *testing.T) {
 	assert.Equal(t, valkeyv1.ReasonFailbackWaitingForCluster, reason(c), "the quiet period has ended")
 
 	trackFailback(c, &valkey.ClusterState{}, nodes, t0.Add(16*time.Minute))
-	assert.Len(t, c.Status.Failback, 1, "an unknown primary keeps the entry")
+	require.Len(t, c.Status.Failback, 1, "an unknown primary keeps the entry")
+	assert.Nil(t, c.Status.Failback[0].SyncedSince, "and restarts its clock")
+
+	trackFailback(c, failbackState("10.0.0.2", "up"), nodes, t0.Add(16*time.Minute+time.Second))
+	assert.Equal(t, valkeyv1.ReasonFailbackWaitingForQuietPeriod, reason(c), "a recovered shard waits a full quiet period again")
 
 	trackFailback(c, failbackState("10.0.0.1", "up"), nodes, t0.Add(17*time.Minute))
 	assert.Empty(t, c.Status.Failback, "a primary back on node-index 0 clears the entry")

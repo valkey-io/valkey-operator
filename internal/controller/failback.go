@@ -131,13 +131,22 @@ func failbackDue(cluster *valkeyiov1alpha1.ValkeyCluster, f *valkeyiov1alpha1.Sh
 
 // trackFailback refreshes status.failback from the live state: it adds the
 // shards whose primary moved away from node-index 0, drops the ones that are
-// back, and starts or clears each shard's quiet period clock. Shards whose
-// primary is unknown keep their entry as it is. It then sets the
+// back, and starts or clears each shard's quiet period clock. A shard whose
+// primary is unknown keeps its entry with the clock cleared. It then sets the
 // PrimaryDisplaced condition.
 func trackFailback(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, now time.Time) {
-	if state != nil {
+	if state == nil {
+		for i := range cluster.Status.Failback {
+			cluster.Status.Failback[i].SyncedSince = nil
+		}
+	} else {
 		for shardIndex := range int(cluster.Spec.Shards) {
 			if _, ip := findShardPrimary(state, shardIndex, nodes); ip == "" {
+				// Nothing can be confirmed about node-index 0 either, so its
+				// clock starts over once the primary is known again.
+				if f := findFailbackStatus(cluster, shardIndex); f != nil {
+					f.SyncedSince = nil
+				}
 				continue
 			}
 			_, target, displaced := failbackCandidate(state, shardIndex, nodes)

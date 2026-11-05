@@ -124,13 +124,12 @@ var _ = Describe("ValkeyCluster spec.config validation", func() {
 		Expect(err.Error()).To(ContainSubstring(reservedKeyMessage))
 	})
 
-	It("names the offending keys in the message", func() {
+	It("explains the rejection and points to the reserved key list", func() {
 		// The message has to be actionable on its own, since there is no webhook to elaborate.
+		// It points to the docs rather than repeating the list, so the list lives in one place.
 		err := k8sClient.Create(ctx, configCluster("cfg-message", map[string]string{"cluster-enabled": "no"}))
 		Expect(err).To(HaveOccurred())
-		for _, key := range []string{"aclfile", "cluster-enabled", "dir", "tls-port"} {
-			Expect(err.Error()).To(ContainSubstring(key), "message should list the reserved keys")
-		}
 		Expect(strings.ToLower(err.Error())).To(ContainSubstring("operator sets these itself"))
+		Expect(err.Error()).To(ContainSubstring("docs/valkeycluster.md"))
 	})
 })

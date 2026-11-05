@@ -34,26 +34,37 @@ import (
 // value for one of these is overridden the same way a base-config key is.
 // They are not in getBaseConfig, so they must be listed here explicitly.
 var podAppliedKeys = []string{
+	"cluster-announce-hostname",
 	"cluster-announce-ip",
 	"primaryauth",
 	"primaryuser",
 }
 
+// ownedKeysImage is new enough that no operator-owned directive is version-gated out of the base config.
+const ownedKeysImage = "valkey/valkey:9.1.0"
+
 // operatorOwnedKeys returns every directive the operator owns.
-// That is the union of the base config, with TLS off and on, and the pod-applied flags.
-// The TLS branch matters on its own.
-// Those keys are only emitted when TLS is configured, so with TLS off a user value takes effect instead of being discarded.
-// That is how a user could move or close the port the operator connects to.
+// That is the union of the base config across every branch that adds a key, and the pod-applied flags.
+// Each branch matters on its own, because a key emitted only on that branch would otherwise take a user value when the branch is off.
+// TLS off is how a user could move or close the port the operator connects to.
+// The branches are TLS off, server TLS, TLS with a client certificate user, and hostname announce off and on.
 func operatorOwnedKeys() []string {
+	server := valkeyiov1alpha1.NodeTLSCertificates{
+		Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "certs"},
+	}
 	seen := map[string]struct{}{}
 	for _, tls := range []*valkeyiov1alpha1.NodeTLSSpec{
 		nil,
-		{Certificates: valkeyiov1alpha1.NodeTLSCertificates{
-			Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "certs"},
+		{Certificates: server},
+		{Certificates: server, ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
+			Mode:            valkeyiov1alpha1.TLSAuthClientsRequired,
+			CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserURI,
 		}},
 	} {
-		for key := range getBaseConfig(tls) {
-			seen[key] = struct{}{}
+		for _, hostnameAnnounce := range []bool{false, true} {
+			for key := range getBaseConfig(tls, hostnameAnnounce, ownedKeysImage) {
+				seen[key] = struct{}{}
+			}
 		}
 	}
 	for _, key := range podAppliedKeys {

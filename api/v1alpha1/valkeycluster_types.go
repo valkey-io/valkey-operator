@@ -281,9 +281,11 @@ type ZonePinning struct {
 var ReservedConfigKeys = []string{
 	"aclfile",
 	"cluster-allow-replica-migration",
+	"cluster-announce-hostname",
 	"cluster-announce-ip",
 	"cluster-config-file",
 	"cluster-enabled",
+	"cluster-preferred-endpoint-type",
 	"cluster-replica-validity-factor",
 	"dir",
 	"port",
@@ -292,6 +294,7 @@ var ReservedConfigKeys = []string{
 	"protected-mode",
 	"shutdown-on-sigterm",
 	"tls-auth-clients",
+	"tls-auth-clients-user",
 	"tls-ca-cert-file",
 	"tls-cert-file",
 	"tls-cluster",
@@ -430,7 +433,7 @@ type ValkeyClusterSpec struct {
 	// It is set high deliberately, because raising a bound later is backwards compatible while lowering one locks out anyone already above it.
 	// Valkey has roughly 200 directives in total, so 1000 cannot realistically be reached.
 	// +kubebuilder:validation:MaxProperties=1000
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

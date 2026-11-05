@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	vclient "github.com/valkey-io/valkey-go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +38,38 @@ type connConfig struct {
 	tls      *tls.Config
 	username string
 	password string
+	// clientCertFallback presents the node's own server certificate as a
+	// client certificate. During a clientAuth roll (Required to Optional or
+	// Disabled) pods that have not restarted yet still demand a client
+	// certificate the primary configuration no longer presents; a dial
+	// refused at the handshake is retried once with this configuration so
+	// the roll keeps moving instead of stalling in Reconciling. It is nil
+	// unless clientAuth is Optional or Disabled, and is only ever used for
+	// that retry, keeping the certificateUser ACL posture documented in
+	// docs/mtls.md intact.
+	clientCertFallback *tls.Config
+}
+
+// clientCertRefusedErrors lists the handshake-refusal spellings that arm the
+// clientAuth-roll fallback retry. TLS 1.3 surfaces the server demand as
+// "certificate required"; the certificate_required alert does not exist in
+// TLS 1.2, so a node enforcing clientAuth.mode: Required on a
+// tls-protocols: TLSv1.2 port instead refuses the dial with a generic
+// "handshake failure". Both spellings mean the same pod state during a
+// clientAuth roll, so both arm the retry.
+var clientCertRefusedErrors = []string{"certificate required", "handshake failure"}
+
+// clientCertificateRefused reports whether err is a dial refusal caused by
+// the server demanding a client certificate the configuration did not
+// present -- the posture of a pod still enforcing clientAuth.mode:
+// Required from before a clientAuth roll. It matches the TLS 1.3
+// "certificate required" alert and the TLS 1.2 "handshake failure" form.
+func clientCertificateRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, clientCertRefusedErrors[0]) || strings.Contains(msg, clientCertRefusedErrors[1])
 }
 
 // clientOption is the option for a single-node client to address (host:port).
@@ -92,17 +125,37 @@ type provider struct {
 // tlsConfig returns the TLS config for spec and a token that changes whenever
 // the config would. Both are empty when spec names no server certificate
 // secret.
-func (p *provider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, string, error) {
+func (p *provider) tlsConfig(ctx context.Context, namespace string, spec *valkeyiov1alpha1.NodeTLSSpec) (*tls.Config, *tls.Config, string, error) {
 	if spec == nil || spec.Certificates.Server.SecretName == "" {
-		return nil, "", nil
+		return nil, nil, "", nil
 	}
 	name := spec.Certificates.Server.SecretName
 	clientCert := spec.RequiresClientCertificate()
-	cfg, resourceVersion, err := getTLSConfig(ctx, p.apiReader, name, spec.ServerName, namespace, clientCert)
+	cfg, fallback, resourceVersion, err := getTLSConfigWithFallback(ctx, p.apiReader, name, spec.ServerName, namespace, clientCert, !clientCert)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	return cfg, fmt.Sprintf("%s/%s/%s/%t", name, resourceVersion, spec.ServerName, clientCert), nil
+	return cfg, fallback, fmt.Sprintf("%s/%s/%s/%t", name, resourceVersion, spec.ServerName, clientCert), nil
+}
+
+// dialPooled returns the pooled client for address built from cfg, retrying
+// once with the clientAuth-roll fallback when the dial is refused by a pod
+// that still demands a client certificate. The retry dials under the token
+// plus a client-cert suffix, so it pools separately: later dials to the
+// same not-yet-rolled pod reuse the fallback client instead of repeating
+// the refused handshake, and the pool drops it when the secret changes or
+// it goes idle.
+func (p *provider) dialPooled(ctx context.Context, address string, cfg connConfig, token string) (vclient.Client, error) {
+	c, err := p.pool.Get(ctx, clientOption(address, cfg), token)
+	if err != nil && cfg.clientCertFallback != nil && clientCertificateRefused(err) {
+		logf.FromContext(ctx).Info("node still requires a client certificate, retrying with one",
+			"address", address)
+		retry := cfg
+		retry.tls = cfg.clientCertFallback
+		retry.clientCertFallback = nil
+		return p.pool.Get(ctx, clientOption(address, retry), token+"/client-cert")
+	}
+	return c, err
 }
 
 func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (valkey.DialFunc, error) {
@@ -113,7 +166,7 @@ func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.Val
 	cfg := connConfig{username: operatorUser, password: password}
 
 	tlsSpec := nodeTLSFromCluster(cluster)
-	tlsCfg, token, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
+	tlsCfg, fallbackCfg, token, err := p.tlsConfig(ctx, cluster.Namespace, tlsSpec)
 	if err != nil {
 		// Fail each dial, not the caller: the cluster reconcile still has
 		// ValkeyNodes to create while the secret is being issued.
@@ -125,9 +178,10 @@ func (p *provider) ForCluster(ctx context.Context, cluster *valkeyiov1alpha1.Val
 		}, nil
 	}
 	cfg.tls = tlsCfg
+	cfg.clientCertFallback = fallbackCfg
 
 	return func(ctx context.Context, address string) (vclient.Client, error) {
-		return p.pool.Get(ctx, clientOption(address, cfg), token)
+		return p.dialPooled(ctx, address, cfg, token)
 	}, nil
 }
 
@@ -140,11 +194,11 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 		tlsSpec = tlsSpec.DeepCopy()
 		tlsSpec.ServerName = nodeTLSServerName(node)
 	}
-	tlsCfg, token, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
+	tlsCfg, fallbackCfg, token, err := p.tlsConfig(ctx, node.Namespace, tlsSpec)
 	if err != nil {
 		return nil, fmt.Errorf("TLS config: %w", err)
 	}
-	cfg := connConfig{tls: tlsCfg}
+	cfg := connConfig{tls: tlsCfg, clientCertFallback: fallbackCfg}
 
 	// A node outside a cluster has no operator user, and a cluster's password
 	// secret does not exist until the cluster controller writes it. Both dial
@@ -160,5 +214,5 @@ func (p *provider) ForNode(ctx context.Context, node *valkeyiov1alpha1.ValkeyNod
 		}
 	}
 
-	return p.pool.Get(ctx, clientOption(net.JoinHostPort(node.Status.PodIP, strconv.Itoa(DefaultPort)), cfg), token)
+	return p.dialPooled(ctx, net.JoinHostPort(node.Status.PodIP, strconv.Itoa(DefaultPort)), cfg, token)
 }

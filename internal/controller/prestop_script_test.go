@@ -30,8 +30,9 @@ import (
 
 // stubValkeyCLI answers INFO replication from $STUB_DIR/info (role:slave once
 // $STUB_DIR/demoted exists), CONFIG GET with $STUB_TIMEOUT, and CLUSTER
-// FAILOVER with OK, creating $STUB_DIR/demoted when $STUB_PROMOTE is set. Every
-// call is appended to $STUB_DIR/calls as "host port command".
+// FAILOVER with OK, creating $STUB_DIR/demoted when $STUB_PROMOTE is set. A
+// command equal to $STUB_BLOCK hangs instead. Every call is appended to
+// $STUB_DIR/calls as "host port command".
 const stubValkeyCLI = `#!/bin/sh
 host=""; port=""
 while [ $# -gt 0 ]; do
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 echo "$host $port $*" >> "$STUB_DIR/calls"
+if [ -n "${STUB_BLOCK:-}" ] && [ "$*" = "$STUB_BLOCK" ]; then exec sleep 30; fi
 case "$*" in
     "INFO replication")
         if [ -f "$STUB_DIR/demoted" ]; then printf 'role:slave\r\n'; else cat "$STUB_DIR/info"; fi ;;
@@ -57,10 +59,11 @@ esac
 
 type preStopRun struct {
 	failovers []string // "host port" of each CLUSTER FAILOVER sent
+	rolePolls int      // local INFO replication calls after the first CLUSTER FAILOVER
 	elapsed   time.Duration
 }
 
-func runPreStopScript(t *testing.T, info, timeoutMs string, promote bool) preStopRun {
+func runPreStopScript(t *testing.T, info, timeoutMs string, promote bool, block ...string) preStopRun {
 	t.Helper()
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "valkey-cli"), []byte(stubValkeyCLI), 0o755))
@@ -79,6 +82,9 @@ func runPreStopScript(t *testing.T, info, timeoutMs string, promote bool) preSto
 	if promote {
 		cmd.Env = append(cmd.Env, "STUB_PROMOTE=1")
 	}
+	if len(block) > 0 {
+		cmd.Env = append(cmd.Env, "STUB_BLOCK="+block[0])
+	}
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "the hook must always exit 0: %s", out)
@@ -88,6 +94,8 @@ func runPreStopScript(t *testing.T, info, timeoutMs string, promote bool) preSto
 	for line := range strings.SplitSeq(strings.TrimSpace(string(calls)), "\n") {
 		if host, ok := strings.CutSuffix(line, " CLUSTER FAILOVER"); ok {
 			run.failovers = append(run.failovers, host)
+		} else if len(run.failovers) > 0 && strings.HasSuffix(line, " INFO replication") {
+			run.rolePolls++
 		}
 	}
 	return run
@@ -125,7 +133,21 @@ func TestPreStopFailoverScript(t *testing.T) {
 	t.Run("a handoff that does not finish ends after the failover timeout", func(t *testing.T) {
 		run := runPreStopScript(t, primary, "1000", false)
 		assert.Equal(t, []string{"10.0.0.3 6379"}, run.failovers)
+		assert.Greater(t, run.rolePolls, 1, "the hook keeps polling the local role until the deadline")
 		assert.GreaterOrEqual(t, run.elapsed, time.Second)
+		assert.Less(t, run.elapsed, 5*time.Second)
+	})
+
+	t.Run("a hung valkey-cli call is cut and the hook carries on", func(t *testing.T) {
+		run := runPreStopScript(t, primary, "5000", true, "CONFIG GET cluster-manual-failover-timeout")
+		assert.Equal(t, []string{"10.0.0.3 6379"}, run.failovers, "falls back to the default timeout")
+		assert.Less(t, run.elapsed, 6*time.Second)
+	})
+
+	t.Run("a replica that hangs on CLUSTER FAILOVER ends the hook", func(t *testing.T) {
+		run := runPreStopScript(t, primary, "5000", false, "CLUSTER FAILOVER")
+		assert.Equal(t, []string{"10.0.0.3 6379"}, run.failovers)
+		assert.Zero(t, run.rolePolls, "no reply means no handoff to wait for")
 		assert.Less(t, run.elapsed, 5*time.Second)
 	})
 }

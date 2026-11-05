@@ -413,6 +413,74 @@ type ValkeyClusterSpec struct {
 	// time; a change rolls the pods. Keys the operator sets itself are rejected.
 	// +optional
 	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
+
+	// Failover configures how the operator moves the primary role between the
+	// members of a shard.
+	// +optional
+	Failover *ClusterFailoverSpec `json:"failover,omitempty"`
+}
+
+// FailbackMode selects whether the operator fails a shard back to its
+// node-index 0 member.
+// +kubebuilder:validation:Enum=Enabled;Disabled
+type FailbackMode string
+
+const (
+	// FailbackEnabled fails each shard back to its node-index 0 member.
+	FailbackEnabled FailbackMode = "Enabled"
+	// FailbackDisabled leaves the primary wherever the last failover put it.
+	FailbackDisabled FailbackMode = "Disabled"
+)
+
+// ClusterFailoverSpec configures how the operator moves the primary role
+// between the members of a shard.
+type ClusterFailoverSpec struct {
+	// Failback returns each shard's primary role to its node-index 0 member
+	// after a failover moved it away.
+	// +optional
+	Failback *FailbackSpec `json:"failback,omitempty"`
+}
+
+// FailbackSpec configures primary failback.
+//
+// A shard fails back with a graceful CLUSTER FAILOVER sent to its node-index 0
+// member once that member is a Ready replica in sync with the primary and the
+// cluster is otherwise healthy. When the operator moved the primary itself to
+// roll a pod, the shard fails back as soon as the rolled member has synced.
+// After any other failover it waits for QuietPeriodSeconds first.
+type FailbackSpec struct {
+	// Mode turns failback on or off. Defaults to Enabled.
+	// +kubebuilder:default=Enabled
+	// +optional
+	Mode FailbackMode `json:"mode,omitempty"`
+
+	// QuietPeriodSeconds is how long the node-index 0 member has to stay a
+	// synced replica before the shard fails back to it after a failover the
+	// operator did not start. It keeps a member that keeps restarting from
+	// taking the primary role back each time it comes up. Defaults to 300.
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	QuietPeriodSeconds *int32 `json:"quietPeriodSeconds,omitempty"`
+}
+
+// defaultFailbackQuietPeriodSeconds matches the CRD default of
+// spec.failover.failback.quietPeriodSeconds.
+const defaultFailbackQuietPeriodSeconds = 300
+
+// FailbackEnabled reports whether the operator fails shards back to their
+// node-index 0 member. Unset means enabled.
+func (s ValkeyClusterSpec) FailbackEnabled() bool {
+	return s.Failover == nil || s.Failover.Failback == nil || s.Failover.Failback.Mode != FailbackDisabled
+}
+
+// FailbackQuietPeriodSeconds returns spec.failover.failback.quietPeriodSeconds,
+// or its default when unset.
+func (s ValkeyClusterSpec) FailbackQuietPeriodSeconds() int32 {
+	if s.Failover == nil || s.Failover.Failback == nil || s.Failover.Failback.QuietPeriodSeconds == nil {
+		return defaultFailbackQuietPeriodSeconds
+	}
+	return *s.Failover.Failback.QuietPeriodSeconds
 }
 
 // PreferredEndpointType mirrors valkey's cluster-preferred-endpoint-type directive.
@@ -790,6 +858,30 @@ type ValkeyClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Failback lists the shards whose primary is away from their node-index 0
+	// member, with what the operator knows about failing them back.
+	// +listType=map
+	// +listMapKey=shard
+	// +optional
+	Failback []ShardFailbackStatus `json:"failback,omitempty"`
+}
+
+// ShardFailbackStatus tracks a shard whose primary is away from its
+// node-index 0 member.
+type ShardFailbackStatus struct {
+	// Shard is the shard index.
+	Shard int32 `json:"shard"`
+
+	// SyncedSince is when the node-index 0 member last became a Ready replica
+	// in sync with the shard's primary. Unset while it is not one.
+	// +optional
+	SyncedSince *metav1.Time `json:"syncedSince,omitempty"`
+
+	// AfterRoll is true when the operator moved the primary itself to roll a
+	// pod. Such a shard fails back without waiting for the quiet period.
+	// +optional
+	AfterRoll bool `json:"afterRoll,omitempty"`
 }
 
 const (
@@ -809,6 +901,9 @@ const (
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
 	ConditionTLSConfigured = "TLSConfigured"
+	// ConditionPrimaryDisplaced is True while a shard's primary is not its
+	// node-index 0 member. The reason says what failback is waiting for.
+	ConditionPrimaryDisplaced = "PrimaryDisplaced"
 )
 
 const (
@@ -871,9 +966,13 @@ const (
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	// ReasonDeprecatedField is used with ConditionConfigurationWarning when the
 	// spec uses a field that still works but is scheduled for removal.
-	ReasonDeprecatedField            = "DeprecatedField"
-	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
-	ReasonServiceAccountLookupFailed = "ServiceAccountLookupFailed"
+	ReasonDeprecatedField               = "DeprecatedField"
+	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	ReasonFailbackDisabled              = "FailbackDisabled"
+	ReasonFailbackWaitingForReplica     = "FailbackWaitingForReplica"
+	ReasonFailbackWaitingForQuietPeriod = "FailbackWaitingForQuietPeriod"
+	ReasonFailbackWaitingForCluster     = "FailbackWaitingForCluster"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"

@@ -195,7 +195,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards: 1, Replicas: 0,
 				Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
-				Users:    []valkeyiov1alpha1.UserAclSpec{user("alice", "acl-system-first-alice")},
+				ACL:      &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-system-first-alice")}},
 			},
 		}
 		defer cleanup(cluster, "acl-system-first-alice", "acl-system-first-bob")
@@ -215,7 +215,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		By("enabling the exporter while adding a user whose Secret does not exist")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
 		cluster.Spec.Exporter.Enabled = new(true)
-		cluster.Spec.Users = append(cluster.Spec.Users, user("bob", "acl-system-first-bob"))
+		cluster.Spec.ACL.Users = append(cluster.Spec.ACL.Users, user("bob", "acl-system-first-bob"))
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 		Expect(reconcileOnce(r, cluster)).To(Succeed())
 
@@ -241,7 +241,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-write-fails", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards: 1, Replicas: 0,
-				Users: []valkeyiov1alpha1.UserAclSpec{user("alice", "acl-write-fails-alice")},
+				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-write-fails-alice")}},
 			},
 		}
 		defer cleanup(cluster, "acl-write-fails-alice", "acl-write-fails-carol")
@@ -255,7 +255,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		By("adding a user whose Secret exists while the internal ACL Secret cannot be written")
 		Expect(k8sClient.Create(ctx, passwordSecret("acl-write-fails-carol"))).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
-		cluster.Spec.Users = append(cluster.Spec.Users, user("carol", "acl-write-fails-carol"))
+		cluster.Spec.ACL.Users = append(cluster.Spec.ACL.Users, user("carol", "acl-write-fails-carol"))
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 		failing, recorder := newReconciler()
 		failing.Client = failingSecretUpdateClient{Client: k8sClient, name: getInternalSecretName(cluster.Name)}

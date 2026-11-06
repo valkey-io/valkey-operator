@@ -53,17 +53,18 @@ metadata:
 spec:
   shards: %d
   replicas: 0
-  users:
+  acl:
+    users:
 %s`, clusterName, shards, users)
 	}
 	userBlock := func(name, secret string) string {
-		return fmt.Sprintf(`    - name: %s
-      enabled: true
-      passwordSecret:
-        name: %s
-        keys: [current]
-      commands:
-        allow: ["@read", "@connection"]
+		return fmt.Sprintf(`      - name: %s
+        password:
+          secret:
+            name: %s
+            keys: [current]
+        commands:
+          allow: ["@read", "@connection"]
 `, name, secret)
 	}
 	apply := func(body string) {

@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -47,6 +48,7 @@ func clientAuthCACluster(name string, mode valkeyiov1alpha1.TLSAuthClients, n in
 					ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{Mode: mode, CA: ca},
 				},
 			},
+			Users: []valkeyiov1alpha1.UserAclSpec{{Name: "default", ResetPass: true}},
 		},
 	}
 }
@@ -56,6 +58,32 @@ var _ = Describe("clientAuth.ca validation", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
+	})
+
+	It("refuses clientAuth.ca when spec.users does not declare default", func() {
+		c := clientAuthCACluster("ca-bad-no-users", valkeyiov1alpha1.TLSAuthClientsRequired, 1)
+		c.Spec.Users = nil
+		Expect(k8sClient.Create(ctx, c)).To(MatchError(ContainSubstring("clientAuth.ca requires spec.users to declare the default user")))
+
+		c = clientAuthCACluster("ca-bad-other-user", valkeyiov1alpha1.TLSAuthClientsRequired, 1)
+		c.Spec.Users = []valkeyiov1alpha1.UserAclSpec{{Name: "alice", ResetPass: true}}
+		Expect(k8sClient.Create(ctx, c)).To(MatchError(ContainSubstring("clientAuth.ca requires spec.users to declare the default user")))
+	})
+
+	It("refuses dropping default while clientAuth.ca is set, and allows dropping both", func() {
+		c := clientAuthCACluster("ca-drop-default", valkeyiov1alpha1.TLSAuthClientsRequired, 1)
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, ctx, c)
+
+		users := c.Spec.Users
+		c.Spec.Users = nil
+		Expect(k8sClient.Update(ctx, c)).To(MatchError(ContainSubstring("clientAuth.ca requires spec.users to declare the default user")))
+
+		c.Spec.Users = users
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(c), c)).To(Succeed())
+		c.Spec.Users = nil
+		c.Spec.Networking.TLS.ClientAuth.CA = nil
+		Expect(k8sClient.Update(ctx, c)).To(Succeed())
 	})
 
 	It("accepts a CA list with mode Required", func() {

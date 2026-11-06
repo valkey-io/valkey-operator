@@ -2161,6 +2161,9 @@ spec:
                               a changed bundle live, without a restart. SPIRE's
                               bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
                               or `bundle.crt`).
+
+                              Setting this requires `spec.users` to declare the `default` user, since
+                              a client whose certificate names no ACL user is logged in as `default`.
                             items:
                               description: |-
                                 TrustSource references CA certificates held in a Secret or a ConfigMap.
@@ -4423,6 +4426,12 @@ spec:
           rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
             || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca)
             == 0 || self.spec.networking.tls.certificates.server.secretName != ''valkey-%s-tls-trust''.format([self.metadata.name])'
+        - message: 'clientAuth.ca requires spec.users to declare the default user:
+            it widens who can log in as default, so state its access, for example
+            {name: default, enabled: false}'
+          rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
+            || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca)
+            == 0 || (has(self.spec.users) && self.spec.users.exists(u, u.name == ''default''))'
     served: true
     storage: true
     subresources:

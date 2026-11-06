@@ -479,7 +479,7 @@ networking:
     clientAuth:
       mode: Optional             # Optional (default) | Required | Disabled
       certificateUser: Disabled  # Disabled (default) | CN | URI
-      ca:                        # optional; extra roots for verifying client certificates
+      ca:                        # optional; extra roots for verifying client certificates. Requires `default` in spec.users
         - secretName: client-ca  # or configMapName; key defaults to ca.crt (PEM or SPIFFE bundle)
 ```
 

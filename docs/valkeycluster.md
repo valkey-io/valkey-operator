@@ -53,7 +53,7 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
-`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, recovery is left to Valkey.
+`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, it takes over only without failover quorum, and only after waiting for the primary to come back (see [Persistence](#persistence)).
 
 #### Version-gated config
 
@@ -165,6 +165,14 @@ persistence:
 When `persistence` is set, the operator manages a PVC for each ValkeyNode. With the [save config option](https://valkey.io/topics/persistence/), memory state survives pod rolls and [partial resyncs](https://valkey.io/topics/replication/) are possible.
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
+
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica, so the operator does it with `CLUSTER FAILOVER TAKEOVER`. With persistence it first waits for the primary to come back with its data:
+
+- 60 seconds from when the operator first sees the primary flagged failed (`--orphan-takeover-grace`).
+- For as long as the operator can reach the primary, for example while it loads its dataset, however long that takes.
+- While a pod of the primary's shard is Pending or running but not Ready, up to 5 minutes from the first failure (`--orphan-takeover-max-wait`). A crash-looping or unschedulable primary is taken over after that.
+
+Both are operator flags that take a Go duration, e.g. `--orphan-takeover-grace=2m`. The failure times are kept in memory, so an operator restart or leader change starts the wait again.
 
 #### Constraints
 

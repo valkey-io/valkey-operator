@@ -2048,6 +2048,36 @@ spec:
                         type: object
                     type: object
                 type: object
+              failover:
+                description: |-
+                  Failover configures how the operator moves the primary role between the
+                  members of a shard.
+                properties:
+                  failback:
+                    description: |-
+                      Failback returns each shard's primary role to its node-index 0 member
+                      after a failover moved it away.
+                    properties:
+                      mode:
+                        default: Enabled
+                        description: Mode turns failback on or off. Defaults to Enabled.
+                        enum:
+                        - Enabled
+                        - Disabled
+                        type: string
+                      quietPeriodSeconds:
+                        default: 300
+                        description: |-
+                          QuietPeriodSeconds is how long the node-index 0 member has to stay a
+                          synced replica before the shard fails back to it after a failover the
+                          operator did not start. It keeps a member that keeps restarting from
+                          taking the primary role back each time it comes up, and it is also the
+                          wait after a failed attempt. Defaults to 300.
+                        format: int32
+                        minimum: 10
+                        type: integer
+                    type: object
+                type: object
               image:
                 description: Override the default Valkey image
                 type: string
@@ -4355,6 +4385,37 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
+                x-kubernetes-list-type: map
+              failback:
+                description: |-
+                  Failback lists the shards whose primary is away from their node-index 0
+                  member, with what the operator knows about failing them back.
+                items:
+                  description: |-
+                    ShardFailbackStatus tracks a shard whose primary is away from its
+                    node-index 0 member.
+                  properties:
+                    afterRoll:
+                      description: |-
+                        AfterRoll is true when the operator moved the primary itself to roll a
+                        pod. Such a shard fails back without waiting for the quiet period.
+                      type: boolean
+                    shard:
+                      description: Shard is the shard index.
+                      format: int32
+                      type: integer
+                    syncedSince:
+                      description: |-
+                        SyncedSince is when the node-index 0 member last became a Ready replica
+                        in sync with the shard's primary. Unset while it is not one.
+                      format: date-time
+                      type: string
+                  required:
+                  - shard
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - shard
                 x-kubernetes-list-type: map
               message:
                 description: Message provides human-readable details about the current

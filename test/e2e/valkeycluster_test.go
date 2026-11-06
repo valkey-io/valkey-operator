@@ -2554,6 +2554,93 @@ spec:
 			Expect(podUID(primaryPod)).To(Equal(primaryUID))
 		})
 	})
+
+	Context("primary failback", Label("failback"), func() {
+		const clusterName = "valkeycluster-failback-e2e"
+
+		AfterEach(func() {
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
+			_, _ = utils.Run(cmd)
+		})
+
+		// primaryNodeIndex returns the node-index label of shard 0's primary,
+		// as the ValkeyNodes report it.
+		primaryNodeIndex := func(g Gomega) string {
+			nodes, err := utils.GetValkeyClusterNodes(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			index := ""
+			for _, node := range nodes.Items {
+				if node.Status.Role == controller.RolePrimary {
+					g.Expect(index).To(BeEmpty(), "two nodes report primary")
+					index = node.Labels[controller.LabelNodeIndex]
+				}
+			}
+			g.Expect(index).NotTo(BeEmpty(), "no node reports primary")
+			return index
+		}
+		failedBack := func(g Gomega) {
+			g.Expect(primaryNodeIndex(g)).To(Equal("0"))
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			g.Expect(cr.Status.Failback).To(BeEmpty())
+			g.Expect(utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionPrimaryDisplaced)).To(BeNil())
+		}
+
+		It("returns the primary to node-index 0 after a pod restart and after a roll", func() {
+			By("creating a cluster with one shard, one replica and a 10s quiet period")
+			manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 1
+  failover:
+    failback:
+      quietPeriodSeconds: 10
+`, clusterName)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster")
+			Eventually(failedBack, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("deleting the node-index 0 pod, which hands the primary role to the replica")
+			_, err = utils.Run(exec.Command("kubectl", "delete", "pod", fmt.Sprintf("valkey-%s-0-0-0", clusterName), "--wait=false"))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(primaryNodeIndex(g)).To(Equal("1"))
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("waiting for the restarted node-index 0 member to take the primary role back")
+			Eventually(failedBack, 5*time.Minute, 2*time.Second).Should(Succeed())
+			Eventually(func(g Gomega) {
+				normal, _, err := utils.GetEvents(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(normal).To(HaveKey("FailbackCompleted"))
+			}, time.Minute, 2*time.Second).Should(Succeed())
+
+			By("rolling the cluster, which moves the primary away before rolling node-index 0")
+			_, err = utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName, "--type=merge",
+				"-p", `{"spec":{"podMetadata":{"annotations":{"e2e/roll":"1"}}}}`))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.Failback).To(ContainElement(HaveField("AfterRoll", BeTrue())))
+			}, 5*time.Minute, time.Second).Should(Succeed())
+
+			By("waiting for the roll to finish with the primary back on node-index 0")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pod", fmt.Sprintf("valkey-%s-0-0-0", clusterName),
+					"-o", "jsonpath={.metadata.annotations.e2e/roll}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("1"), "node-index 0 runs the rolled template")
+				failedBack(g)
+			}, 10*time.Minute, 2*time.Second).Should(Succeed())
+		})
+	})
 })
 
 // ---------------------------------------------------------------------------

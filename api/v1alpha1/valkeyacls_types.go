@@ -92,7 +92,7 @@ type ACLUserSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:Pattern=`^[^\s]+$`
-	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
+	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')",reason="FieldValueForbidden"
 	Name string `json:"name"`
 
 	// Whether the user can authenticate
@@ -125,7 +125,7 @@ type UserAclSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:Pattern=`^[^\s]+$`
-	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')"
+	// +kubebuilder:validation:XValidation:message="Username cannot start with '_'",rule="!self.startsWith('_')",reason="FieldValueForbidden"
 	Name string `json:"name"`
 
 	// If the user is enabled or not

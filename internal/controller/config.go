@@ -44,6 +44,7 @@ const (
 	readinessScriptKey = "readiness-check.sh"
 	livenessScriptKey  = "liveness-check.sh"
 	initScriptKey      = "init.sh"
+	preStopScriptKey   = "prestop-failover.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -325,6 +326,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 
+	preStop, err := scripts.ReadFile("scripts/" + preStopScriptKey)
+	if err != nil {
+		return fmt.Errorf("reading embedded %s: %w", preStopScriptKey, err)
+	}
+
 	// Get the new server config
 	newServerConfig := buildServerConfig(cluster)
 
@@ -360,6 +366,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			readinessScriptKey: string(readiness),
 			livenessScriptKey:  string(liveness),
 			initScriptKey:      string(initScript),
+			preStopScriptKey:   string(preStop),
 			configFileKey:      newServerConfig,
 		}
 
@@ -386,10 +393,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, liveness and init scripts")
+		log.V(1).Info("updated readiness, liveness, init and preStop scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
 		serverConfigMap.Data[initScriptKey] = string(initScript)
+		serverConfigMap.Data[preStopScriptKey] = string(preStop)
 	}
 
 	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
@@ -447,6 +455,11 @@ func init() {
 		panic("failure reading embedded init.sh")
 	}
 
+	preStop, err := scripts.ReadFile("scripts/" + preStopScriptKey)
+	if err != nil {
+		panic("failure reading embedded " + preStopScriptKey)
+	}
+
 	// Calculate hash of all scripts
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), initScript...)))
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(slices.Concat(readiness, liveness, initScript, preStop)))
 }

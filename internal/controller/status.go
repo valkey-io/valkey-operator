@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,4 +94,30 @@ func (r *ValkeyClusterReconciler) applyConfigurationWarnings(ctx context.Context
 		reason = valkeyiov1alpha1.ReasonMultipleConfigurationWarnings
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionConfigurationWarning, reason, strings.Join(messages, "; "), metav1.ConditionTrue)
+}
+
+// applyIncompleteScrape records pods this pass could not scrape and primaries
+// whose slots stay held. The condition is removed when the pass has neither.
+// It does not change Ready. An event is emitted only when the message changes,
+// so a node that stays dropped does not raise a new event on every reconcile.
+func (r *ValkeyClusterReconciler) applyIncompleteScrape(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) {
+	if state == nil {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)
+		return
+	}
+	kind, message := state.ScrapeHeldSummary()
+	if kind == "" {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)
+		return
+	}
+	reason := valkeyiov1alpha1.ReasonNodeScrapeIncomplete
+	if kind == "slots-held" {
+		reason = valkeyiov1alpha1.ReasonSlotsHeldForMissingPrimary
+	}
+	existing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionIncompleteScrape)
+	if r.Recorder != nil && (existing == nil || existing.Status != metav1.ConditionTrue || existing.Message != message) {
+		logf.FromContext(ctx).Info("incomplete scrape", "reason", reason, "detail", message)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, reason, "ScrapeCluster", "%s", message)
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionIncompleteScrape, reason, message, metav1.ConditionTrue)
 }

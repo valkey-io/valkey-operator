@@ -324,7 +324,9 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			ReadinessProbe: &corev1.Probe{
 				PeriodSeconds:    5,
 				FailureThreshold: 5,
-				TimeoutSeconds:   2,
+				// PING, INFO, and CLUSTER NODES each run under a 1s client
+				// timeout. The probe deadline has to cover all three (#552).
+				TimeoutSeconds:   5,
 				SuccessThreshold: 1,
 				ProbeHandler: corev1.ProbeHandler{
 					Exec: &corev1.ExecAction{

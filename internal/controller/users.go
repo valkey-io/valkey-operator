@@ -177,12 +177,38 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	return systemsAcls.String(), nil
 }
 
+// defaultUser is the name of Valkey's built-in user.
+const defaultUser = "default"
+
+// disabledDefaultUser is written to the aclfile when the cluster declares no
+// default user. Valkey's stock default is `on nopass +@all`, and a client that
+// never authenticates, or whose certificate names no ACL user, is logged in as
+// it. Any declared default, in any form, is used exactly as written instead.
+var disabledDefaultUser = valkeyiov1alpha1.ACLUserSpec{
+	Name:     defaultUser,
+	State:    valkeyiov1alpha1.ACLUserStateDisabled,
+	Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+	ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+		RawAcl: "resetkeys resetchannels -@all",
+	},
+}
+
+// managedUsers returns the users the aclfile manages: the declared users, plus
+// a disabled default user when none is declared.
+func managedUsers(cluster *valkeyiov1alpha1.ValkeyCluster) []valkeyiov1alpha1.ACLUserSpec {
+	users := cluster.Spec.ACLUsers()
+	if !slices.ContainsFunc(users, func(u valkeyiov1alpha1.ACLUserSpec) bool { return u.Name == defaultUser }) {
+		users = append(users, *disabledDefaultUser.DeepCopy())
+	}
+	return users
+}
+
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
 	// Sort users for consistency in hash calculations
-	users := cluster.Spec.ACLUsers()
+	users := managedUsers(cluster)
 	slices.SortFunc(users, func(a, b valkeyiov1alpha1.ACLUserSpec) int {
 		return strings.Compare(a.Name, b.Name)
 	})

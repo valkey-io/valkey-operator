@@ -394,6 +394,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
 `, singleNodeClusterName)
@@ -774,6 +780,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: %d
   replicas: 1
 `, valkeyClusterName, baseShards)
@@ -897,6 +909,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: %d
   replicas: 1
 `, valkeyClusterName, initialShards)
@@ -1053,6 +1071,12 @@ kind: ValkeyCluster
 metadata:
   name: valkeycluster-degraded-status-test
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
   replicas: 1
 `
@@ -1453,6 +1477,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
   workloadType: StatefulSet
@@ -1487,6 +1517,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
 `, addClusterName)
@@ -1515,6 +1551,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
   persistence:
@@ -1549,6 +1591,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
   replicas: 1
   scheduling:
@@ -1631,6 +1679,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 1
   scheduling:
@@ -1679,6 +1733,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 2
   replicas: 1
   scheduling:
@@ -1755,6 +1815,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 1
   scheduling:
@@ -1825,6 +1891,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 1
   scheduling:
@@ -1912,6 +1984,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 1
   scheduling:
@@ -1951,6 +2029,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 2
   replicas: 1
 `, clusterName)
@@ -2030,6 +2114,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
 `, clusterName)
@@ -2079,6 +2169,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 0
 `, clusterName)
@@ -2479,6 +2575,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
   replicas: 1
 `, clusterName)

@@ -108,6 +108,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
   replicas: 1
@@ -360,6 +366,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
   replicas: 1
@@ -586,6 +598,10 @@ spec:
     enabled: true
   acl:
     users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
       - name: alice
         password:
           type: Disabled

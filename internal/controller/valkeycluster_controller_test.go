@@ -861,6 +861,36 @@ var _ = Describe("reconcileUsersAcl", func() {
 			Expect(declaredUserLines(ctx, legacy)).To(Equal([]string{"user default on nopass ~* &* +@all"}))
 		})
 
+		It("adds no second default when the declared one is disabled", func() {
+			ctx := context.Background()
+			stateDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-state-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						State:          valkeyiov1alpha1.ACLUserStateDisabled,
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"},
+					}}},
+				},
+			}
+			passwordDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-password-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"},
+					}}},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, stateDisabled)).To(Equal([]string{"user default off nopass ~* &* +@all"}))
+			Expect(declaredUserLines(ctx, passwordDisabled)).To(Equal([]string{"user default on +@read"}))
+		})
+
 		It("renders the same aclfile for spec.users and the equivalent spec.acl.users", func() {
 			ctx := context.Background()
 			perms := valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"}

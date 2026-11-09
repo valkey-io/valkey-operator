@@ -171,6 +171,17 @@ Common reasons:
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
 - `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
+#### `ExporterPasswordHeld`
+Non-blocking. Set during [system password rotation](valkeycluster.md#system-password-rotation) while the metrics exporter's previous password is still accepted. `Ready` is not affected, and the other system passwords keep rotating.
+
+| Status | Meaning |
+|---|---|
+| `True` | A running metrics exporter started before the switch, or within five minutes after it, so it may still send the previous password. That password stays accepted until the container starts again. |
+| (absent) | No previous exporter password is held. |
+
+Common reasons:
+- `ExporterNotRestarted` – the exporter container has not started again since the switch.
+
 ---
 
 ### ValkeyNode conditions
@@ -452,6 +463,10 @@ These events are emitted during ACL user management.
 | `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
 | `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
 | `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
+| `SystemPasswordRotationStarted` | Normal | The next system passwords were generated; the ones in use stay valid |
+| `SystemPasswordRotationCutover` | Normal | Every node accepts both passwords; clients are moving to the new ones |
+| `SystemPasswordRotationHolding` | Normal | A client still uses a previous system password, which stays accepted |
+| `SystemPasswordRotationFinished` | Normal | Every client uses the new passwords and the old ones were removed |
 
 ### Viewing events
 

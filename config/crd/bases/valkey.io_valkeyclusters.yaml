@@ -61,6 +61,23 @@ spec:
                 description: ACL configures the Valkey access control the operator
                   manages.
                 properties:
+                  systemPasswordRotation:
+                    description: |-
+                      SystemPasswordRotation turns on rotation of the passwords the operator
+                      generates for its internal users (_operator, _replication, _exporter).
+                      Unset leaves those passwords unchanged.
+                    properties:
+                      intervalDays:
+                        default: 30
+                        description: |-
+                          IntervalDays is how many days a password stays current before the
+                          operator generates the next one. The first rotation happens one
+                          interval after rotation is turned on.
+                        format: int32
+                        maximum: 3650
+                        minimum: 1
+                        type: integer
+                    type: object
                   users:
                     description: Users managed by the operator
                     items:

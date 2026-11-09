@@ -34,10 +34,6 @@ import (
 )
 
 const (
-	// systemPasswordRotationPeriod is how long a system password stays current
-	// before the operator generates the next one. The password already in use
-	// is not removed in that step.
-	systemPasswordRotationPeriod = 30 * 24 * time.Hour
 	// systemPasswordCutoverGrace is how long the previous password stays
 	// accepted after the new one becomes the value clients read. Probes read
 	// the mounted file on every check, and kubelet refreshes a Secret volume
@@ -187,7 +183,10 @@ func equalHashes(a, b []string) bool {
 // cluster. SkipNext users were given their current password in this call, so
 // they must not be rotated in the same call.
 type systemPasswordSignals struct {
-	Now                 time.Time
+	Now time.Time
+	// Interval is how long a password stays current before the next one is
+	// generated. Zero starts no rotation; one already under way still finishes.
+	Interval            time.Duration
 	PasswordsLive       bool
 	OperatorCaughtUp    bool
 	ExporterCaughtUp    bool
@@ -237,16 +236,20 @@ func advanceSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, 
 }
 
 func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals systemPasswordSignals) (string, error) {
-	// An existing Secret from before this feature has no clock. Stamp it and
-	// wait out the period. Rotating on the upgrade reconcile would overlap
-	// the one-time pod roll that installs the volume and the new command.
+	if signals.Interval <= 0 {
+		return "", nil
+	}
+	// A Secret that has not rotated before has no clock. Stamp it and wait
+	// out the interval, so turning rotation on does not rotate at once, and an
+	// upgrade does not rotate during the one-time pod roll that installs the
+	// volume and the new command.
 	if secret.Annotations[annotationSystemPasswordRotatedAt] == "" && !systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
 		secret.Annotations[annotationSystemPasswordRotatedAt] = signals.Now.Format(time.RFC3339Nano)
 		return "clock", nil
 	}
 	if rotatedAt, ok := secret.Annotations[annotationSystemPasswordRotatedAt]; ok && rotatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, rotatedAt)
-		if err == nil && signals.Now.Sub(t) < systemPasswordRotationPeriod {
+		if err == nil && signals.Now.Sub(t) < signals.Interval {
 			return "", nil
 		}
 	}
@@ -518,7 +521,7 @@ func (r *ValkeyClusterReconciler) uncachedReader() client.Reader {
 }
 
 func (r *ValkeyClusterReconciler) systemPasswordSignals(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (systemPasswordSignals, error) {
-	signals := systemPasswordSignals{Now: time.Now()}
+	signals := systemPasswordSignals{Now: time.Now(), Interval: cluster.Spec.SystemPasswordRotationInterval()}
 	phase := secret.Annotations[annotationSystemPasswordPhase]
 	holdSince := secret.Annotations[annotationExporterHoldSince]
 	if holdSince == "" && exporterPasswordHeld(secret) {

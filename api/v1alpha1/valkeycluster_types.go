@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -751,6 +752,19 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 		users = append(users, u.ToACLUser())
 	}
 	return users
+}
+
+// SystemPasswordRotationInterval returns how long an internal user's password
+// stays current, or zero when spec.acl.systemPasswordRotation is unset.
+func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
+	if s.ACL == nil || s.ACL.SystemPasswordRotation == nil {
+		return 0
+	}
+	days := s.ACL.SystemPasswordRotation.IntervalDays
+	if days < 1 {
+		days = DefaultSystemPasswordRotationDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.

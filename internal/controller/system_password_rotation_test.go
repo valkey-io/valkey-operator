@@ -25,10 +25,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -403,6 +406,56 @@ func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {
 	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordPhase])
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(current))
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(secret.Data[systemPasswordNextKey(operatorUser)]))
+}
+
+func TestExporterHoldConditionFollowsTheStoredSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	enabled := true
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
+	}}
+	now := time.Now()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
+		Annotations: map[string]string{
+			annotationSystemPasswordRotatedAt: now.Format(time.RFC3339Nano),
+			annotationExporterHoldSince:       now.Add(-systemPasswordCutoverGrace - time.Minute).Format(time.RFC3339Nano),
+		},
+	}, Data: map[string][]byte{
+		operatorUser:                            []byte("op-current"),
+		replicationUser:                         []byte("re-current"),
+		exporterUser:                            []byte("ex-current"),
+		systemPasswordPreviousKey(exporterUser): []byte("ex-old"),
+	}}
+	failUpdate := true
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster, secret).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1.Secret); ok && failUpdate {
+				return apierrors.NewConflict(corev1.Resource("secrets"), obj.GetName(), fmt.Errorf("modified"))
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	}).Build()
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, APIReader: c}
+	r.syncExporterPasswordHold(cluster, secret)
+	require.True(t, meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
+
+	// No exporter is running, so the release is due, but the write fails.
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.Error(t, err)
+	stored := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), stored))
+	require.Equal(t, []byte("ex-old"), stored.Data[systemPasswordPreviousKey(exporterUser)])
+	require.True(t, meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
+
+	failUpdate = false
+	_, err = r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), stored))
+	require.Empty(t, stored.Data[systemPasswordPreviousKey(exporterUser)])
+	require.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
 }
 
 func TestCreateSystemUsersAclRotatesAnExistingSecret(t *testing.T) {

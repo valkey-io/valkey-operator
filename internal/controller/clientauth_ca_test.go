@@ -83,9 +83,9 @@ var _ = Describe("clientAuth.ca reconcile", func() {
 		reconcileOnce(cluster.Name)
 
 		trust := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ca-rec-tls-trust"}, trust)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "valkey-ca-rec-tls-trust"}, trust)).To(Succeed())
 		Expect(trust.Data).To(HaveKey(tlsSecretKeyCA))
-		Expect(nodeTrustBundles(cluster.Name)).To(HaveEach("ca-rec-tls-trust"))
+		Expect(nodeTrustBundles(cluster.Name)).To(HaveEach("valkey-ca-rec-tls-trust"))
 
 		got := &valkeyiov1alpha1.ValkeyCluster{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), got)).To(Succeed())
@@ -107,7 +107,7 @@ var _ = Describe("clientAuth.ca reconcile", func() {
 
 		reconcileOnce(cluster.Name)
 
-		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "ca-miss-tls-trust"}, &corev1.Secret{})
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "valkey-ca-miss-tls-trust"}, &corev1.Secret{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		Expect(nodeTrustBundles(cluster.Name)).To(HaveEach(""))
 

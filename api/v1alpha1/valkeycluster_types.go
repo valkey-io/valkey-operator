@@ -268,6 +268,7 @@ type ZonePinning struct {
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
+// +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
@@ -353,10 +354,17 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
-	// Users, and ACL-related configuration; see valkeyacls_types.go
+	// Valkey users managed by the operator.
+	//
+	// Deprecated: use spec.acl.users; removed in v1beta1.
+	//
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
+
+	// ACL configures the Valkey access control the operator manages.
+	// +optional
+	ACL *ACLSpec `json:"acl,omitempty"`
 
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
 	// +optional
@@ -530,7 +538,7 @@ type TLSClientAuthSpec struct {
 	//
 	// The operator merges the server secret's `ca.crt` with the roots under
 	// each entry's key, in list order and without duplicates, into the
-	// operator-managed `<cluster>-tls-trust` Secret, and nodes verify clients
+	// operator-managed `valkey-<cluster>-tls-trust` Secret, and nodes verify clients
 	// and peers against that bundle. The server root always stays in the
 	// bundle, since peers present the server certificate on the cluster bus
 	// and replication links.
@@ -728,6 +736,23 @@ func (s ValkeyClusterSpec) ExporterEnabled() bool {
 	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
 }
 
+// ACLUsers returns spec.acl.users when set, otherwise the converted
+// spec.users. The result is a deep copy and can be modified freely.
+func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
+	if s.ACL != nil && len(s.ACL.Users) > 0 {
+		users := make([]ACLUserSpec, 0, len(s.ACL.Users))
+		for _, u := range s.ACL.Users {
+			users = append(users, *u.DeepCopy())
+		}
+		return users
+	}
+	users := make([]ACLUserSpec, 0, len(s.Users))
+	for _, u := range s.Users {
+		users = append(users, u.ToACLUser())
+	}
+	return users
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -791,7 +816,7 @@ const (
 
 const (
 	// ReasonTrustBundleReady is used with ConditionTLSConfigured=True when
-	// <cluster>-tls-trust holds the server root and every clientAuth.ca root.
+	// valkey-<cluster>-tls-trust holds the server root and every clientAuth.ca root.
 	ReasonTrustBundleReady = "TrustBundleReady"
 	// ReasonTrustSourceNotFound is used with ConditionTLSConfigured=False when
 	// a source Secret or ConfigMap, or its configured key, does not exist. The
@@ -802,7 +827,7 @@ const (
 	// X.509 authority. The trust Secret keeps its last good roots.
 	ReasonTrustSourceInvalid = "TrustSourceInvalid"
 	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
-	// a Secret named <cluster>-tls-trust exists but this cluster does not
+	// a Secret named valkey-<cluster>-tls-trust exists but this cluster does not
 	// control it. Nodes stay on the server root.
 	ReasonTrustBundleConflict = "TrustBundleConflict"
 	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
@@ -849,13 +874,16 @@ const (
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
-	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
-	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	// ReasonDeprecatedField is used with ConditionConfigurationWarning when the
+	// spec uses a field that still works but is scheduled for removal.
+	ReasonDeprecatedField            = "DeprecatedField"
+	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
 	// ReasonTrustBundleError is used with ConditionReady when the operator
-	// cannot read a trust source or write <cluster>-tls-trust.
+	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"
 )
 
@@ -884,8 +912,8 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != self.metadata.name + '-tls-trust')",message="clientAuth.ca cannot name <name>-tls-trust: it is the operator-managed trust bundle"
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != self.metadata.name + '-tls-trust'",message="certificates.server.secretName cannot be <name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

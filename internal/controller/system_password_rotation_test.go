@@ -463,8 +463,9 @@ func TestApplyReplicationPasswordSkipsASteadySecret(t *testing.T) {
 func testSystemPasswordACL(data map[string][]byte, users []string) (string, string) {
 	var body strings.Builder
 	for _, user := range users {
-		acl := buildUserAcl(valkeyiov1alpha1.UserAclSpec{
-			Name: user, Enabled: true, RawAcl: systemUsersAcls[user],
+		acl := buildUserAcl(valkeyiov1alpha1.ACLUserSpec{
+			Name:           user,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: systemUsersAcls[user]},
 		}, systemUserPasswordHashes(data, user))
 		fmt.Fprintf(&body, "%s\n", acl)
 	}

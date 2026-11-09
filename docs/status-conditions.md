@@ -56,7 +56,7 @@ Common reasons when `Ready=False`:
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
-- `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `<cluster>-tls-trust` Secret
+- `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `valkey-<cluster>-tls-trust` Secret
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
   - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
@@ -97,7 +97,7 @@ Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
-- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 
 ---
 
@@ -141,6 +141,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
+- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces. The field keeps working until `v1beta1`; see [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -155,7 +156,7 @@ Common reasons:
 - `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
 #### `TLSConfigured`
-Reports whether the operator-managed trust bundle `<cluster>-tls-trust` is in place. Set only while `networking.tls.clientAuth.ca` is non-empty; absent otherwise. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca).
+Reports whether the operator-managed trust bundle `valkey-<cluster>-tls-trust` is in place. Set only while `networking.tls.clientAuth.ca` is non-empty; absent otherwise. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca).
 
 | Status | Meaning |
 |---|---|
@@ -166,9 +167,9 @@ Common reasons:
 - `TrustBundleReady` – the trust bundle is up to date.
 - `TrustSourceNotFound` – a referenced Secret or ConfigMap, or its key, does not exist.
 - `TrustSourceInvalid` – a source's key holds neither PEM certificates nor a SPIFFE bundle with an X.509 authority.
-- `TrustBundleConflict` – a Secret named `<cluster>-tls-trust` exists but the cluster does not control it. The operator never adopts or writes it, and nodes stay on the server root.
+- `TrustBundleConflict` – a Secret named `valkey-<cluster>-tls-trust` exists but the cluster does not control it. The operator never adopts or writes it, and nodes stay on the server root.
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
-- `TrustBundleRejected` – the API server refused to store `<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
+- `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
 ---
 
@@ -237,7 +238,7 @@ Common reasons when `LiveConfigApplied=True`:
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 #### `ACLApplied`
-Indicates whether the ACL the cluster controller wrote for `spec.users` is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
+Indicates whether the ACL the cluster controller wrote for `spec.acl.users` (or the deprecated `spec.users`) is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
 
 This condition is set once the node is ready and mounts an ACL Secret. An edit reads `False` until the mounted aclfile refreshes (the projected Secret volume is updated lazily by kubelet) and the server loads it.
 
@@ -438,7 +439,7 @@ These events are emitted during live configuration application on ValkeyNode res
 |---|---|---|
 | `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
 | `TrustBundleReloadFailed` | Warning | Reloading a node's trust bundle failed; the `TrustBundleApplied` condition is set to `False` and the reload is retried every 10 seconds |
-| `TrustBundleRetireFailed` | Warning | Rewriting or deleting `<cluster>-tls-trust` failed after `clientAuth.ca` was emptied; it is tried again on the next reconcile, and the nodes still roll off it. |
+| `TrustBundleRetireFailed` | Warning | Rewriting or deleting `valkey-<cluster>-tls-trust` failed after `clientAuth.ca` was emptied; it is tried again on the next reconcile, and the nodes still roll off it. |
 
 ### Users/ACL events
 

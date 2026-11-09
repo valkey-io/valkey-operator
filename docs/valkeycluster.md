@@ -602,6 +602,8 @@ acl:
       permissions: "~* &* +@all"
 ```
 
+> **Valkey 9.0.0:** a cluster with `default` disabled cannot scale: slot migrations fail with `NOPERM` on `cluster|syncslots` ([valkey-io/valkey#2785](https://github.com/valkey-io/valkey/pull/2785), fixed in 9.0.1). Upgrade to Valkey 9.0.1 or later, or declare `default` until you can.
+
 > **Upgrade note:** Before this version, a cluster that declared no `default` kept Valkey's open one. Upgrading the operator disables it on every such cluster, live through `ACL LOAD` and without a pod restart, so clients that connect without credentials start getting `NOAUTH`, including `valkey-cli` run inside a node's pod. Before upgrading, declare `default` in `acl.users` on every cluster whose clients rely on it, with the access they need.
 
 ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.

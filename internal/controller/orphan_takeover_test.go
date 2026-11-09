@@ -22,19 +22,17 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	vclient "github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/mock"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -171,8 +169,9 @@ func TestOrphansToTakeOver(t *testing.T) {
 // with err when it is set.
 type takeoverClient struct {
 	vclient.Client
-	takeovers int
-	err       error
+	takeovers  int
+	err        error
+	beforeCall func()
 }
 
 // B returns a builder; the zero value builds commands without a connection.
@@ -181,200 +180,161 @@ func (c *takeoverClient) B() vclient.Builder { return vclient.Builder{} }
 func (c *takeoverClient) Do(_ context.Context, cmd vclient.Completed) vclient.ValkeyResult {
 	if strings.Join(cmd.Commands(), " ") == "CLUSTER FAILOVER TAKEOVER" {
 		c.takeovers++
+		if c.beforeCall != nil {
+			c.beforeCall()
+		}
 	}
 	if c.err != nil {
-		return errorResult(c.err)
+		return mock.ErrorResult(c.err)
 	}
 	return vclient.ValkeyResult{}
 }
 
-// errorResult returns a ValkeyResult holding err. valkey-go has no exported
-// constructor for one; this is what valkey-go/mock.ErrorResult does.
-func errorResult(err error) vclient.ValkeyResult {
-	r := struct {
-		err error
-		val vclient.ValkeyMessage
-	}{err: err}
-	return *(*vclient.ValkeyResult)(unsafe.Pointer(&r))
+type orphanTakeoverFixture struct {
+	reconciler *ValkeyClusterReconciler
+	cluster    *valkeyiov1alpha1.ValkeyCluster
+	state      *valkey.ClusterState
+	nodes      *valkeyiov1alpha1.ValkeyNodeList
+	candidates []orphan
+	client     *takeoverClient
 }
 
-// orphanSetup is one shard of cluster ns/c whose primary p1 is FAIL, with no
-// quorum, so only the operator can promote the replica r1 (10.0.0.2, shard 0).
-type orphanSetup struct {
-	persistent  bool
-	primaryUp   bool          // p1 is not flagged FAIL
-	failedFor   time.Duration // since p1 was first seen FAIL; 0 if never
-	timerUID    types.UID     // UID the recorded FAIL time belongs to; the cluster's if empty
-	grace       time.Duration // OrphanTakeoverGrace; the default if zero
-	takeoverErr error
-	scraped     []*valkey.NodeState // scraped nodes outside the shard
-	pods        []corev1.Pod
-}
-
-type orphanOutcome struct {
-	takeovers int
-	handled   bool
-	requeue   time.Duration
-	timers    *orphanTimers
-}
-
-func (o orphanSetup) run(t *testing.T) orphanOutcome {
+// newOrphanTakeoverFixture builds a one-shard cluster with an unreachable primary.
+func newOrphanTakeoverFixture(t *testing.T, persistent bool, annotation string, takeoverErr error) *orphanTakeoverFixture {
 	t.Helper()
-	flags := "master,fail"
-	if o.primaryUp {
-		flags = "master"
-	}
-	vc := &takeoverClient{err: o.takeoverErr}
+	vc := &takeoverClient{err: takeoverErr}
 	replica := &valkey.NodeState{Id: "r1", Address: "10.0.0.2", Client: vc, ClusterInfo: map[string]string{"cluster_size": "1"}}
-	replica.SetClusterNodesForTesting("p1 10.0.0.1:6379@16379 " + flags + " - 0 0 1 connected 0-16383\n" +
+	replica.SetClusterNodesForTesting("p1 10.0.0.1:6379@16379 master,fail - 0 0 1 connected 0-16383\n" +
 		"r1 10.0.0.2:6379@16379 myself,slave p1 0 0 1 connected\n")
-	state := &valkey.ClusterState{
-		Shards:       []*valkey.ShardState{{PrimaryId: "p1", Nodes: []*valkey.NodeState{replica}}},
-		PendingNodes: o.scraped,
-	}
-
-	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid"}}
-	if o.persistent {
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{PrimaryId: "p1", Nodes: []*valkey.NodeState{replica}}}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{
+		Name: "c", Namespace: "ns", UID: "uid", Annotations: map[string]string{},
+	}}
+	if persistent {
 		cluster.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{}
+	}
+	if annotation != "" {
+		cluster.Annotations[forceTakeoverAnnotation] = annotation
 	}
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{{
 		ObjectMeta: metav1.ObjectMeta{Name: "c-0-1", Namespace: "ns", Labels: map[string]string{LabelShardIndex: "0", LabelNodeIndex: "1"}},
 		Status:     valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.2"},
 	}}}
-
 	scheme := runtime.NewScheme()
 	assert.NoError(t, clientgoscheme.AddToScheme(scheme))
-	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for i := range o.pods {
-		builder = builder.WithObjects(&o.pods[i])
+	assert.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster).WithStatusSubresource(cluster).Build()
+	r := &ValkeyClusterReconciler{Client: cl, Recorder: events.NewFakeRecorder(8)}
+	return &orphanTakeoverFixture{
+		reconciler: r,
+		cluster:    cluster,
+		state:      state,
+		nodes:      nodes,
+		candidates: orphansToTakeOver(state),
+		client:     vc,
 	}
-	r := &ValkeyClusterReconciler{Client: builder.Build(), Recorder: events.NewFakeRecorder(8), OrphanTakeoverGrace: o.grace}
-	key := client.ObjectKeyFromObject(cluster)
-	if o.failedFor > 0 {
-		uid := o.timerUID
-		if uid == "" {
-			uid = cluster.UID
-		}
-		r.orphanTimers = map[client.ObjectKey]*orphanTimers{
-			key: {uid: uid, failedSince: map[string]time.Time{"p1": time.Now().Add(-o.failedFor)}},
-		}
-	}
-
-	result, handled := r.promoteOrphanedReplicas(context.Background(), cluster, state, nodes)
-	return orphanOutcome{takeovers: vc.takeovers, handled: handled, requeue: result.RequeueAfter, timers: r.orphanTimers[key]}
-}
-
-func shardPod(name, shard string, phase corev1.PodPhase, ready bool) corev1.Pod {
-	pod := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{LabelCluster: "c", LabelShardIndex: shard}},
-		Status:     corev1.PodStatus{Phase: phase},
-	}
-	if ready {
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-	}
-	return pod
 }
 
 func TestPromoteOrphanedReplicas(t *testing.T) {
-	loadingPrimary := &valkey.NodeState{Id: "p1", Address: "10.0.0.9", Info: map[string]string{"loading": "1"}}
-	loadingOther := &valkey.NodeState{Id: "x1", Address: "10.0.0.3", Info: map[string]string{"loading": "1"}}
 
-	tests := []struct {
-		name      string
-		setup     orphanSetup
-		takeover  bool
-		requeue   time.Duration // when no takeover
-		keepTimer bool
-	}{
-		{name: "no persistence", setup: orphanSetup{}, takeover: true},
-		{name: "first FAIL", setup: orphanSetup{persistent: true}, requeue: time.Minute, keepTimer: true},
-		{name: "within the grace", setup: orphanSetup{persistent: true, failedFor: 45 * time.Second}, requeue: 15 * time.Second, keepTimer: true},
-		{name: "longer grace set", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, grace: 5 * time.Minute}, requeue: 3 * time.Minute, keepTimer: true},
-		{name: "grace over", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute}, takeover: true},
-		{name: "TAKEOVER fails", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, takeoverErr: errors.New("boom")}, takeover: true, keepTimer: true},
-		{name: "primary recovered", setup: orphanSetup{persistent: true, primaryUp: true, failedFor: 2 * time.Minute}},
-		// A primary that answers the scrape, here while loading its dataset,
-		// is alive however long it has been flagged.
-		{name: "primary reachable", setup: orphanSetup{persistent: true, failedFor: time.Hour, scraped: []*valkey.NodeState{loadingPrimary}}},
-		{name: "another node reachable", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, scraped: []*valkey.NodeState{loadingOther}}, takeover: true},
-		{name: "shard pod pending", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, pods: []corev1.Pod{
-			shardPod("c-0-0", "0", corev1.PodPending, false), shardPod("c-0-1", "0", corev1.PodRunning, true),
-		}}, requeue: 3 * time.Minute, keepTimer: true},
-		{name: "shard pod running but not ready", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, pods: []corev1.Pod{
-			shardPod("c-0-0", "0", corev1.PodRunning, false),
-		}}, requeue: 3 * time.Minute, keepTimer: true},
-		{name: "shard pod pending past the max wait", setup: orphanSetup{persistent: true, failedFor: 6 * time.Minute, pods: []corev1.Pod{
-			shardPod("c-0-0", "0", corev1.PodPending, false),
-		}}, takeover: true},
-		{name: "other shard's pod pending", setup: orphanSetup{persistent: true, failedFor: 2 * time.Minute, pods: []corev1.Pod{
-			shardPod("c-1-0", "1", corev1.PodPending, false),
-		}}, takeover: true},
-		// Same name, new UID: retained PVCs can bring back p1's node ID.
-		{name: "cluster recreated", setup: orphanSetup{persistent: true, failedFor: time.Hour, timerUID: "old-uid"}, requeue: time.Minute, keepTimer: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.setup.run(t)
-			if tt.takeover {
-				assert.Equal(t, 1, got.takeovers)
-				assert.True(t, got.handled)
-			} else {
-				assert.Zero(t, got.takeovers)
-				assert.False(t, got.handled)
-				assert.InDelta(t, tt.requeue, got.requeue, float64(time.Second))
-			}
-			if tt.keepTimer {
-				assert.Contains(t, got.timers.failedSince, "p1")
-				assert.Equal(t, types.UID("uid"), got.timers.uid)
-			} else if !tt.takeover && got.timers != nil {
-				// After a takeover the next reconcile drops it, once the
-				// shard is served again.
-				assert.NotContains(t, got.timers.failedSince, "p1")
-			}
-		})
-	}
+	t.Run("persistent cluster waits for explicit authorization", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, true, "", nil)
+		result, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Zero(t, f.client.takeovers)
+		assert.Equal(t, 30*time.Second, result.RequeueAfter)
+		condition := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		if assert.NotNil(t, condition) {
+			assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, condition.Reason)
+			assert.Contains(t, condition.Message, "shard 0")
+			assert.Contains(t, condition.Message, "primary p1")
+			assert.Contains(t, condition.Message, "replica r1")
+			assert.Contains(t, condition.Message, forceTakeoverAnnotation+"=p1")
+		}
+		ready := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+		if assert.NotNil(t, ready) {
+			assert.Equal(t, metav1.ConditionFalse, ready.Status)
+			assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, ready.Reason)
+		}
+	})
+
+	t.Run("one-shot annotation authorizes takeover and is cleared", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, true, " stale, p1 , later ", nil)
+		f.client.beforeCall = func() {
+			stored := &valkeyiov1alpha1.ValkeyCluster{}
+			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
+			assert.Equal(t, "later,stale", stored.Annotations[forceTakeoverAnnotation], "consume approval before TAKEOVER")
+		}
+		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Equal(t, 1, f.client.takeovers)
+		stored := &valkeyiov1alpha1.ValkeyCluster{}
+		assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
+		assert.Equal(t, "later,stale", stored.Annotations[forceTakeoverAnnotation])
+	})
+
+	t.Run("stale annotation does not authorize a different orphan", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, true, "stale", nil)
+		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Zero(t, f.client.takeovers)
+		stored := &valkeyiov1alpha1.ValkeyCluster{}
+		assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
+		assert.Equal(t, "stale", stored.Annotations[forceTakeoverAnnotation])
+	})
+
+	t.Run("without persistence takeover remains automatic", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, false, "", nil)
+		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Equal(t, 1, f.client.takeovers)
+	})
+
+	t.Run("failed takeover consumes authorization", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, true, "p1", errors.New("boom"))
+		f.client.beforeCall = func() {
+			stored := &valkeyiov1alpha1.ValkeyCluster{}
+			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
+			assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
+		}
+		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Equal(t, 1, f.client.takeovers)
+		stored := &valkeyiov1alpha1.ValkeyCluster{}
+		assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
+		assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
+	})
 }
 
-// A cluster that regains quorum drops its FAIL times, so the next loss of
-// quorum starts a fresh grace period.
-func TestOrphanTimersClearedWhenQuorumReturns(t *testing.T) {
-	primary := &valkey.NodeState{Id: "p1", Address: "10.0.0.1", ClusterInfo: map[string]string{"cluster_size": "1"}}
-	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{
-		PrimaryId: "p1", Slots: []valkey.SlotsRange{{Start: 0, End: 16383}}, Nodes: []*valkey.NodeState{primary},
+func TestHasAuthorizedOrphan(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		forceTakeoverAnnotation: "p2,p3",
 	}}}
-	cluster := &valkeyiov1alpha1.ValkeyCluster{}
-	cluster.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{}
-	r := &ValkeyClusterReconciler{orphanTimers: map[client.ObjectKey]*orphanTimers{
-		{}: {failedSince: map[string]time.Time{"p1": time.Now().Add(-time.Hour)}},
-	}}
-
-	_, handled := r.promoteOrphanedReplicas(context.Background(), cluster, state, &valkeyiov1alpha1.ValkeyNodeList{})
-	assert.False(t, handled)
-	assert.NotContains(t, r.orphanTimers, client.ObjectKey{})
+	candidates := []orphan{{primaryId: "p1"}, {primaryId: "p2"}}
+	assert.True(t, hasAuthorizedOrphan(cluster, candidates))
+	assert.False(t, hasAuthorizedOrphan(cluster, candidates[:1]))
 }
 
-// A cluster's FAIL times are dropped once it is being deleted or gone, and
-// other clusters keep theirs.
-func TestOrphanTimersClearedOnClusterDelete(t *testing.T) {
+func TestParseForceTakeoverIDs(t *testing.T) {
+	assert.Equal(t, map[string]bool{"p1": true, "p2": true}, parseForceTakeoverIDs(" p1, ,p2,p1 "))
+}
+
+func TestClearRecoveredForceTakeoverIDs(t *testing.T) {
 	scheme := runtime.NewScheme()
 	assert.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
-	gone := client.ObjectKey{Namespace: "ns", Name: "gone"}
-	deleting := client.ObjectKey{Namespace: "ns", Name: "deleting"}
-	other := client.ObjectKey{Namespace: "ns", Name: "other"}
-	now := metav1.Now()
-	inDeletion := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{
-		Name: deleting.Name, Namespace: deleting.Namespace, DeletionTimestamp: &now, Finalizers: []string{"test"},
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{
+		Name: "c", Namespace: "ns", Annotations: map[string]string{forceTakeoverAnnotation: "p1,p2"},
 	}}
-	timers := func() *orphanTimers { return &orphanTimers{failedSince: map[string]time.Time{"p1": time.Now()}} }
-	r := &ValkeyClusterReconciler{
-		Client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(inDeletion).Build(),
-		orphanTimers: map[client.ObjectKey]*orphanTimers{gone: timers(), deleting: timers(), other: timers()},
-	}
+	r := &ValkeyClusterReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster).Build()}
+	state := &valkey.ClusterState{PendingNodes: []*valkey.NodeState{{Id: "p1"}}}
 
-	for _, key := range []client.ObjectKey{gone, deleting} {
-		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
-		assert.NoError(t, err)
-		assert.NotContains(t, r.orphanTimers, key)
-	}
-	assert.Contains(t, r.orphanTimers, other)
+	assert.NoError(t, r.pruneRecoveredForceTakeoverIDs(context.Background(), cluster, state))
+	stored := &valkeyiov1alpha1.ValkeyCluster{}
+	assert.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(cluster), stored))
+	assert.Equal(t, "p2", stored.Annotations[forceTakeoverAnnotation])
+
+	cluster = stored
+	assert.NoError(t, r.pruneRecoveredForceTakeoverIDs(context.Background(), cluster, &valkey.ClusterState{}))
+	assert.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(cluster), stored))
+	assert.Equal(t, "p2", stored.Annotations[forceTakeoverAnnotation], "an incomplete scrape must preserve pending authorization")
 }

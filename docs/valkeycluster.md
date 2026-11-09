@@ -54,7 +54,7 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
-`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, it takes over only without failover quorum, and only after waiting for the primary to come back (see [Persistence](#persistence)).
+`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence and quorum, the operator can use TAKEOVER when automatic failover is disabled and the failure is confirmed; without quorum, takeover requires the `valkey.io/force-takeover` annotation described below.
 
 #### Version-gated config
 
@@ -167,13 +167,15 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
 
-If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica, so the operator does it with `CLUSTER FAILOVER TAKEOVER`. With persistence it first waits for the primary to come back with its data:
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`; its message and a Warning event identify the shard, failed primary, eligible replica, and command to authorize takeover.
 
-- 60 seconds from when the operator first sees the primary flagged failed (`--orphan-takeover-grace`).
-- For as long as the operator can reach the primary, for example while it loads its dataset, however long that takes.
-- While a pod of the primary's shard is Pending or running but not Ready, up to 5 minutes from the first failure (`--orphan-takeover-max-wait`). A crash-looping or unschedulable primary is taken over after that.
+To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:
 
-Both are operator flags that take a Go duration, e.g. `--orphan-takeover-grace=2m`. The failure times are kept in memory, so an operator restart or leader change starts the wait again.
+```sh
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
+```
+
+The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A reachable primary, including one loading its dataset, cannot be taken over through this annotation. The operator consumes the ID before attempting takeover, so a failed attempt must be explicitly re-authorized. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary's persistent volume returns, Valkey can recover without discarding its data, and the `AwaitingManualTakeover` condition clears.
 
 #### Constraints
 

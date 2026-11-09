@@ -101,6 +101,7 @@ Common reasons:
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 - `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
+- `AwaitingManualTakeover` – a persistent primary is orphaned without failover quorum. The message names the shard, primary, eligible replica, and the `valkey.io/force-takeover` command that authorizes possible data loss.
 
 ---
 
@@ -424,6 +425,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 | Event Type | Type | Description |
 |---|---|---|
 | `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
+| `AwaitingManualTakeover` | Warning | A persistent primary is orphaned without quorum; the message gives the one-shot annotation command to authorize takeover |
 
 ### Maintenance events
 

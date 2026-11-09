@@ -389,18 +389,21 @@ func systemPasswordHasSuffix(data map[string][]byte, suffix string) bool {
 	return false
 }
 
-// exporterPasswordCaughtUp reports whether no running exporter container
-// started before cutover. redis_exporter reads REDIS_PASSWORD once, at
-// process start, and its image has no shell, so a container that is already
-// running keeps the old password until it starts again. A container that is
-// not running will read the current key when it starts.
+// exporterPasswordCaughtUp reports whether every running exporter container
+// started at least systemPasswordCutoverGrace after cutover. redis_exporter
+// reads REDIS_PASSWORD once, at process start, and its image has no shell, so
+// a container that is already running keeps the old password until it starts
+// again. The kubelet fills that variable from its Secret cache, so a start
+// shortly after cutover can still get the old password. A container that is
+// not running reads the current key when it starts.
 func exporterPasswordCaughtUp(pods []corev1.Pod, cutover time.Time) bool {
+	readsCurrent := cutover.Add(systemPasswordCutoverGrace)
 	for i := range pods {
 		for _, status := range pods[i].Status.ContainerStatuses {
 			if status.Name != metricsExporterContainerName || status.State.Running == nil {
 				continue
 			}
-			if status.State.Running.StartedAt.Time.Before(cutover) {
+			if status.State.Running.StartedAt.Time.Before(readsCurrent) {
 				return false
 			}
 		}
@@ -696,7 +699,7 @@ func (r *ValkeyNodeReconciler) serverRestartedSincePrimaryAuth(ctx context.Conte
 func (r *ValkeyClusterReconciler) syncExporterPasswordHold(cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) {
 	if secret != nil && exporterPasswordHeld(secret) {
 		setCondition(cluster, valkeyiov1alpha1.ConditionExporterPasswordHeld, valkeyiov1alpha1.ReasonExporterNotRestarted,
-			"The metrics-exporter keeps the previous password until that container starts again. The other system passwords keep rotating.",
+			"The metrics-exporter keeps the previous password until that container starts again more than five minutes after the switch. The other system passwords keep rotating.",
 			metav1.ConditionTrue)
 		return
 	}

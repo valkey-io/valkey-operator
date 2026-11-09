@@ -275,7 +275,10 @@ func TestExporterAndReplicationCaughtUp(t *testing.T) {
 		}}}}
 	}
 	require.False(t, exporterPasswordCaughtUp([]corev1.Pod{running(cutover.Add(-time.Second))}, cutover))
-	require.True(t, exporterPasswordCaughtUp([]corev1.Pod{running(cutover)}, cutover))
+	// A start right after cutover can still read the old Secret from the kubelet cache.
+	require.False(t, exporterPasswordCaughtUp([]corev1.Pod{running(cutover)}, cutover))
+	require.False(t, exporterPasswordCaughtUp([]corev1.Pod{running(cutover.Add(systemPasswordCutoverGrace - time.Second))}, cutover))
+	require.True(t, exporterPasswordCaughtUp([]corev1.Pod{running(cutover.Add(systemPasswordCutoverGrace))}, cutover))
 	require.True(t, exporterPasswordCaughtUp(nil, cutover))
 
 	current := []byte("re-new")

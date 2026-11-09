@@ -504,6 +504,8 @@ On scale-in the Service stays while that ValkeyNode exists. Kubernetes deletes t
 
 Cluster-owned StatefulSets use the **cluster headless Service** as `spec.serviceName` so multi 1-pod STS get real per-pod DNS under that Service.
 
+The headless Service sets `publishNotReadyAddresses: true`. A pod stays not Ready until it owns slots or has finished copying its primary's data, and its per-pod DNS name resolves during that time.
+
 `serviceName` is immutable, so changing it means the operator deletes the StatefulSet with **orphan** cascade and recreates it with the new `serviceName`. The existing pod is adopted, not deleted by that step. If the pod template is unchanged, the recreate keeps the live template and runs straight away. If the template also changes, the operator waits until the cluster authorises that node's roll (`WorkloadRevision`), then recreates the StatefulSet and applies the new template together, so the migration follows the one-node-at-a-time roll order and its proactive failover. Per-pod DNS names under the headless Service (and the pod `subdomain` the STS controller sets) apply only to pods created after the recreate.
 
 `networking.clusterDomain` must match the kubelet cluster domain (`--cluster-domain`). The field is a DNS subdomain (a trailing dot on input is trimmed). Hostname announce uses an FQDN **without** a trailing dot, so it is a valid TLS SNI name (RFC 6066) and matches typical cert SANs and the default TLS `serverName`. The per-pod announce name has at least five dots, so under the pod default `ndots:5` resolvers try it as absolute first (one query); only short custom cluster domains fall back to the search list, which is accepted over breaking SNI.

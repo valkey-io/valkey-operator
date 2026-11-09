@@ -619,6 +619,9 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			svc.Spec.ClusterIP = "None"
 		}
 		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
+		// The readiness probe holds a pod NotReady until it owns slots or has
+		// finished its sync, and its per-pod DNS name must resolve before then.
+		svc.Spec.PublishNotReadyAddresses = true
 		// Protocol and TargetPort are API-server defaults; set them explicitly
 		// so the rebuilt slice deep-equals the stored one and CreateOrUpdate
 		// stops updating the Service on every reconcile (#315).

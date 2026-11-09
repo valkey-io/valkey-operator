@@ -1421,6 +1421,34 @@ var _ = Describe("EventRecorder", func() {
 				"an upsert with no changes must not write the Service")
 		})
 
+		It("should publish not-ready pod addresses on the headless Service", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc-notready-cluster",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards:   3,
+					Replicas: 1,
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			Expect(r.upsertService(ctx, cluster)).To(Succeed())
+			svc := &corev1.Service{}
+			svcKey := types.NamespacedName{Name: headlessServiceName(cluster.Name), Namespace: cluster.Namespace}
+			Expect(k8sClient.Get(ctx, svcKey, svc)).To(Succeed())
+			Expect(svc.Spec.PublishNotReadyAddresses).To(BeTrue())
+
+			By("setting it on a Service an earlier operator created without it")
+			svc.Spec.PublishNotReadyAddresses = false
+			Expect(k8sClient.Update(ctx, svc)).To(Succeed())
+			Expect(r.upsertService(ctx, cluster)).To(Succeed())
+			Expect(k8sClient.Get(ctx, svcKey, svc)).To(Succeed())
+			Expect(svc.Spec.PublishNotReadyAddresses).To(BeTrue())
+		})
+
 		It("should emit ConfigMapCreated event on successful configmap creation", func() {
 			cluster := &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{

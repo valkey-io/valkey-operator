@@ -184,12 +184,18 @@ const defaultUser = "default"
 // default user. Valkey's stock default is `on nopass +@all`, and a client that
 // never authenticates, or whose certificate names no ACL user, is logged in as
 // it. Any declared default, in any form, is used exactly as written instead.
+//
+// Being off is what locks clients out: an off user cannot be authenticated as.
+// It keeps every permission because Valkey still runs internal work as default
+// and checks its permissions: AOF loading drops transactions default may not
+// run (valkey-io/valkey#3983), and Valkey 9.0.0 slot migrations need
+// cluster|syncslots (valkey-io/valkey#2783).
 var disabledDefaultUser = valkeyiov1alpha1.ACLUserSpec{
 	Name:     defaultUser,
 	State:    valkeyiov1alpha1.ACLUserStateDisabled,
 	Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
 	ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-		RawAcl: "resetkeys resetchannels -@all",
+		RawAcl: "~* &* +@all",
 	},
 }
 

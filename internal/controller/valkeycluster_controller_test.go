@@ -820,7 +820,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 
 			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{
 				"user bob on nopass +@all",
-				"user default off resetkeys resetchannels -@all",
+				"user default off ~* &* +@all",
 			}))
 		})
 
@@ -831,7 +831,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
 			}
 
-			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user default off resetkeys resetchannels -@all"}))
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user default off ~* &* +@all"}))
 		})
 
 		It("uses a declared default exactly as written, in either field", func() {
@@ -919,7 +919,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 			Expect(legacyLines).To(Equal([]string{
 				"user bob on nopass +@read",
 				"user carol on +@read",
-				"user default off resetkeys resetchannels -@all",
+				"user default off ~* &* +@all",
 			}))
 			Expect(declaredUserLines(ctx, current)).To(Equal(legacyLines))
 			Expect(current.Spec.ACL.Users[0].Name).To(Equal("carol"), "reconcile must not reorder spec.acl.users")

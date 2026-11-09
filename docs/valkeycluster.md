@@ -591,7 +591,7 @@ acl:
 
 #### The `default` user
 
-Valkey logs a client in as `default` until it authenticates. Under [mTLS](mtls.md) with `certificateUser` set, so is a client whose certificate names no ACL user. Valkey's own `default` is `on nopass +@all`, so unless `acl.users` (or the deprecated `spec.users`) declares `default`, the operator disables it with `user default off resetkeys resetchannels -@all`, and such clients get `NOAUTH`. A declared `default` is used exactly as written. To keep Valkey's open `default`, for example to try a cluster out, declare it:
+Valkey logs a client in as `default` until it authenticates. Under [mTLS](mtls.md) with `certificateUser` set, so is a client whose certificate names no ACL user. Valkey's own `default` is `on nopass +@all`, so unless `acl.users` (or the deprecated `spec.users`) declares `default`, the operator disables it with `user default off ~* &* +@all`, and such clients get `NOAUTH`: an `off` user cannot be authenticated as, whatever its permissions. It keeps every permission because Valkey still runs some internal work as `default` and checks them, as described below. A declared `default` is used exactly as written. To keep Valkey's open `default`, for example to try a cluster out, declare it:
 
 ```yaml
 acl:
@@ -602,7 +602,12 @@ acl:
       permissions: "~* &* +@all"
 ```
 
-> **Valkey 9.0.0:** a cluster with `default` disabled cannot scale: slot migrations fail with `NOPERM` on `cluster|syncslots` ([valkey-io/valkey#2785](https://github.com/valkey-io/valkey/pull/2785), fixed in 9.0.1). Upgrade to Valkey 9.0.1 or later, or declare `default` until you can.
+> **If you declare `default` with fewer permissions:** Valkey checks `default`'s permissions in two internal paths, even while it is `off`:
+>
+> - With AOF enabled, transactions and function calls that `default` may not run are silently dropped when the AOF is loaded ([valkey-io/valkey#3983](https://github.com/valkey-io/valkey/issues/3983), fixed in 7.2.15, 8.0.11, 8.1.10, 9.0.6 and 9.1.2).
+> - On Valkey 9.0.0, slot migrations fail with `NOPERM` unless `default` may run `cluster|syncslots` ([valkey-io/valkey#2783](https://github.com/valkey-io/valkey/issues/2783), fixed in 9.0.1).
+>
+> On an affected version, keep `~* &* +@all` on a declared `default` and restrict access with `state: Disabled` instead.
 
 > **Upgrade note:** Before this version, a cluster that declared no `default` kept Valkey's open one. Upgrading the operator disables it on every such cluster, live through `ACL LOAD` and without a pod restart, so clients that connect without credentials start getting `NOAUTH`, including `valkey-cli` run inside a node's pod. Before upgrading, declare `default` in `acl.users` on every cluster whose clients rely on it, with the access they need.
 

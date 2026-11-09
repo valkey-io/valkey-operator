@@ -91,6 +91,10 @@ func OperatorCommands() ([]Command, error) {
 		commands = append(commands, found...)
 	}
 
+	// SENTINEL commands go to Sentinel pods, which have no _operator user, so they are out of scope for the _operator ACL.
+	commands = slices.DeleteFunc(commands, func(c Command) bool {
+		return len(c.Tokens) > 0 && c.Tokens[0] == "SENTINEL"
+	})
 	return dedupe(commands), nil
 }
 

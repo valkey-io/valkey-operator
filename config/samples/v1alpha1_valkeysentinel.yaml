@@ -1,0 +1,12 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeySentinel
+metadata:
+  name: valkeysentinel-sample
+spec:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi

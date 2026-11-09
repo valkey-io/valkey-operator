@@ -841,6 +841,7 @@ const (
 	ReasonUpdatingNodes                 = "UpdatingNodes"
 	ReasonSystemUsersAclError           = "SystemUsersACLError"
 	ReasonPodDisruptionBudgetError      = "PodDisruptionBudgetError"
+	ReasonInstanceHealthy               = "InstanceHealthy"
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"

@@ -635,7 +635,7 @@ acl:
 
 The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. The other users keep rotating.
 
-Removing `acl.systemPasswordRotation` starts no new rotation. A rotation already under way still finishes.
+Removing `acl.systemPasswordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
 

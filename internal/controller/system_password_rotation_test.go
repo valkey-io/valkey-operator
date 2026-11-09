@@ -190,20 +190,26 @@ func TestSystemPasswordRotationStartsOnlyWhenTurnedOn(t *testing.T) {
 	require.Empty(t, event)
 	require.Empty(t, secret.Annotations[annotationSystemPasswordRotatedAt], "rotation off starts no clock")
 
+	// A clock left by an earlier rotation is dropped while rotation is off.
 	secret.Annotations[annotationSystemPasswordRotatedAt] = now.Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
 	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now})
 	require.NoError(t, err)
-	require.Empty(t, event)
+	require.Equal(t, "clock", event)
+	require.Empty(t, secret.Annotations[annotationSystemPasswordRotatedAt])
 	require.False(t, systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix))
 
+	// Turning it on again waits the configured interval.
 	week := 7 * 24 * time.Hour
-	secret.Annotations[annotationSystemPasswordRotatedAt] = now.Add(-week + time.Hour).Format(time.RFC3339Nano)
 	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now, Interval: week})
+	require.NoError(t, err)
+	require.Equal(t, "clock", event)
+	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordRotatedAt])
+
+	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now.Add(week - time.Hour), Interval: week})
 	require.NoError(t, err)
 	require.Empty(t, event)
 
-	secret.Annotations[annotationSystemPasswordRotatedAt] = now.Add(-week - time.Second).Format(time.RFC3339Nano)
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now, Interval: week})
+	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now.Add(week + time.Second), Interval: week})
 	require.NoError(t, err)
 	require.Equal(t, "started", event)
 }

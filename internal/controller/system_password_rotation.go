@@ -72,6 +72,8 @@ const (
 	systemPasswordPhasePending = "pending"
 	systemPasswordPhaseCutover = "cutover"
 	systemPasswordEventHolding = "holding"
+	// systemPasswordEventClock means only the rotation clock changed.
+	systemPasswordEventClock = "clock"
 
 	metricsExporterContainerName = "metrics-exporter"
 )
@@ -237,6 +239,11 @@ func advanceSystemPasswordRotation(secret *corev1.Secret, exporterEnabled bool, 
 
 func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals systemPasswordSignals) (string, error) {
 	if signals.Interval <= 0 {
+		// Drop the clock so turning rotation on again waits a full interval.
+		if secret.Annotations[annotationSystemPasswordRotatedAt] != "" {
+			delete(secret.Annotations, annotationSystemPasswordRotatedAt)
+			return systemPasswordEventClock, nil
+		}
 		return "", nil
 	}
 	// A Secret that has not rotated before has no clock. Stamp it and wait
@@ -245,7 +252,7 @@ func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals 
 	// volume and the new command.
 	if secret.Annotations[annotationSystemPasswordRotatedAt] == "" && !systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
 		secret.Annotations[annotationSystemPasswordRotatedAt] = signals.Now.Format(time.RFC3339Nano)
-		return "clock", nil
+		return systemPasswordEventClock, nil
 	}
 	if rotatedAt, ok := secret.Annotations[annotationSystemPasswordRotatedAt]; ok && rotatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, rotatedAt)
@@ -274,7 +281,7 @@ func startSystemPasswordRotation(secret *corev1.Secret, users []string, signals 
 	if !systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix) {
 		if secret.Annotations[annotationSystemPasswordRotatedAt] == "" {
 			secret.Annotations[annotationSystemPasswordRotatedAt] = signals.Now.Format(time.RFC3339Nano)
-			return "clock", nil
+			return systemPasswordEventClock, nil
 		}
 		return "", nil
 	}

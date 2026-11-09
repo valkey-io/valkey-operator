@@ -56,6 +56,33 @@ var _ = Describe("Valkey CEL validation", func() {
 		Expect(err.Error()).To(ContainSubstring("replication is not implemented yet"))
 	})
 
+	It("admits a ServiceAccount and pod metadata", func() {
+		valkey := valkeyFor("val-podmeta", 0)
+		valkey.Spec.ServiceAccountName = "valkey-sa"
+		valkey.Spec.PodMetadata = &valkeyiov1alpha1.EmbeddedObjectMetadata{
+			Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "cache"},
+			Annotations: map[string]string{"prometheus.io/scrape": "true"},
+		}
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	It("rejects an invalid ServiceAccount name", func() {
+		valkey := valkeyFor("val-bad-sa", 0)
+		valkey.Spec.ServiceAccountName = "Not_Valid"
+		Expect(k8sClient.Create(ctx, valkey)).NotTo(Succeed())
+	})
+
+	It("rejects pod labels the operator owns", func() {
+		valkey := valkeyFor("val-reserved-label", 0)
+		valkey.Spec.PodMetadata = &valkeyiov1alpha1.EmbeddedObjectMetadata{
+			Labels: map[string]valkeyiov1alpha1.LabelValue{"valkey.io/cluster": "other"},
+		}
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved for the operator"))
+	})
+
 	Describe("spec.config", func() {
 		configValkey := func(name string, config map[string]string) *valkeyiov1alpha1.Valkey {
 			valkey := valkeyFor(name, 0)

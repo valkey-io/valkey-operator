@@ -239,6 +239,20 @@ type ValkeySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// ServiceAccountName is the ServiceAccount the instance's pods run as.
+	// The namespace's default ServiceAccount is used when unset.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// PodMetadata adds labels and annotations to every pod of the instance.
+	// They are not part of the workload selector, so they can change at any time, and a change rolls the pods.
+	// Keys the operator sets itself are rejected.
+	// +optional
+	PodMetadata *EmbeddedObjectMetadata `json:"podMetadata,omitempty"`
 }
 
 // ValkeyStatus defines the observed state of Valkey.

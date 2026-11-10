@@ -71,9 +71,9 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
-	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
+	serverStart, err := scripts.ReadFile("scripts/primary-handoff.sh")
 	if err != nil {
-		return nil, fmt.Errorf("reading embedded server-start.sh: %w", err)
+		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
 	}
 
 	return &corev1.ConfigMap{
@@ -92,7 +92,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	}, nil
 }
 
-// serverStartCommand starts the server through /scripts/server-start.sh when the
+// serverStartCommand starts the server through /scripts/primary-handoff.sh when the
 // mounted ConfigMap carries it, and directly otherwise, so a node that mounts
 // an external ConfigMap without the script still starts. $0 is the server
 // binary and $@ its arguments.
@@ -100,7 +100,7 @@ const serverStartCommand = `if [ -f /scripts/` + serverStartScriptKey + ` ]; the
 	serverStartScriptKey + ` "$@"; fi; exec "$0" "$@"`
 
 // usesServerStartScript reports whether the server container of the node starts
-// through server-start.sh: a cluster member without persistence. /data is then
+// through primary-handoff.sh: a cluster member without persistence. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
 // not, and the script holds the server back until a crashed primary's replica
 // has been promoted, then drops the node identity, so that the replica keeps
@@ -126,7 +126,7 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe,
-// in periods of 5s: about 100s, or about 300s where server-start.sh runs, since
+// in periods of 5s: about 100s, or about 300s where primary-handoff.sh runs, since
 // the script may hold the server back for up to 300s for a replica hand-off.
 // The value is fixed so that a change of cluster-node-timeout, which the script
 // reads from the config, never rolls the pod.

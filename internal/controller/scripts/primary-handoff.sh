@@ -3,14 +3,14 @@
 # Starts the server of a cluster node without persistence
 # (POSIX sh, works with bash, dash & busybox ash).
 #
-# Usage: server-start.sh <valkey.conf> <further valkey-server arguments>
+# Usage: primary-handoff.sh <valkey.conf> <further valkey-server arguments>
 #
 # Without persistence /data is an emptyDir, which outlives a restart of the
 # server container while the dataset in memory does not. A primary whose
 # server crashed would reload nodes.conf and come back as the same node, with
-# the same slots and an empty dataset, and its replicas would full-sync to
-# nothing. So when the previous run was a primary with a replica that can be
-# promoted, this script:
+# the same slots and only the data it can reload from disk. Its replicas
+# could then full-sync to that older or empty dataset. When the previous run
+# was a primary with a replica that can be promoted, this script:
 #
 #   1. waits until every such replica is a primary or follows another node.
 #      Replicas reconnect by address, and the restarted container keeps the
@@ -37,9 +37,20 @@ role_timeout=3 # seconds one ROLE call may take, connection and reply included
 
 case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
 
-# config_value KEY DEFAULT prints the last value of KEY in valkey.conf.
-config_value() {
-    awk -v key="$1" -v def="$2" '$1 == key { v = $2 } END { print (v == "" ? def : v) }' "$conf" 2>/dev/null
+# handoff_timeout_ms reads the last cluster-node-timeout as a decimal number.
+# Cap the input at 50000ms before multiplying it by six in the shell.
+handoff_timeout_ms() {
+    awk '
+        $1 == "cluster-node-timeout" { value = $2 }
+        END {
+            quote = substr(value, 1, 1)
+            if ((quote == sprintf("%c", 34) || quote == sprintf("%c", 39)) &&
+                substr(value, length(value), 1) == quote)
+                value = substr(value, 2, length(value) - 2)
+            if (value !~ /^[0-9]+$/) value = 15000
+            print (value + 0 > 50000 ? 50000 : value + 0)
+        }
+    ' "$conf" 2>/dev/null
 }
 
 # timeout_cmd SECONDS COMMAND... runs the command with a time limit, as in the
@@ -154,8 +165,7 @@ if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
         fi
         # Six cluster-node-timeouts, at most 300s, which the startup probe of
         # the container allows for (startupFailureThreshold).
-        cap=$(( $(config_value cluster-node-timeout 15000) * 6 / 1000 ))
-        [ "$cap" -gt 300 ] && cap=300
+        cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))
         [ "$cap" -lt 1 ] && cap=1
         echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2
         started=$(date +%s)

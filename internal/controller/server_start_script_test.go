@@ -36,7 +36,7 @@ const (
 	otherID   = "67ed2db8d677e59ec4a4cefb06858cf2a1a89fa1"
 )
 
-// scriptRun is one run of scripts/server-start.sh against a temporary data
+// scriptRun is one run of scripts/primary-handoff.sh against a temporary data
 // dir, with stub valkey-server and valkey-cli binaries on PATH.
 type scriptRun struct {
 	out      string
@@ -108,7 +108,7 @@ func startScriptCommand(t *testing.T, nodesConf, valkeyConf string, cli stubCLI)
 		}
 	}
 
-	cmd = exec.Command(shellPath, "scripts/server-start.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
+	cmd = exec.Command(shellPath, "scripts/primary-handoff.sh", filepath.Join(dir, "valkey.conf"), "--port", "6379")
 	// TMPDIR points nowhere: the root filesystem of the server container may
 	// be read-only, so the script must not depend on a writable /tmp.
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "VALKEY_DATA_DIR="+dataDir, "TMPDIR=/nonexistent")
@@ -133,7 +133,7 @@ func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 }
 
 // The server command of a cluster node runs serverStartCommand, which falls
-// back to the server binary when the mounted ConfigMap has no server-start.sh,
+// back to the server binary when the mounted ConfigMap has no primary-handoff.sh,
 // as an external ConfigMap may not. The script path is absolute, so this
 // exercises the fallback on a machine without it.
 func TestServerStartCommandFallsBackToServer(t *testing.T) {
@@ -175,6 +175,21 @@ func TestServerStartScript(t *testing.T) {
 		assert.Equal(t, 3, r.cliCalls)
 		assertSnapshotKept(t, r, false)
 	})
+
+	for _, tt := range []struct {
+		name, value, wait string
+	}{
+		{"double-quoted timeout", `"5000"`, "30s"},
+		{"single-quoted timeout", "'5000'", "30s"},
+		{"invalid timeout falls back", "invalid", "90s"},
+		{"large timeout caps the wait", "9223372036854775807", "300s"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := runStartScript(t, primary+replica+vars, "cluster-node-timeout "+tt.value+"\n", stubCLI{})
+			assert.Contains(t, r.out, "waiting up to "+tt.wait)
+			assert.Contains(t, r.out, serverLine)
+		})
+	}
 
 	t.Run("a replica that follows another primary counts as moved on", func(t *testing.T) {
 		r := runStartScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3"})

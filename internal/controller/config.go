@@ -44,7 +44,7 @@ const (
 	readinessScriptKey   = "readiness-check.sh"
 	livenessScriptKey    = "liveness-check.sh"
 	initScriptKey        = "init.sh"
-	serverStartScriptKey = "server-start.sh"
+	serverStartScriptKey = "primary-handoff.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -327,9 +327,9 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	}
 
 	// Embed the server start script
-	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
+	serverStart, err := scripts.ReadFile("scripts/primary-handoff.sh")
 	if err != nil {
-		return fmt.Errorf("reading embedded server-start.sh: %w", err)
+		return fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
 	}
 
 	// Get the new server config
@@ -457,9 +457,9 @@ func init() {
 	}
 
 	// Read the server start script
-	serverStart, err := scripts.ReadFile("scripts/server-start.sh")
+	serverStart, err := scripts.ReadFile("scripts/primary-handoff.sh")
 	if err != nil {
-		panic("failure reading embedded server-start.sh")
+		panic("failure reading embedded primary-handoff.sh")
 	}
 
 	// Calculate hash of all scripts

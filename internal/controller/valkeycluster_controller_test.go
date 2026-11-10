@@ -818,7 +818,77 @@ var _ = Describe("reconcileUsersAcl", func() {
 				},
 			}
 
-			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user bob on nopass +@all"}))
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{
+				"user bob on nopass +@all",
+				"user default off ~* &* +@all",
+			}))
+		})
+
+		It("disables default when no user is declared", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-undeclared", Namespace: "default"},
+				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+			}
+
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user default off ~* &* +@all"}))
+		})
+
+		It("uses a declared default exactly as written, in either field", func() {
+			ctx := context.Background()
+			current := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-declared", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"},
+					}}},
+				},
+			}
+			legacy := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-declared-legacy", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+						{Name: "default", Enabled: true, NoPassword: true, ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"}},
+					},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, current)).To(Equal([]string{"user default on nopass ~* &* +@all"}))
+			Expect(declaredUserLines(ctx, legacy)).To(Equal([]string{"user default on nopass ~* &* +@all"}))
+		})
+
+		It("adds no second default when the declared one is disabled", func() {
+			ctx := context.Background()
+			stateDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-state-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						State:          valkeyiov1alpha1.ACLUserStateDisabled,
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"},
+					}}},
+				},
+			}
+			passwordDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-password-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"},
+					}}},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, stateDisabled)).To(Equal([]string{"user default off nopass ~* &* +@all"}))
+			Expect(declaredUserLines(ctx, passwordDisabled)).To(Equal([]string{"user default on +@read"}))
 		})
 
 		It("renders the same aclfile for spec.users and the equivalent spec.acl.users", func() {
@@ -846,7 +916,11 @@ var _ = Describe("reconcileUsersAcl", func() {
 			}
 
 			legacyLines := declaredUserLines(ctx, legacy)
-			Expect(legacyLines).To(Equal([]string{"user bob on nopass +@read", "user carol on +@read"}))
+			Expect(legacyLines).To(Equal([]string{
+				"user bob on nopass +@read",
+				"user carol on +@read",
+				"user default off ~* &* +@all",
+			}))
 			Expect(declaredUserLines(ctx, current)).To(Equal(legacyLines))
 			Expect(current.Spec.ACL.Users[0].Name).To(Equal("carol"), "reconcile must not reorder spec.acl.users")
 		})

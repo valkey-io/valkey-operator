@@ -5,6 +5,14 @@ metadata:
 spec:
   shards: 1
   replicas: 1
+  acl:
+    users:
+      # Valkey's open default user: any client, no password, every command.
+      # For trying the cluster out; restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   exporter:
     enabled: true
     securityContext:

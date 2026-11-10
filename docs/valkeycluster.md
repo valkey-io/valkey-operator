@@ -589,6 +589,30 @@ acl:
 - `channels`: pub/sub channel patterns
 - `permissions`: raw ACL string appended after any generated rules
 
+#### The `default` user
+
+Valkey logs a client in as `default` until it authenticates. Under [mTLS](mtls.md) with `certificateUser` set, so is a client whose certificate names no ACL user. Valkey's own `default` is `on nopass +@all`, so unless `acl.users` (or the deprecated `spec.users`) declares `default`, the operator disables it with `user default off ~* &* +@all`, and such clients get `NOAUTH`: an `off` user cannot be authenticated as, whatever its permissions. It keeps every permission because Valkey still runs some internal work as `default` and checks them, as described below. A declared `default` is used exactly as written. To keep Valkey's open `default`, for example to try a cluster out, declare it:
+
+```yaml
+acl:
+  users:
+    - name: default
+      password:
+        type: Any
+      permissions: "~* &* +@all"
+```
+
+> **If you declare `default` with fewer permissions:** Valkey checks `default`'s permissions in two internal paths, even while it is `off`:
+>
+> - With AOF enabled, transactions and function calls that `default` may not run are silently dropped when the AOF is loaded ([valkey-io/valkey#3983](https://github.com/valkey-io/valkey/issues/3983), fixed in 7.2.15, 8.0.11, 8.1.10, 9.0.6 and 9.1.2).
+> - On Valkey 9.0.0, slot migrations fail with `NOPERM` unless `default` may run `cluster|syncslots` ([valkey-io/valkey#2783](https://github.com/valkey-io/valkey/issues/2783), fixed in 9.0.1).
+>
+> On an affected version, keep `~* &* +@all` on a declared `default` and restrict access with `state: Disabled` instead.
+
+> **Connections that are already open:** disabling `default`, whether by upgrading the operator or by removing a declared open `default`, refuses new anonymous connections. But a connection that logged in as `default` while it was open stays logged in, and runs with the disabled `default`'s permissions until it disconnects: every command, for the one the operator writes. To cut those connections off at once, run `CLIENT KILL USER default` on every node after it reports [`ACLApplied`](status-conditions.md#aclapplied), or restart the pods. `CLIENT KILL USER default` also drops clients that have connected but not yet authenticated, which then need to reconnect.
+
+> **Upgrade note:** Before this version, a cluster that declared no `default` kept Valkey's open one. Upgrading the operator disables it on every such cluster, live through `ACL LOAD` and without a pod restart, so clients that connect without credentials start getting `NOAUTH`, including `valkey-cli` run inside a node's pod. Anonymous connections already open at the upgrade keep full access until they disconnect; see "Connections that are already open" above. Before upgrading, declare `default` in `acl.users` on every cluster whose clients rely on it, with the access they need.
+
 ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.
 
 > **Upgrade note:** Live application relies on the operator's `_operator` user holding the `acl|load`, `acl|getuser`, and `acl|users` commands, which older operator versions did not grant. Upgrading onto this version rewrites the pod template (it drops a now-unused annotation), so every existing cluster rolls once and picks up the new grants on restart, after which ACL changes apply live. The exception is a cluster old enough to predate that annotation entirely: it gets no automatic roll, so it needs a one-time manual pod restart after the upgrade before live ACL applies.

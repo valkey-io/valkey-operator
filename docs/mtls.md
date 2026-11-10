@@ -33,14 +33,15 @@ spec:
       clientAuth:
         mode: Required
         certificateUser: CN
-  users:
-    - name: alice
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~app:* &events:*"
+  acl:
+    users:
+      - name: alice
+        password:
+          type: Disabled
+        permissions: "+@all ~app:* &events:*"
 ```
 
-With `clientAuth.mode: Required` and `clientAuth.certificateUser: CN`, a client whose certificate carries `CN=alice` is authenticated as the ACL user `alice` during the TLS handshake, with no `AUTH` command required. Pass `resetpass: true` with this configuration so authentication relies exclusively on the client certificate.
+With `clientAuth.mode: Required` and `clientAuth.certificateUser: CN`, a client whose certificate carries `CN=alice` is authenticated as the ACL user `alice` during the TLS handshake, with no `AUTH` command required. Set `password.type: Disabled` with this configuration so authentication relies exclusively on the client certificate.
 
 `clientAuth.mode: Required` does not disable password authentication. It requires a valid client certificate at the TLS handshake; clients can still run `AUTH` when they present a certificate signed by the configured CA.
 
@@ -168,7 +169,7 @@ The bundle also governs the cluster bus. Nodes verify peers on port 16379 agains
 - **Missing or invalid sources.** If a source or its key is missing, or its contents are neither PEM certificates nor a SPIFFE bundle with an X.509 authority, `valkey-<cluster>-tls-trust` keeps that source's last good roots, stored in the same Secret, and the cluster reports `TLSConfigured=False` with reason `TrustSourceNotFound` or `TrustSourceInvalid`. Every other source stays current: removing a root from another source, or removing an entry from `clientAuth.ca`, revokes those roots at once, and a new root in another source is still added. Editing an entry's name or key counts as removing it, so a typo there refuses that entry's clients until it is fixed, and the condition names the broken source. If nothing mounts the bundle yet, nodes keep verifying clients against the server secret's `ca.crt` alone, and a `valkey-<cluster>-tls-trust` left from an earlier `clientAuth.ca` is not used.
 - **The size limit.** The Secret stores each source's roots as well as the merged bundle, so together they have to fit the 1 MiB Secret limit, which leaves room for about 500 KiB of roots. If the API server refuses the Secret, it keeps its current contents, the cluster reports `TLSConfigured=False` with reason `TrustBundleRejected`, and the rest of the reconcile carries on.
 - **The name `valkey-<cluster>-tls-trust` is reserved.** While `clientAuth.ca` is set, the API server refuses it as the server certificate Secret, and it can never be a `clientAuth.ca` source. If a Secret of that name already exists and the cluster does not control it, the operator never adopts, writes or trusts it: the cluster reports `TrustBundleConflict` and nodes stay on the server root until it is removed.
-- **The `default` user.** Under `certificateUser: URI` or `CN`, a client whose certificate chains to a trusted root but names no ACL user is logged in as `default`, as is a client that presents no certificate under `mode: Optional`. Valkey's stock `default` is `on nopass +@all`, and `clientAuth.ca` widens who can reach it, for example to every SVID in a SPIFFE trust domain. Declare `default` in `spec.users` to restrict it, for example `{name: default, enabled: false}`. See [#489](https://github.com/valkey-io/valkey-operator/issues/489).
+- **The `default` user.** Under `certificateUser: URI` or `CN`, a client whose certificate chains to a trusted root but names no ACL user is logged in as `default`, and under `Disabled` every certificate is. So is a client that presents no certificate under `mode: Optional`. Unless `acl.users` (or the deprecated `spec.users`) declares `default`, the operator disables it and such clients get `NOAUTH`; see [The `default` user](valkeycluster.md#the-default-user). If you declare it, remember that `clientAuth.ca` widens who can reach it, for example to every SVID in a SPIFFE trust domain.
 - **Adding or removing `clientAuth.ca`** rolls the nodes one at a time. Removing it rewrites `valkey-<cluster>-tls-trust` to hold only the server root, so a node still waiting for its roll reloads that and stops trusting the client roots once the kubelet has refreshed its mount. A node whose roll has started no longer reloads, so it trusts them until its pod is replaced. The Secret is deleted once no workload or running pod mounts it, since a pod could not start without it until then. If `networking.tls` is removed in the same update, the Secret is left as it is, and pods trust the client roots until they roll off TLS.
 
 ## Connecting clients
@@ -194,15 +195,16 @@ With `clientAuth.certificateUser: CN`, a presented server certificate CN is the 
 
 ## Security considerations
 
-### Do not use `nopass` on a certificate-mapped user
+### Do not use `password.type: Any` on a certificate-mapped user
 
-`nopass: true` lets any client run `AUTH <user> <any-password>` and succeed, whether or not it holds the matching client certificate. Under `clientAuth.mode: Required`, any client with a valid CA-signed certificate can then authenticate as any `nopass` user.
+`password.type: Any` renders Valkey's `nopass`, which lets any client run `AUTH <user> <any-password>` and succeed, whether or not it holds the matching client certificate. Under `clientAuth.mode: Required`, any client with a valid CA-signed certificate can then authenticate as any such user.
 
-Set `resetpass: true` instead. That clears every password and disables `nopass`, so password authentication is impossible and the CN or URI from the client certificate becomes the only way to authenticate as that user.
+Set `password.type: Disabled` instead. The user then has no password and no `nopass` flag, so password authentication is impossible and the CN or URI from the client certificate becomes the only way to authenticate as that user.
 
 ```yaml
-users:
-  - name: alice
-    enabled: true
-    resetpass: true
+acl:
+  users:
+    - name: alice
+      password:
+        type: Disabled
 ```

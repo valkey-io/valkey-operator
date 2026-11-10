@@ -254,10 +254,11 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 
 1. Check that the installed CRD has the new field: `kubectl explain valkeyclusters.spec.replicasPerShard` must print it. Helm does not upgrade CRDs from a chart's `crds` directory. On an old CRD the API server drops `replicasPerShard` from the patch in step 3, which then leaves the cluster with 0 replicas.
 2. Wait until the new operator release runs and the old operator pod is gone.
-3. Replace one field with the other in a single update:
+3. Read the current `spec.replicas` and replace it with `replicasPerShard` in a single update. The patch keeps that count:
 
    ```sh
-   kubectl patch valkeycluster <name> --type=merge -p '{"spec":{"replicas":null,"replicasPerShard":1}}'
+   n=$(kubectl get valkeycluster <name> -o jsonpath='{.spec.replicas}') && \
+   kubectl patch valkeycluster <name> --type=merge -p "{\"spec\":{\"replicas\":null,\"replicasPerShard\":${n:?spec.replicas is not set}}}"
    ```
 
 Applying an edited manifest works only if the apply removes `replicas`. Two cases keep it, and the API server rejects the update: client side `kubectl apply` on a cluster that was not created with `kubectl apply`, and server side apply when another field manager owns `spec.replicas`, for example after a `kubectl patch`. The merge patch works in both cases.

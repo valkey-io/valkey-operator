@@ -60,6 +60,15 @@ var ValkeyStates = []ValkeyState{
 	ValkeyStateFailed,
 }
 
+// ValkeyACLSpec holds the ACL configuration of a Valkey.
+type ValkeyACLSpec struct {
+	// Users managed by the operator.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Users []ACLUserSpec `json:"users,omitempty"`
+}
+
 // ValkeyNetworkingSpec groups how clients and peers reach a Valkey.
 type ValkeyNetworkingSpec struct {
 	// ClusterDomain is the DNS suffix kubelet publishes Service DNS under (kubelet --cluster-domain).
@@ -185,11 +194,9 @@ type ValkeySpec struct {
 	// +optional
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
-	// Users holds ACL user definitions. See valkeyacls_types.go.
-	// +listType=map
-	// +listMapKey=name
+	// ACL configures the Valkey access control the operator manages.
 	// +optional
-	Users []UserAclSpec `json:"users,omitempty"`
+	ACL *ValkeyACLSpec `json:"acl,omitempty"`
 
 	// Containers holds additional containers, or overrides for the default ones.
 	// Applied as a strategic merge patch.

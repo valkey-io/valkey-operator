@@ -69,6 +69,134 @@ spec:
           spec:
             description: spec defines the desired state of Valkey
             properties:
+              acl:
+                description: ACL configures the Valkey access control the operator
+                  manages.
+                properties:
+                  users:
+                    description: Users managed by the operator.
+                    items:
+                      description: ACLUserSpec defines a Valkey ACL user.
+                      properties:
+                        channels:
+                          description: Channel restrictions
+                          properties:
+                            patterns:
+                              description: 'Pub/Sub channel patterns - maps to Valkey:
+                                &pattern'
+                              items:
+                                pattern: ^[^\s]+$
+                                type: string
+                              type: array
+                          type: object
+                        commands:
+                          description: Valkey command categories, commands, and subcommands
+                            restrictions for this user
+                          properties:
+                            allow:
+                              description: Allowed commands for this user
+                              items:
+                                pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
+                                type: string
+                              type: array
+                            deny:
+                              description: Denied commands for this user
+                              items:
+                                pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
+                                type: string
+                              type: array
+                          type: object
+                        keys:
+                          description: Key restrictions
+                          properties:
+                            readOnly:
+                              description: 'Keys restricted to read-only; maps to
+                                Valkey: %R~pattern'
+                              items:
+                                pattern: ^[^\s]+$
+                                type: string
+                              type: array
+                            readWrite:
+                              description: 'Keys on which this user can read, and
+                                write; maps to Valkey: ~pattern'
+                              items:
+                                pattern: ^[^\s]+$
+                                type: string
+                              type: array
+                            writeOnly:
+                              description: 'Keys restricted to write-only; maps to
+                                Valkey: %W~pattern'
+                              items:
+                                pattern: ^[^\s]+$
+                                type: string
+                              type: array
+                          type: object
+                        name:
+                          description: Username
+                          maxLength: 128
+                          minLength: 1
+                          pattern: ^[^\s]+$
+                          type: string
+                          x-kubernetes-validations:
+                          - message: Username cannot start with '_'
+                            reason: FieldValueForbidden
+                            rule: '!self.startsWith(''_'')'
+                        password:
+                          default: {}
+                          description: Password authentication; defaults to the passwords
+                            in the Secret <cluster>-users
+                          properties:
+                            secret:
+                              description: Reference information to a Secret containing
+                                user passwords
+                              properties:
+                                keys:
+                                  description: |-
+                                    An array of keys inside the referencing Secret to find passwords; defaults to username
+                                    Valkey supports multiple passwords per user for rotation
+                                  items:
+                                    type: string
+                                  type: array
+                                name:
+                                  description: Name of the referencing Secret; Defaults
+                                    to clustername-users
+                                  type: string
+                              type: object
+                            type:
+                              default: Secret
+                              description: How the user authenticates with a password
+                              enum:
+                              - Secret
+                              - Any
+                              - Disabled
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                          - fieldPath: .secret
+                            message: secret is only used when type is Secret
+                            reason: FieldValueForbidden
+                            rule: '!has(self.secret) || !has(self.type) || self.type
+                              == ''Secret'''
+                        permissions:
+                          description: Raw ACL for (additional) permissions. Appended
+                            to anything generated.
+                          pattern: ^[^\r\n]*\n?$
+                          type: string
+                        state:
+                          default: Enabled
+                          description: Whether the user can authenticate
+                          enum:
+                          - Enabled
+                          - Disabled
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               config:
                 additionalProperties:
                   type: string
@@ -2122,6 +2250,7 @@ spec:
                         && (!k.contains('/') || k.indexOf('/') <= 253))
                     - message: annotation keys under valkey.io/ are reserved for the
                         operator
+                      reason: FieldValueForbidden
                       rule: self.all(k, !k.startsWith('valkey.io/'))
                   labels:
                     additionalProperties:
@@ -2147,6 +2276,7 @@ spec:
                     - message: label keys under valkey.io/ and app.kubernetes.io/
                         name, instance, component, part-of and managed-by are reserved
                         for the operator
+                      reason: FieldValueForbidden
                       rule: self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name',
                         'app.kubernetes.io/instance', 'app.kubernetes.io/component',
                         'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))
@@ -3613,106 +3743,6 @@ spec:
                 format: int64
                 minimum: 1
                 type: integer
-              users:
-                description: Users holds ACL user definitions. See valkeyacls_types.go.
-                items:
-                  description: An UserAclSpec contains user, authorization, and permissions-related
-                    configurations
-                  properties:
-                    channels:
-                      description: Channel restrictions
-                      properties:
-                        patterns:
-                          description: 'Pub/Sub channel patterns - maps to Valkey:
-                            &pattern'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    commands:
-                      description: Valkey command categories, commands, and subcommands
-                        restrictions for this user
-                      properties:
-                        allow:
-                          description: Allowed commands for this user
-                          items:
-                            pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
-                            type: string
-                          type: array
-                        deny:
-                          description: Denied commands for this user
-                          items:
-                            pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
-                            type: string
-                          type: array
-                      type: object
-                    enabled:
-                      default: true
-                      description: If the user is enabled or not
-                      type: boolean
-                    keys:
-                      description: Key restrictions
-                      properties:
-                        readOnly:
-                          description: 'Keys restricted to read-only; maps to Valkey:
-                            %R~pattern'
-                          items:
-                            type: string
-                          type: array
-                        readWrite:
-                          description: 'Keys on which this user can read, and write;
-                            maps to Valkey: ~pattern'
-                          items:
-                            type: string
-                          type: array
-                        writeOnly:
-                          description: 'Keys restricted to write-only; maps to Valkey:
-                            %W~pattern'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    name:
-                      description: Username
-                      type: string
-                      x-kubernetes-validations:
-                      - message: Username cannot start with '_'
-                        rule: '!self.startsWith(''_'')'
-                    nopass:
-                      default: false
-                      description: Do not apply a password to this user
-                      type: boolean
-                    passwordSecret:
-                      description: Reference information to a Secret containing user
-                        passwords
-                      properties:
-                        keys:
-                          description: |-
-                            An array of keys inside the referencing Secret to find passwords; defaults to username
-                            Valkey supports multiple passwords per user for rotation
-                          items:
-                            type: string
-                          type: array
-                        name:
-                          description: Name of the referencing Secret; Defaults to
-                            clustername-users
-                          type: string
-                      type: object
-                    permissions:
-                      description: Raw ACL for (additional) permissions. Appended
-                        to anything generated.
-                      type: string
-                    resetpass:
-                      default: false
-                      description: Apply the resetpass flag to this user
-                      type: boolean
-                  required:
-                  - name
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - name
-                x-kubernetes-list-type: map
               workloadType:
                 default: StatefulSet
                 description: WorkloadType picks the ValkeyNode's workload kind. It

@@ -107,7 +107,12 @@ The referenced ServiceAccount **must already exist in the same namespace** as th
 
 The operator requires the `--default-valkey-image` and `--default-exporter-image`
 flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
-`spec.exporter.image` is empty. Changing a default rolls the pods that use it.
+`spec.exporter.image` is empty.
+
+- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster or
+  standalone ValkeyNode that omits `spec.image`.
+- Changing `--default-exporter-image` rolls pods with an enabled exporter whose
+  ValkeyCluster or standalone ValkeyNode omits `spec.exporter.image`.
 
 When upgrading a deployment that supplies its own manager arguments, add both
 flags. To keep the previous image defaults, use

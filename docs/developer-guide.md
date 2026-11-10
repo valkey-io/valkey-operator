@@ -286,14 +286,9 @@ contents. Bind it to localhost and never add it to a Service.
 
 ### Running locally
 
-`make run` passes no arguments, so run the binary directly. This needs a cluster
-to talk to, as described in [Run the operator locally](#run-the-operator-locally):
-
-```bash
-go run ./cmd/main.go --pprof-bind-address=localhost:8082 \
-  --default-valkey-image=valkey/valkey:9.0.0 \
-  --default-exporter-image=oliver006/redis_exporter:v1.88.0
-```
+Start with the command in the [`run` target of the Makefile](../Makefile)
+and add `--pprof-bind-address=localhost:8082`. The operator needs access to a
+cluster as described in [Run the operator locally](#run-the-operator-locally).
 
 ### Running in a cluster
 

@@ -352,12 +352,13 @@ const (
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
-	// wrote to the mounted Secret is live on the server. It is applied via ACL
-	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// wrote to the mounted Secret, for spec.acl.users (or the deprecated
+	// spec.users) and the system users, is live on the server. It is applied via
+	// ACL LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
 	// means the desired user set, their password hashes, and the current ACL
-	// revision are live, confirmed by a bookkeeping revision user whose password
-	// is a hash of the managed ACL (see aclRevisionUser); permission-only
-	// edits are therefore honoured too.
+	// revision are live, confirmed by a bookkeeping revision user whose password is
+	// a hash of the managed ACL (see aclRevisionUser); permission-only edits are
+	// therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
 	// ValkeyNodeConditionTrustBundleApplied indicates that the server has
 	// reloaded the mounted trust bundle (Spec.TLS.Certificates.TrustBundle) as
@@ -374,6 +375,12 @@ const (
 	ValkeyNodeReasonApplied            = "Applied"
 	ValkeyNodeReasonPendingPropagation = "PendingPropagation"
 	ValkeyNodeReasonApplyFailed        = "ApplyFailed"
+	// ValkeyNodeReasonAuthenticationFailed is the ACLApplied and
+	// LiveConfigApplied reason when the node rejects the operator's _operator
+	// password (WRONGPASS), so the operator can neither apply nor check either.
+	// It clears on the next node reconcile after the node accepts the password
+	// again; the operator does not change the password itself.
+	ValkeyNodeReasonAuthenticationFailed = "AuthenticationFailed"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means

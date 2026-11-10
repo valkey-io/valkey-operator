@@ -250,7 +250,7 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 
 #### Migrating from `spec.replicas`
 
-`replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster that still sets it gets a `ConfigurationWarning` condition with reason `DeprecatedField`. The API server rejects a spec that sets both fields.
+`replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a spec that sets both fields.
 
 1. Check that the installed CRD has the new field: `kubectl explain valkeyclusters.spec.replicasPerShard` must print it. Helm does not upgrade CRDs from a chart's `crds` directory. On an old CRD the API server drops `replicasPerShard` from the patch in step 3, which then leaves the cluster with 0 replicas.
 2. Wait until the new operator release runs and the old operator pod is gone.

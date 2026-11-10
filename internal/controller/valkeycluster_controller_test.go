@@ -701,7 +701,7 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:    "testuser",
 							Enabled: true,
@@ -738,12 +738,14 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:   1,
 					Replicas: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:       "testuser",
 							Enabled:    true,
 							NoPassword: true,
-							RawAcl:     "+@all",
+							ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+								RawAcl: "+@all",
+							},
 						},
 					},
 				},
@@ -770,6 +772,157 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, internalSecret) }()
 
 			Expect(internalSecret.Type).To(Equal(AclSecretType))
+		})
+
+		// declaredUserLines reconciles the cluster's users and returns the
+		// aclfile lines for the declared (non-system) users.
+		declaredUserLines := func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []string {
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
+
+			reconciler := &ValkeyClusterReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+			}
+			Expect(reconciler.reconcileUsersAcl(ctx, cluster)).To(Succeed())
+
+			internalSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      getInternalSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			}, internalSecret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, internalSecret) })
+
+			var lines []string
+			for line := range strings.SplitSeq(string(internalSecret.Data[aclFilename]), "\n") {
+				if strings.HasPrefix(line, "user ") && !strings.HasPrefix(line, "user _") {
+					lines = append(lines, line)
+				}
+			}
+			return lines
+		}
+
+		It("renders users from spec.acl.users", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-new-field-test", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "bob",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@all"},
+					}}},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{
+				"user bob on nopass +@all",
+				"user default off ~* &* +@all",
+			}))
+		})
+
+		It("disables default when no user is declared", func() {
+			ctx := context.Background()
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-undeclared", Namespace: "default"},
+				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+			}
+
+			Expect(declaredUserLines(ctx, cluster)).To(Equal([]string{"user default off ~* &* +@all"}))
+		})
+
+		It("uses a declared default exactly as written, in either field", func() {
+			ctx := context.Background()
+			current := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-declared", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"},
+					}}},
+				},
+			}
+			legacy := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-declared-legacy", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+						{Name: "default", Enabled: true, NoPassword: true, ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"}},
+					},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, current)).To(Equal([]string{"user default on nopass ~* &* +@all"}))
+			Expect(declaredUserLines(ctx, legacy)).To(Equal([]string{"user default on nopass ~* &* +@all"}))
+		})
+
+		It("adds no second default when the declared one is disabled", func() {
+			ctx := context.Background()
+			stateDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-state-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						State:          valkeyiov1alpha1.ACLUserStateDisabled,
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "~* &* +@all"},
+					}}},
+				},
+			}
+			passwordDisabled := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-default-password-disabled", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:           "default",
+						Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+						ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"},
+					}}},
+				},
+			}
+
+			Expect(declaredUserLines(ctx, stateDisabled)).To(Equal([]string{"user default off nopass ~* &* +@all"}))
+			Expect(declaredUserLines(ctx, passwordDisabled)).To(Equal([]string{"user default on +@read"}))
+		})
+
+		It("renders the same aclfile for spec.users and the equivalent spec.acl.users", func() {
+			ctx := context.Background()
+			perms := valkeyiov1alpha1.ACLPermissions{RawAcl: "+@read"}
+			legacy := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-parity-legacy", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+						{Name: "carol", Enabled: true, ResetPass: true, ACLPermissions: perms},
+						{Name: "bob", Enabled: true, NoPassword: true, ACLPermissions: perms},
+					},
+				},
+			}
+			current := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "acl-parity-current", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{
+						{Name: "carol", Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled}, ACLPermissions: perms},
+						{Name: "bob", Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny}, ACLPermissions: perms},
+					}},
+				},
+			}
+
+			legacyLines := declaredUserLines(ctx, legacy)
+			Expect(legacyLines).To(Equal([]string{
+				"user bob on nopass +@read",
+				"user carol on +@read",
+				"user default off ~* &* +@all",
+			}))
+			Expect(declaredUserLines(ctx, current)).To(Equal(legacyLines))
+			Expect(current.Spec.ACL.Users[0].Name).To(Equal("carol"), "reconcile must not reorder spec.acl.users")
 		})
 
 		It("should be able to create the internal ACL secret when unknown system user is present", func() {
@@ -1629,7 +1782,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, nil)
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, nil, "")
 	}
 
 	// reconcileNodesWithState is reconcileNodes with a live topology snapshot, so
@@ -1640,7 +1793,7 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(k8sClient.List(testCtx, nodeList,
 			client.InNamespace("default"),
 			client.MatchingLabels{LabelCluster: clusterName})).To(Succeed())
-		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, state)
+		return r.reconcileValkeyNodes(testCtx, cluster, nodeList, state, "")
 	}
 
 	// setPodIP publishes a pod IP so shardExistsInTopology and findShardPrimary
@@ -1791,6 +1944,51 @@ var _ = Describe("reconcileValkeyNodes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(requeue).To(BeTrue())
 		Expect(getImage(node00)).To(Equal("valkey/valkey:9.1.0"))
+	})
+
+	It("does not copy perNodeServices to later nodes while one node is not ready", func() {
+		createAllNodes()
+		markAllReady()
+
+		cluster.Spec.Networking = &valkeyiov1alpha1.NetworkingSpec{
+			PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
+		}
+
+		requeue, err := reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+
+		serviceOf := func(name string) *valkeyiov1alpha1.ValkeyNodeServiceSpec {
+			GinkgoHelper()
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: "default"}, node)).To(Succeed())
+			return node.Spec.Service
+		}
+		Expect(serviceOf(node01)).NotTo(BeNil())
+		for _, name := range []string{node00, node10, node11} {
+			Expect(serviceOf(name)).To(BeNil(), name)
+		}
+
+		first := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: node01, Namespace: "default"}, first)).To(Succeed())
+		first.Status.Ready = false
+		first.Status.ObservedGeneration = first.Generation
+		meta.SetStatusCondition(&first.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             valkeyiov1alpha1.ValkeyNodeReasonServiceError,
+			Message:            "service name is taken",
+			ObservedGeneration: first.Generation,
+		})
+		Expect(k8sClient.Status().Update(testCtx, first)).To(Succeed())
+
+		requeue, err = reconcileNodes()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+		Expect(serviceOf(node01)).NotTo(BeNil())
+		for _, name := range []string{node00, node10, node11} {
+			Expect(serviceOf(name)).To(BeNil(), name)
+		}
 	})
 
 	It("skips only the shard whose primary is unidentifiable", func() {
@@ -1955,7 +2153,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 	}
 
 	It("creates the ValkeyNode and emits ValkeyNodeCreated event", func() {
-		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeCreated))
 
@@ -1965,12 +2163,12 @@ var _ = Describe("reconcileValkeyNode", func() {
 	})
 
 	It("updates the ValkeyNode spec, emits ValkeyNodeUpdated event, and signals requeue", func() {
-		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeRequeued))
 
@@ -1979,31 +2177,31 @@ var _ = Describe("reconcileValkeyNode", func() {
 	})
 
 	It("signals requeue when node is unchanged but not yet ready", func() {
-		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		// Status.Ready defaults to false after creation
-		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeRequeued))
 	})
 
 	It("does not requeue when node is unchanged and ready", func() {
-		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		collectEvents(fakeRecorder) // drain creation event
 
 		setNodeReady(true)
 
-		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeUnchanged))
 	})
 
 	It("signals requeue when node is unchanged but ObservedGeneration is stale", func() {
 		// Create the node
-		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		_, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 
 		// Mark ready but leave ObservedGeneration at 0
@@ -2018,7 +2216,7 @@ var _ = Describe("reconcileValkeyNode", func() {
 		// Because ObservedGeneration > 0 guard: newly created node with
 		// ObservedGeneration=0 falls through to the Ready check, which
 		// passes (Ready=true). No requeue.
-		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err := r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeUnchanged))
 
@@ -2033,13 +2231,13 @@ var _ = Describe("reconcileValkeyNode", func() {
 
 		// Change cluster spec to trigger an update on next reconcile
 		cluster.Spec.Image = "valkey/valkey:9.1.0"
-		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeRequeued), "should requeue after updating node")
 
 		// Next reconcile: spec matches (OperationResultNone), but
 		// Generation (2) != ObservedGeneration (1) — must requeue.
-		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil)
+		result, err = r.reconcileValkeyNode(testCtx, cluster, shardIndex, nodeIndex, nil, nil, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(nodeRequeued), "should requeue while ObservedGeneration is stale")
 	})

@@ -479,7 +479,19 @@ networking:
     clientAuth:
       mode: Optional             # Optional (default) | Required | Disabled
       certificateUser: Disabled  # Disabled (default) | CN | URI
+      ca:                        # optional; extra roots for verifying client certificates
+        - secretName: client-ca  # or configMapName; key defaults to ca.crt (PEM or SPIFFE bundle)
 ```
+
+#### Per-node Services
+
+Set `networking.perNodeServices: {}` to create one ClusterIP Service per node. The cluster copies that onto each ValkeyNode, one node at a time. The ValkeyNode controller creates the Service and owns it. Removing it later clears the field on each node in turn, and that node deletes its Service. The ValkeyNodes stay.
+
+The Service name matches the node's StatefulSet: `valkey-<cluster>-<shard>-<node>`. It must be at most 63 characters. The API server rejects a create or update that sets `perNodeServices` when the longest name would be longer. A cluster with a longer name keeps running without the field, but it cannot turn the feature on. If a Service the node does not own already has that name, the operator leaves it as it is. That node reports `Ready=False` and still reconciles its workload. The reason is `ServiceError` when the pod is Ready and the workload has rolled out. Before that, the reason stays the pod or PVC reason. When that pod is Ready, the node still applies live config, ACL and the trust bundle, then requeues after 30 seconds. The cluster does not copy the field to later nodes until that Service is removed. The same rule applies to the headless Service of another ValkeyCluster: whichever Service exists first keeps the name. The Service selects the one pod with that shard index and node index. The port is 6379.
+
+This does not change `CLUSTER SLOTS`. A client that follows redirects still uses the announced pod IP or hostname. The Service is a stable address for a client that dials that node directly. A client that dials the Service DNS name needs that name as a subject alternative name on the certificate.
+
+On scale-in the Service stays while that ValkeyNode exists. Kubernetes deletes the Service when the ValkeyNode is deleted.
 
 #### Discovery (in-cluster announce)
 
@@ -519,36 +531,87 @@ config:
   tls-auto-reload-interval: "3600"
 ```
 
-For certificate-based client authentication and certificate-to-ACL-user mapping, see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
+For certificate-based client authentication, certificate-to-ACL-user mapping, and trusting client certificates from a different CA than the server certificate (`clientAuth.ca`), see [Mutual TLS (mTLS) certificate-based ACL authentication](./mtls.md).
+
+#### Network policies
+
+The operator does not create NetworkPolicies. In a namespace that denies traffic by default, the node pods of a cluster need these flows:
+
+| Flow | Port | Peer |
+|---|---|---|
+| Node to node: replication and the cluster bus | 6379 and 16379 TCP | pods of the same cluster |
+| Operator to node | 6379 TCP | the operator pod, in its own namespace |
+| Application to node | 6379 TCP | your clients |
+| Prometheus to exporter | 9121 TCP | your scraper, unless `exporter.enabled` is false |
+
+[`config/samples/v1_networkpolicy-cluster-sample.yaml`](../config/samples/v1_networkpolicy-cluster-sample.yaml) is a complete policy for the `cluster-sample` cluster: the first two flows are written out, the last two are marked `REPLACE` because only you know where the clients and the scraper run. Node pods carry `valkey.io/cluster: <name>` and `app.kubernetes.io/component: valkey-node`, which is what the peer selectors use.
+
+Ports do not change with TLS: the TLS listener takes over 6379 and the bus stays on 16379. The operator dials every node by pod IP, so its rule is a pod selector on the operator namespace, not the client Service. The node pods need no DNS egress, even with `preferredEndpointType: Hostname`: the cluster bus and replication dial pod IPs, and the announced names are for clients. Cluster clients follow `MOVED` redirects straight to the node pods, so the client rule applies even when they connect through the Service, and with `Hostname` announce their own namespace must let them resolve the names.
+
+The operator pod needs a policy of its own when its namespace denies egress: to the node pods on 6379 in every namespace it watches, and to the API server on its endpoint port (6443 on kubeadm and k3s, 443 on most managed distributions; `kubectl get endpoints kubernetes` shows it). It does not need DNS: it reaches the API server by the ClusterIP from its environment and the nodes by pod IP, and reconciles a cluster to Ready with DNS egress denied. Whether a policy can restrict traffic to the API server at all depends on the CNI. The Helm chart renders such a policy with `networkPolicy.enabled`, DNS included; set `networkPolicy.apiServerPort` to the endpoint port, since it defaults to 6443. The kustomize install has only the metrics ingress policy in `config/network-policy`, disabled by default, so write the egress rules yourself; the chart's `netpolicy.yaml` is a working reference.
 
 ### Users
 
 ```yaml
-users:
-  - name: alice
-    passwordSecret:
-      name: my-users-secret
-      keys: [alicepw]
-    commands:
-      allow: ["@read", "@write", "@connection"]
-      deny: ["@admin", "@dangerous"]
-    keys:
-      readWrite: ["app:*"]
-      readOnly: ["shared:*"]
-    channels:
-      patterns: ["notifications:*"]
-  - name: bob
-    nopass: true
-    permissions: "+@all ~* &*"
+acl:
+  users:
+    - name: alice
+      password:
+        secret:
+          name: my-users-secret
+          keys: [alicepw]
+      commands:
+        allow: ["@read", "@write", "@connection"]
+        deny: ["@admin", "@dangerous"]
+      keys:
+        readWrite: ["app:*"]
+        readOnly: ["shared:*"]
+      channels:
+        patterns: ["notifications:*"]
+    - name: bob
+      password:
+        type: Any
+      permissions: "+@all ~* &*"
+    - name: charlie
+      state: Disabled
 ```
 
-`users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
+`acl.users` defines per-user [ACL rules](https://valkey.io/topics/acl/) distributed to every node via a Secret mounted into each pod.
 
-- `passwordSecret` — one or more password keys from a Secret (multiple keys supported for rotation)
-- `commands` — command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
-- `keys` — key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
-- `channels` — pub/sub channel patterns
-- `permissions` — raw ACL string appended after any generated rules
+- `state`: `Enabled` (default) or `Disabled`. A disabled user is rendered `off`: new connections cannot authenticate as it, and connections already authenticated keep working
+- `password.type`: how the user authenticates with a password:
+  - `Secret` (default): the passwords referenced by `password.secret`
+  - `Any`: any password authenticates (Valkey `nopass`)
+  - `Disabled`: no password authenticates (Valkey `resetpass`). The user can still authenticate with a TLS client certificate; see [mTLS](mtls.md)
+- `password.secret`: one or more password keys from a Secret (multiple keys supported for rotation). Defaults to the Secret `<cluster>-users` and the username as key. Only valid with `type: Secret`
+- `commands`: command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
+- `keys`: key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
+- `channels`: pub/sub channel patterns
+- `permissions`: raw ACL string appended after any generated rules
+
+#### The `default` user
+
+Valkey logs a client in as `default` until it authenticates. Under [mTLS](mtls.md) with `certificateUser` set, so is a client whose certificate names no ACL user. Valkey's own `default` is `on nopass +@all`, so unless `acl.users` (or the deprecated `spec.users`) declares `default`, the operator disables it with `user default off ~* &* +@all`, and such clients get `NOAUTH`: an `off` user cannot be authenticated as, whatever its permissions. It keeps every permission because Valkey still runs some internal work as `default` and checks them, as described below. A declared `default` is used exactly as written. To keep Valkey's open `default`, for example to try a cluster out, declare it:
+
+```yaml
+acl:
+  users:
+    - name: default
+      password:
+        type: Any
+      permissions: "~* &* +@all"
+```
+
+> **If you declare `default` with fewer permissions:** Valkey checks `default`'s permissions in two internal paths, even while it is `off`:
+>
+> - With AOF enabled, transactions and function calls that `default` may not run are silently dropped when the AOF is loaded ([valkey-io/valkey#3983](https://github.com/valkey-io/valkey/issues/3983), fixed in 7.2.15, 8.0.11, 8.1.10, 9.0.6 and 9.1.2).
+> - On Valkey 9.0.0, slot migrations fail with `NOPERM` unless `default` may run `cluster|syncslots` ([valkey-io/valkey#2783](https://github.com/valkey-io/valkey/issues/2783), fixed in 9.0.1).
+>
+> On an affected version, keep `~* &* +@all` on a declared `default` and restrict access with `state: Disabled` instead.
+
+> **Connections that are already open:** disabling `default`, whether by upgrading the operator or by removing a declared open `default`, refuses new anonymous connections. But a connection that logged in as `default` while it was open stays logged in, and runs with the disabled `default`'s permissions until it disconnects: every command, for the one the operator writes. To cut those connections off at once, run `CLIENT KILL USER default` on every node after it reports [`ACLApplied`](status-conditions.md#aclapplied), or restart the pods. `CLIENT KILL USER default` also drops clients that have connected but not yet authenticated, which then need to reconnect.
+
+> **Upgrade note:** Before this version, a cluster that declared no `default` kept Valkey's open one. Upgrading the operator disables it on every such cluster, live through `ACL LOAD` and without a pod restart, so clients that connect without credentials start getting `NOAUTH`, including `valkey-cli` run inside a node's pod. Anonymous connections already open at the upgrade keep full access until they disconnect; see "Connections that are already open" above. Before upgrading, declare `default` in `acl.users` on every cluster whose clients rely on it, with the access they need.
 
 ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.
 
@@ -557,6 +620,26 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 #### Constraints
 
 - Usernames cannot start with `_` (reserved for operator-managed system users)
+- `spec.users` and `spec.acl.users` cannot both be non-empty. An empty list in one is accepted next to a non-empty list in the other, and the non-empty list is used
+- Usernames are 1 to 128 characters with no whitespace. `permissions` cannot contain a newline except a single trailing one, and key and channel patterns cannot contain whitespace
+- `password.secret` is only valid with `password.type: Secret`
+
+#### Migrating from `spec.users`
+
+`spec.users` is deprecated and will be removed in `v1beta1`. It still works in this release, and a cluster that uses it reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event.
+
+Move the list under `spec.acl.users`, replace the booleans and nest `passwordSecret` under `password`:
+
+| `spec.users` | `spec.acl.users` |
+|---|---|
+| `enabled: true` | `state: Enabled` (default; can be omitted) |
+| `enabled: false` | `state: Disabled` |
+| `resetpass: true` | `password.type: Disabled` (takes precedence over `nopass`, as before) |
+| `nopass: true` | `password.type: Any` |
+| `resetpass` and `nopass` both unset or `false` | `password.type: Secret` (default; can be omitted) |
+| `passwordSecret: {name, keys}` | `password.secret: {name, keys}` |
+
+Drop `passwordSecret` from users whose `password.type` is not `Secret`. The permission fields (`commands`, `keys`, `channels`, `permissions`) keep their names. The generated ACL is the same for both fields, so moving users changes nothing on the running nodes.
 
 ### Workload type
 

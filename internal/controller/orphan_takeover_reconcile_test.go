@@ -213,7 +213,7 @@ func TestManualTakeoverWarningAndReadiness(t *testing.T) {
 			replica:   &valkey.NodeState{Id: strings.Repeat("r", 40), Address: "10.0.0.2"},
 		})
 	}
-	recorder := events.NewFakeRecorder(2)
+	recorder := events.NewFakeRecorder(len(candidates))
 	f.reconciler.Recorder = recorder
 	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates)
 	degraded := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
@@ -223,13 +223,11 @@ func TestManualTakeoverWarningAndReadiness(t *testing.T) {
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status, "manual recovery must clear a previously healthy Ready condition")
 	assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, ready.Reason)
-	select {
-	case event := <-recorder.Events:
+	for range len(candidates) {
+		event := <-recorder.Events
 		assert.LessOrEqual(t, len(event), 1024)
 		assert.Contains(t, event, "Warning AwaitingManualTakeover")
-		assert.Contains(t, event, "see the Degraded condition")
-	default:
-		t.Fatal("expected a manual recovery Warning event")
+		assert.Contains(t, event, forceTakeoverAnnotation+"=")
 	}
 	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates)
 	select {

@@ -167,7 +167,7 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
 
-If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`. The condition message identifies the shard, failed primary, eligible replica, and command to authorize takeover; a Warning event directs users to that condition.
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`. Its message and a Warning event identify the shard, failed primary, eligible replica, and command to authorize takeover.
 
 To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:
 
@@ -175,7 +175,7 @@ To accept the possible data loss, annotate the ValkeyCluster with the failed pri
 kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
 ```
 
-The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A reachable primary, including one loading its dataset, cannot be taken over through this annotation. The operator consumes the ID before attempting takeover, so a failed attempt must be explicitly re-authorized. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary's persistent volume returns, Valkey can recover without discarding its data, and the `AwaitingManualTakeover` condition clears.
+The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A reachable primary, including one loading its dataset, cannot be taken over through this annotation. The operator removes the ID after TAKEOVER succeeds; a failed command retains the authorization and retries the same replica. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary's persistent volume returns, Valkey can recover without discarding its data, and the `AwaitingManualTakeover` condition clears.
 
 #### Constraints
 

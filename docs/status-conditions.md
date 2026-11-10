@@ -425,7 +425,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 | Event Type | Type | Description |
 |---|---|---|
 | `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
-| `AwaitingManualTakeover` | Warning | A persistent primary is orphaned without quorum; directs users to the `Degraded` condition for the one-shot annotation command to authorize takeover |
+| `AwaitingManualTakeover` | Warning | A persistent primary is orphaned without quorum; identifies the failed primary, eligible replica, and annotation command to authorize takeover |
 
 ### Maintenance events
 

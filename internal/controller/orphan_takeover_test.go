@@ -265,7 +265,8 @@ func TestPromoteOrphanedReplicas(t *testing.T) {
 		f.client.beforeCall = func() {
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-			assert.Equal(t, "later,stale", stored.Annotations[forceTakeoverAnnotation], "consume approval before TAKEOVER")
+			assert.Equal(t, " stale, p1 , later ", stored.Annotations[forceTakeoverAnnotation], "keep approval until TAKEOVER succeeds")
+			assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation], "pin the attempt to its selected replica")
 		}
 		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
 		assert.True(t, handled)
@@ -292,19 +293,21 @@ func TestPromoteOrphanedReplicas(t *testing.T) {
 		assert.Equal(t, 1, f.client.takeovers)
 	})
 
-	t.Run("failed takeover consumes authorization", func(t *testing.T) {
+	t.Run("failed takeover keeps authorization", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "p1", errors.New("boom"))
 		f.client.beforeCall = func() {
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-			assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
+			assert.Equal(t, "p1", stored.Annotations[forceTakeoverAnnotation])
+			assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation])
 		}
 		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
 		assert.True(t, handled)
 		assert.Equal(t, 1, f.client.takeovers)
 		stored := &valkeyiov1alpha1.ValkeyCluster{}
 		assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-		assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
+		assert.Equal(t, "p1", stored.Annotations[forceTakeoverAnnotation])
+		assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation])
 	})
 }
 

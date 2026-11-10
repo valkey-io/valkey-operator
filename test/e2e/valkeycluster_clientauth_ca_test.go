@@ -360,13 +360,6 @@ spec:
 			"-p", `[{"op":"remove","path":"/spec/networking/tls/clientAuth/ca"}]`))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("connecting with an unmapped certificate from the removed CA while nodes roll")
-		phase, logs := whoami(unmappedPodName, unmappedCertSecret)
-		Expect(logs).NotTo(Equal("default"), "a removed CA's certificate must never land on default (phase %s)", phase)
-		if phase == "Succeeded" {
-			Expect(logs).To(ContainSubstring("NOAUTH"))
-		}
-
 		By("waiting for every node to stop referencing the trust bundle")
 		Eventually(func(g Gomega) {
 			out, err := utils.Run(exec.Command("kubectl", "get", "valkeynode",

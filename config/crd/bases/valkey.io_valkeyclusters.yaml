@@ -127,6 +127,7 @@ spec:
                           type: string
                           x-kubernetes-validations:
                           - message: Username cannot start with '_'
+                            reason: FieldValueForbidden
                             rule: '!self.startsWith(''_'')'
                         password:
                           default: {}
@@ -1774,6 +1775,7 @@ spec:
                 x-kubernetes-validations:
                 - message: container name 'server-init' is reserved for the operator-managed
                     init container
+                  reason: FieldValueForbidden
                   rule: '!self.exists(c, c.name == ''server-init'')'
               exporter:
                 default:
@@ -2228,12 +2230,16 @@ spec:
                             type: string
                         type: object
                         x-kubernetes-validations:
-                        - message: 'certificateUser has no effect when mode=Disabled:
+                        - fieldPath: .certificateUser
+                          message: 'certificateUser has no effect when mode=Disabled:
                             Valkey ignores client certificates in that mode'
+                          reason: FieldValueForbidden
                           rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
                             has(self.certificateUser) && self.certificateUser != ''Disabled'')'
-                        - message: 'ca has no effect when mode=Disabled: Valkey ignores
+                        - fieldPath: .ca
+                          message: 'ca has no effect when mode=Disabled: Valkey ignores
                             client certificates in that mode'
+                          reason: FieldValueForbidden
                           rule: '!(has(self.mode) && self.mode == ''Disabled'' &&
                             has(self.ca) && size(self.ca) > 0)'
                       serverName:
@@ -2320,6 +2326,7 @@ spec:
                         && (!k.contains('/') || k.indexOf('/') <= 253))
                     - message: annotation keys under valkey.io/ are reserved for the
                         operator
+                      reason: FieldValueForbidden
                       rule: self.all(k, !k.startsWith('valkey.io/'))
                   labels:
                     additionalProperties:
@@ -2345,6 +2352,7 @@ spec:
                     - message: label keys under valkey.io/ and app.kubernetes.io/
                         name, instance, component, part-of and managed-by are reserved
                         for the operator
+                      reason: FieldValueForbidden
                       rule: self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name',
                         'app.kubernetes.io/instance', 'app.kubernetes.io/component',
                         'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))
@@ -3909,8 +3917,10 @@ spec:
                         - zones
                         type: object
                         x-kubernetes-validations:
-                        - message: 'zone.pinning.zones entries must be unique: a repeated
+                        - fieldPath: .zones
+                          message: 'zone.pinning.zones entries must be unique: a repeated
                             zone silently biases the round-robin'
+                          reason: FieldValueForbidden
                           rule: self.zones.all(z, self.zones.exists_one(y, y == z))
                       spread:
                         description: Spread distributes the cluster's pods across
@@ -4067,6 +4077,7 @@ spec:
                       type: string
                       x-kubernetes-validations:
                       - message: Username cannot start with '_'
+                        reason: FieldValueForbidden
                         rule: '!self.startsWith(''_'')'
                     nopass:
                       default: false
@@ -4114,12 +4125,15 @@ spec:
                 type: string
                 x-kubernetes-validations:
                 - message: workloadType is immutable
+                  reason: FieldValueForbidden
                   rule: self == oldSelf
             required:
             - shards
             type: object
             x-kubernetes-validations:
-            - message: persistence requires workloadType StatefulSet
+            - fieldPath: .persistence
+              message: persistence requires workloadType StatefulSet
+              reason: FieldValueForbidden
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
             - fieldPath: .acl.users
               message: 'spec.users is deprecated and cannot be combined with spec.acl.users:
@@ -4127,41 +4141,55 @@ spec:
               reason: FieldValueForbidden
               rule: '!(has(self.users) && size(self.users) > 0 && has(self.acl) &&
                 has(self.acl.users) && size(self.acl.users) > 0)'
-            - message: persistence cannot be removed once set
+            - fieldPath: .persistence
+              message: persistence cannot be removed once set
+              reason: FieldValueForbidden
               rule: '!has(oldSelf.persistence) || has(self.persistence)'
-            - message: persistence cannot be added after creation
+            - fieldPath: .persistence
+              message: persistence cannot be added after creation
+              reason: FieldValueForbidden
               rule: has(oldSelf.persistence) || !has(self.persistence)
-            - message: persistence.size may only be expanded
+            - fieldPath: .persistence.size
+              message: persistence.size may only be expanded
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size))
                 >= 0'
-            - message: persistence.storageClassName is immutable
+            - fieldPath: .persistence.storageClassName
+              message: persistence.storageClassName is immutable
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName)
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
                 == oldSelf.persistence.storageClassName))'
-            - message: 'node.spread.primaries and node.spread.pods cannot both be
+            - fieldPath: .scheduling.node.spread
+              message: 'node.spread.primaries and node.spread.pods cannot both be
                 Required: they render duplicate kubernetes.io/hostname DoNotSchedule
                 topology spread constraints'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
                 || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
                 ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Required''
                 && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
                 ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
                 )'
-            - message: 'node.spread.primaries and node.spread.pods cannot both be
+            - fieldPath: .scheduling.node.spread
+              message: 'node.spread.primaries and node.spread.pods cannot both be
                 Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway
                 topology spread constraints (set one to Disabled or Required)'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread)
                 || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode))
                 ? self.scheduling.node.spread.primaries.mode : ''Disabled'') == ''Preferred''
                 && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
                 ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
                 )'
-            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+            - fieldPath: .scheduling.topologySpreadConstraints
+              message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
                 with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries
                 or node.spread.pods set to Required, which render the same hostname
                 DoNotSchedule constraint: set that node.spread mode to Disabled, or
                 remove the passthrough constraint'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
                 || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
                 == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''DoNotSchedule'')
@@ -4171,11 +4199,13 @@ spec:
                 || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
                 ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Required''
                 )'
-            - message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
+            - fieldPath: .scheduling.topologySpreadConstraints
+              message: 'a topologySpreadConstraints entry on kubernetes.io/hostname
                 with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries
                 or node.spread.pods set to Preferred, which render the same hostname
                 ScheduleAnyway constraint: set that node.spread mode to Disabled or
                 Required, or remove the passthrough constraint'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
                 || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
                 == ''kubernetes.io/hostname'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
@@ -4185,9 +4215,11 @@ spec:
                 || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode))
                 ? self.scheduling.node.spread.pods.mode : ''Disabled'') == ''Preferred''
                 )'
-            - message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
+            - fieldPath: .scheduling.zone.spread
+              message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
                 may be Required: they render duplicate topology.kubernetes.io/zone
                 DoNotSchedule topology spread constraints'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
                 || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
                 ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Required''
@@ -4202,10 +4234,12 @@ spec:
                 && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
                 ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Required'')
                 )'
-            - message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
+            - fieldPath: .scheduling.zone.spread
+              message: 'at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods
                 may be Preferred: they render duplicate topology.kubernetes.io/zone
                 ScheduleAnyway topology spread constraints (set one to Disabled or
                 Required)'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread)
                 || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode))
                 ? self.scheduling.zone.spread.shard.mode : ''Disabled'') == ''Preferred''
@@ -4220,11 +4254,13 @@ spec:
                 && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
                 ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Preferred'')
                 )'
-            - message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
+            - fieldPath: .scheduling.topologySpreadConstraints
+              message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
                 with whenUnsatisfiable DoNotSchedule collides with zone.spread.shard,
                 primaries, or pods set to Required, which render the same zone DoNotSchedule
                 constraint: set that zone.spread mode to Disabled, or remove the passthrough
                 constraint'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
                 || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
                 == ''topology.kubernetes.io/zone'' && c.whenUnsatisfiable == ''DoNotSchedule'')
@@ -4236,11 +4272,13 @@ spec:
                 || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
                 ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Required''
                 )'
-            - message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
+            - fieldPath: .scheduling.topologySpreadConstraints
+              message: 'a topologySpreadConstraints entry on topology.kubernetes.io/zone
                 with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard,
                 primaries, or pods set to Preferred, which render the same zone ScheduleAnyway
                 constraint: set that zone.spread mode to Disabled or Required, or
                 remove the passthrough constraint'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints)
                 || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey
                 == ''topology.kubernetes.io/zone'' && c.whenUnsatisfiable == ''ScheduleAnyway'')
@@ -4252,9 +4290,11 @@ spec:
                 || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode))
                 ? self.scheduling.zone.spread.pods.mode : ''Disabled'') == ''Preferred''
                 )'
-            - message: 'zone.pinning cannot be combined with a non-Disabled zone.spread.shard,
+            - fieldPath: .scheduling.zone.pinning
+              message: 'zone.pinning cannot be combined with a non-Disabled zone.spread.shard,
                 primaries, or pods: pinning already assigns every pod a fixed zone,
                 which a zone spread constraint can contradict'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning)
                 || !has(self.scheduling.zone.spread) || ( ((has(self.scheduling.zone.spread.shard)
                 && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode
@@ -4263,22 +4303,28 @@ spec:
                 : ''Disabled'') == ''Disabled'' && ((has(self.scheduling.zone.spread.pods)
                 && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode
                 : ''Disabled'') == ''Disabled'' )'
-            - message: 'zone.pinning.zones is immutable while set: changing it reassigns
+            - fieldPath: .scheduling.zone.pinning.zones
+              message: 'zone.pinning.zones is immutable while set: changing it reassigns
                 nearly every pod. Remove zone.pinning, reconcile, then re-add it with
                 the new list'
+              reason: FieldValueForbidden
               rule: '!has(oldSelf.scheduling) || !has(oldSelf.scheduling.zone) ||
                 !has(oldSelf.scheduling.zone.pinning) || !has(self.scheduling) ||
                 !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) ||
                 self.scheduling.zone.pinning.zones == oldSelf.scheduling.zone.pinning.zones'
-            - message: 'scheduling.nodeSelector cannot set topology.kubernetes.io/zone
+            - fieldPath: .scheduling.nodeSelector
+              message: 'scheduling.nodeSelector cannot set topology.kubernetes.io/zone
                 while zone.pinning is set: pinning renders that key itself, and the
                 curated value would overwrite yours'
+              reason: FieldValueForbidden
               rule: '!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning)
                 || !has(self.scheduling.nodeSelector) || !(''topology.kubernetes.io/zone''
                 in self.scheduling.nodeSelector)'
-            - message: networking.discovery.preferredEndpointType Hostname requires
+            - fieldPath: .networking.discovery.preferredEndpointType
+              message: networking.discovery.preferredEndpointType Hostname requires
                 workloadType StatefulSet (or omit workloadType for the StatefulSet
                 default)
+              reason: FieldValueForbidden
               rule: '!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType)
                 || self.networking.discovery.preferredEndpointType != ''Hostname''
                 || !has(self.workloadType) || self.workloadType == ''StatefulSet'''
@@ -4413,13 +4459,17 @@ spec:
           rule: '!has(self.spec.networking) || !has(self.spec.networking.perNodeServices)
             || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) +
             size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 63'
-        - message: 'clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed
+        - fieldPath: .spec.networking.tls.clientAuth.ca
+          message: 'clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed
             trust bundle'
+          reason: FieldValueForbidden
           rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
             || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s,
             !has(s.secretName) || s.secretName != ''valkey-%s-tls-trust''.format([self.metadata.name]))'
-        - message: 'certificates.server.secretName cannot be valkey-<name>-tls-trust
+        - fieldPath: .spec.networking.tls.certificates.server.secretName
+          message: 'certificates.server.secretName cannot be valkey-<name>-tls-trust
             while clientAuth.ca is set: it is the operator-managed trust bundle'
+          reason: FieldValueForbidden
           rule: '!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth)
             || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca)
             == 0 || self.spec.networking.tls.certificates.server.secretName != ''valkey-%s-tls-trust''.format([self.metadata.name])'

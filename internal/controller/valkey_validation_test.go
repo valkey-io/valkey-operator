@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -398,5 +399,52 @@ var _ = Describe("Valkey CEL validation", func() {
 		err := k8sClient.Update(ctx, valkey)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("workloadType is immutable"))
+	})
+
+	Context("spec.acl", func() {
+		It("admits users and applies the defaults", func() {
+			valkey := valkeyFor("val-acl", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "alice"}},
+			}
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			got := &valkeyiov1alpha1.Valkey{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(valkey), got)).To(Succeed())
+			Expect(got.Spec.ACL).NotTo(BeNil())
+			Expect(got.Spec.ACL.Users).To(HaveLen(1))
+			Expect(got.Spec.ACL.Users[0].State).To(Equal(valkeyiov1alpha1.ACLUserStateEnabled))
+		})
+
+		It("rejects a username that starts with an underscore", func() {
+			valkey := valkeyFor("val-acl-underscore", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "_internal"}},
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].name"))
+			Expect(err.Error()).To(ContainSubstring("Username cannot start with '_'"))
+		})
+
+		It("rejects password.secret when password.type is not Secret", func() {
+			valkey := valkeyFor("val-acl-secret", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name: "alice",
+					Password: &valkeyiov1alpha1.ACLUserPassword{
+						Type:   valkeyiov1alpha1.ACLPasswordTypeAny,
+						Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "users"},
+					},
+				}},
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].password.secret: Forbidden"))
+			Expect(err.Error()).To(ContainSubstring("secret is only used when type is Secret"))
+		})
 	})
 })

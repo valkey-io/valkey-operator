@@ -52,11 +52,12 @@ Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
 - `UsersACLError` – failed to reconcile ACL users/secrets
+- `OperatorAuthenticationFailed` – one or more nodes reject the operator's `_operator` password. See [`Degraded`](#degraded)
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
-- `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `<cluster>-tls-trust` Secret
+- `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `valkey-<cluster>-tls-trust` Secret
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
   - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
@@ -83,6 +84,7 @@ Common reasons:
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
 - `RebalancingSlots` – rebalancing hash slots across primaries (scale-out and scale-in)
 - `ScaleInBlocked` – scale-in is waiting; see [`Ready`](#ready)
+- `OperatorAuthenticationFailed` – one or more nodes reject the operator's password, so the controller makes no topology changes (`status=False`)
 - `ReconcileComplete` – reconciliation finished (typically with `status=False`)
 
 #### `Degraded`
@@ -97,7 +99,8 @@ Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
-- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.users` are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 ---
 
@@ -141,7 +144,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
-- `DeprecatedField` – the spec sets a deprecated field, for example `spec.replicas` instead of `spec.replicasPerShard`. The value is still applied. The message names the replacement.
+- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces, and `spec.replicas`, which `spec.replicasPerShard` replaces. The field keeps working until `v1beta1`. See [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers) and [Migrating from `spec.replicas`](valkeycluster.md#migrating-from-specreplicas).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -156,7 +159,7 @@ Common reasons:
 - `TLSWithIPAnnounce` – TLS with IP preferred endpoint type.
 
 #### `TLSConfigured`
-Reports whether the operator-managed trust bundle `<cluster>-tls-trust` is in place. Set only while `networking.tls.clientAuth.ca` is non-empty; absent otherwise. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca).
+Reports whether the operator-managed trust bundle `valkey-<cluster>-tls-trust` is in place. Set only while `networking.tls.clientAuth.ca` is non-empty; absent otherwise. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca).
 
 | Status | Meaning |
 |---|---|
@@ -167,9 +170,9 @@ Common reasons:
 - `TrustBundleReady` – the trust bundle is up to date.
 - `TrustSourceNotFound` – a referenced Secret or ConfigMap, or its key, does not exist.
 - `TrustSourceInvalid` – a source's key holds neither PEM certificates nor a SPIFFE bundle with an X.509 authority.
-- `TrustBundleConflict` – a Secret named `<cluster>-tls-trust` exists but the cluster does not control it. The operator never adopts or writes it, and nodes stay on the server root.
+- `TrustBundleConflict` – a Secret named `valkey-<cluster>-tls-trust` exists but the cluster does not control it. The operator never adopts or writes it, and nodes stay on the server root.
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
-- `TrustBundleRejected` – the API server refused to store `<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
+- `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
 ---
 
@@ -188,6 +191,7 @@ Indicates whether the ValkeyNode pod is ready and the backing workload has compl
 Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
+- `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -230,6 +234,7 @@ This condition is only set when the node is ready and there are allowlisted conf
 
 Common reasons when `LiveConfigApplied=False`:
 - `ApplyFailed` – `CONFIG SET` returned an error (e.g. a permissions error or an invalid value). The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
+- `AuthenticationFailed` – the node rejected the operator's `_operator` password (`WRONGPASS`), so no `CONFIG SET` was sent. The node controller also sets `ACLApplied` to this reason. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 Common reasons when `LiveConfigApplied=True`:
 - `Applied` – Live config applied successfully.
@@ -237,7 +242,7 @@ Common reasons when `LiveConfigApplied=True`:
 > **Note:** A `False` condition blocks one-at-a-time progress in the cluster controller (the same way `Ready=False` does during a rolling update). The node controller retries with exponential backoff and emits a `LiveConfigApplyFailed` warning event on each failure. The condition clears in either of two ways: once `CONFIG SET` succeeds it transitions to `True`, or if the offending key is removed from `spec.config` (leaving no allowlisted keys) the condition is removed and reverts to absent. Either way the cluster advances.
 
 #### `ACLApplied`
-Indicates whether the ACL the cluster controller wrote for `spec.users` is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
+Indicates whether the ACL the cluster controller wrote, covering `spec.acl.users` (or the deprecated `spec.users`) and the operator's system users, is live on the running Valkey process. The ACL is applied with `ACL LOAD` on the mounted aclfile, so an ACL change takes effect without a pod roll and does not enter `spec.workloadRevision`.
 
 This condition is set once the node is ready and mounts an ACL Secret. An edit reads `False` until the mounted aclfile refreshes (the projected Secret volume is updated lazily by kubelet) and the server loads it.
 
@@ -249,11 +254,21 @@ This condition is set once the node is ready and mounts an ACL Secret. An edit r
 Common reasons when `ACLApplied=False`:
 - `PendingPropagation` – the reload read a stale mounted aclfile; the node retries until the projected volume catches up.
 - `ApplyFailed` – `ACL LOAD` or the follow-up read returned an error. The message field contains the current error, although the connection's local address (IP and port) may be from an earlier attempt.
+- `AuthenticationFailed` – the node rejected the operator's `_operator` password (`WRONGPASS`), so the operator can neither apply nor check the ACL. The message names the system passwords Secret. The operator connects as `_operator` only and does not change the password itself; the condition clears on the next node reconcile after the node accepts the password again. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 Common reasons when `ACLApplied=True`:
 - `Applied` – the desired ACL revision is live.
 
-> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff. Once the condition is `True`, the node records the revision it confirmed in `status.appliedACLRevision`.
+> **Note:** The operator appends a disabled bookkeeping user, `_operator_acl_revision`, to the aclfile. Its only password is a hash of the whole managed ACL, so a node reports `ACLApplied=True` only once the running server has loaded that exact revision. This keeps the condition honest for permission-only edits, which leave every user and password unchanged but still change the revision hash. The user is disabled (`off`) and cannot authenticate; it is expected to appear in `ACL LIST`. The condition does not block the cluster controller's one-at-a-time progress, but a failure it cannot resolve is carried up: while any node reports `ApplyFailed`, the cluster sets [`Degraded`](#degraded) with reason `ACLApplyFailed` and a message naming the nodes, and `status.state` reports `Degraded` because it takes that condition ahead of `Ready`. `PendingPropagation` is deliberately not carried up, since it is the normal state after every ACL edit and clears itself once the mounted aclfile catches up. On a failed apply the node controller emits a `LiveACLApplyFailed` warning event and retries with backoff. Once the condition is `True`, the node records the revision it confirmed in `status.appliedACLRevision`. `AuthenticationFailed` is carried up as `Degraded` with reason `OperatorAuthenticationFailed` instead.
+
+##### Recovering from `AuthenticationFailed`
+
+The node's running ACL no longer accepts the `_operator` password in `internal-<cluster>-system-passwords`. Which fix applies depends on which side changed:
+
+- The Secret changed, for example it was deleted and the operator generated new passwords. Write the previous `_operator` and `_replication` values back into the Secret. Running pods still hold them in the server container's `VALKEYCLI_AUTH` and `PRIMARY_AUTH` environment variables. Leave `_exporter` at its new value, since the exporter image has no shell to read its old one from. The operator then rewrites the internal ACL Secret and every node reloads it. With the exporter enabled, each pod's exporter reports `redis_up 0` until it restarts and reads the new `_exporter`. To restart it without restarting the server container, run `kubectl debug <pod> --image=busybox --target=metrics-exporter --profile=baseline -- kill 1` in each pod.
+- The server's password changed while the Secret did not, for example an `ACL SETUSER _operator` run by hand. Run `ACL LOAD` on the node as a user allowed to run it, or restart the pod. Either reloads the mounted aclfile. Unless `acl.users` declares an enabled `default`, the liveness probe also fails, because it authenticates as `_operator`, so the kubelet restarts the server container after the probe's failure threshold. On a primary, that restart fails the shard over.
+
+The node controller retries a node that rejects the password every 10 seconds, so the node condition clears within about 10 seconds of the fix. The cluster's `Degraded` condition clears on the cluster reconcile after that.
 
 #### `TrustBundleApplied`
 Indicates whether the running Valkey process has loaded the trust bundle named by `spec.tls.certificates.trustBundle` as its `tls-ca-cert-file`. The bundle is reloaded live, with `CONFIG SET tls-ca-cert-file` on its unchanged path, so a changed bundle takes effect for new connections without a pod roll.
@@ -429,6 +444,7 @@ These events provide high-level status information about the cluster.
 | `WaitingForShards` | Normal | Waiting for shards to be created |
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
+| `OperatorAuthenticationFailed` | Warning | One or more nodes reject the operator's `_operator` password; emitted when the lockout starts |
 
 ### Live config events
 
@@ -438,7 +454,7 @@ These events are emitted during live configuration application on ValkeyNode res
 |---|---|---|
 | `LiveConfigApplyFailed` | Warning | `CONFIG SET` failed on a node; the `LiveConfigApplied` condition is set to `False` and the cluster controller will not advance past this node until it recovers |
 | `TrustBundleReloadFailed` | Warning | Reloading a node's trust bundle failed; the `TrustBundleApplied` condition is set to `False` and the reload is retried every 10 seconds |
-| `TrustBundleRetireFailed` | Warning | Rewriting or deleting `<cluster>-tls-trust` failed after `clientAuth.ca` was emptied; it is tried again on the next reconcile, and the nodes still roll off it. |
+| `TrustBundleRetireFailed` | Warning | Rewriting or deleting `valkey-<cluster>-tls-trust` failed after `clientAuth.ca` was emptied; it is tried again on the next reconcile, and the nodes still roll off it. |
 
 ### Users/ACL events
 

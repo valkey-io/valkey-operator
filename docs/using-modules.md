@@ -64,6 +64,14 @@ metadata:
 spec:
   shards: 1
   replicasPerShard: 0
+  acl:
+    users:
+      # Valkey's open default user, so valkey-cli below works without
+      # credentials. Restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   containers:
     - name: server
       image: valkey-customized:1.0

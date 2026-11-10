@@ -288,7 +288,7 @@ spec:
 
 	It("writes the trust bundle and reports TLSConfigured", func() {
 		Eventually(func(g Gomega) {
-			out, err := utils.Run(exec.Command("kubectl", "get", "secret", clusterName+"-tls-trust",
+			out, err := utils.Run(exec.Command("kubectl", "get", "secret", "valkey-"+clusterName+"-tls-trust",
 				"-o", "jsonpath={.data.ca\\.crt}"))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).NotTo(BeEmpty())
@@ -308,7 +308,7 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 		refs := strings.Fields(out)
 		Expect(refs).To(HaveLen(2))
-		Expect(refs).To(HaveEach(clusterName + "-tls-trust"))
+		Expect(refs).To(HaveEach("valkey-" + clusterName + "-tls-trust"))
 	})
 
 	It("authenticates a client certificate from the client CA as its SPIFFE ID", func() {
@@ -374,7 +374,7 @@ spec:
 
 		By("waiting for the unused trust bundle to be deleted")
 		Eventually(func(g Gomega) {
-			out, err := utils.Run(exec.Command("kubectl", "get", "secret", clusterName+"-tls-trust", "--ignore-not-found", "-o", "name"))
+			out, err := utils.Run(exec.Command("kubectl", "get", "secret", "valkey-"+clusterName+"-tls-trust", "--ignore-not-found", "-o", "name"))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(strings.TrimSpace(out)).To(BeEmpty())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())

@@ -35,8 +35,18 @@ metadata:
 spec:
   shards: 3
   replicasPerShard: 1
+  acl:
+    users:
+      # Valkey's open default user: any client, no password, every command.
+      # For trying the cluster out; restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
 EOF
 ```
+
+The cluster declares Valkey's open `default` user so the CLI below works without credentials. A cluster that does not declare `default` has it disabled; see [The `default` user](valkeycluster.md#the-default-user).
 
 ## 3. Verify the cluster is healthy
 

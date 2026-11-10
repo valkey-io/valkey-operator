@@ -125,6 +125,26 @@ var _ = Describe("Valkey CEL validation", func() {
 			Entry("upper case", "CLUSTER-ENABLED"),
 		)
 
+		It("admits a module config key with a dot", func() {
+			valkey := configValkey("cfg-module", map[string]string{"search.timeout": "500"})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		// Valkey trims and unquotes each config line, so these keys would reach it as cluster-enabled or replicaof.
+		DescribeTable("rejects keys Valkey would trim or unquote",
+			func(key string) {
+				err := k8sClient.Create(ctx, configValkey("cfg-format", map[string]string{key: "yes"}))
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("keys may contain only letters, digits"))
+			},
+			Entry("leading space", " cluster-enabled"),
+			Entry("double quoted", `"cluster-enabled"`),
+			Entry("single quoted replicaof", `'replicaof'`),
+			Entry("tab padded", "\treplicaof"),
+			Entry("trailing space", "slaveof "),
+		)
+
 		It("rejects a cluster key mixed in with valid ones", func() {
 			err := k8sClient.Create(ctx, configValkey("cfg-mixed", map[string]string{
 				"maxmemory":       "100mb",

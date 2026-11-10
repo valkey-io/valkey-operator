@@ -218,6 +218,11 @@ type ValkeySpec struct {
 	// The operator owns replication topology.
 	// A user-set directive would fight the operator's own wiring.
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))",message="spec.config must not contain replicaof or slaveof: the operator owns replication topology"
+	//
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// Valkey trims and unquotes each config line before reading its key, so a key such as " cluster-enabled" or "replicaof" in quotes would pass the rules above.
+	// The '.' keeps module configs such as search.<name> valid.
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

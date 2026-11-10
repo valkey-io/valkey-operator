@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -93,6 +94,14 @@ var _ = Describe("Valkey CEL validation", func() {
 		Entry("uppercase", "Valkey.example.com", false),
 		Entry("a trailing dot", "valkey.example.com.", false),
 	)
+
+	It("rejects the reserved server-init container name", func() {
+		valkey := valkeyFor("val-server-init", 0)
+		valkey.Spec.Containers = []corev1.Container{{Name: "server-init", Image: "busybox"}}
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("container name 'server-init' is reserved"))
+	})
 
 	It("rejects pod labels the operator owns", func() {
 		valkey := valkeyFor("val-reserved-label", 0)

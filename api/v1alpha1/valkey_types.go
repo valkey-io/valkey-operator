@@ -193,7 +193,9 @@ type ValkeySpec struct {
 
 	// Containers holds additional containers, or overrides for the default ones.
 	// Applied as a strategic merge patch.
+	// The name server-init is reserved for the operator-managed init container.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Config holds additional Valkey configuration parameters.

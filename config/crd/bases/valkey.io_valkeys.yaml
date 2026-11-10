@@ -113,6 +113,7 @@ spec:
                 description: |-
                   Containers holds additional containers, or overrides for the default ones.
                   Applied as a strategic merge patch.
+                  The name server-init is reserved for the operator-managed init container.
                 items:
                   description: A single application container that you want to run
                     within a pod.
@@ -1692,6 +1693,10 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: container name 'server-init' is reserved for the operator-managed
+                    init container
+                  rule: '!self.exists(c, c.name == ''server-init'')'
               exporter:
                 default:
                   enabled: true

@@ -54,7 +54,6 @@ var _ = Describe("perNodeServices CEL validation", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 52), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards:       1,
-				Replicas:     0,
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
@@ -70,7 +69,6 @@ var _ = Describe("perNodeServices CEL validation", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 53), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards:       1,
-				Replicas:     0,
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
@@ -86,9 +84,9 @@ var _ = Describe("perNodeServices CEL validation", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("b", 48), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:       10,
-				Replicas:     2,
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+				Shards:           10,
+				ReplicasPerShard: 2,
+				WorkloadType:     valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 				},
@@ -103,7 +101,6 @@ var _ = Describe("perNodeServices CEL validation", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("c", 52), Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 				Shards:       11,
-				Replicas:     0,
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
 				Networking: &valkeyiov1alpha1.NetworkingSpec{
 					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
@@ -126,6 +123,39 @@ var _ = Describe("perNodeServices CEL validation", func() {
 			PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
 		}
 		err := k8sClient.Update(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
+	})
+	It("rejects when replicasPerShard digits push the name over 63", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("d", 52), Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:           1,
+				ReplicasPerShard: 10,
+				WorkloadType:     valkeyiov1alpha1.WorkloadTypeDeployment,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
+				},
+			},
+		}
+		err := k8sClient.Create(ctx, cluster)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
+	})
+
+	It("rejects when the deprecated replicas field pushes the name over 63", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("f", 52), Namespace: "default"},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Shards:       1,
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+				Networking: &valkeyiov1alpha1.NetworkingSpec{
+					PerNodeServices: &valkeyiov1alpha1.PerNodeServicesSpec{},
+				},
+			},
+		}
+		cluster.Spec.Replicas = 10 //nolint:staticcheck // the rule must still count spec.replicas
+		err := k8sClient.Create(ctx, cluster)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"))
 	})

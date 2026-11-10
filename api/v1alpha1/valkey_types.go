@@ -195,6 +195,7 @@ type ValkeySpec struct {
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// ACL configures the Valkey access control the operator manages.
+	// The controller does not apply these users yet.
 	// +optional
 	ACL *ValkeyACLSpec `json:"acl,omitempty"`
 

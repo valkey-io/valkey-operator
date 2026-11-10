@@ -268,15 +268,24 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	return nil
 }
 
-// deprecatedFieldConfigWarnings flags spec.users, which spec.acl.users replaces.
+// deprecatedFieldConfigWarnings flags spec.users and spec.replicas, which
+// spec.acl.users and spec.replicasPerShard replace. An explicit spec.replicas
+// of 0 is omitted from the object, so it does not warn.
 func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	if len(cluster.Spec.Users) == 0 { //nolint:staticcheck // legacy spec.users
-		return nil
+	var warnings []configWarning
+	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+		})
 	}
-	return []configWarning{{
-		reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-		message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
-	}}
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
+		})
+	}
+	return warnings
 }
 
 // Helper for repeated actions

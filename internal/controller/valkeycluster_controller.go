@@ -202,13 +202,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
-	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
-		configWarnings = append(configWarnings, configWarning{
-			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
-		})
-	}
-
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
 	configWarnings = append(configWarnings, deprecatedFieldConfigWarnings(cluster)...)
 	r.applyConfigurationWarnings(ctx, cluster, configWarnings)

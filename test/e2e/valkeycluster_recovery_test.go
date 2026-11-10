@@ -461,6 +461,12 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: %d
   replicas: 1
   config:

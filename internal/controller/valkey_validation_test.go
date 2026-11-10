@@ -1,0 +1,450 @@
+/*
+Copyright 2026 Valkey Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"strings"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+)
+
+// valkeyFor builds a minimal Valkey for exercising the CEL validation.
+func valkeyFor(name string, replicas int32) *valkeyiov1alpha1.Valkey {
+	return &valkeyiov1alpha1.Valkey{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: valkeyiov1alpha1.ValkeySpec{
+			Replicas: replicas,
+		},
+	}
+}
+
+var _ = Describe("Valkey CEL validation", func() {
+	ctx := context.Background()
+
+	It("admits a standalone instance", func() {
+		valkey := valkeyFor("val-standalone", 0)
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	It("rejects replicas above zero until replication lands", func() {
+		err := k8sClient.Create(ctx, valkeyFor("val-replicated", 1))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("replication is not implemented yet"))
+	})
+
+	It("admits a ServiceAccount and pod metadata", func() {
+		valkey := valkeyFor("val-podmeta", 0)
+		valkey.Spec.ServiceAccountName = "valkey-sa"
+		valkey.Spec.PodMetadata = &valkeyiov1alpha1.EmbeddedObjectMetadata{
+			Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "cache"},
+			Annotations: map[string]string{"prometheus.io/scrape": "true"},
+		}
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	It("rejects an invalid ServiceAccount name", func() {
+		valkey := valkeyFor("val-bad-sa", 0)
+		valkey.Spec.ServiceAccountName = "Not_Valid"
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		// Check the field, so a create that fails for an unrelated reason does not pass.
+		Expect(err.Error()).To(ContainSubstring("spec.serviceAccountName"))
+		Expect(err.Error()).To(ContainSubstring("should match"))
+	})
+
+	DescribeTable("validates the TLS serverName",
+		func(serverName string, admitted bool) {
+			valkey := valkeyFor("val-servername", 0)
+			valkey.Spec.Networking = &valkeyiov1alpha1.ValkeyNetworkingSpec{TLS: &valkeyiov1alpha1.ValkeyTLSSpec{
+				ServerName:   serverName,
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls"}},
+			}}
+			err := k8sClient.Create(ctx, valkey)
+			if admitted {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+				return
+			}
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must be a valid DNS-1123 subdomain"))
+		},
+		Entry("a DNS subdomain", "valkey.default.svc.cluster.local", true),
+		Entry("uppercase", "Valkey.example.com", false),
+		Entry("a trailing dot", "valkey.example.com.", false),
+	)
+
+	It("rejects the reserved server-init container name", func() {
+		valkey := valkeyFor("val-server-init", 0)
+		valkey.Spec.Containers = []corev1.Container{{Name: "server-init", Image: "busybox"}}
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("container name 'server-init' is reserved"))
+	})
+
+	It("rejects pod labels the operator owns", func() {
+		valkey := valkeyFor("val-reserved-label", 0)
+		valkey.Spec.PodMetadata = &valkeyiov1alpha1.EmbeddedObjectMetadata{
+			Labels: map[string]valkeyiov1alpha1.LabelValue{"valkey.io/cluster": "other"},
+		}
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved for the operator"))
+	})
+
+	Describe("spec.config", func() {
+		configValkey := func(name string, config map[string]string) *valkeyiov1alpha1.Valkey {
+			valkey := valkeyFor(name, 0)
+			valkey.Spec.Config = config
+			return valkey
+		}
+
+		It("admits non-cluster keys", func() {
+			valkey := configValkey("cfg-ok", map[string]string{
+				"maxmemory":                 "100mb",
+				"maxmemory-policy":          "allkeys-lru",
+				"appendonly":                "yes",
+				"timeout":                   "0",
+				"maxmemory-clients":         "0",
+				"latency-monitor-threshold": "100",
+			})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		It("admits an empty config", func() {
+			valkey := configValkey("cfg-empty", map[string]string{})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		DescribeTable("rejects cluster mode directives",
+			func(key string) {
+				err := k8sClient.Create(ctx, configValkey("cfg-reject", map[string]string{key: "yes"}))
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+			},
+			Entry("cluster-enabled", "cluster-enabled"),
+			Entry("cluster-node-timeout", "cluster-node-timeout"),
+			Entry("cluster-config-file", "cluster-config-file"),
+			Entry("cluster-require-full-coverage", "cluster-require-full-coverage"),
+			// tls-cluster is cluster-only but does not start with cluster-.
+			Entry("tls-cluster", "tls-cluster"),
+			Entry("tls-cluster upper case", "TLS-Cluster"),
+			// Valkey config keys are case-insensitive, so the rule lowercases.
+			// A bare startsWith would let these through.
+			Entry("mixed case", "Cluster-Enabled"),
+			Entry("upper case", "CLUSTER-ENABLED"),
+		)
+
+		It("admits a module config key with a dot", func() {
+			valkey := configValkey("cfg-module", map[string]string{"search.timeout": "500"})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		// Valkey trims and unquotes each config line, so these keys would reach it as cluster-enabled or replicaof.
+		DescribeTable("rejects keys Valkey would trim or unquote",
+			func(key string) {
+				err := k8sClient.Create(ctx, configValkey("cfg-format", map[string]string{key: "yes"}))
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("keys may contain only letters, digits"))
+			},
+			Entry("leading space", " cluster-enabled"),
+			Entry("double quoted", `"cluster-enabled"`),
+			Entry("single quoted replicaof", `'replicaof'`),
+			Entry("tab padded", "\treplicaof"),
+			Entry("trailing space", "slaveof "),
+		)
+
+		It("rejects a cluster key mixed in with valid ones", func() {
+			err := k8sClient.Create(ctx, configValkey("cfg-mixed", map[string]string{
+				"maxmemory":       "100mb",
+				"cluster-enabled": "yes",
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+		})
+
+		It("rejects a cluster key added by update", func() {
+			valkey := configValkey("cfg-update", map[string]string{"maxmemory": "100mb"})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Config["cluster-enabled"] = "yes"
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not contain cluster- keys"))
+		})
+
+		It("admits a key that merely contains cluster", func() {
+			// The rule is a prefix test, so it must not catch unrelated keys.
+			valkey := configValkey("cfg-substring", map[string]string{
+				"maxmemory-clients": "0",
+			})
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		DescribeTable("rejects a replication-topology key",
+			func(name, key string) {
+				valkey := configValkey(name, map[string]string{key: "host 6379"})
+				err := k8sClient.Create(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("the operator owns replication topology"))
+			},
+			Entry("replicaof", "cfg-replicaof", "replicaof"),
+			Entry("slaveof alias", "cfg-slaveof", "slaveof"),
+			Entry("mixed case", "cfg-replicaof-case", "ReplicaOf"),
+		)
+	})
+
+	DescribeTable("admits names regardless of suffix",
+		func(name string) {
+			valkey := valkeyFor(name, 0)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		},
+		// The trailing "-<number>" rule was dropped so ValkeyCell can name
+		// its shards "cache-0", "cache-1". Node-name collisions are detected
+		// controller-side instead.
+		Entry("per-node suffix", "val-0"),
+		Entry("multi-digit per-node suffix", "val-12"),
+		Entry("former primary Service suffix", "val-primary"),
+		Entry("former replicas Service suffix", "val-replicas"),
+	)
+
+	It("rejects a name too long for derived child names", func() {
+		// 38 characters, one over the limit.
+		// See the Valkey type comment for how the limit is derived.
+		err := k8sClient.Create(ctx, valkeyFor(strings.Repeat("a", 38), 0))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("at most 37 characters"))
+	})
+
+	It("admits a name at the length limit", func() {
+		valkey := valkeyFor(strings.Repeat("b", 37), 0)
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+	})
+
+	// The persistence rules are copied from ValkeyClusterSpec.
+	// They are exercised against the Valkey spec shape rather than trusted.
+	Describe("spec.persistence", func() {
+		persistentValkey := func(name, size string, class *string) *valkeyiov1alpha1.Valkey {
+			valkey := valkeyFor(name, 0)
+			valkey.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size:             resource.MustParse(size),
+				StorageClassName: class,
+			}
+			return valkey
+		}
+
+		It("admits an instance created with persistence", func() {
+			valkey := persistentValkey("pv-ok", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		It("rejects persistence with workloadType Deployment", func() {
+			valkey := persistentValkey("pv-deploy", "1Gi", nil)
+			valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence requires workloadType StatefulSet"))
+		})
+
+		It("rejects persistence added after creation", func() {
+			valkey := valkeyFor("pv-added", 0)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence = &valkeyiov1alpha1.PersistenceSpec{
+				Size: resource.MustParse("1Gi"),
+			}
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence cannot be added after creation"))
+		})
+
+		It("rejects persistence removed once set", func() {
+			valkey := persistentValkey("pv-removed", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence = nil
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence cannot be removed once set"))
+		})
+
+		It("admits an expanded size", func() {
+			valkey := persistentValkey("pv-expand", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("2Gi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("rejects a shrunk size", func() {
+			valkey := persistentValkey("pv-shrink", "2Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1Gi")
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.size may only be expanded"))
+		})
+
+		It("admits an equal size, so a no-op update is not a shrink", func() {
+			valkey := persistentValkey("pv-same", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1Gi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("treats equivalent quantities as equal, not as a shrink", func() {
+			// 1Gi and 1024Mi are the same size written differently.
+			// The rule compares quantities, so neither ordering is a shrink.
+			valkey := persistentValkey("pv-equiv", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.Size = resource.MustParse("1024Mi")
+			Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+		})
+
+		It("holds storageClassName immutable", func() {
+			fast, slow := "fast", "slow"
+			valkey := persistentValkey("pv-class", "1Gi", &fast)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.StorageClassName = &slow
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
+		})
+
+		It("rejects adding a storageClassName that was unset", func() {
+			class := "fast"
+			valkey := persistentValkey("pv-class-add", "1Gi", nil)
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			valkey.Spec.Persistence.StorageClassName = &class
+			err := k8sClient.Update(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
+		})
+	})
+
+	It("holds workloadType immutable", func() {
+		valkey := valkeyFor("val-immutable", 0)
+		valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeStatefulSet
+		Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+		})
+
+		valkey.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeDeployment
+		err := k8sClient.Update(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("workloadType is immutable"))
+	})
+
+	Context("spec.acl", func() {
+		It("admits users and applies the defaults", func() {
+			valkey := valkeyFor("val-acl", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "alice"}},
+			}
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+
+			got := &valkeyiov1alpha1.Valkey{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(valkey), got)).To(Succeed())
+			Expect(got.Spec.ACL).NotTo(BeNil())
+			Expect(got.Spec.ACL.Users).To(HaveLen(1))
+			Expect(got.Spec.ACL.Users[0].State).To(Equal(valkeyiov1alpha1.ACLUserStateEnabled))
+		})
+
+		It("rejects a username that starts with an underscore", func() {
+			valkey := valkeyFor("val-acl-underscore", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "_internal"}},
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].name"))
+			Expect(err.Error()).To(ContainSubstring("Username cannot start with '_'"))
+		})
+
+		It("rejects password.secret when password.type is not Secret", func() {
+			valkey := valkeyFor("val-acl-secret", 0)
+			valkey.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{
+				Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name: "alice",
+					Password: &valkeyiov1alpha1.ACLUserPassword{
+						Type:   valkeyiov1alpha1.ACLPasswordTypeAny,
+						Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "users"},
+					},
+				}},
+			}
+			err := k8sClient.Create(ctx, valkey)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.acl.users[0].password.secret: Forbidden"))
+			Expect(err.Error()).To(ContainSubstring("secret is only used when type is Secret"))
+		})
+	})
+})

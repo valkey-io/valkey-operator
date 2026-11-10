@@ -63,7 +63,7 @@ metadata:
   name: my-cluster
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   acl:
     users:
       # Valkey's open default user, so valkey-cli below works without

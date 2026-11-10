@@ -401,7 +401,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, singleNodeClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -787,7 +787,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, baseShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
 			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
@@ -916,7 +916,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, initialShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scalein.yaml")
 			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
@@ -1078,7 +1078,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
 `
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-degraded.yaml")
@@ -1210,7 +1210,7 @@ metadata:
   name: %[1]s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   acl:
     users:
       - name: default
@@ -1484,7 +1484,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   workloadType: StatefulSet
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -1524,7 +1524,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, addClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1558,7 +1558,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   persistence:
     size: 1Gi
 `, shrinkClusterName)
@@ -1598,7 +1598,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1686,7 +1686,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "%s"
@@ -1740,7 +1740,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1822,7 +1822,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1898,7 +1898,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     zone:
       spread:
@@ -1991,7 +1991,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -2036,7 +2036,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2121,7 +2121,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2137,7 +2137,7 @@ spec:
 
 			By("scaling to 1 replica")
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2176,7 +2176,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2265,7 +2265,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2551,7 +2551,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2702,7 +2702,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)

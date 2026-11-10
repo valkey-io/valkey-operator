@@ -132,7 +132,7 @@ Common reasons:
 - `SlotsUnassigned` – waiting for slots to be assigned
 
 #### `ConfigurationWarning`
-Indicates the operator accepted a spec value it considers risky, rather than rejecting or overriding it.
+Indicates the operator accepted a spec value it considers risky or deprecated, rather than rejecting or overriding it.
 
 | Status | Meaning |
 |---|---|
@@ -144,7 +144,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
-- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces. The field keeps working until `v1beta1`; see [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers).
+- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces, and `spec.replicas`, which `spec.replicasPerShard` replaces. The field keeps working until `v1beta1`. See [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers) and [Migrating from `spec.replicas`](valkeycluster.md#migrating-from-specreplicas).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -663,8 +663,8 @@ Metadata:
   Resource Version:    108933
   UID:                 7b60e0f4-2842-4929-bc94-3fa3cfb1dfa5
 Spec:
-  Replicas:  1
-  Shards:    3
+  Replicas Per Shard:  1
+  Shards:              3
 Status:
   Conditions:
     Last Transition Time:  2025-12-19T06:07:21Z
@@ -716,7 +716,7 @@ Events:
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary def456 (shard 1)
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary ghi789 (shard 2)
   Normal  ReplicasAttached   14m   valkeycluster-controller  Attached 3 replica node(s)
-  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready with 3 shards and 1 replicas
+  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready: shards 3, replicasPerShard 1
 ```
 
 ### How to read it
@@ -728,7 +728,7 @@ Events:
 - **Conditions**
   - `Progressing=False (ReconcileComplete)` → controller is not actively changing anything.
   - `Ready=True (ClusterHealthy)` → cluster is fully functional.
-  - `ClusterFormed=True (TopologyComplete)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicas=1`).
+  - `ClusterFormed=True (TopologyComplete)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicasPerShard=1`).
   - `SlotsAssigned=True (AllSlotsAssigned)` → all 16384 hash slots are assigned.
 
 - **Observed Generation**

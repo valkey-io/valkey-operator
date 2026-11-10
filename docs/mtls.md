@@ -24,7 +24,7 @@ metadata:
   name: valkeycluster-mtls
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:

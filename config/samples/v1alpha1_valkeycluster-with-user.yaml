@@ -15,7 +15,7 @@ metadata:
   name: cluster-sample-with-users
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   acl:
     users:
       - name: alice

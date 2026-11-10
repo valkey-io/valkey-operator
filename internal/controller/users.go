@@ -177,12 +177,44 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	return systemsAcls.String(), nil
 }
 
+// defaultUser is the name of Valkey's built-in user.
+const defaultUser = "default"
+
+// disabledDefaultUser is written to the aclfile when the cluster declares no
+// default user. Valkey's stock default is `on nopass +@all`, and a client that
+// never authenticates, or whose certificate names no ACL user, is logged in as
+// it. Any declared default, in any form, is used exactly as written instead.
+//
+// Being off is what locks clients out: an off user cannot be authenticated as.
+// It keeps every permission because Valkey still runs internal work as default
+// and checks its permissions: AOF loading drops transactions default may not
+// run (valkey-io/valkey#3983), and Valkey 9.0.0 slot migrations need
+// cluster|syncslots (valkey-io/valkey#2783).
+var disabledDefaultUser = valkeyiov1alpha1.ACLUserSpec{
+	Name:     defaultUser,
+	State:    valkeyiov1alpha1.ACLUserStateDisabled,
+	Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+	ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+		RawAcl: "~* &* +@all",
+	},
+}
+
+// managedUsers returns the users the aclfile manages: the declared users, plus
+// a disabled default user when none is declared.
+func managedUsers(cluster *valkeyiov1alpha1.ValkeyCluster) []valkeyiov1alpha1.ACLUserSpec {
+	users := cluster.Spec.ACLUsers()
+	if !slices.ContainsFunc(users, func(u valkeyiov1alpha1.ACLUserSpec) bool { return u.Name == defaultUser }) {
+		users = append(users, *disabledDefaultUser.DeepCopy())
+	}
+	return users
+}
+
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
 	// Sort users for consistency in hash calculations
-	users := cluster.Spec.ACLUsers()
+	users := managedUsers(cluster)
 	slices.SortFunc(users, func(a, b valkeyiov1alpha1.ACLUserSpec) int {
 		return strings.Compare(a.Name, b.Name)
 	})
@@ -243,15 +275,24 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	return nil
 }
 
-// deprecatedFieldConfigWarnings flags spec.users, which spec.acl.users replaces.
+// deprecatedFieldConfigWarnings flags spec.users and spec.replicas, which
+// spec.acl.users and spec.replicasPerShard replace. spec.replicas of 0 does
+// not warn: the Go field is 0 when the spec omits it and when the spec sets 0.
 func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	if len(cluster.Spec.Users) == 0 { //nolint:staticcheck // legacy spec.users
-		return nil
+	var warnings []configWarning
+	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+		})
 	}
-	return []configWarning{{
-		reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-		message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
-	}}
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
+		})
+	}
+	return warnings
 }
 
 // Helper for repeated actions

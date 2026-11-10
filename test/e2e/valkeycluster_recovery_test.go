@@ -37,7 +37,7 @@ import (
 // Recovery from cluster states the operator has to repair on its own, without a
 // spec change or manual intervention.
 var _ = Describe("ValkeyCluster recovery", Label("ValkeyCluster", "recovery", "spec-update"), func() {
-	// The clusters declare no users, so valkey-cli runs as the default user with
+	// The clusters declare an open default user, so valkey-cli runs as it with
 	// no password. The connect timeout bounds a stale MOVED redirect pointing at
 	// a terminated pod.
 	cliOpts := utils.ValkeyCLIOptions{ConnectTimeoutSeconds: 2}
@@ -114,8 +114,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 2
+  replicasPerShard: 2
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -141,7 +147,7 @@ spec:
 
 			By("scaling replicas from 2 to 1, which puts shard 0's primary out of range")
 			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -196,7 +202,7 @@ spec:
 		})
 
 		// shell runs a script in the server container of pod with the probe
-		// credentials unset, so valkey-cli uses the default user.
+		// credentials unset, so valkey-cli uses the declared open default user.
 		shell := func(pod, script string) (string, error) {
 			return utils.Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--",
 				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
@@ -243,8 +249,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 4
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -326,8 +338,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   config:
     cluster-replica-no-failover: "yes"
 `, clusterName))

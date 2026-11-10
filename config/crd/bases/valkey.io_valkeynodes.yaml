@@ -3729,6 +3729,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              defaultUserSessionsPending:
+                description: |-
+                  DefaultUserSessionsPending is set once the operator has seen the
+                  server's default user enabled, and cleared once default is off and the
+                  operator has closed the connections still logged in as it. While it is
+                  set and default is off, the operator retries closing them.
+                type: boolean
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the controller.

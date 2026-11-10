@@ -84,6 +84,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `podIP` — used by the parent to connect and issue Valkey commands
 - `podName` — name of the managed pod
 - `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`
+- `defaultUserSessionsPending` — set once the server's `default` user has been seen enabled, and cleared after `default` is off and the connections still logged in as it have been closed with `CLIENT KILL USER default`; while it is set and `default` is off, the node retries closing them
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 

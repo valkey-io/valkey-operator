@@ -2112,11 +2112,18 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	}
 	reconcilerFor := func(fake *fakeConfigClient) *ValkeyNodeReconciler {
 		return &ValkeyNodeReconciler{
+			Client:    k8sClient,
 			APIReader: k8sClient,
+			Recorder:  events.NewFakeRecorder(10),
 			newConfigClient: func(_ context.Context, _ *ValkeyNodeReconciler, _ *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
 				return fake, nil
 			},
 		}
+	}
+	sessionsPending := func() bool {
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodeWith(aclSecretName)), current)).To(Succeed())
+		return current.Status.DefaultUserSessionsPending
 	}
 
 	BeforeEach(func() {
@@ -2125,6 +2132,10 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 			Data:       map[string][]byte{aclFilename: []byte(aclFileContent)},
 		}
 		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
+		Expect(k8sClient.Create(ctx, nodeWith(aclSecretName))).To(Succeed())
+	})
+	AfterEach(func() {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, nodeWith(aclSecretName)))).To(Succeed())
 	})
 
 	It("does nothing when the node has no ACL secret", func() {
@@ -2186,6 +2197,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.killed).To(Equal([]string{"default"}))
+		Expect(sessionsPending()).To(BeFalse(), "a successful kill clears the marker")
 	})
 
 	It("leaves default's connections alone when it was already off", func() {
@@ -2195,25 +2207,52 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.killed).To(BeEmpty())
+		Expect(sessionsPending()).To(BeFalse())
 	})
 
-	It("leaves default's connections alone while it stays on", func() {
+	It("marks default's connections pending while it stays on", func() {
 		// Also the case of a stale mounted aclfile: the load changes nothing
-		// yet, and the next one, once the volume catches up, does the kill.
+		// yet, and a later one, once the volume catches up, does the kill.
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": true}}
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.killed).To(BeEmpty())
+		Expect(sessionsPending()).To(BeTrue(), "recorded before the load, so a later kill survives a restart")
 	})
 
-	It("returns an error when closing default's connections fails", func() {
+	It("retries a failed kill on the next reconcile, though default is already off", func() {
 		fake := &fakeConfigClient{
 			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
 			enabledOnLoad: map[string]bool{"default": false}, killErr: fmt.Errorf("boom"),
 		}
-		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		r := reconcilerFor(fake)
+		synced, _, err := r.applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
+		Expect(sessionsPending()).To(BeTrue(), "a failed kill must stay pending")
+		Expect(r.Recorder.(*events.FakeRecorder).Events).To(Receive(ContainSubstring("DefaultUserSessionsCloseFailed")))
+
+		By("reconciling again, with default off before the load")
+		fake.killErr = nil
+		_, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(Equal([]string{"default"}))
+		Expect(sessionsPending()).To(BeFalse())
+	})
+
+	It("closes default's connections after an operator restart between the load and the kill", func() {
+		// The marker was written before the load; the process died before the
+		// kill. The new process sees default off and the marker still set.
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodeWith(aclSecretName)), current)).To(Succeed())
+		current.Status.DefaultUserSessionsPending = true
+		Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+
+		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(Equal([]string{"default"}))
+		Expect(sessionsPending()).To(BeFalse())
 	})
 })
 

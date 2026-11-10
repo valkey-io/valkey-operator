@@ -44,21 +44,24 @@ import (
 // bundle.spiffe in a ConfigMap.
 var _ = Describe("ValkeyCluster mTLS with clientAuth.ca and URI-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS", "security"), func() {
 	const (
-		clusterName       = "cluster-clientca"
-		selfSigned        = "valkey-clientca-selfsigned"
-		serverCA          = "valkey-clientca-server-ca"
-		clientCA          = "valkey-clientca-client-ca"
-		untrustedCA       = "valkey-clientca-untrusted-ca"
-		serverCertSecret  = "valkey-clientca-server-cert"
-		clientCertSecret  = "valkey-clientca-client-svid"
-		rogueCertSecret   = "valkey-clientca-rogue-svid"
-		rotatedCA         = "valkey-clientca-rotated-ca"
-		rotatedCertSecret = "valkey-clientca-rotated-svid"
-		rotatedPodName    = "client-clientca-rotated"
-		spiffeID          = "spiffe://example.org/ns/default/sa/api"
-		spireBundle       = "valkey-clientca-spire-bundle"
-		trustedPodName    = "client-clientca-trusted"
-		roguePodName      = "client-clientca-rogue"
+		clusterName        = "cluster-clientca"
+		selfSigned         = "valkey-clientca-selfsigned"
+		serverCA           = "valkey-clientca-server-ca"
+		clientCA           = "valkey-clientca-client-ca"
+		untrustedCA        = "valkey-clientca-untrusted-ca"
+		serverCertSecret   = "valkey-clientca-server-cert"
+		clientCertSecret   = "valkey-clientca-client-svid"
+		rogueCertSecret    = "valkey-clientca-rogue-svid"
+		rotatedCA          = "valkey-clientca-rotated-ca"
+		rotatedCertSecret  = "valkey-clientca-rotated-svid"
+		rotatedPodName     = "client-clientca-rotated"
+		spiffeID           = "spiffe://example.org/ns/default/sa/api"
+		spireBundle        = "valkey-clientca-spire-bundle"
+		trustedPodName     = "client-clientca-trusted"
+		roguePodName       = "client-clientca-rogue"
+		unmappedCertSecret = "valkey-clientca-unmapped-svid"
+		unmappedID         = "spiffe://example.org/ns/default/sa/unmapped"
+		unmappedPodName    = "client-clientca-unmapped"
 	)
 	var tmpDir string
 
@@ -205,6 +208,7 @@ spec:
 `, selfSigned, serverCertSecret, serverCertSecret, clusterName, clusterName, serverCA) +
 			"---" + caManifest(serverCA) + "---" + caManifest(clientCA) + "---" + caManifest(untrustedCA) +
 			"---" + svidManifest(clientCertSecret, clientCA, spiffeID) + "---" + svidManifest(rogueCertSecret, untrustedCA, spiffeID) +
+			"---" + svidManifest(unmappedCertSecret, clientCA, unmappedID) +
 			"---" + caManifest(rotatedCA) + "---" + svidManifest(rotatedCertSecret, rotatedCA, spiffeID)
 		manifestFile := filepath.Join(tmpDir, "clientca-cert-manager.yaml")
 		Expect(os.WriteFile(manifestFile, []byte(manifest), 0644)).To(Succeed())
@@ -214,7 +218,7 @@ spec:
 		}).Should(Succeed())
 
 		By("waiting for every certificate to be ready")
-		for _, cert := range []string{serverCA, clientCA, untrustedCA, serverCertSecret, clientCertSecret, rogueCertSecret, rotatedCA, rotatedCertSecret} {
+		for _, cert := range []string{serverCA, clientCA, untrustedCA, serverCertSecret, clientCertSecret, rogueCertSecret, unmappedCertSecret, rotatedCA, rotatedCertSecret} {
 			Eventually(func() error {
 				_, err := utils.Run(exec.Command("kubectl", "wait", "certificate/"+cert, "--for=condition=Ready", "--timeout=120s"))
 				return err
@@ -267,14 +271,14 @@ spec:
 
 	AfterAll(func() {
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true"))
-		for _, cert := range []string{serverCertSecret, clientCertSecret, rogueCertSecret, rotatedCertSecret, serverCA, clientCA, untrustedCA, rotatedCA} {
+		for _, cert := range []string{serverCertSecret, clientCertSecret, rogueCertSecret, unmappedCertSecret, rotatedCertSecret, serverCA, clientCA, untrustedCA, rotatedCA} {
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "certificate", cert, "--ignore-not-found=true"))
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", cert, "--ignore-not-found=true"))
 		}
 		for _, issuer := range []string{selfSigned, serverCA, clientCA, untrustedCA, rotatedCA} {
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "issuer", issuer, "--ignore-not-found=true"))
 		}
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", trustedPodName, roguePodName, rotatedPodName, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", trustedPodName, roguePodName, unmappedPodName, rotatedPodName, "--ignore-not-found=true"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "configmap", spireBundle, "--ignore-not-found=true"))
 		os.RemoveAll(tmpDir)
 	})
@@ -339,6 +343,12 @@ spec:
 		Expect(podUIDs()).To(Equal(before), "the new root must be picked up without recreating or restarting a pod")
 	})
 
+	It("gives NOAUTH to a trusted certificate that names no ACL user, since the operator disables default", func() {
+		_, logs := whoami(unmappedPodName, unmappedCertSecret)
+		Expect(logs).To(ContainSubstring("NOAUTH"),
+			"an unmapped certificate must not get past the disabled default")
+	})
+
 	It("rejects a client certificate from a CA that is not in clientAuth.ca", func() {
 		phase, logs := whoami(roguePodName, rogueCertSecret)
 		Expect(phase).To(Equal("Failed"), "a certificate from an untrusted CA must not connect: %s", logs)
@@ -349,6 +359,13 @@ spec:
 		_, err := utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName, "--type=json",
 			"-p", `[{"op":"remove","path":"/spec/networking/tls/clientAuth/ca"}]`))
 		Expect(err).NotTo(HaveOccurred())
+
+		By("connecting with an unmapped certificate from the removed CA while nodes roll")
+		phase, logs := whoami(unmappedPodName, unmappedCertSecret)
+		Expect(logs).NotTo(Equal("default"), "a removed CA's certificate must never land on default (phase %s)", phase)
+		if phase == "Succeeded" {
+			Expect(logs).To(ContainSubstring("NOAUTH"))
+		}
 
 		By("waiting for every node to stop referencing the trust bundle")
 		Eventually(func(g Gomega) {

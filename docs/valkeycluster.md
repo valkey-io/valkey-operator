@@ -18,6 +18,7 @@
 - [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
 - [Scheduling](#scheduling)
+- [Shards and replicas](#shards-and-replicas)
 - [TLS](#tls)
 - [Users](#users)
 - [Workload type](#workload-type)
@@ -248,6 +249,34 @@ imagePullSecrets:
 
 `imagePullSecrets` is a list of `Secret` references (in the cluster's namespace) used to pull images from private registries. It is applied at the pod level, so a single list covers every image in the pod - the Valkey server, the metrics exporter sidecar, and any additional containers. It is optional and has no default; omit it when the nodes already authenticate to the registry.
 
+### Shards and replicas
+
+```yaml
+shards: 3
+replicasPerShard: 1  # 3 primaries + 3 replicas
+```
+
+`shards` sets the number of shards, and `replicasPerShard` sets the number of replicas in each shard in addition to its primary. A shard follows the [Valkey definition](https://valkey.io/commands/cluster-shards/): one primary and its replicas, serving the same slots. `replicasPerShard` defaults to 0.
+
+#### Migrating from `spec.replicas`
+
+`replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a spec that sets both fields.
+
+1. Check that the installed CRD has the new field: `kubectl explain valkeyclusters.spec.replicasPerShard` must print it. Helm does not upgrade CRDs from a chart's `crds` directory. On an old CRD the API server drops `replicasPerShard` from the patch in step 3, which then leaves the cluster with 0 replicas.
+2. Wait until the new operator release runs and the old operator pod is gone.
+3. Read the current `spec.replicas` and replace it with `replicasPerShard` in a single update. The patch keeps that count:
+
+   ```sh
+   n=$(kubectl get valkeycluster <name> -o jsonpath='{.spec.replicas}') && \
+   kubectl patch valkeycluster <name> --type=merge -p "{\"spec\":{\"replicas\":null,\"replicasPerShard\":${n:?spec.replicas is not set}}}"
+   ```
+
+Applying an edited manifest works only if the apply removes `replicas`. Two cases keep it, and the API server rejects the update: client side `kubectl apply` on a cluster that was not created with `kubectl apply`, and server side apply when another field manager owns `spec.replicas`, for example after a `kubectl patch`. The merge patch works in both cases.
+
+A Go program built against an older `api/v1alpha1` drops `replicasPerShard` when it reads and then updates a ValkeyCluster, because its type does not have the field. Update such programs before you migrate.
+
+The rename does not create, delete, or restart any pod. An operator release that does not know `replicasPerShard` reads 0 replicas from a migrated cluster and deletes every ValkeyNode with node index 1 or higher.
+
 ### Scheduling
 
 ```yaml
@@ -286,7 +315,7 @@ scheduling:
             - valkey.io/shard-index
 ```
 
-A required term needs at least `1 + replicas` racks, or the extra members of each shard stay `Pending`. With fewer racks, use the preferred form, which keeps a shard's members apart where it can:
+A required term needs at least `1 + replicasPerShard` racks, or the extra members of each shard stay `Pending`. With fewer racks, use the preferred form, which keeps a shard's members apart where it can:
 
 ```yaml
 scheduling:
@@ -460,7 +489,7 @@ The zone list is **immutable while pinning is set**, because changing it reassig
 
 Pinning renders the `topology.kubernetes.io/zone` key itself, so `scheduling.nodeSelector` may not also set that key; the operator rejects the combination rather than silently overwriting your value. Your `scheduling.affinity` is left untouched — Kubernetes ANDs `nodeSelector` with `nodeAffinity`, so a node must satisfy both. The node axis is independent: `node.spread.*` keys on `kubernetes.io/hostname` and composes with pinning freely.
 
-If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`affinity` that contradicts the pin, or a passthrough `topologySpreadConstraints` entry on `topology.kubernetes.io/zone` that the pinned distribution cannot satisfy (pinning spreads pods unevenly whenever `shards × (replicas+1)` is not a multiple of `len(zones)`, which can make a `maxSkew: 1` / `DoNotSchedule` zone constraint unsatisfiable) — it stays `Pending` and the operator marks the cluster `Degraded` with reason `PodUnschedulable`.
+If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`affinity` that contradicts the pin, or a passthrough `topologySpreadConstraints` entry on `topology.kubernetes.io/zone` that the pinned distribution cannot satisfy (pinning spreads pods unevenly whenever `shards × (replicasPerShard+1)` is not a multiple of `len(zones)`, which can make a `maxSkew: 1` / `DoNotSchedule` zone constraint unsatisfiable) — it stays `Pending` and the operator marks the cluster `Degraded` with reason `PodUnschedulable`.
 
 > **With persistence, pin at creation time**
 >
@@ -663,7 +692,7 @@ workloadType: StatefulSet  # default
 
 - Immutable after creation
 - `persistence` requires `workloadType: StatefulSet`
-- `metadata.name` is limited by the longest name derived from it. With `StatefulSet`, every ValkeyNode gets a StatefulSet named `valkey-<name>-<shard>-<node>`, and that name must stay within 52 characters: Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, label values are limited to 63 characters, and a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters; each extra digit in the highest shard index (`shards - 1`) or node index (`replicas`) takes one character away, so a scale-out that pushes an index into more digits is rejected as well. With `Deployment` there is no such label, and the limit is the headless Service `valkey-<name>`, a DNS label of at most 63 characters, so the name may have up to 56 characters. The ValkeyNode name `<name>-<shard>-<node>` is the `app.kubernetes.io/instance` label value of its pod with either workload type, so it must stay within 63 characters as well. The StatefulSet rule already keeps it there, and a `Deployment` cluster only reaches that limit with a long name and thousands of shards. All three rules are enforced at admission.
+- `metadata.name` is limited by the longest name derived from it. With `StatefulSet`, every ValkeyNode gets a StatefulSet named `valkey-<name>-<shard>-<node>`, and that name must stay within 52 characters: Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, label values are limited to 63 characters, and a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters; each extra digit in the highest shard index (`shards - 1`) or node index (`replicasPerShard`) takes one character away, so a scale-out that pushes an index into more digits is rejected as well. With `Deployment` there is no such label, and the limit is the headless Service `valkey-<name>`, a DNS label of at most 63 characters, so the name may have up to 56 characters. The ValkeyNode name `<name>-<shard>-<node>` is the `app.kubernetes.io/instance` label value of its pod with either workload type, so it must stay within 63 characters as well. The StatefulSet rule already keeps it there, and a `Deployment` cluster only reaches that limit with a long name and thousands of shards. All three rules are enforced at admission.
 - A cluster created before these rules whose name breaks them is frozen: the API server rejects every spec update until the cluster is scaled down to a size the rule accepts, or deleted. Both still work.
 
 ## Architecture

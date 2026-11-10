@@ -880,6 +880,9 @@ const (
 	// ReasonTrustBundleError is used with ConditionReady when the operator
 	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"
+	// ReasonOperatorAuthenticationFailed is used with ConditionDegraded, Ready
+	// and Progressing when a node rejects the operator's _operator password.
+	ReasonOperatorAuthenticationFailed = "OperatorAuthenticationFailed"
 )
 
 // +kubebuilder:object:root=true

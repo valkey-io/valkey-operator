@@ -34,11 +34,11 @@ const (
 )
 
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
-// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable",fieldPath=".persistence.storageClassName",reason="FieldValueForbidden"
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
 	// +optional
@@ -52,7 +52,7 @@ type ValkeyNodeSpec struct {
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.
 	// +kubebuilder:default=StatefulSet
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable",reason="FieldValueForbidden"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -106,7 +106,7 @@ type ValkeyNodeSpec struct {
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// TLS configuration for the node
@@ -209,7 +209,7 @@ type NodeTLSSpec struct {
 // a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
 // controller merges spec.networking.tls.clientAuth.ca into a Secret and
 // references it from certificates.trustBundle.
-// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode",fieldPath=".certificateUser",reason="FieldValueForbidden"
 type NodeTLSClientAuthSpec struct {
 	// Mode controls whether clients must authenticate with a TLS certificate.
 	// Maps to `tls-auth-clients`. Defaults to `Optional`.

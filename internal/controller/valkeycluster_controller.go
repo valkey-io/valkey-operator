@@ -43,11 +43,10 @@ import (
 )
 
 // DefaultImage and DefaultExporterImage are used where a spec leaves the image
-// empty. The manager flags --default-valkey-image and --default-exporter-image
-// override them.
+// empty. The manager sets them from its required image flags.
 var (
-	DefaultImage         = "valkey/valkey:9.0.0"
-	DefaultExporterImage = "oliver006/redis_exporter:v1.88.0"
+	DefaultImage         string
+	DefaultExporterImage string
 )
 
 const (

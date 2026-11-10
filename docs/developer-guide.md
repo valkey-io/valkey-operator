@@ -290,7 +290,9 @@ contents. Bind it to localhost and never add it to a Service.
 to talk to, as described in [Run the operator locally](#run-the-operator-locally):
 
 ```bash
-go run ./cmd/main.go --pprof-bind-address=localhost:8082
+go run ./cmd/main.go --pprof-bind-address=localhost:8082 \
+  --default-valkey-image=valkey/valkey:9.0.0 \
+  --default-exporter-image=oliver006/redis_exporter:v1.88.0
 ```
 
 ### Running in a cluster

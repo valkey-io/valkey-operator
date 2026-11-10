@@ -105,14 +105,16 @@ The referenced ServiceAccount **must already exist in the same namespace** as th
 
 ### Default images
 
-A ValkeyCluster or ValkeyNode that leaves `image` empty runs the Valkey image the operator was started with, and a cluster or standalone ValkeyNode whose `exporter.image` is empty runs the operator's exporter image. Both come from the manager flags `--default-valkey-image` and `--default-exporter-image`, which default to the images compiled into the binary. Changing either flag, or upgrading to a build with a new compiled default, rolls every cluster and node that left the field empty, the same as setting `image` would. `--print-default-images` prints the defaults, after any override, and exits, so they can be checked without a cluster:
+The operator requires the `--default-valkey-image` and `--default-exporter-image`
+flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
+`spec.exporter.image` is empty. Changing a default rolls the pods that use it.
 
-```sh
-$ docker run --rm ghcr.io/valkey-io/valkey-operator:<tag> --print-default-images
-{"valkey":"valkey/valkey:9.0.0","exporter":"oliver006/redis_exporter:v1.88.0"}
-```
-
-`--version` prints the build version and exits. With both flags set, both are printed.
+When upgrading a deployment that supplies its own manager arguments, add both
+flags. To keep the previous image defaults, use
+`--default-valkey-image=valkey/valkey:9.0.0` and
+`--default-exporter-image=oliver006/redis_exporter:v1.88.0`.
+The Kustomize deployment and `make run` already pass these values. When using
+a Helm chart that does not supply these flags, add them to `manager.args`.
 
 ### Metrics
 

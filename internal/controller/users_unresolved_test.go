@@ -111,8 +111,8 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-unresolved", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards: 2, Replicas: 0,
-				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-unresolved-alice")}},
+				Shards: 2,
+				ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-unresolved-alice")}},
 			},
 		}
 		defer cleanup(cluster, "acl-unresolved-alice", "acl-unresolved-bob")
@@ -193,7 +193,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-system-first", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards: 1, Replicas: 0,
+				Shards:   1,
 				Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 				ACL:      &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-system-first-alice")}},
 			},
@@ -240,8 +240,8 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-write-fails", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards: 1, Replicas: 0,
-				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-write-fails-alice")}},
+				Shards: 1,
+				ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("alice", "acl-write-fails-alice")}},
 			},
 		}
 		defer cleanup(cluster, "acl-write-fails-alice", "acl-write-fails-carol")
@@ -280,8 +280,8 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "acl-first", Namespace: ns},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards: 1, Replicas: 0,
-				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("carol", "acl-first-carol")}},
+				Shards: 1,
+				ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{user("carol", "acl-first-carol")}},
 			},
 		}
 		defer cleanup(cluster, "acl-first-carol")

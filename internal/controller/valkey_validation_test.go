@@ -73,6 +73,27 @@ var _ = Describe("Valkey CEL validation", func() {
 		Expect(k8sClient.Create(ctx, valkey)).NotTo(Succeed())
 	})
 
+	DescribeTable("validates the TLS serverName",
+		func(serverName string, admitted bool) {
+			valkey := valkeyFor("val-servername", 0)
+			valkey.Spec.Networking = &valkeyiov1alpha1.ValkeyNetworkingSpec{TLS: &valkeyiov1alpha1.ValkeyTLSSpec{
+				ServerName:   serverName,
+				Certificates: valkeyiov1alpha1.TLSCertificates{Server: valkeyiov1alpha1.CertificateSource{SecretName: "tls"}},
+			}}
+			err := k8sClient.Create(ctx, valkey)
+			if admitted {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+				return
+			}
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must be a valid DNS-1123 subdomain"))
+		},
+		Entry("a DNS subdomain", "valkey.default.svc.cluster.local", true),
+		Entry("uppercase", "Valkey.example.com", false),
+		Entry("a trailing dot", "valkey.example.com.", false),
+	)
+
 	It("rejects pod labels the operator owns", func() {
 		valkey := valkeyFor("val-reserved-label", 0)
 		valkey.Spec.PodMetadata = &valkeyiov1alpha1.EmbeddedObjectMetadata{

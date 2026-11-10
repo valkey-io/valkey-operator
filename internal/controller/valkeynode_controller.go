@@ -438,8 +438,8 @@ func liveApplyFailure(node *valkeyiov1alpha1.ValkeyNode, err error) (string, str
 	return valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()
 }
 
-// authRetryInterval is how often a node that rejects the operator's password
-// is retried.
+// authRetryInterval is how often a node, or a cluster with a node, that
+// rejects the operator's password is retried.
 const authRetryInterval = 10 * time.Second
 
 // liveApplyResult is the reconcile result for a failed live apply. A rejected

@@ -352,12 +352,13 @@ const (
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
-	// wrote to the mounted Secret, for spec.users and the system users, is live
-	// on the server. It is applied via ACL LOAD without a pod roll, so ACL never
-	// enters Spec.WorkloadRevision. True means the desired user set, their
-	// password hashes, and the current ACL revision are live, confirmed by a
-	// bookkeeping revision user whose password is a hash of the managed ACL (see
-	// aclRevisionUser); permission-only edits are therefore honoured too.
+	// wrote to the mounted Secret, for spec.acl.users (or the deprecated
+	// spec.users) and the system users, is live on the server. It is applied via
+	// ACL LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// means the desired user set, their password hashes, and the current ACL
+	// revision are live, confirmed by a bookkeeping revision user whose password is
+	// a hash of the managed ACL (see aclRevisionUser); permission-only edits are
+	// therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
 	// ValkeyNodeConditionTrustBundleApplied indicates that the server has
 	// reloaded the mounted trust bundle (Spec.TLS.Certificates.TrustBundle) as

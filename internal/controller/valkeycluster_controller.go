@@ -104,13 +104,16 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
+//   - Build the Valkey cluster state by connecting to each node and scraping
+//     CLUSTER INFO / CLUSTER NODES.
+//   - Stop if a Ready node rejects the operator's password
+//     (nodesRejectingOperator), so the steps below never act on a partial
+//     scrape.
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
 //     primary cannot be identified has its roll skipped; other shards still roll,
 //     and once none is mid-roll the phases below run to repair it.
-//   - Build the Valkey cluster state by connecting to each node and scraping
-//     CLUSTER INFO / CLUSTER NODES.
 //   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
 //     is lost (promoteOrphanedReplicas).
 //   - Forget stale nodes that no longer have a backing ValkeyNode.
@@ -240,7 +243,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		r.reportOperatorLockout(cluster, rejecting)
 		// The partial scrape would zero the shard counts; keep the last ones.
 		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
 	}
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
 		c.Reason == valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {

@@ -482,6 +482,12 @@ metadata:
 spec:
   shards: 3
   replicas: 1
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   config:
     enable-debug-command: local
 `, clusterName))

@@ -149,6 +149,9 @@ var _ = Describe("Valkey CEL validation", func() {
 			Entry("cluster-node-timeout", "cluster-node-timeout"),
 			Entry("cluster-config-file", "cluster-config-file"),
 			Entry("cluster-require-full-coverage", "cluster-require-full-coverage"),
+			// tls-cluster is cluster-only but does not start with cluster-.
+			Entry("tls-cluster", "tls-cluster"),
+			Entry("tls-cluster upper case", "TLS-Cluster"),
 			// Valkey config keys are case-insensitive, so the rule lowercases.
 			// A bare startsWith would let these through.
 			Entry("mixed case", "Cluster-Enabled"),

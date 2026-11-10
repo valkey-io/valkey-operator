@@ -204,8 +204,8 @@ type ValkeySpec struct {
 	// A Valkey always runs with cluster-enabled no.
 	// Every cluster- key is therefore inert or actively wrong here.
 	// Accepting one would store an unhonourable spec.
-	// Every cluster directive carries the prefix.
-	// A prefix test therefore covers them all without enumerating each key.
+	// Every cluster directive except tls-cluster carries the prefix.
+	// A prefix test plus tls-cluster therefore covers them all without enumerating each key.
 	//
 	// The comparison is lowercased because Valkey keys are case-insensitive.
 	// Cluster-Enabled has to be caught alongside cluster-enabled.
@@ -214,7 +214,7 @@ type ValkeySpec struct {
 	// The base config still emits cluster-config-file for every node.
 	// That keeps the node state file on the writable /data volume.
 	// See buildManagedConfig.
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-'))",message="spec.config must not contain cluster- keys: a Valkey runs standalone, so cluster mode directives are not supported"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-') && key.lowerAscii() != 'tls-cluster')",message="spec.config must not contain cluster- keys or tls-cluster: a Valkey runs standalone, so cluster mode directives are not supported"
 	//
 	// replicaof and its alias slaveof are rejected too.
 	// The operator owns replication topology.

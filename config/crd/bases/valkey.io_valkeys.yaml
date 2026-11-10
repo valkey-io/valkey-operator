@@ -79,8 +79,8 @@ spec:
                   A Valkey always runs with cluster-enabled no.
                   Every cluster- key is therefore inert or actively wrong here.
                   Accepting one would store an unhonourable spec.
-                  Every cluster directive carries the prefix.
-                  A prefix test therefore covers them all without enumerating each key.
+                  Every cluster directive except tls-cluster carries the prefix.
+                  A prefix test plus tls-cluster therefore covers them all without enumerating each key.
 
                   The comparison is lowercased because Valkey keys are case-insensitive.
                   Cluster-Enabled has to be caught alongside cluster-enabled.
@@ -99,9 +99,10 @@ spec:
                   The '.' keeps module configs such as search.<name> valid.
                 type: object
                 x-kubernetes-validations:
-                - message: 'spec.config must not contain cluster- keys: a Valkey runs
-                    standalone, so cluster mode directives are not supported'
-                  rule: self.all(key, !key.lowerAscii().startsWith('cluster-'))
+                - message: 'spec.config must not contain cluster- keys or tls-cluster:
+                    a Valkey runs standalone, so cluster mode directives are not supported'
+                  rule: self.all(key, !key.lowerAscii().startsWith('cluster-') &&
+                    key.lowerAscii() != 'tls-cluster')
                 - message: 'spec.config must not contain replicaof or slaveof: the
                     operator owns replication topology'
                   rule: self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))

@@ -70,6 +70,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
+	preStop, err := scripts.ReadFile("scripts/" + preStopScriptKey)
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded %s: %w", preStopScriptKey, err)
+	}
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -82,6 +86,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"liveness-check.sh":  string(liveness),
 			"readiness-check.sh": string(readiness),
 			initScriptKey:        string(initScript),
+			preStopScriptKey:     string(preStop),
 		},
 	}, nil
 }
@@ -321,6 +326,16 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 					},
 				},
 			},
+			// Hand a primary's slots to a replica before SIGTERM, while the
+			// primary can still vote for it. A ConfigMap without the script
+			// (an external one on a standalone ValkeyNode) skips the hook.
+			Lifecycle: &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: preStopCommand(scriptsMountPath + "/" + preStopScriptKey),
+					},
+				},
+			},
 			ReadinessProbe: &corev1.Probe{
 				PeriodSeconds:    5,
 				FailureThreshold: 5,
@@ -395,6 +410,13 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	// standalone node must not gain one by default.
 	if node.Spec.Exporter.Enabled != nil && *node.Spec.Exporter.Enabled {
 		containers = append(containers, generateMetricsExporterContainerDef(node.Spec.Exporter, node.Labels[LabelCluster], node.Spec.TLS))
+	}
+
+	// A preStop the user sets on the server container replaces the default
+	// one. The strategic merge would otherwise keep both handlers, and
+	// Kubernetes rejects a hook with more than one.
+	if userSetsPreStop(node.Spec.Containers) {
+		containers[0].Lifecycle = nil
 	}
 
 	merged, err := mergePatchContainers(containers, node.Spec.Containers)
@@ -543,6 +565,23 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	}}
 	applyContainerAPIDefaults(c)
 	return c[0]
+}
+
+// userSetsPreStop reports whether patches give the server container a
+// preStop handler of their own. Like mergePatchContainers, it looks at the
+// last patch for the server container only.
+func userSetsPreStop(patches []corev1.Container) bool {
+	for _, c := range slices.Backward(patches) {
+		if c.Name == serverContainerName {
+			return c.Lifecycle != nil && c.Lifecycle.PreStop != nil
+		}
+	}
+	return false
+}
+
+// preStopCommand runs script when it exists and exits 0 otherwise.
+func preStopCommand(script string) []string {
+	return []string{shellPath, "-c", fmt.Sprintf(`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi`, script, shellPath)}
 }
 
 // initContainerCommand runs script when it exists and exits 0 otherwise. An

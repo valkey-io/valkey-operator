@@ -55,7 +55,7 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, the init container script, the server start
+// and readiness probe scripts, the init container script, the primary handoff
 // script, plus an empty valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
@@ -71,7 +71,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
-	serverStart, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
 	}
@@ -83,23 +83,23 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			Labels:    valkeyNodeLabels(node),
 		},
 		Data: map[string]string{
-			"valkey.conf":        generateValkeyNodeConfig(node),
-			"liveness-check.sh":  string(liveness),
-			"readiness-check.sh": string(readiness),
-			initScriptKey:        string(initScript),
-			serverStartScriptKey: string(serverStart),
+			"valkey.conf":           generateValkeyNodeConfig(node),
+			"liveness-check.sh":     string(liveness),
+			"readiness-check.sh":    string(readiness),
+			initScriptKey:           string(initScript),
+			primaryHandoffScriptKey: string(primaryHandoff),
 		},
 	}, nil
 }
 
-// serverStartCommand starts the server through /scripts/primary-handoff.sh when the
+// primaryHandoffCommand starts the server through /scripts/primary-handoff.sh when the
 // mounted ConfigMap carries it, and directly otherwise, so a node that mounts
 // an external ConfigMap without the script still starts. $0 is the server
 // binary and $@ its arguments.
-const serverStartCommand = `if [ -f /scripts/` + serverStartScriptKey + ` ]; then exec /bin/sh /scripts/` +
-	serverStartScriptKey + ` "$@"; fi; exec "$0" "$@"`
+const primaryHandoffCommand = `if [ -f /scripts/` + primaryHandoffScriptKey + ` ]; then exec /bin/sh /scripts/` +
+	primaryHandoffScriptKey + ` "$@"; fi; exec "$0" "$@"`
 
-// usesServerStartScript reports whether the server container of the node starts
+// usesPrimaryHandoffScript reports whether the server container of the node starts
 // through primary-handoff.sh: a cluster member without persistence. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
 // not, and the script holds the server back until a crashed primary's replica
@@ -110,15 +110,15 @@ const serverStartCommand = `if [ -f /scripts/` + serverStartScriptKey + ` ]; the
 // the cluster controller computes the workload revision of a node it builds
 // before the reference is set, and both controllers must build the same
 // template or they roll the node against each other.
-func usesServerStartScript(node *valkeyiov1alpha1.ValkeyNode) bool {
+func usesPrimaryHandoffScript(node *valkeyiov1alpha1.ValkeyNode) bool {
 	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
 }
 
 // serverCommand returns the command of the server container.
 func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
 	args := make([]string, 0, 9+len(announceArgs))
-	if usesServerStartScript(node) {
-		args = append(args, shellPath, "-c", serverStartCommand)
+	if usesPrimaryHandoffScript(node) {
+		args = append(args, shellPath, "-c", primaryHandoffCommand)
 	}
 	args = append(args, "valkey-server", "/config/valkey.conf")
 	args = append(args, announceArgs...)
@@ -131,7 +131,7 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 // The value is fixed so that a change of cluster-node-timeout, which the script
 // reads from the config, never rolls the pod.
 func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode) int32 {
-	if usesServerStartScript(node) {
+	if usesPrimaryHandoffScript(node) {
 		return 80
 	}
 	return 20

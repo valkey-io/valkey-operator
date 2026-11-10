@@ -481,7 +481,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   acl:
     users:
       - name: default

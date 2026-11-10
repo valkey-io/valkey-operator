@@ -56,10 +56,10 @@ type stubCLI struct {
 	seedFiles     []string // extra files to create in the data dir
 }
 
-// runStartScript runs the script with the given nodes.conf and valkey.conf.
-func runStartScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scriptRun {
+// runPrimaryHandoffScript runs the script with the given nodes.conf and valkey.conf.
+func runPrimaryHandoffScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scriptRun {
 	t.Helper()
-	cmd, dataDir, calls := startScriptCommand(t, nodesConf, valkeyConf, cli)
+	cmd, dataDir, calls := primaryHandoffTestCommand(t, nodesConf, valkeyConf, cli)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	_, statErr := os.Stat(filepath.Join(dataDir, "nodes.conf"))
@@ -70,11 +70,11 @@ func runStartScript(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) scr
 	return scriptRun{out: string(out), nodeKept: statErr == nil, dataDir: dataDir, cliCalls: n}
 }
 
-// startScriptCommand prepares the script run: a data dir with the given
+// primaryHandoffTestCommand prepares the script run: a data dir with the given
 // nodes.conf and snapshot files, stub binaries on PATH, and the command. It
 // returns the command unstarted, the data dir and the file counting the ROLE
 // calls the stub answered.
-func startScriptCommand(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) (cmd *exec.Cmd, dataDir, calls string) {
+func primaryHandoffTestCommand(t *testing.T, nodesConf, valkeyConf string, cli stubCLI) (cmd *exec.Cmd, dataDir, calls string) {
 	t.Helper()
 	dir := t.TempDir()
 	dataDir = filepath.Join(dir, "data")
@@ -115,7 +115,7 @@ func startScriptCommand(t *testing.T, nodesConf, valkeyConf string, cli stubCLI)
 	return cmd, dataDir, calls
 }
 
-// assertSnapshotKept checks the snapshot files seeded by runStartScript.
+// assertSnapshotKept checks the snapshot files seeded by runPrimaryHandoffScript.
 func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 	t.Helper()
 	for _, f := range []string{"dump.rdb", "temp-42.rdb"} {
@@ -132,25 +132,25 @@ func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 	}
 }
 
-// The server command of a cluster node runs serverStartCommand, which falls
+// The server command of a cluster node runs primaryHandoffCommand, which falls
 // back to the server binary when the mounted ConfigMap has no primary-handoff.sh,
 // as an external ConfigMap may not. The script path is absolute, so this
 // exercises the fallback on a machine without it.
-func TestServerStartCommandFallsBackToServer(t *testing.T) {
-	if _, err := os.Stat("/scripts/" + serverStartScriptKey); err == nil {
-		t.Skip("/scripts/" + serverStartScriptKey + " exists on this machine")
+func TestPrimaryHandoffCommandFallsBackToServer(t *testing.T) {
+	if _, err := os.Stat("/scripts/" + primaryHandoffScriptKey); err == nil {
+		t.Skip("/scripts/" + primaryHandoffScriptKey + " exists on this machine")
 	}
 	binDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
-	cmd := exec.Command(shellPath, "-c", serverStartCommand, "valkey-server", "/config/valkey.conf", "--port", "6379")
+	cmd := exec.Command(shellPath, "-c", primaryHandoffCommand, "valkey-server", "/config/valkey.conf", "--port", "6379")
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	assert.Equal(t, "valkey-server /config/valkey.conf --port 6379\n", string(out))
 }
 
-func TestServerStartScript(t *testing.T) {
+func TestPrimaryHandoffScript(t *testing.T) {
 	const serverLine = "valkey-server"
 	// Valkey 9 address format, with an empty hostname and a tls-port of 0.
 	primary := primaryID + " 10.0.0.1:6379@16379,,tls-port=0,shard-id=abc myself,master - 0 1760000000000 1 connected 0-5460\n"
@@ -160,14 +160,14 @@ func TestServerStartScript(t *testing.T) {
 	conf := "cluster-node-timeout 1000\n" // the hand-off wait caps at six timeouts: 6s
 
 	t.Run("no nodes.conf starts the server untouched", func(t *testing.T) {
-		r := runStartScript(t, "", conf, stubCLI{})
+		r := runPrimaryHandoffScript(t, "", conf, stubCLI{})
 		assert.Contains(t, r.out, serverLine)
 		assert.False(t, r.nodeKept)
 		assert.Zero(t, r.cliCalls)
 	})
 
 	t.Run("a primary with a replica waits for its promotion and starts as a new node", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: 2})
+		r := runPrimaryHandoffScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: 2})
 		assert.Contains(t, r.out, "Previous run was primary "+primaryID+" with a replica")
 		assert.Regexp(t, `Replica hand-off done after [0-9]+s; starting as a new node`, r.out)
 		assert.Contains(t, r.out, serverLine)
@@ -185,20 +185,20 @@ func TestServerStartScript(t *testing.T) {
 		{"large timeout caps the wait", "9223372036854775807", "300s"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r := runStartScript(t, primary+replica+vars, "cluster-node-timeout "+tt.value+"\n", stubCLI{})
+			r := runPrimaryHandoffScript(t, primary+replica+vars, "cluster-node-timeout "+tt.value+"\n", stubCLI{})
 			assert.Contains(t, r.out, "waiting up to "+tt.wait)
 			assert.Contains(t, r.out, serverLine)
 		})
 	}
 
 	t.Run("a replica that follows another primary counts as moved on", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3"})
+		r := runPrimaryHandoffScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3"})
 		assert.Contains(t, r.out, "starting as a new node")
 		assert.False(t, r.nodeKept)
 	})
 
 	t.Run("the identity is kept when the replica has not moved on by the cap", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+vars, conf, stubCLI{promotedAfter: -1})
+		r := runPrimaryHandoffScript(t, primary+replica+vars, conf, stubCLI{promotedAfter: -1})
 		assert.Contains(t, r.out, "Replica 10.0.0.2:6379 still follows this node")
 		assert.Regexp(t, `Keeping the previous identity after [5-7]s`, r.out)
 		assert.Contains(t, r.out, serverLine)
@@ -209,7 +209,7 @@ func TestServerStartScript(t *testing.T) {
 	t.Run("SIGTERM ends the wait with exit status 143", func(t *testing.T) {
 		// The script is PID 1 in the container, where a shell ignores SIGTERM
 		// unless it traps it, and the kubelet would wait out the grace period.
-		cmd, dataDir, _ := startScriptCommand(t, primary+replica+vars, "cluster-node-timeout 50000\n", stubCLI{promotedAfter: -1})
+		cmd, dataDir, _ := primaryHandoffTestCommand(t, primary+replica+vars, "cluster-node-timeout 50000\n", stubCLI{promotedAfter: -1})
 		log, err := os.Create(filepath.Join(filepath.Dir(dataDir), "log"))
 		require.NoError(t, err)
 		defer func() { _ = log.Close() }()
@@ -235,7 +235,7 @@ func TestServerStartScript(t *testing.T) {
 	})
 
 	t.Run("a replica that does not answer is bounded per call and keeps the identity", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{promotedAfter: -1, hang: true})
+		r := runPrimaryHandoffScript(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{promotedAfter: -1, hang: true})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 		assert.LessOrEqual(t, r.cliCalls, 3, "each hung call is cut after the per-call timeout")
@@ -245,13 +245,13 @@ func TestServerStartScript(t *testing.T) {
 		me := primaryID + " fd00::1:6379@16379,,tls-port=0,shard-id=abc myself,master - 0 1760000000000 1 connected 0-5460\n"
 		them := replicaID + " fd00::2:6379@16379,,tls-port=0,shard-id=abc slave " + primaryID + " 0 1760000000000 1 connected\n"
 		// The stub keeps following fd00::1, which must not pass as another primary.
-		r := runStartScript(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
+		r := runPrimaryHandoffScript(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 	})
 
 	t.Run("the whole data dir is emptied, custom and hidden snapshot names included", func(t *testing.T) {
-		r := runStartScript(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb", ".snapshot.rdb"}})
+		r := runPrimaryHandoffScript(t, primary+replica+vars, conf, stubCLI{seedFiles: []string{"custom.rdb", ".snapshot.rdb"}})
 		assert.False(t, r.nodeKept)
 		entries, err := os.ReadDir(r.dataDir)
 		require.NoError(t, err)
@@ -260,7 +260,7 @@ func TestServerStartScript(t *testing.T) {
 
 	t.Run("a replica flagged fail does not count", func(t *testing.T) {
 		failed := replicaID + " 10.0.0.2:6379@16379,,tls-port=0,shard-id=abc slave,fail " + primaryID + " 0 1760000000000 1 connected\n"
-		r := runStartScript(t, primary+failed+other+vars, conf, stubCLI{})
+		r := runPrimaryHandoffScript(t, primary+failed+other+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
@@ -270,7 +270,7 @@ func TestServerStartScript(t *testing.T) {
 
 	t.Run("a replica flagged nofailover is waited for, since the operator takes it over", func(t *testing.T) {
 		nofailover := replicaID + " 10.0.0.2:6379@16379,,tls-port=0,shard-id=abc slave,nofailover " + primaryID + " 0 1760000000000 1 connected\n"
-		r := runStartScript(t, primary+nofailover+vars, conf, stubCLI{promotedAfter: 2})
+		r := runPrimaryHandoffScript(t, primary+nofailover+vars, conf, stubCLI{promotedAfter: 2})
 		assert.Contains(t, r.out, "Previous run was primary "+primaryID+" with a replica")
 		assert.Contains(t, r.out, "starting as a new node")
 		assert.False(t, r.nodeKept)
@@ -278,7 +278,7 @@ func TestServerStartScript(t *testing.T) {
 
 	t.Run("a primary without a replica keeps its identity", func(t *testing.T) {
 		otherReplica := replicaID + " 10.0.0.2:6379@16379,valkey-c-1-1-0 slave " + otherID + " 0 1760000000000 2 connected\n"
-		r := runStartScript(t, primary+other+otherReplica+vars, conf, stubCLI{})
+		r := runPrimaryHandoffScript(t, primary+other+otherReplica+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
@@ -287,7 +287,7 @@ func TestServerStartScript(t *testing.T) {
 	t.Run("a replica keeps its identity", func(t *testing.T) {
 		me := replicaID + " 10.0.0.2:6379@16379,valkey-c-0-1-0 myself,slave " + primaryID + " 0 1760000000000 1 connected\n"
 		them := primaryID + " 10.0.0.1:6379@16379,valkey-c-0-0-0 master - 0 1760000000000 1 connected 0-5460\n"
-		r := runStartScript(t, me+them+vars, conf, stubCLI{})
+		r := runPrimaryHandoffScript(t, me+them+vars, conf, stubCLI{})
 		assert.NotContains(t, r.out, "Previous run")
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)

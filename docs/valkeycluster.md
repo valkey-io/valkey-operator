@@ -177,6 +177,16 @@ kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<p
 
 The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A reachable primary, including one loading its dataset, cannot be taken over through this annotation. The operator removes the ID after TAKEOVER succeeds; a failed command retains the authorization and retries the same replica. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary's persistent volume returns, Valkey can recover without discarding its data, and the `AwaitingManualTakeover` condition clears.
 
+The operator pins an uncertain attempt to its selected replica so it cannot promote a sibling using the same approval. If that replica becomes unavailable before the result can be confirmed, the operator waits rather than switching replicas. To cancel that attempt and choose again, remove the approval, wait until `valkey.io/force-takeover-attempt` disappears from the ValkeyCluster metadata, then annotate the failed primary ID again:
+
+```sh
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover-
+# Wait until valkey.io/force-takeover-attempt is absent from the ValkeyCluster metadata.
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
+```
+
+Removing the approval cancels the attempt; no takeover happens until it is re-applied.
+
 #### Constraints
 
 - Only supported with `workloadType: StatefulSet`

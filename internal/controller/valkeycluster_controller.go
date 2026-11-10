@@ -1869,6 +1869,9 @@ func (r *ValkeyClusterReconciler) resolveForceTakeoverAttempt(ctx context.Contex
 	if attempt == nil {
 		return nil
 	}
+	if !parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])[attempt.primaryID] {
+		return r.clearForceTakeoverAttempt(ctx, cluster, *attempt, false)
+	}
 	primaryReturned := state.FindNodeById(attempt.primaryID) != nil
 	replica := state.FindNodeById(attempt.replicaID)
 	replicaPromoted := replica != nil && replica.IsPrimary() && len(replica.GetSlots()) > 0

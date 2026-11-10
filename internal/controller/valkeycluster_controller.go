@@ -1632,7 +1632,7 @@ func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1a
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonAwaitingManualTakeover, message, metav1.ConditionFalse)
 }
 
-// manualTakeoverMessage builds the condition and event text for orphaned shards.
+// manualTakeoverMessage builds the condition text for orphaned shards.
 func manualTakeoverMessage(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) string {
 	items := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {

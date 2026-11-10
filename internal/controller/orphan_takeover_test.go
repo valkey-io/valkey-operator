@@ -170,6 +170,7 @@ func TestOrphansToTakeOver(t *testing.T) {
 type takeoverClient struct {
 	vclient.Client
 	takeovers  int
+	commands   []string
 	err        error
 	beforeCall func()
 }
@@ -178,6 +179,7 @@ type takeoverClient struct {
 func (c *takeoverClient) B() vclient.Builder { return vclient.Builder{} }
 
 func (c *takeoverClient) Do(_ context.Context, cmd vclient.Completed) vclient.ValkeyResult {
+	c.commands = append(c.commands, strings.Join(cmd.Commands(), " "))
 	if strings.Join(cmd.Commands(), " ") == "CLUSTER FAILOVER TAKEOVER" {
 		c.takeovers++
 		if c.beforeCall != nil {

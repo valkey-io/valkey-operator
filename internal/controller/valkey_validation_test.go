@@ -71,7 +71,11 @@ var _ = Describe("Valkey CEL validation", func() {
 	It("rejects an invalid ServiceAccount name", func() {
 		valkey := valkeyFor("val-bad-sa", 0)
 		valkey.Spec.ServiceAccountName = "Not_Valid"
-		Expect(k8sClient.Create(ctx, valkey)).NotTo(Succeed())
+		err := k8sClient.Create(ctx, valkey)
+		Expect(err).To(HaveOccurred())
+		// Check the field, so a create that fails for an unrelated reason does not pass.
+		Expect(err.Error()).To(ContainSubstring("spec.serviceAccountName"))
+		Expect(err.Error()).To(ContainSubstring("should match"))
 	})
 
 	DescribeTable("validates the TLS serverName",

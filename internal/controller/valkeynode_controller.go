@@ -75,6 +75,12 @@ type valkeyConfigClient interface {
 	// rather than an error, so a user that has not been loaded yet reads as out
 	// of sync.
 	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
+	// UserEnabled reports whether the user exists and is on. An unknown user
+	// reads as not enabled.
+	UserEnabled(ctx context.Context, username string) (bool, error)
+	// KillUserClients closes every connection logged in as the user, other
+	// than the operator's own.
+	KillUserClients(ctx context.Context, username string) error
 }
 
 // realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
@@ -128,6 +134,32 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	// Valkey keeps passwords as a set, but normalize anyway so both sides of
 	// the comparison are in the same shape.
 	return normalizeHashes(hashes), nil
+}
+
+func (rc *realValkeyConfigClient) UserEnabled(ctx context.Context, username string) (bool, error) {
+	m, err := rc.client.Do(ctx, rc.client.B().AclGetuser().Username(username).Build()).AsMap()
+	if err != nil {
+		if vclient.IsValkeyNil(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("ACL GETUSER %s: %w", username, err)
+	}
+	flags, ok := m["flags"]
+	if !ok {
+		return false, nil
+	}
+	fs, err := flags.AsStrSlice()
+	if err != nil {
+		return false, fmt.Errorf("ACL GETUSER %s flags: %w", username, err)
+	}
+	return slices.Contains(fs, "on"), nil
+}
+
+func (rc *realValkeyConfigClient) KillUserClients(ctx context.Context, username string) error {
+	if err := rc.client.Do(ctx, rc.client.B().ClientKill().User(username).SkipmeYes().Build()).Error(); err != nil {
+		return fmt.Errorf("CLIENT KILL USER %s: %w", username, err)
+	}
+	return nil
 }
 
 // realConfigClient returns the pooled client for the node's pod.

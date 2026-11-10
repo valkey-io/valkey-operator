@@ -2033,6 +2033,29 @@ type fakeConfigClient struct {
 	aclOnLoad map[string][]string
 	aclLoads  int
 	aclErr    error
+
+	// enabled is each user's on/off state, as ACL GETUSER flags report it.
+	// enabledOnLoad, when set, replaces it on ACL LOAD.
+	enabled       map[string]bool
+	enabledOnLoad map[string]bool
+	// killed records the users whose connections CLIENT KILL USER closed.
+	killed  []string
+	killErr error
+}
+
+func (f *fakeConfigClient) UserEnabled(_ context.Context, username string) (bool, error) {
+	if f.aclErr != nil {
+		return false, f.aclErr
+	}
+	return f.enabled[username], nil
+}
+
+func (f *fakeConfigClient) KillUserClients(_ context.Context, username string) error {
+	if f.killErr != nil {
+		return f.killErr
+	}
+	f.killed = append(f.killed, username)
+	return nil
 }
 
 func (f *fakeConfigClient) SetConfig(_ context.Context, params map[string]string) error {
@@ -2047,6 +2070,9 @@ func (f *fakeConfigClient) LoadACL(_ context.Context) error {
 	}
 	if f.aclOnLoad != nil {
 		f.aclHashes = f.aclOnLoad
+	}
+	if f.enabledOnLoad != nil {
+		f.enabled = f.enabledOnLoad
 	}
 	return nil
 }
@@ -2147,6 +2173,44 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 	It("returns an error when ACL LOAD fails", func() {
 		fake := &fakeConfigClient{aclErr: fmt.Errorf("boom")}
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).To(HaveOccurred())
+		Expect(synced).To(BeFalse())
+	})
+
+	It("closes default's connections when a load turns it off", func() {
+		fake := &fakeConfigClient{
+			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			enabledOnLoad: map[string]bool{"default": false},
+		}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(Equal([]string{"default"}))
+	})
+
+	It("leaves default's connections alone when it was already off", func() {
+		// Clients that have connected but not yet sent AUTH are reported as
+		// default too; killing on every load would keep dropping them.
+		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(BeEmpty())
+	})
+
+	It("leaves default's connections alone while it stays on", func() {
+		// Also the case of a stale mounted aclfile: the load changes nothing
+		// yet, and the next one, once the volume catches up, does the kill.
+		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": true}}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(BeEmpty())
+	})
+
+	It("returns an error when closing default's connections fails", func() {
+		fake := &fakeConfigClient{
+			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			enabledOnLoad: map[string]bool{"default": false}, killErr: fmt.Errorf("boom"),
+		}
 		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())

@@ -156,14 +156,47 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 		return false, "", err
 	}
 
+	defaultWasEnabled, err := c.UserEnabled(ctx, defaultUser)
+	if err != nil {
+		return false, "", err
+	}
 	if err := c.LoadACL(ctx); err != nil {
 		return false, "", err
+	}
+	if defaultWasEnabled {
+		if err := closeDisabledDefaultSessions(ctx, c); err != nil {
+			return false, "", err
+		}
 	}
 	synced, err := aclObservablyInSync(ctx, c, desired)
 	if err != nil || !synced {
 		return false, "", err
 	}
 	return true, aclRevision(desired), nil
+}
+
+// closeDisabledDefaultSessions closes the connections still logged in as
+// default once a load has turned it off.
+//
+// ACL LOAD copies the new default rules into the existing user, and a
+// connection that logged in while default was on keeps its authenticated flag,
+// so it goes on running commands with the new rules. The disabled default the
+// cluster controller writes keeps every permission (see disabledDefaultUser),
+// so without this such a connection keeps full access until it disconnects.
+//
+// It runs only on the on-to-off transition, which applyLiveACL detects by
+// reading default before the load. Killing whenever default is off would also
+// drop, on every reconcile, clients that have connected but not yet sent AUTH,
+// since Valkey reports those as default too and exposes no flag that tells the
+// two apart. The cost is that a kill lost to an error or an operator restart
+// between the load and the kill is not retried: the next load sees default
+// already off.
+func closeDisabledDefaultSessions(ctx context.Context, c valkeyConfigClient) error {
+	enabled, err := c.UserEnabled(ctx, defaultUser)
+	if err != nil || enabled {
+		return err
+	}
+	return c.KillUserClients(ctx, defaultUser)
 }
 
 // setAppliedACLRevision records in status the aclfile revision the running

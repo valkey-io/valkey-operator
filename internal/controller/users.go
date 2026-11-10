@@ -269,8 +269,8 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 }
 
 // deprecatedFieldConfigWarnings flags spec.users and spec.replicas, which
-// spec.acl.users and spec.replicasPerShard replace. An explicit spec.replicas
-// of 0 is omitted from the object, so it does not warn.
+// spec.acl.users and spec.replicasPerShard replace. spec.replicas of 0 does
+// not warn: the Go field is 0 when the spec omits it and when the spec sets 0.
 func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
 	var warnings []configWarning
 	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users

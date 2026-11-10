@@ -1825,6 +1825,7 @@ spec:
                 x-kubernetes-validations:
                 - message: container name 'server-init' is reserved for the operator-managed
                     init container
+                  reason: FieldValueForbidden
                   rule: '!self.exists(c, c.name == ''server-init'')'
               exporter:
                 default:
@@ -3753,22 +3754,33 @@ spec:
                 type: string
                 x-kubernetes-validations:
                 - message: workloadType is immutable
+                  reason: FieldValueForbidden
                   rule: self == oldSelf
             type: object
             x-kubernetes-validations:
             - message: 'spec.replicas must be 0: replication is not implemented yet,
                 only standalone Valkey is supported'
               rule: '!has(self.replicas) || self.replicas == 0'
-            - message: persistence requires workloadType StatefulSet
+            - fieldPath: .persistence
+              message: persistence requires workloadType StatefulSet
+              reason: FieldValueForbidden
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
-            - message: persistence cannot be removed once set
+            - fieldPath: .persistence
+              message: persistence cannot be removed once set
+              reason: FieldValueForbidden
               rule: '!has(oldSelf.persistence) || has(self.persistence)'
-            - message: persistence cannot be added after creation
+            - fieldPath: .persistence
+              message: persistence cannot be added after creation
+              reason: FieldValueForbidden
               rule: has(oldSelf.persistence) || !has(self.persistence)
-            - message: persistence.size may only be expanded
+            - fieldPath: .persistence.size
+              message: persistence.size may only be expanded
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size))
                 >= 0'
-            - message: persistence.storageClassName is immutable
+            - fieldPath: .persistence.storageClassName
+              message: persistence.storageClassName is immutable
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName)
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName

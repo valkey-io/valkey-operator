@@ -150,11 +150,11 @@ type ValkeyPodDisruptionBudgetConfig struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.replicas) || self.replicas == 0",message="spec.replicas must be 0: replication is not implemented yet, only standalone Valkey is supported"
 //
 // Persistence rules are copied from ValkeyClusterSpec so both kinds behave alike.
-// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable",fieldPath=".persistence.storageClassName",reason="FieldValueForbidden"
 type ValkeySpec struct {
 	// Replicas is the number of replicas in addition to the primary.
 	// Values above 0 are rejected until replication support lands.
@@ -186,7 +186,7 @@ type ValkeySpec struct {
 
 	// WorkloadType picks the ValkeyNode's workload kind. It is immutable.
 	// +kubebuilder:default=StatefulSet
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable",reason="FieldValueForbidden"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -202,7 +202,7 @@ type ValkeySpec struct {
 	// Applied as a strategic merge patch.
 	// The name server-init is reserved for the operator-managed init container.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Config holds additional Valkey configuration parameters.

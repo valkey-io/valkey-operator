@@ -128,10 +128,32 @@ func newShardPrimaries(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valke
 	return primaries
 }
 
+// readyServerContainers returns, for each member pod, the ID of its server
+// container when that container is running and ready.
+func (r *ValkeyClusterReconciler) readyServerContainers(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) map[string]string {
+	ready := map[string]string{}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if !usesInitialSyncGate(node) || node.Status.PodName == "" {
+			continue
+		}
+		pod := &corev1.Pod{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: node.Status.PodName}, pod); err != nil {
+			continue
+		}
+		if server := serverContainerStatus(pod); server != nil && server.State.Running != nil && server.Ready {
+			ready[pod.Name] = server.ContainerID
+		}
+	}
+	return ready
+}
+
 // syncInitialSyncGates sets initialSyncGate on each member pod from this
-// pass's scrape. A node the scrape missed keeps its value. It reports whether
-// any member pod is still gated, so the caller can look again soon.
-func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState) (bool, error) {
+// pass's scrape. A node the scrape missed keeps its value. readyBefore holds
+// the server containers that were ready before the scrape (see
+// readyServerContainers). It reports whether any member pod is still gated,
+// so the caller can look again soon.
+func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState, readyBefore map[string]string) (bool, error) {
 	scraped := map[string]*valkey.NodeState{}
 	if state != nil {
 		for _, n := range state.AllNodes() {
@@ -163,7 +185,7 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		if ip := node.Status.PodIP; ip != "" && ip == pod.Status.PodIP {
 			scrape = scraped[ip]
 		}
-		want, write, reason, message := initialSyncGateChange(pod, scrape, newPrimaries[node.Status.PodIP])
+		want, write, reason, message := initialSyncGateChange(pod, scrape, newPrimaries[node.Status.PodIP], readyBefore[pod.Name])
 		if write {
 			if err := r.setInitialSyncGate(ctx, pod, want, reason, message); err != nil {
 				errs = append(errs, err)
@@ -182,10 +204,10 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 // initialSyncGateChange decides the pod's gate and whether to write it. A true
 // gate belongs to the server container that earned it, whose ID the condition
 // message records. Once that container is gone the server may have come back
-// empty, so the gate is cleared, and only a ready server container can earn it
-// again: a container that has just restarted is not ready yet, so a scrape
-// taken before the restart cannot approve it.
-func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool) (bool, bool, string, string) {
+// empty, so the gate is cleared. Only the container that was already running
+// and ready before the scrape (readyBefore) can earn it, so a scrape cannot
+// approve a container that started after it.
+func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool, readyBefore string) (bool, bool, string, string) {
 	condition := podCondition(pod, initialSyncGate)
 	current := condition != nil && condition.Status == corev1.ConditionTrue
 	server := serverContainerStatus(pod)
@@ -196,7 +218,7 @@ func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPr
 	verdict, reason, message := initialSyncVerdict(scrape, newShardPrimary)
 	switch verdict {
 	case gateSet:
-		if current || !running || !server.Ready {
+		if current || !running || !server.Ready || server.ContainerID != readyBefore {
 			return current, false, "", ""
 		}
 		return true, true, reason, gateMessage(message, server.ContainerID)

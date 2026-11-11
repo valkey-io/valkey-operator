@@ -185,20 +185,28 @@ func TestInitialSyncGateChange(t *testing.T) {
 		scrape      *valkey.NodeState
 		want, write bool
 		reason      string
+		// readyBefore overrides the container that was ready before the
+		// scrape; empty means the pod's current server container.
+		readyBefore string
 	}{
-		{"same server container", gatePod("p", "10.0.0.1", &isTrue), linkDown, true, false, ""},
-		{"readiness flap on the same server container", notReady(gatePod("p", "10.0.0.1", &isTrue)), linkDown, true, false, ""},
-		{"restarted container seen before it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), false), serving, false, true, "ServerRestarted"},
-		{"restarted container seen only after it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), true), serving, false, true, "ServerRestarted"},
-		{"server container crash-looping", waiting(gatePod("p", "10.0.0.1", &isTrue)), nil, false, true, "ServerRestarted"},
-		{"true gate that records no container", unrecorded(gatePod("p", "10.0.0.1", &isTrue)), linkDown, false, true, "ServerRestarted"},
-		{"a scrape cannot approve a container that is not ready", restarted(gatePod("p", "10.0.0.1", nil), false), serving, false, false, ""},
-		{"a ready container earns the gate", gatePod("p", "10.0.0.1", nil), serving, true, true, "OwnsSlots"},
-		{"a cleared gate records the full sync that follows", cleared("ServerRestarted"), syncing, false, true, "FullSyncInProgress"},
-		{"a cleared gate already on the full sync is not rewritten", cleared("FullSyncInProgress"), syncing, false, false, ""},
+		{"same server container", gatePod("p", "10.0.0.1", &isTrue), linkDown, true, false, "", ""},
+		{"readiness flap on the same server container", notReady(gatePod("p", "10.0.0.1", &isTrue)), linkDown, true, false, "", ""},
+		{"restarted container seen before it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), false), serving, false, true, "ServerRestarted", ""},
+		{"restarted container seen only after it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), true), serving, false, true, "ServerRestarted", ""},
+		{"server container crash-looping", waiting(gatePod("p", "10.0.0.1", &isTrue)), nil, false, true, "ServerRestarted", ""},
+		{"true gate that records no container", unrecorded(gatePod("p", "10.0.0.1", &isTrue)), linkDown, false, true, "ServerRestarted", ""},
+		{"a scrape cannot approve a container that is not ready", restarted(gatePod("p", "10.0.0.1", nil), false), serving, false, false, "", ""},
+		{"a ready container earns the gate", gatePod("p", "10.0.0.1", nil), serving, true, true, "OwnsSlots", ""},
+		{"a scrape that predates a restart cannot approve the new container", restarted(gatePod("p", "10.0.0.1", nil), true), serving, false, false, "", "containerd://p-1"},
+		{"a cleared gate records the full sync that follows", cleared("ServerRestarted"), syncing, false, true, "FullSyncInProgress", ""},
+		{"a cleared gate already on the full sync is not rewritten", cleared("FullSyncInProgress"), syncing, false, false, "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			want, write, reason, message := initialSyncGateChange(tt.pod, tt.scrape, false)
+			readyBefore := tt.readyBefore
+			if readyBefore == "" {
+				readyBefore = tt.pod.Status.ContainerStatuses[0].ContainerID
+			}
+			want, write, reason, message := initialSyncGateChange(tt.pod, tt.scrape, false, readyBefore)
 			assert.Equal(t, tt.want, want)
 			assert.Equal(t, tt.write, write)
 			if tt.write {
@@ -252,7 +260,7 @@ func TestSyncInitialSyncGates(t *testing.T) {
 		return nil
 	}
 
-	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state)
+	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state, r.readyServerContainers(context.Background(), nodes))
 	require.NoError(t, err)
 	assert.True(t, gated, "the syncing replica is still gated")
 	require.NotNil(t, gate("primary"))
@@ -266,7 +274,7 @@ func TestSyncInitialSyncGates(t *testing.T) {
 	assert.Nil(t, gate("replaced"), "a pod whose IP is not the one scraped is not judged on that scrape")
 
 	shard.Nodes[1] = gateReplica("10.0.0.2", map[string]string{"master_link_status": "up", "master_sync_in_progress": "0"})
-	gated, err = r.syncInitialSyncGates(context.Background(), nodes, state)
+	gated, err = r.syncInitialSyncGates(context.Background(), nodes, state, r.readyServerContainers(context.Background(), nodes))
 	require.NoError(t, err)
 	assert.True(t, gated, "the replaced pod is still waiting for a scrape of its own")
 	assert.Equal(t, corev1.ConditionTrue, gate("syncing").Status)
@@ -297,7 +305,7 @@ func TestSyncInitialSyncGatesRetriesAFailedWrite(t *testing.T) {
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{gateMember("0", "0", "10.0.0.1", "primary")}}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{gatePrimary("10.0.0.1", "0-16383", nil)}}}}
 
-	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state)
+	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state, r.readyServerContainers(context.Background(), nodes))
 	require.Error(t, err)
 	assert.True(t, gated, "a write that failed is retried on the gate recheck")
 }

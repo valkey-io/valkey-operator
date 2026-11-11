@@ -253,6 +253,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	// Before the scrape, so a gate is earned only by a server container that
+	// was already ready when its INFO was read.
+	readyBefore := r.readyServerContainers(ctx, nodes)
 	state := r.scrapeClusterState(ctx, nodes, dial)
 
 	// A node that rejects the operator's password is missing from state, so
@@ -270,7 +273,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Before the walk, which returns early on many paths. A failure leaves
 	// each gate as it is, so a new pod stays unready until a later pass.
-	gatesPending, err := r.syncInitialSyncGates(ctx, nodes, state)
+	gatesPending, err := r.syncInitialSyncGates(ctx, nodes, state, readyBefore)
 	if err != nil {
 		log.Error(err, "failed to update the initial sync readiness gate")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InitialSyncGateFailed", "SetReadinessGate",

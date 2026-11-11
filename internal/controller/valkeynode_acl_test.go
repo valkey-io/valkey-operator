@@ -213,3 +213,21 @@ func TestLiveApplyResult(t *testing.T) {
 	require.ErrorIs(t, err, failed)
 	assert.Zero(t, result.RequeueAfter)
 }
+
+func TestACLFileDisablesDefault(t *testing.T) {
+	for name, tc := range map[string]struct {
+		acl  string
+		want bool
+	}{
+		"off":                  {"user default off ~* &* +@all\n", true},
+		"on":                   {"user default on nopass ~* &* +@all\n", false},
+		"no default line":      {"user alice on #aaa ~* +@all\n", false},
+		"last flag wins (off)": {"user default on nopass off ~*\n", true},
+		"last flag wins (on)":  {"user default off on nopass ~*\n", false},
+		"another user's off":   {"user alice off\nuser default on nopass\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, aclFileDisablesDefault(tc.acl))
+		})
+	}
+}

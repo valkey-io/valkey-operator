@@ -901,6 +901,11 @@ const (
 	// ReasonOperatorAuthenticationFailed is used with ConditionDegraded, Ready
 	// and Progressing when a node rejects the operator's _operator password.
 	ReasonOperatorAuthenticationFailed = "OperatorAuthenticationFailed"
+
+	// ReasonUsersACLUnresolved marks Degraded when a user's password Secret or key
+	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
+	// while topology work continues.
+	ReasonUsersACLUnresolved = "UsersACLUnresolved"
 )
 
 // +kubebuilder:object:root=true

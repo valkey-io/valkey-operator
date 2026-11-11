@@ -258,16 +258,14 @@ func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context,
 // reads from the API server rather than the cache: a stale cached empty value
 // would skip the write and lose the pending close.
 func (r *ValkeyNodeReconciler) clearAppliedACLRevision(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	if current.Status.AppliedACLRevision == "" {
-		return nil
-	}
-	patchBase := current.DeepCopy()
-	current.Status.AppliedACLRevision = ""
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+	_, err := r.patchStatus(ctx, node, r.APIReader, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		if current.Status.AppliedACLRevision == "" {
+			return false
+		}
+		current.Status.AppliedACLRevision = ""
+		return true
+	})
+	if err != nil {
 		return fmt.Errorf("clear appliedACLRevision: %w", err)
 	}
 	return nil
@@ -276,16 +274,14 @@ func (r *ValkeyNodeReconciler) clearAppliedACLRevision(ctx context.Context, node
 // setAppliedACLRevision records in status the aclfile revision the running
 // server was confirmed to hold.
 func (r *ValkeyNodeReconciler) setAppliedACLRevision(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, revision string) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	if current.Status.AppliedACLRevision == revision {
-		return nil
-	}
-	patchBase := current.DeepCopy()
-	current.Status.AppliedACLRevision = revision
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		if current.Status.AppliedACLRevision == revision {
+			return false
+		}
+		current.Status.AppliedACLRevision = revision
+		return true
+	})
+	if err != nil {
 		return fmt.Errorf("patch appliedACLRevision: %w", err)
 	}
 	return nil

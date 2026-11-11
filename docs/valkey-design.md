@@ -1,6 +1,6 @@
 # Valkey Design
 
-`Valkey` is the user-facing CRD for Valkey outside cluster mode. It describes one primary, optional replicas, and in future an optional failover authority. The data pods run on [ValkeyNode](valkeynode-design.md), the same internal primitive `ValkeyCluster` uses.
+`Valkey` is the user-facing CRD for Valkey outside cluster mode. Today it runs one primary. Replication and an optional failover authority are planned. The data pods run on [ValkeyNode](valkeynode-design.md), the same internal primitive `ValkeyCluster` uses.
 
 The full design, including replication and `ValkeySentinel`, was settled in [discussion #387](https://github.com/valkey-io/valkey-operator/discussions/387), which grew out of [issue #198](https://github.com/valkey-io/valkey-operator/issues/198). This document records what is built today and the decisions behind it. Read #387 for the parts not built yet.
 

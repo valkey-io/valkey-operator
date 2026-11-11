@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -179,40 +180,60 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 }
 
 // initialSyncGateChange decides the pod's gate and whether to write it. A true
-// gate belongs to the server process that earned it: once that process is gone
-// the server may have come back empty, so it has to show its data again.
-// LastTransitionTime dates the gate from the process that earned it, so a gate
-// confirmed for a new process is rewritten even though it stays true.
+// gate belongs to the server container that earned it, whose ID the condition
+// message records. Once that container is gone the server may have come back
+// empty, so the gate is cleared, and only a ready server container can earn it
+// again: a container that has just restarted is not ready yet, so a scrape
+// taken before the restart cannot approve it.
 func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool) (bool, bool, string, string) {
 	condition := podCondition(pod, initialSyncGate)
 	current := condition != nil && condition.Status == corev1.ConditionTrue
-	verdict, reason, message := initialSyncVerdict(scrape, newShardPrimary)
-	if current && serverRestartedSince(pod, condition.LastTransitionTime.Time) {
-		if verdict == gateSet && serverContainerRunning(pod) {
-			return true, true, reason, message
-		}
-		return false, true, "ServerRestarted", "The server restarted after the gate was set; it is set again once its data is verified"
+	server := serverContainerStatus(pod)
+	running := server != nil && server.State.Running != nil
+	if current && (!running || server.ContainerID != gateContainerID(condition.Message)) {
+		return false, true, "ServerRestarted", "The server container that earned the gate is gone; it is set again once the new one shows its data"
 	}
+	verdict, reason, message := initialSyncVerdict(scrape, newShardPrimary)
 	switch verdict {
 	case gateSet:
-		return true, !current, reason, message
+		if current || !running || !server.Ready {
+			return current, false, "", ""
+		}
+		return true, true, reason, gateMessage(message, server.ContainerID)
 	case gateClear:
 		return false, current || condition == nil || condition.Reason != reason, reason, message
 	}
 	return current, false, "", ""
 }
 
-// serverRestartedSince reports whether the server container is not running,
-// or started at or after since. The kubelet records the start, so a restart is
-// seen even when INFO cannot be read, and a sidecar's readiness does not count.
-// Both times have second precision, so a start in the same second counts.
-func serverRestartedSince(pod *corev1.Pod, since time.Time) bool {
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == serverContainerName {
-			return status.State.Running == nil || !status.State.Running.StartedAt.Time.Before(since)
+// gateContainerMarker introduces the server container ID at the end of a true
+// gate's message.
+const gateContainerMarker = " (server container "
+
+// gateMessage appends the ID of the server container that earned the gate.
+func gateMessage(message, containerID string) string {
+	return message + gateContainerMarker + containerID + ")"
+}
+
+// gateContainerID returns the server container ID a gate message records, or
+// "" when it records none.
+func gateContainerID(message string) string {
+	i := strings.LastIndex(message, gateContainerMarker)
+	if i < 0 || !strings.HasSuffix(message, ")") {
+		return ""
+	}
+	return strings.TrimSuffix(message[i+len(gateContainerMarker):], ")")
+}
+
+// serverContainerStatus returns the kubelet's status of the server container,
+// or nil.
+func serverContainerStatus(pod *corev1.Pod) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == serverContainerName {
+			return &pod.Status.ContainerStatuses[i]
 		}
 	}
-	return true
+	return nil
 }
 
 // setInitialSyncGate writes initialSyncGate on the pod with a strategic merge

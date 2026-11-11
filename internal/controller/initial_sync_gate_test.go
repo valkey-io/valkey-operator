@@ -119,13 +119,11 @@ func TestNewShardPrimaries(t *testing.T) {
 	assert.Empty(t, newShardPrimaries(state, nodes))
 }
 
-// gateTestNow anchors the start and transition times in gate fixtures.
-var gateTestNow = time.Now().Truncate(time.Second)
-
-// gatePod is a member pod at ip that lists initialSyncGate, whose server has
-// run for ten minutes, with the gate's current status when recorded, set a
-// minute ago.
+// gatePod is a member pod at ip that lists initialSyncGate, whose server
+// container containerd://<name>-1 is running and ready, with the gate's current
+// status when recorded. A true gate records that container.
 func gatePod(name, ip string, gate *corev1.ConditionStatus) *corev1.Pod {
+	containerID := "containerd://" + name + "-1"
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec: corev1.PodSpec{
@@ -136,43 +134,49 @@ func gatePod(name, ip string, gate *corev1.ConditionStatus) *corev1.Pod {
 			PodIP:      ip,
 			Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}},
 			ContainerStatuses: []corev1.ContainerStatus{{
-				Name:  serverContainerName,
-				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(gateTestNow.Add(-10 * time.Minute))}},
+				Name:        serverContainerName,
+				ContainerID: containerID,
+				Ready:       true,
+				State:       corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(time.Now().Add(-10 * time.Minute))}},
 			}},
 		},
 	}
 	if gate != nil {
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-			Type: initialSyncGate, Status: *gate, LastTransitionTime: metav1.NewTime(gateTestNow.Add(-time.Minute)),
-		})
+		condition := corev1.PodCondition{Type: initialSyncGate, Status: *gate, Reason: "Earlier"}
+		if *gate == corev1.ConditionTrue {
+			condition.Message = gateMessage("set earlier", containerID)
+		}
+		pod.Status.Conditions = append(pod.Status.Conditions, condition)
 	}
 	return pod
 }
 
 func TestInitialSyncGateChange(t *testing.T) {
 	isTrue, isFalse := corev1.ConditionTrue, corev1.ConditionFalse
-	setAt := gateTestNow.Add(-time.Minute)
-	started := func(pod *corev1.Pod, at time.Time) *corev1.Pod {
-		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(at)}}
+	restarted := func(pod *corev1.Pod, ready bool) *corev1.Pod {
+		pod.Status.ContainerStatuses[0].ContainerID = "containerd://p-2"
+		pod.Status.ContainerStatuses[0].Ready = ready
+		return pod
+	}
+	notReady := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Status.ContainerStatuses[0].Ready = false
 		return pod
 	}
 	waiting := func(pod *corev1.Pod) *corev1.Pod {
 		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
 		return pod
 	}
-	sidecarFlap := func(pod *corev1.Pod) *corev1.Pod {
-		pod.Status.Conditions[0].Status = corev1.ConditionFalse
+	unrecorded := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Status.Conditions[1].Message = "set earlier"
 		return pod
 	}
-	clearedFor := func(reason string) *corev1.Pod {
+	cleared := func(reason string) *corev1.Pod {
 		pod := gatePod("p", "10.0.0.1", &isFalse)
 		pod.Status.Conditions[1].Reason = reason
 		return pod
 	}
-	slotless := gatePrimary("10.0.0.1", "", nil)
 	serving := gatePrimary("10.0.0.1", "0-16383", nil)
 	linkDown := gateReplica("10.0.0.1", map[string]string{"master_link_status": "down", "master_sync_in_progress": "0"})
-	noInfo := gateReplica("10.0.0.1", nil)
 	syncing := gateReplica("10.0.0.1", map[string]string{"master_link_status": "down", "master_sync_in_progress": "1"})
 
 	for _, tt := range []struct {
@@ -182,22 +186,26 @@ func TestInitialSyncGateChange(t *testing.T) {
 		want, write bool
 		reason      string
 	}{
-		{"server up since before the gate", gatePod("p", "10.0.0.1", &isTrue), slotless, true, false, ""},
-		{"sidecar readiness flap while the server keeps its data", sidecarFlap(gatePod("p", "10.0.0.1", &isTrue)), linkDown, true, false, ""},
-		{"server restarted empty after the gate", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), slotless, false, true, "ServerRestarted"},
-		{"server restarted and owns slots again", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), serving, true, true, "OwnsSlots"},
-		{"server restarted while INFO cannot be read", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), noInfo, false, true, "ServerRestarted"},
-		{"server restarted in the second the gate was set", started(gatePod("p", "10.0.0.1", &isTrue), setAt), linkDown, false, true, "ServerRestarted"},
+		{"same server container", gatePod("p", "10.0.0.1", &isTrue), linkDown, true, false, ""},
+		{"readiness flap on the same server container", notReady(gatePod("p", "10.0.0.1", &isTrue)), linkDown, true, false, ""},
+		{"restarted container seen before it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), false), serving, false, true, "ServerRestarted"},
+		{"restarted container seen only after it is ready", restarted(gatePod("p", "10.0.0.1", &isTrue), true), serving, false, true, "ServerRestarted"},
 		{"server container crash-looping", waiting(gatePod("p", "10.0.0.1", &isTrue)), nil, false, true, "ServerRestarted"},
-		{"a cleared gate records the full sync that follows", clearedFor("ServerRestarted"), syncing, false, true, "FullSyncInProgress"},
-		{"a cleared gate already on the full sync is not rewritten", clearedFor("FullSyncInProgress"), syncing, false, false, "FullSyncInProgress"},
+		{"true gate that records no container", unrecorded(gatePod("p", "10.0.0.1", &isTrue)), linkDown, false, true, "ServerRestarted"},
+		{"a scrape cannot approve a container that is not ready", restarted(gatePod("p", "10.0.0.1", nil), false), serving, false, false, ""},
+		{"a ready container earns the gate", gatePod("p", "10.0.0.1", nil), serving, true, true, "OwnsSlots"},
+		{"a cleared gate records the full sync that follows", cleared("ServerRestarted"), syncing, false, true, "FullSyncInProgress"},
+		{"a cleared gate already on the full sync is not rewritten", cleared("FullSyncInProgress"), syncing, false, false, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			want, write, reason, _ := initialSyncGateChange(tt.pod, tt.scrape, false)
+			want, write, reason, message := initialSyncGateChange(tt.pod, tt.scrape, false)
 			assert.Equal(t, tt.want, want)
 			assert.Equal(t, tt.write, write)
 			if tt.write {
 				assert.Equal(t, tt.reason, reason)
+			}
+			if tt.write && want {
+				assert.Equal(t, tt.pod.Status.ContainerStatuses[0].ContainerID, gateContainerID(message), "a true gate records its container")
 			}
 		})
 	}

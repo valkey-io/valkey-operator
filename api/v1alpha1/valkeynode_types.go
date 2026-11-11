@@ -335,7 +335,9 @@ type ValkeyNodeStatus struct {
 
 	// AppliedACLRevision is the revision of the operator-managed aclfile that
 	// the running server was last confirmed to hold, recorded as ACLApplied
-	// becomes True.
+	// becomes True. It is cleared before an ACL LOAD that turns a live default
+	// user off, and recorded again only once the connections still logged in
+	// as default have been closed.
 	// +optional
 	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
 }

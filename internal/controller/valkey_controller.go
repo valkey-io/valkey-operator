@@ -120,8 +120,10 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 // failChild records a child resource error as Ready=False and returns the error for a retry.
+// Progressing is set to False with the same reason, so a stale waiting message does not hide the error.
 func (r *ValkeyReconciler) failChild(ctx context.Context, v *valkeyiov1alpha1.Valkey, reason string, err error) (ctrl.Result, error) {
 	setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionReady, reason, err.Error(), metav1.ConditionFalse)
+	setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, reason, err.Error(), metav1.ConditionFalse)
 	_ = r.updateStatus(ctx, v)
 	return ctrl.Result{}, err
 }

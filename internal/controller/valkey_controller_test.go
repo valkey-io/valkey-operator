@@ -126,6 +126,27 @@ var _ = Describe("Valkey controller", func() {
 		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonInstanceHealthy))
 	})
 
+	It("reports a child resource error instead of a stale waiting state", func() {
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getStatus().State).To(Equal(valkeyiov1alpha1.ValkeyStateReconciling))
+
+		// A user whose password Secret does not exist makes the ACL step fail.
+		current := &valkeyiov1alpha1.Valkey{}
+		Expect(k8sClient.Get(ctx, req.NamespacedName, current)).To(Succeed())
+		current.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+			Name:     "alice",
+			Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "missing"}},
+		}}}
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
+		status := getStatus()
+		Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateFailed))
+		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersAclError))
+	})
+
 	It("reports Degraded when the node cannot apply the ACL, and clears it after", func() {
 		_, err := reconciler.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())

@@ -12,6 +12,7 @@
 
 - [Config](#config)
 - [Containers](#containers)
+- [Default images](#default-images)
 - [Metrics](#metrics)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
@@ -130,6 +131,24 @@ serviceAccountName: valkey-sa
 pod. If unset, the pod uses the namespace's default ServiceAccount.
 
 The referenced ServiceAccount **must already exist in the same namespace** as the ValkeyCluster. The operator assigns the name to each pod template; it does not create the ServiceAccount or configure its RBAC. If the ServiceAccount does not exist, pod admission rejects each pod and the cluster cannot become ready. The operator reports a `ConfigurationWarning` with reason `ServiceAccountNotFound`; if an API error prevents the existence check, it reports `ServiceAccountLookupFailed`. The check is advisory, and Kubernetes admission remains authoritative. Changing this field updates every ValkeyNode pod template and rolls all pods.
+
+### Default images
+
+The operator requires the `--default-valkey-image` and `--default-exporter-image`
+flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
+`spec.exporter.image` is empty.
+
+- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster or
+  standalone ValkeyNode that omits `spec.image`.
+- Changing `--default-exporter-image` rolls pods with an enabled exporter whose
+  ValkeyCluster or standalone ValkeyNode omits `spec.exporter.image`.
+
+When upgrading a deployment that supplies its own manager arguments, add both
+flags. To keep the previous image defaults, use
+`--default-valkey-image=valkey/valkey:9.0.0` and
+`--default-exporter-image=oliver006/redis_exporter:v1.88.0`.
+The Kustomize deployment and `make run` already pass these values. When using
+a Helm chart that does not supply these flags, add them to `manager.args`.
 
 ### Metrics
 

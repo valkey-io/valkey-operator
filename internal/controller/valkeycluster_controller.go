@@ -1566,15 +1566,123 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // is an explicit acknowledgement that the primary's durable writes may be lost.
 // Returns (result, true) when a takeover ran or manual recovery is required.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) (ctrl.Result, bool) {
-	log := logf.FromContext(ctx)
 	if len(candidates) == 0 {
 		return ctrl.Result{}, false
 	}
 	allCandidates := slices.Clone(candidates)
 	manual := cluster.Spec.Persistence != nil && !state.HasFailoverQuorum()
 	attempts := parseForceTakeoverAttempts(cluster.Annotations[forceTakeoverAttemptAnnotation])
+	candidates, attempts = r.pinOrphanTakeoverCandidates(ctx, cluster, state, candidates, attempts)
+	if manual {
+		r.setAwaitingManualTakeover(cluster, nodes, allCandidates)
+		candidates = authorizedOrphanTakeovers(cluster, candidates)
+		if len(candidates) == 0 {
+			if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+				r.recordStaleAddressesHealed(cluster, healed)
+				_ = r.updateStatus(ctx, cluster, state)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+		}
+	}
+
+	tookOver := false
+	for _, candidate := range candidates {
+		attempt, hasAttempt := attempts[candidate.primaryId]
+		switch r.promoteOrphanCandidate(ctx, cluster, candidate, manual, attempt, hasAttempt) {
+		case orphanTakeoverWait:
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+		case orphanTakeoverSucceeded:
+			remaining := slices.DeleteFunc(slices.Clone(allCandidates), func(item orphan) bool {
+				return item.primaryId == candidate.primaryId
+			})
+			if manual && len(remaining) > 0 {
+				r.setAwaitingManualTakeover(cluster, nodes, remaining)
+			} else {
+				removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
+				removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
+			}
+			tookOver = true
+		}
+		if tookOver {
+			break // one takeover per reconcile; requeue and re-evaluate
+		}
+	}
+	if manual {
+		if tookOver {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	}
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+}
+
+type orphanTakeoverOutcome uint8
+
+const (
+	orphanTakeoverSkipped orphanTakeoverOutcome = iota
+	orphanTakeoverSucceeded
+	orphanTakeoverWait
+)
+
+func (r *ValkeyClusterReconciler) promoteOrphanCandidate(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, candidate orphan, manual bool, attempt forceTakeoverAttempt, hasAttempt bool) orphanTakeoverOutcome {
+	log := logf.FromContext(ctx)
+	primaryID := candidate.primaryId
+	protectedAttempt := manual || hasAttempt
+	if manual && !hasAttempt {
+		claimed, err := r.claimForceTakeoverAttempt(ctx, cluster, primaryID, candidate.replica.Id)
+		if err != nil {
+			log.Error(err, "failed to persist takeover attempt", "primaryId", primaryID)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverAttemptRecordFailed", "FailoverTakeover", "Could not persist takeover attempt for primary %s; no takeover was attempted: %v", primaryID, err)
+			return orphanTakeoverSkipped
+		}
+		if !claimed {
+			return orphanTakeoverWait
+		}
+		attempt = forceTakeoverAttempt{primaryID: primaryID, replicaID: candidate.replica.Id}
+		hasAttempt = true
+		protectedAttempt = true
+	}
+	if protectedAttempt {
+		approved, err := r.forceTakeoverAttemptApproved(ctx, cluster, attempt)
+		if err != nil {
+			log.Error(err, "failed to verify takeover authorization", "primaryId", primaryID)
+			return orphanTakeoverWait
+		}
+		if !approved {
+			if hasAttempt {
+				if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
+					log.Error(err, "failed to clear revoked takeover attempt", "primaryId", primaryID)
+				}
+			}
+			return orphanTakeoverSkipped
+		}
+	}
+	log.Info("promoting orphaned replica via TAKEOVER", "node", candidate.replica.Address, "deadPrimary", primaryID)
+	if err := candidate.replica.Client.Do(ctx, candidate.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
+		log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", candidate.replica.Address)
+		message := fmt.Sprintf("TAKEOVER for primary %s via replica %s failed: %v", primaryID, candidate.replica.Id, err)
+		if protectedAttempt {
+			message += "; authorization remains in place and this replica will be retried"
+		}
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "FailoverTakeoverFailed", "FailoverTakeover", "%s", message)
+		return orphanTakeoverSkipped
+	}
+	if protectedAttempt {
+		if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, true); err != nil {
+			log.Error(err, "TAKEOVER succeeded but authorization cleanup failed", "primaryId", primaryID, "replicaId", candidate.replica.Id)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverCleanupFailed", "FailoverTakeover", "TAKEOVER succeeded for primary %s via replica %s, but authorization cleanup failed; the in-flight attempt prevents another promotion: %v", primaryID, candidate.replica.Id, err)
+		}
+	}
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted orphaned replica via TAKEOVER for dead primary %s", primaryID)
+	return orphanTakeoverSucceeded
+}
+
+func (r *ValkeyClusterReconciler) pinOrphanTakeoverCandidates(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, candidates []orphan, attempts map[string]forceTakeoverAttempt) ([]orphan, map[string]forceTakeoverAttempt) {
+	log := logf.FromContext(ctx)
+	requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
 	for primaryID, attempt := range attempts {
-		if !parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])[primaryID] {
+		if !requested[primaryID] {
 			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
 				log.Error(err, "failed to clear revoked takeover attempt", "primaryId", primaryID)
 			}
@@ -1603,100 +1711,18 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		}
 	}
 	slices.SortFunc(filtered, func(a, b orphan) int { return strings.Compare(a.primaryId, b.primaryId) })
-	candidates = filtered
-	if manual {
-		r.setAwaitingManualTakeover(cluster, nodes, allCandidates)
+	return filtered, attempts
+}
 
-		requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
-		allowed := make([]orphan, 0, len(candidates))
-		for _, candidate := range candidates {
-			if requested[candidate.primaryId] {
-				allowed = append(allowed, candidate)
-			}
+func authorizedOrphanTakeovers(cluster *valkeyiov1alpha1.ValkeyCluster, candidates []orphan) []orphan {
+	requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
+	allowed := make([]orphan, 0, len(candidates))
+	for _, candidate := range candidates {
+		if requested[candidate.primaryId] {
+			allowed = append(allowed, candidate)
 		}
-		if len(allowed) == 0 {
-			if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
-				r.recordStaleAddressesHealed(cluster, healed)
-				_ = r.updateStatus(ctx, cluster, state)
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-			}
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-		}
-		slices.SortFunc(allowed, func(a, b orphan) int { return strings.Compare(a.primaryId, b.primaryId) })
-		candidates = allowed
 	}
-	tookOver := false
-	for _, c := range candidates {
-		attempt, hasAttempt := attempts[c.primaryId]
-		protectedAttempt := manual || hasAttempt
-		if manual && !hasAttempt {
-			claimed, err := r.claimForceTakeoverAttempt(ctx, cluster, c.primaryId, c.replica.Id)
-			if err != nil {
-				log.Error(err, "failed to persist takeover attempt", "primaryId", c.primaryId)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverAttemptRecordFailed", "FailoverTakeover", "Could not persist takeover attempt for primary %s; no takeover was attempted: %v", c.primaryId, err)
-				continue
-			}
-			if !claimed {
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-			}
-			attempt = forceTakeoverAttempt{primaryID: c.primaryId, replicaID: c.replica.Id}
-			attempts[c.primaryId] = attempt
-			hasAttempt = true
-			protectedAttempt = true
-		}
-		if protectedAttempt {
-			approved, err := r.forceTakeoverAttemptApproved(ctx, cluster, attempt)
-			if err != nil {
-				log.Error(err, "failed to verify takeover authorization", "primaryId", c.primaryId)
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-			}
-			if !approved {
-				if hasAttempt {
-					if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
-						log.Error(err, "failed to clear revoked takeover attempt", "primaryId", c.primaryId)
-					}
-				}
-				continue
-			}
-		}
-		log.Info("promoting orphaned replica via TAKEOVER", "node", c.replica.Address, "deadPrimary", c.primaryId)
-		if err := c.replica.Client.Do(ctx, c.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", c.replica.Address)
-			message := fmt.Sprintf("TAKEOVER for primary %s via replica %s failed: %v", c.primaryId, c.replica.Id, err)
-			if protectedAttempt {
-				message += "; authorization remains in place and this replica will be retried"
-			}
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "FailoverTakeoverFailed", "FailoverTakeover", "%s", message)
-			continue
-		}
-		if protectedAttempt {
-			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, true); err != nil {
-				log.Error(err, "TAKEOVER succeeded but authorization cleanup failed", "primaryId", c.primaryId, "replicaId", c.replica.Id)
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverCleanupFailed", "FailoverTakeover", "TAKEOVER succeeded for primary %s via replica %s, but authorization cleanup failed; the in-flight attempt prevents another promotion: %v", c.primaryId, c.replica.Id, err)
-			}
-		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted orphaned replica via TAKEOVER for dead primary %s", c.primaryId)
-		if protectedAttempt {
-			remaining := slices.DeleteFunc(slices.Clone(allCandidates), func(candidate orphan) bool {
-				return candidate.primaryId == c.primaryId
-			})
-			if manual && len(remaining) > 0 {
-				r.setAwaitingManualTakeover(cluster, nodes, remaining)
-			} else {
-				removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
-				removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
-			}
-		}
-		tookOver = true
-		break // one takeover per reconcile; requeue and re-evaluate
-	}
-	if manual {
-		if tookOver {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-	}
-	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	return allowed
 }
 
 // setAwaitingManualTakeover records why a persistent orphan needs operator action.

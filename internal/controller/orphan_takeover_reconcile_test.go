@@ -48,7 +48,7 @@ func newOrphanReconcileFixture(t *testing.T, annotation string, holdRoll, unsche
 	t.Helper()
 	f := newOrphanTakeoverFixture(t, true, annotation, nil)
 	f.cluster.Spec.Shards = 2
-	f.cluster.Spec.Replicas = 1
+	f.cluster.Spec.ReplicasPerShard = 1
 	f.cluster.Spec.Image = "valkey/valkey:9.0.0"
 	f.cluster.Spec.WorkloadType = valkeyiov1alpha1.WorkloadTypeStatefulSet
 

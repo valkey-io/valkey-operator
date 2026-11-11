@@ -924,6 +924,12 @@ const (
 // indexes grow enough for the ValkeyNode name <name>-<shard>-<node>, which
 // every pod carries as its app.kubernetes.io/instance label value, to reach 63
 // first.
+//
+// Kubernetes admits a dot in a custom resource name, but the headless Service
+// valkey-<name> is a DNS label and cannot hold one. The dot rule rejects it at
+// creation instead of leaving the cluster at ServiceError. It skips updates,
+// because the name cannot change, so a cluster that already has a dotted name
+// can still be updated and deleted.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
@@ -935,6 +941,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.clientAuth.ca",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !self.metadata.name.contains('.')",optionalOldSelf=true,message="metadata.name must not contain '.', because the headless Service name valkey-<name> is derived from it"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.certificates.server.secretName",reason="FieldValueForbidden"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`

@@ -45,11 +45,6 @@ const initialSyncGate corev1.PodConditionType = "valkey.io/initial-sync-complete
 // member's gate is still false.
 const initialSyncGateRecheck = 5 * time.Second
 
-// serverRestartSlack absorbs the second-granularity rounding of the server's
-// uptime and of the gate's transition time, so a gate set just after the
-// server started is not read as a restart.
-const serverRestartSlack = 5 * time.Second
-
 // usesInitialSyncGate reports whether the node's pod carries initialSyncGate:
 // a member the cluster controller built, which has all three cluster labels.
 // A standalone ValkeyNode, even one with the cluster label, has no controller
@@ -143,7 +138,6 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		}
 	}
 	newPrimaries := newShardPrimaries(state, nodes)
-	now := time.Now()
 	gated := false
 	var errs []error
 	for i := range nodes.Items {
@@ -168,7 +162,7 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		if ip := node.Status.PodIP; ip != "" && ip == pod.Status.PodIP {
 			scrape = scraped[ip]
 		}
-		want, write, reason, message := initialSyncGateChange(pod, scrape, newPrimaries[node.Status.PodIP], now)
+		want, write, reason, message := initialSyncGateChange(pod, scrape, newPrimaries[node.Status.PodIP])
 		if write {
 			if err := r.setInitialSyncGate(ctx, pod, want, reason, message); err != nil {
 				errs = append(errs, err)
@@ -185,22 +179,16 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 }
 
 // initialSyncGateChange decides the pod's gate and whether to write it. A true
-// gate belongs to the server process that earned it: when the containers are
-// not ready, or the server has been up for less time than the gate has been
-// set, the server restarted and may be empty, so it has to show its data again.
-func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool, now time.Time) (bool, bool, string, string) {
+// gate belongs to the server process that earned it: once that process is gone
+// the server may have come back empty, so it has to show its data again.
+// LastTransitionTime dates the gate from the process that earned it, so a gate
+// confirmed for a new process is rewritten even though it stays true.
+func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool) (bool, bool, string, string) {
 	condition := podCondition(pod, initialSyncGate)
 	current := condition != nil && condition.Status == corev1.ConditionTrue
-	if !podContainersReady(pod) {
-		if current {
-			return false, true, "ServerNotReady", "The server container is not ready; the gate is set again once its data is verified"
-		}
-		return current, false, "", ""
-	}
 	verdict, reason, message := initialSyncVerdict(scrape, newShardPrimary)
-	if current && serverRestartedSince(scrape, condition.LastTransitionTime.Time, now) {
-		if verdict == gateSet {
-			// Rewrite to date the gate from this server process.
+	if current && serverRestartedSince(pod, condition.LastTransitionTime.Time) {
+		if verdict == gateSet && serverContainerRunning(pod) {
 			return true, true, reason, message
 		}
 		return false, true, "ServerRestarted", "The server restarted after the gate was set; it is set again once its data is verified"
@@ -209,23 +197,22 @@ func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPr
 	case gateSet:
 		return true, !current, reason, message
 	case gateClear:
-		return false, current || condition == nil, reason, message
+		return false, current || condition == nil || condition.Reason != reason, reason, message
 	}
 	return current, false, "", ""
 }
 
-// serverRestartedSince reports whether the scraped server has been up for less
-// time than has passed since the gate was set. Both are durations, so clock
-// skew between the operator and the node does not matter.
-func serverRestartedSince(n *valkey.NodeState, since, now time.Time) bool {
-	if n == nil || since.IsZero() {
-		return false
+// serverRestartedSince reports whether the server container is not running,
+// or started at or after since. The kubelet records the start, so a restart is
+// seen even when INFO cannot be read, and a sidecar's readiness does not count.
+// Both times have second precision, so a start in the same second counts.
+func serverRestartedSince(pod *corev1.Pod, since time.Time) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == serverContainerName {
+			return status.State.Running == nil || !status.State.Running.StartedAt.Time.Before(since)
+		}
 	}
-	uptime, err := strconv.ParseInt(n.Info["uptime_in_seconds"], 10, 64)
-	if err != nil {
-		return false
-	}
-	return time.Duration(uptime)*time.Second+serverRestartSlack < now.Sub(since)
+	return true
 }
 
 // setInitialSyncGate writes initialSyncGate on the pod with a strategic merge

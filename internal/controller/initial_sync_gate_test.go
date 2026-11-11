@@ -119,36 +119,61 @@ func TestNewShardPrimaries(t *testing.T) {
 	assert.Empty(t, newShardPrimaries(state, nodes))
 }
 
-// gatePod is a member pod at ip that lists initialSyncGate, with the gate's
-// current status when recorded.
+// gateTestNow anchors the start and transition times in gate fixtures.
+var gateTestNow = time.Now().Truncate(time.Second)
+
+// gatePod is a member pod at ip that lists initialSyncGate, whose server has
+// run for ten minutes, with the gate's current status when recorded, set a
+// minute ago.
 func gatePod(name, ip string, gate *corev1.ConditionStatus) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec: corev1.PodSpec{
-			Containers:     []corev1.Container{{Name: "server", Image: DefaultImage}},
+			Containers:     []corev1.Container{{Name: serverContainerName, Image: DefaultImage}},
 			ReadinessGates: []corev1.PodReadinessGate{{ConditionType: initialSyncGate}},
 		},
-		Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}},
+		Status: corev1.PodStatus{
+			PodIP:      ip,
+			Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  serverContainerName,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(gateTestNow.Add(-10 * time.Minute))}},
+			}},
+		},
 	}
 	if gate != nil {
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: initialSyncGate, Status: *gate})
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type: initialSyncGate, Status: *gate, LastTransitionTime: metav1.NewTime(gateTestNow.Add(-time.Minute)),
+		})
 	}
 	return pod
 }
 
 func TestInitialSyncGateChange(t *testing.T) {
-	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
-	setAt := metav1.NewTime(now.Add(-time.Minute))
-	gated := func(containersReady corev1.ConditionStatus, gate *corev1.ConditionStatus) *corev1.Pod {
-		pod := gatePod("p", "10.0.0.1", nil)
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: containersReady}}
-		if gate != nil {
-			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: initialSyncGate, Status: *gate, LastTransitionTime: setAt})
-		}
+	isTrue, isFalse := corev1.ConditionTrue, corev1.ConditionFalse
+	setAt := gateTestNow.Add(-time.Minute)
+	started := func(pod *corev1.Pod, at time.Time) *corev1.Pod {
+		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(at)}}
 		return pod
 	}
-	isTrue := corev1.ConditionTrue
-	up := func(seconds string) map[string]string { return map[string]string{"uptime_in_seconds": seconds} }
+	waiting := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+		return pod
+	}
+	sidecarFlap := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Status.Conditions[0].Status = corev1.ConditionFalse
+		return pod
+	}
+	clearedFor := func(reason string) *corev1.Pod {
+		pod := gatePod("p", "10.0.0.1", &isFalse)
+		pod.Status.Conditions[1].Reason = reason
+		return pod
+	}
+	slotless := gatePrimary("10.0.0.1", "", nil)
+	serving := gatePrimary("10.0.0.1", "0-16383", nil)
+	linkDown := gateReplica("10.0.0.1", map[string]string{"master_link_status": "down", "master_sync_in_progress": "0"})
+	noInfo := gateReplica("10.0.0.1", nil)
+	syncing := gateReplica("10.0.0.1", map[string]string{"master_link_status": "down", "master_sync_in_progress": "1"})
 
 	for _, tt := range []struct {
 		name        string
@@ -157,18 +182,23 @@ func TestInitialSyncGateChange(t *testing.T) {
 		want, write bool
 		reason      string
 	}{
-		{"containers stopped after the gate was set", gated(corev1.ConditionFalse, &isTrue), nil, false, true, "ServerNotReady"},
-		{"containers not ready and never gated", gated(corev1.ConditionFalse, nil), gatePrimary("10.0.0.1", "0-16383", nil), false, false, ""},
-		{"server restarted empty after the gate was set", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("3")), false, true, "ServerRestarted"},
-		{"server restarted and owns slots again", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "0-16383", up("3")), true, true, "OwnsSlots"},
-		{"server up since before the gate was set", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("600")), true, false, ""},
-		{"gate set just after the server started", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("58")), true, false, ""},
+		{"server up since before the gate", gatePod("p", "10.0.0.1", &isTrue), slotless, true, false, ""},
+		{"sidecar readiness flap while the server keeps its data", sidecarFlap(gatePod("p", "10.0.0.1", &isTrue)), linkDown, true, false, ""},
+		{"server restarted empty after the gate", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), slotless, false, true, "ServerRestarted"},
+		{"server restarted and owns slots again", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), serving, true, true, "OwnsSlots"},
+		{"server restarted while INFO cannot be read", started(gatePod("p", "10.0.0.1", &isTrue), setAt.Add(30*time.Second)), noInfo, false, true, "ServerRestarted"},
+		{"server restarted in the second the gate was set", started(gatePod("p", "10.0.0.1", &isTrue), setAt), linkDown, false, true, "ServerRestarted"},
+		{"server container crash-looping", waiting(gatePod("p", "10.0.0.1", &isTrue)), nil, false, true, "ServerRestarted"},
+		{"a cleared gate records the full sync that follows", clearedFor("ServerRestarted"), syncing, false, true, "FullSyncInProgress"},
+		{"a cleared gate already on the full sync is not rewritten", clearedFor("FullSyncInProgress"), syncing, false, false, "FullSyncInProgress"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			want, write, reason, _ := initialSyncGateChange(tt.pod, tt.scrape, false, now)
+			want, write, reason, _ := initialSyncGateChange(tt.pod, tt.scrape, false)
 			assert.Equal(t, tt.want, want)
 			assert.Equal(t, tt.write, write)
-			assert.Equal(t, tt.reason, reason)
+			if tt.write {
+				assert.Equal(t, tt.reason, reason)
+			}
 		})
 	}
 }

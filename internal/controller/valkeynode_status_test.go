@@ -148,6 +148,26 @@ var _ = Describe("ValkeyNode status writes from a stale read", func() {
 		))
 	})
 
+	It("stamps the generation it reconciled, not one the spec reached since", func() {
+		r := reconcilerOn()
+		reconciled := read()
+		By("changing the spec after the reconcile read it")
+		changed := read()
+		changed.Spec.WorkloadRevision = "newer"
+		Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+		Expect(read().Generation).To(BeNumerically(">", reconciled.Generation))
+
+		_, err := r.updateStatus(ctx, reconciled, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		n := read()
+		Expect(n.Status.ObservedGeneration).To(Equal(reconciled.Generation),
+			"the newer spec is not processed until its own reconcile")
+		ready := meta.FindStatusCondition(n.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.ObservedGeneration).To(Equal(reconciled.Generation))
+	})
+
 	It("judges a roll pending from the node it writes, not the stale read", func() {
 		r := reconcilerOn()
 		write(rollPending)

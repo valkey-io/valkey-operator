@@ -998,8 +998,11 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		before := current.Status.DeepCopy()
 
 		// Always stamp the observed generation so ValkeyCluster can detect
-		// whether the controller has processed the latest spec.
-		current.Status.ObservedGeneration = current.Generation
+		// whether the controller has processed the latest spec. It is the
+		// generation of the spec this reconcile acted on and observed the pod
+		// for, not of the node patchStatus reads: a spec changed since then is
+		// not processed yet, and its own reconcile stamps it.
+		current.Status.ObservedGeneration = node.Generation
 
 		if node.Spec.Persistence != nil {
 			pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
@@ -1008,15 +1011,15 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				Status:             pvcStatus,
 				Reason:             pvcReason,
 				Message:            pvcMessage,
-				ObservedGeneration: current.Generation,
+				ObservedGeneration: node.Generation,
 			})
-			pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(current, pvc)
+			pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(node, pvc)
 			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 				Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
 				Status:             pvcSizeStatus,
 				Reason:             pvcSizeReason,
 				Message:            pvcSizeMessage,
-				ObservedGeneration: current.Generation,
+				ObservedGeneration: node.Generation,
 			})
 		} else {
 			meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
@@ -1079,7 +1082,7 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			Status:             readyStatus,
 			Reason:             readyReason,
 			Message:            readyMessage,
-			ObservedGeneration: current.Generation,
+			ObservedGeneration: node.Generation,
 		})
 
 		changed = !reflect.DeepEqual(*before, current.Status)

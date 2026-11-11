@@ -242,7 +242,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	state := r.scrapeClusterState(ctx, nodes, dial)
 	orphanCandidates := orphansToTakeOver(state)
-	if err := r.resolveForceTakeoverAttempt(ctx, cluster, state); err != nil {
+	if err := r.resolveForceTakeoverAttempts(ctx, cluster, state); err != nil {
 		log.Error(err, "failed to resolve in-flight takeover attempt")
 		return ctrl.Result{}, err
 	}
@@ -1572,24 +1572,40 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 	}
 	allCandidates := slices.Clone(candidates)
 	manual := cluster.Spec.Persistence != nil && !state.HasFailoverQuorum()
-	attempt := parseForceTakeoverAttempt(cluster.Annotations[forceTakeoverAttemptAnnotation])
-	if attempt != nil {
-		requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
-		if !requested[attempt.primaryID] {
-			if err := r.clearForceTakeoverAttempt(ctx, cluster, *attempt, false); err != nil {
-				log.Error(err, "failed to clear revoked takeover attempt", "primaryId", attempt.primaryID)
+	attempts := parseForceTakeoverAttempts(cluster.Annotations[forceTakeoverAttemptAnnotation])
+	for primaryID, attempt := range attempts {
+		if !parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])[primaryID] {
+			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
+				log.Error(err, "failed to clear revoked takeover attempt", "primaryId", primaryID)
 			}
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-		}
-		candidates = slices.DeleteFunc(candidates, func(candidate orphan) bool {
-			return candidate.primaryId != attempt.primaryID || candidate.replica.Id != attempt.replicaID
-		})
-		if len(candidates) == 0 {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+			delete(attempts, primaryID)
 		}
 	}
+	eligible := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		eligible[candidate.primaryId] = true
+	}
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		attempt, pinned := attempts[candidate.primaryId]
+		if !pinned || candidate.replica.Id == attempt.replicaID {
+			filtered = append(filtered, candidate)
+		}
+	}
+	for primaryID, attempt := range attempts {
+		if !eligible[primaryID] || slices.ContainsFunc(filtered, func(candidate orphan) bool {
+			return candidate.primaryId == primaryID
+		}) {
+			continue
+		}
+		if replica := state.FindNodeById(attempt.replicaID); replica != nil && replica.PrimaryIdFromSelf() == primaryID {
+			filtered = append(filtered, orphan{replica: replica, primaryId: primaryID})
+		}
+	}
+	slices.SortFunc(filtered, func(a, b orphan) int { return strings.Compare(a.primaryId, b.primaryId) })
+	candidates = filtered
 	if manual {
-		r.setAwaitingManualTakeover(cluster, nodes, candidates)
+		r.setAwaitingManualTakeover(cluster, nodes, allCandidates)
 
 		requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
 		allowed := make([]orphan, 0, len(candidates))
@@ -1599,24 +1615,21 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			}
 		}
 		if len(allowed) == 0 {
-			if attempt == nil {
-				if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
-					r.recordStaleAddressesHealed(cluster, healed)
-					_ = r.updateStatus(ctx, cluster, state)
-					return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-				}
+			if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+				r.recordStaleAddressesHealed(cluster, healed)
+				_ = r.updateStatus(ctx, cluster, state)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, true
 		}
-		if attempt == nil {
-			allowed = allowed[:1]
-		}
+		slices.SortFunc(allowed, func(a, b orphan) int { return strings.Compare(a.primaryId, b.primaryId) })
 		candidates = allowed
 	}
 	tookOver := false
 	for _, c := range candidates {
-		protectedAttempt := manual || attempt != nil
-		if manual && attempt == nil {
+		attempt, hasAttempt := attempts[c.primaryId]
+		protectedAttempt := manual || hasAttempt
+		if manual && !hasAttempt {
 			claimed, err := r.claimForceTakeoverAttempt(ctx, cluster, c.primaryId, c.replica.Id)
 			if err != nil {
 				log.Error(err, "failed to persist takeover attempt", "primaryId", c.primaryId)
@@ -1625,6 +1638,25 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			}
 			if !claimed {
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+			}
+			attempt = forceTakeoverAttempt{primaryID: c.primaryId, replicaID: c.replica.Id}
+			attempts[c.primaryId] = attempt
+			hasAttempt = true
+			protectedAttempt = true
+		}
+		if protectedAttempt {
+			approved, err := r.forceTakeoverAttemptApproved(ctx, cluster, attempt)
+			if err != nil {
+				log.Error(err, "failed to verify takeover authorization", "primaryId", c.primaryId)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+			}
+			if !approved {
+				if hasAttempt {
+					if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
+						log.Error(err, "failed to clear revoked takeover attempt", "primaryId", c.primaryId)
+					}
+				}
+				continue
 			}
 		}
 		log.Info("promoting orphaned replica via TAKEOVER", "node", c.replica.Address, "deadPrimary", c.primaryId)
@@ -1635,13 +1667,9 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 				message += "; authorization remains in place and this replica will be retried"
 			}
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "FailoverTakeoverFailed", "FailoverTakeover", "%s", message)
-			if protectedAttempt {
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, true
-			}
 			continue
 		}
 		if protectedAttempt {
-			attempt := forceTakeoverAttempt{primaryID: c.primaryId, replicaID: c.replica.Id}
 			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, true); err != nil {
 				log.Error(err, "TAKEOVER succeeded but authorization cleanup failed", "primaryId", c.primaryId, "replicaId", c.replica.Id)
 				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverCleanupFailed", "FailoverTakeover", "TAKEOVER succeeded for primary %s via replica %s, but authorization cleanup failed; the in-flight attempt prevents another promotion: %v", c.primaryId, c.replica.Id, err)
@@ -1785,12 +1813,28 @@ type forceTakeoverAttempt struct {
 	replicaID string
 }
 
-func parseForceTakeoverAttempt(value string) *forceTakeoverAttempt {
-	primaryID, replicaID, ok := strings.Cut(value, "/")
-	if !ok || primaryID == "" || replicaID == "" {
-		return nil
+func parseForceTakeoverAttempts(value string) map[string]forceTakeoverAttempt {
+	attempts := make(map[string]forceTakeoverAttempt)
+	for item := range strings.SplitSeq(value, ",") {
+		primaryID, replicaID, ok := strings.Cut(item, "/")
+		if ok && primaryID != "" && replicaID != "" {
+			attempts[primaryID] = forceTakeoverAttempt{primaryID: primaryID, replicaID: replicaID}
+		}
 	}
-	return &forceTakeoverAttempt{primaryID: primaryID, replicaID: replicaID}
+	return attempts
+}
+
+func formatForceTakeoverAttempts(attempts map[string]forceTakeoverAttempt) string {
+	primaryIDs := make([]string, 0, len(attempts))
+	for primaryID := range attempts {
+		primaryIDs = append(primaryIDs, primaryID)
+	}
+	slices.Sort(primaryIDs)
+	items := make([]string, 0, len(primaryIDs))
+	for _, primaryID := range primaryIDs {
+		items = append(items, primaryID+"/"+attempts[primaryID].replicaID)
+	}
+	return strings.Join(items, ",")
 }
 
 // claimForceTakeoverAttempt records the selected replica before TAKEOVER. The
@@ -1799,7 +1843,7 @@ func parseForceTakeoverAttempt(value string) *forceTakeoverAttempt {
 func (r *ValkeyClusterReconciler) claimForceTakeoverAttempt(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, primaryID, replicaID string) (bool, error) {
 	current := &valkeyiov1alpha1.ValkeyCluster{}
 	key := client.ObjectKeyFromObject(cluster)
-	if err := r.Get(ctx, key, current); err != nil {
+	if err := r.getLatestCluster(ctx, key, current); err != nil {
 		return false, err
 	}
 	requested := parseForceTakeoverIDs(current.Annotations[forceTakeoverAnnotation])
@@ -1808,15 +1852,17 @@ func (r *ValkeyClusterReconciler) claimForceTakeoverAttempt(ctx context.Context,
 		return false, nil
 	}
 	attempt := forceTakeoverAttempt{primaryID: primaryID, replicaID: replicaID}
-	if existing := parseForceTakeoverAttempt(current.Annotations[forceTakeoverAttemptAnnotation]); existing != nil {
+	attempts := parseForceTakeoverAttempts(current.Annotations[forceTakeoverAttemptAnnotation])
+	if existing, ok := attempts[primaryID]; ok {
 		cluster.Annotations = current.Annotations
-		return existing.primaryID == attempt.primaryID && existing.replicaID == attempt.replicaID, nil
+		return existing.replicaID == attempt.replicaID, nil
 	}
 	base := current.DeepCopy()
 	if current.Annotations == nil {
 		current.Annotations = make(map[string]string)
 	}
-	current.Annotations[forceTakeoverAttemptAnnotation] = attempt.primaryID + "/" + attempt.replicaID
+	attempts[primaryID] = attempt
+	current.Annotations[forceTakeoverAttemptAnnotation] = formatForceTakeoverAttempts(attempts)
 	if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return false, err
 	}
@@ -1830,16 +1876,21 @@ func (r *ValkeyClusterReconciler) claimForceTakeoverAttempt(ctx context.Context,
 func (r *ValkeyClusterReconciler) clearForceTakeoverAttempt(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, attempt forceTakeoverAttempt, consumeAuthorization bool) error {
 	current := &valkeyiov1alpha1.ValkeyCluster{}
 	key := client.ObjectKeyFromObject(cluster)
-	if err := r.Get(ctx, key, current); err != nil {
+	if err := r.getLatestCluster(ctx, key, current); err != nil {
 		return err
 	}
-	want := attempt.primaryID + "/" + attempt.replicaID
-	if current.Annotations[forceTakeoverAttemptAnnotation] != want {
+	attempts := parseForceTakeoverAttempts(current.Annotations[forceTakeoverAttemptAnnotation])
+	if existing, ok := attempts[attempt.primaryID]; !ok || existing.replicaID != attempt.replicaID {
 		cluster.Annotations = current.Annotations
 		return nil
 	}
 	base := current.DeepCopy()
-	delete(current.Annotations, forceTakeoverAttemptAnnotation)
+	delete(attempts, attempt.primaryID)
+	if len(attempts) == 0 {
+		delete(current.Annotations, forceTakeoverAttemptAnnotation)
+	} else {
+		current.Annotations[forceTakeoverAttemptAnnotation] = formatForceTakeoverAttempts(attempts)
+	}
 	if consumeAuthorization {
 		requested := parseForceTakeoverIDs(current.Annotations[forceTakeoverAnnotation])
 		remaining := make([]string, 0, len(requested))
@@ -1862,23 +1913,51 @@ func (r *ValkeyClusterReconciler) clearForceTakeoverAttempt(ctx context.Context,
 	return nil
 }
 
-// resolveForceTakeoverAttempt finishes a prior command after a restart or an
+// resolveForceTakeoverAttempts finishes prior commands after a restart or an
 // API write failure once a fresh scrape proves either recovery or promotion.
-func (r *ValkeyClusterReconciler) resolveForceTakeoverAttempt(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
-	attempt := parseForceTakeoverAttempt(cluster.Annotations[forceTakeoverAttemptAnnotation])
-	if attempt == nil {
-		return nil
+func (r *ValkeyClusterReconciler) resolveForceTakeoverAttempts(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
+	attempts := parseForceTakeoverAttempts(cluster.Annotations[forceTakeoverAttemptAnnotation])
+	for _, attempt := range attempts {
+		approved, err := r.forceTakeoverAttemptApproved(ctx, cluster, attempt)
+		if err != nil {
+			return err
+		}
+		if !approved {
+			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, false); err != nil {
+				return err
+			}
+			continue
+		}
+		primaryReturned := state.FindNodeById(attempt.primaryID) != nil
+		replica := state.FindNodeById(attempt.replicaID)
+		replicaPromoted := replica != nil && replica.IsPrimary() && len(replica.GetSlots()) > 0
+		if primaryReturned || replicaPromoted {
+			if err := r.clearForceTakeoverAttempt(ctx, cluster, attempt, true); err != nil {
+				return err
+			}
+		}
 	}
-	if !parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])[attempt.primaryID] {
-		return r.clearForceTakeoverAttempt(ctx, cluster, *attempt, false)
+	return nil
+}
+
+func (r *ValkeyClusterReconciler) forceTakeoverAttemptApproved(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, attempt forceTakeoverAttempt) (bool, error) {
+	current := &valkeyiov1alpha1.ValkeyCluster{}
+	if err := r.getLatestCluster(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+		return false, err
 	}
-	primaryReturned := state.FindNodeById(attempt.primaryID) != nil
-	replica := state.FindNodeById(attempt.replicaID)
-	replicaPromoted := replica != nil && replica.IsPrimary() && len(replica.GetSlots()) > 0
-	if !primaryReturned && !replicaPromoted {
-		return nil
+	cluster.Annotations = current.Annotations
+	if !parseForceTakeoverIDs(current.Annotations[forceTakeoverAnnotation])[attempt.primaryID] {
+		return false, nil
 	}
-	return r.clearForceTakeoverAttempt(ctx, cluster, *attempt, true)
+	existing, ok := parseForceTakeoverAttempts(current.Annotations[forceTakeoverAttemptAnnotation])[attempt.primaryID]
+	return ok && existing.replicaID == attempt.replicaID, nil
+}
+
+func (r *ValkeyClusterReconciler) getLatestCluster(ctx context.Context, key client.ObjectKey, current *valkeyiov1alpha1.ValkeyCluster) error {
+	if r.APIReader != nil {
+		return r.APIReader.Get(ctx, key, current)
+	}
+	return r.Get(ctx, key, current)
 }
 
 // orphan is an orphaned replica and the ID of its dead primary.

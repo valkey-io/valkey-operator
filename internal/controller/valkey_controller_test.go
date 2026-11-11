@@ -178,6 +178,25 @@ var _ = Describe("Valkey controller", func() {
 		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersAclError))
 	})
 
+	It("reports Degraded when the node cannot apply live config", func() {
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		setNodeStatus(func(s *valkeyiov1alpha1.ValkeyNodeStatus) {
+			s.Ready = true
+			meta.SetStatusCondition(&s.Conditions, metav1.Condition{
+				Type:   valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+				Status: metav1.ConditionFalse,
+				Reason: valkeyiov1alpha1.ValkeyNodeReasonApplyFailed,
+			})
+		})
+
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		status := getStatus()
+		Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateDegraded))
+		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonLiveConfigApplyFailed))
+	})
+
 	It("reports Degraded when the node cannot apply the ACL, and clears it after", func() {
 		_, err := reconciler.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())

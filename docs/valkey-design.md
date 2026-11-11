@@ -159,7 +159,7 @@ Conditions follow [status-conditions.md](status-conditions.md).
 | --- | --- |
 | `Ready` | The node reports ready. Reason `InstanceHealthy` |
 | `Progressing` | Waiting for the node to become ready |
-| `Degraded` | The node failed to apply the ACL. Reason `ACLApplyFailed` |
+| `Degraded` | The node failed to apply the ACL (`ACLApplyFailed`) or live config (`LiveConfigApplyFailed`) |
 
 A child resource error sets `Ready=False` with the existing reason for that resource, such as `ServiceError` or `ConfigMapError`, and the reconcile is retried.
 

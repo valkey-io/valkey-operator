@@ -114,10 +114,12 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionTrue)
 	}
 
-	// A node whose ACL the operator cannot apply leaves the declared users out of Valkey.
-	// The instance would otherwise read as healthy with an ACL that is not in effect.
-	if c := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied); c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
+	// A node whose ACL or live config the operator cannot apply runs with settings the spec does not declare.
+	// The instance would otherwise read as healthy with that change not in effect.
+	if nodeConditionFailed(node, valkeyiov1alpha1.ValkeyNodeConditionACLApplied) {
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed, fmt.Sprintf("ACL not applied on %s", node.Name), metav1.ConditionTrue)
+	} else if nodeConditionFailed(node, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied) {
+		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonLiveConfigApplyFailed, fmt.Sprintf("Live config not applied on %s", node.Name), metav1.ConditionTrue)
 	} else {
 		meta.RemoveStatusCondition(&v.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	}
@@ -132,6 +134,12 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: valkeyReadyRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// nodeConditionFailed reports whether the node's condition of the given type is False with reason ApplyFailed.
+func nodeConditionFailed(node *valkeyiov1alpha1.ValkeyNode, condType string) bool {
+	c := meta.FindStatusCondition(node.Status.Conditions, condType)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed
 }
 
 // failChild records a child resource error as Ready=False and returns the error for a retry.

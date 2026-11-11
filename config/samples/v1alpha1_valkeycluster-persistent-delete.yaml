@@ -4,7 +4,15 @@ metadata:
   name: cluster-persistent-delete-sample
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
+  acl:
+    users:
+      # Valkey's open default user: any client, no password, every command.
+      # For trying the cluster out; restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   persistence:
     size: 1Gi
     reclaimPolicy: Delete

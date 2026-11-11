@@ -78,23 +78,24 @@ const (
 	metricsExporterContainerName = "metrics-exporter"
 )
 
-// replicationAuthShell is the container command that starts valkey-server.
+// replicationAuthShell is the script the server container's shell runs.
 // Kubelet expands $(VAR) in the pod command, which would freeze PRIMARY_AUTH
 // at container start, so this string must not contain "$(". The shell reads
 // the mounted file when it is there and otherwise uses the environment value.
-func replicationAuthShell() string {
+// With handoff it starts the server through primary-handoff.sh when the
+// mounted ConfigMap carries that script, and directly otherwise, so a node
+// that mounts an external ConfigMap without the script still starts. $0 is
+// the server binary and $@ its arguments.
+func replicationAuthShell(handoff bool) string {
+	start := `exec "$0" "$@" --primaryauth "$PRIMARY_AUTH"`
+	if handoff {
+		start = `if [ -f /scripts/` + primaryHandoffScriptKey + ` ]; then exec /bin/sh /scripts/` + primaryHandoffScriptKey +
+			` "$@" --primaryauth "$PRIMARY_AUTH"; fi` + "\n" + start
+	}
 	return fmt.Sprintf(`pw="%s/%s"
 if [ -f "$pw" ]; then IFS= read -r PRIMARY_AUTH < "$pw" || true; fi
 if [ -z "${PRIMARY_AUTH:-}" ]; then echo "replication password is empty" >&2; exit 1; fi
-exec "$0" "$@" --primaryauth "$PRIMARY_AUTH"`, systemPasswordMountPath, replicationUser)
-}
-
-func valkeyServerCommand(announceArgs []string) []string {
-	cmd := make([]string, 0, 5+len(announceArgs)+2)
-	cmd = append(cmd, shellPath, "-c", replicationAuthShell(), "valkey-server", "/config/valkey.conf")
-	cmd = append(cmd, announceArgs...)
-	cmd = append(cmd, "--primaryuser", replicationUser)
-	return cmd
+%s`, systemPasswordMountPath, replicationUser, start)
 }
 
 func systemPasswordNextKey(user string) string {

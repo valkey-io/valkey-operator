@@ -49,7 +49,7 @@ var _ = Describe("spec.acl validation", func() {
 				Name:      fmt.Sprintf("acl-spec-%d", counter),
 				Namespace: "default",
 			},
-			Spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
 		}
 		mutate(&cluster.Spec)
 		err := k8sClient.Create(ctx, cluster)

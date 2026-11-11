@@ -40,10 +40,12 @@ import (
 const testRotationInterval = valkeyiov1alpha1.DefaultSystemPasswordRotationDays * 24 * time.Hour
 
 func TestReplicationAuthShellIsNotExpandedByKubelet(t *testing.T) {
-	shell := replicationAuthShell()
-	require.NotContains(t, shell, "$(")
-	require.Contains(t, shell, systemPasswordMountPath+"/"+replicationUser)
-	command := valkeyServerCommand([]string{"--cluster-announce-ip", "$(POD_IP)"})
+	for _, handoff := range []bool{false, true} {
+		shell := replicationAuthShell(handoff)
+		require.NotContains(t, shell, "$(")
+		require.Contains(t, shell, systemPasswordMountPath+"/"+replicationUser)
+	}
+	command := serverCommand(&valkeyiov1alpha1.ValkeyNode{}, []string{"--cluster-announce-ip", "$(POD_IP)"})
 	require.Equal(t, shellPath, command[0])
 	require.NotContains(t, command, "$(PRIMARY_AUTH)")
 }
@@ -390,7 +392,7 @@ func TestExporterAndReplicationCaughtUp(t *testing.T) {
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(setAt.Add(-time.Second))}},
 	}}}}
 	newPod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
-		Name: serverContainerName, Command: valkeyServerCommand(nil),
+		Name: serverContainerName, Command: serverCommand(&valkeyiov1alpha1.ValkeyNode{}, nil),
 	}}}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
 		Name:  serverContainerName,
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(setAt.Add(-time.Second))}},

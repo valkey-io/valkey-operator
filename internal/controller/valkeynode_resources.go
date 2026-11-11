@@ -55,7 +55,8 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 }
 
 // buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, the init container script, plus an empty valkey.conf.
+// and readiness probe scripts, the init container script, the primary handoff
+// script, plus an empty valkey.conf.
 // The ConfigMap is named via config.go:getConfigMapName(node).
 func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
 	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
@@ -70,6 +71,10 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
 	}
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
+	}
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -78,12 +83,50 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			Labels:    valkeyNodeLabels(node),
 		},
 		Data: map[string]string{
-			"valkey.conf":        generateValkeyNodeConfig(node),
-			"liveness-check.sh":  string(liveness),
-			"readiness-check.sh": string(readiness),
-			initScriptKey:        string(initScript),
+			"valkey.conf":           generateValkeyNodeConfig(node),
+			"liveness-check.sh":     string(liveness),
+			"readiness-check.sh":    string(readiness),
+			initScriptKey:           string(initScript),
+			primaryHandoffScriptKey: string(primaryHandoff),
 		},
 	}, nil
+}
+
+// usesPrimaryHandoffScript reports whether the server container of the node starts
+// through primary-handoff.sh: a cluster member without persistence. /data is then
+// an emptyDir that outlives a restart of the container while the dataset does
+// not, and the script holds the server back until a crashed primary's replica
+// has been promoted, then drops the node identity, so that the replica keeps
+// the data instead of full-syncing from a primary that came back empty.
+//
+// Membership is read from the cluster label rather than the owner reference:
+// the cluster controller computes the workload revision of a node it builds
+// before the reference is set, and both controllers must build the same
+// template or they roll the node against each other.
+func usesPrimaryHandoffScript(node *valkeyiov1alpha1.ValkeyNode) bool {
+	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
+}
+
+// serverCommand returns the command of the server container: a shell that
+// reads the replication password when the process starts, then starts the
+// server, through primary-handoff.sh where usesPrimaryHandoffScript.
+func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
+	args := make([]string, 0, 7+len(announceArgs))
+	args = append(args, shellPath, "-c", replicationAuthShell(usesPrimaryHandoffScript(node)), "valkey-server", "/config/valkey.conf")
+	args = append(args, announceArgs...)
+	return append(args, "--primaryuser", replicationUser)
+}
+
+// startupFailureThreshold returns the failure threshold of the startup probe,
+// in periods of 5s: about 100s, or about 300s where primary-handoff.sh runs, since
+// the script may hold the server back for up to 300s for a replica hand-off.
+// The value is fixed so that a change of cluster-node-timeout, which the script
+// reads from the config, never rolls the pod.
+func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode) int32 {
+	if usesPrimaryHandoffScript(node) {
+		return 80
+	}
+	return 20
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -260,7 +303,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			Name:      serverContainerName,
 			Image:     image,
 			Resources: node.Spec.Resources,
-			Command:   valkeyServerCommand(announceArgs),
+			Command:   serverCommand(node, announceArgs),
 			Env: append(announceEnv, corev1.EnvVar{
 				Name: "PRIMARY_AUTH",
 				ValueFrom: &corev1.EnvVarSource{
@@ -285,7 +328,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			StartupProbe: &corev1.Probe{
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
-				FailureThreshold:    20,
+				FailureThreshold:    startupFailureThreshold(node),
 				TimeoutSeconds:      5,
 				SuccessThreshold:    1,
 				ProbeHandler: corev1.ProbeHandler{

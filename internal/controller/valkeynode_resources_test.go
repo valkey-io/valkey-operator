@@ -102,10 +102,14 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command. The password is read by the shell at process start. Kubelet
-	// must not expand it, or a rotation would stay on the value from the
-	// last container start.
-	assert.Equal(t, valkeyServerCommand([]string{"--cluster-announce-ip", "$(POD_IP)"}), c.Command)
+	// Command: a standalone node starts the server without primary-handoff.sh.
+	// The shell reads the replication password at process start. Kubelet must
+	// not expand it, or a rotation would stay on the value from the last
+	// container start.
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser}, c.Command)
+	assert.NotContains(t, strings.Join(c.Command, "\n"), primaryHandoffScriptKey)
 	assert.NotContains(t, c.Command, "$(PRIMARY_AUTH)")
 	assert.Contains(t, strings.Join(c.Command, "\n"), systemPasswordMountPath)
 
@@ -510,7 +514,7 @@ func TestRefuseDesiredSTSCreate(t *testing.T) {
 func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 	base := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 0},
 	}
 
 	t.Run("default IP leaves PreferredEndpointType empty and still sets ClusterDomain", func(t *testing.T) {
@@ -729,11 +733,12 @@ func TestBuildValkeyNodeConfigMap(t *testing.T) {
 	assert.Equal(t, "test-ns", cm.Namespace)
 	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
 
-	// Must contain both script keys and valkey.conf
+	// Must contain the script keys and valkey.conf
 	assert.Contains(t, cm.Data, "valkey.conf")
 	assert.Contains(t, cm.Data, "liveness-check.sh")
 	assert.Contains(t, cm.Data, "readiness-check.sh")
 	assert.Contains(t, cm.Data, "init.sh")
+	assert.Contains(t, cm.Data, primaryHandoffScriptKey)
 }
 
 func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
@@ -874,6 +879,59 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	}
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
+}
+
+// clusterMember labels the node as buildClusterValkeyNode does.
+func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
+	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	return node
+}
+
+func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHandoffScript(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser}, containers[0].Command)
+	// The startup probe allows for the replica hand-off wait of up to 300s.
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *testing.T) {
+	// A standalone ValkeyNode may carry the cluster label and mount an
+	// external ConfigMap without the script. It gets the same command, which
+	// falls back to the server at run time, see TestPrimaryHandoffCommandFallsBackToServer.
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mynode"}
+	node.Spec.ServerConfigMapName = "my-own-config"
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server"}, containers[0].Command[:4])
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestStartupFailureThreshold(t *testing.T) {
+	// A cluster-node-timeout in the config must not change the probe, since
+	// that would roll the pod on a change of the value.
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
+	assert.Equal(t, int32(80), startupFailureThreshold(node))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	assert.Equal(t, int32(20), startupFailureThreshold(node))
+}
+
+func TestBuildContainersDef_PersistentClusterNodeSkipsPrimaryHandoffScript(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser}, containers[0].Command)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
@@ -1288,10 +1346,10 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards:       3,
-			Replicas:     1,
-			Image:        "valkey/valkey:9.1.0",
-			WorkloadType: valkeyv1.WorkloadTypeStatefulSet,
+			Shards:           3,
+			ReplicasPerShard: 1,
+			Image:            "valkey/valkey:9.1.0",
+			WorkloadType:     valkeyv1.WorkloadTypeStatefulSet,
 			Persistence: &valkeyv1.PersistenceSpec{
 				Size:             resource.MustParse("10Gi"),
 				StorageClassName: &storageClassName,
@@ -1356,7 +1414,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 func TestBuildClusterValkeyNode_NodeSpreadDefaultsRenderNothing(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)
@@ -1370,7 +1428,7 @@ func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1399,7 +1457,7 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				Affinity:                  &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}},
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
@@ -1425,7 +1483,7 @@ func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1456,7 +1514,7 @@ func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
 				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
@@ -1728,7 +1786,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
 				Zone: &valkeyv1.ZoneScheduling{
@@ -1757,7 +1815,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)

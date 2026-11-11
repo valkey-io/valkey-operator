@@ -50,6 +50,7 @@ spec:
           Tightening it later would reject objects that already exist.
 
           Kubernetes admits a dot in a custom resource name, but the child Service name is a DNS label and cannot hold one.
+          The rule skips updates, because the name cannot change.
         properties:
           apiVersion:
             description: |-
@@ -3910,7 +3911,8 @@ spec:
           rule: self.metadata.name.size() <= 37
         - message: metadata.name must not contain '.', because child Service names
             are derived from it
-          rule: '!self.metadata.name.contains(''.'')'
+          optionalOldSelf: true
+          rule: oldSelf.hasValue() || !self.metadata.name.contains('.')
     served: true
     storage: true
     subresources:

@@ -333,7 +333,8 @@ type ValkeyStatus struct {
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 37",message="metadata.name must be at most 37 characters, because child resource names are derived from it"
 //
 // Kubernetes admits a dot in a custom resource name, but the child Service name is a DNS label and cannot hold one.
-// +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="metadata.name must not contain '.', because child Service names are derived from it"
+// The rule skips updates, because the name cannot change.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !self.metadata.name.contains('.')",optionalOldSelf=true,message="metadata.name must not contain '.', because child Service names are derived from it"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the instance"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="Primary",type="string",JSONPath=".status.primary",description="ValkeyNode currently serving as primary"

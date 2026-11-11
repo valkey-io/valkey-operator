@@ -31,14 +31,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/controller"
+	controller "github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // Recovery from cluster states the operator has to repair on its own, without a
 // spec change or manual intervention.
 var _ = Describe("ValkeyCluster recovery", Label("ValkeyCluster", "recovery", "spec-update"), func() {
-	// The clusters declare no users, so valkey-cli runs as the default user with
+	// The clusters declare an open default user, so valkey-cli runs as it with
 	// no password. The connect timeout bounds a stale MOVED redirect pointing at
 	// a terminated pod.
 	cliOpts := utils.ValkeyCLIOptions{ConnectTimeoutSeconds: 2}
@@ -115,8 +115,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 2
+  replicasPerShard: 2
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -142,7 +148,7 @@ spec:
 
 			By("scaling replicas from 2 to 1, which puts shard 0's primary out of range")
 			cmd := exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -197,7 +203,7 @@ spec:
 		})
 
 		// shell runs a script in the server container of pod with the probe
-		// credentials unset, so valkey-cli uses the default user.
+		// credentials unset, so valkey-cli uses the declared open default user.
 		shell := func(pod, script string) (string, error) {
 			return utils.Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--",
 				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
@@ -244,8 +250,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 4
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName))
 
 			By("waiting for the cluster to become Ready")
@@ -327,8 +339,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   config:
     cluster-replica-no-failover: "yes"
 `, clusterName))
@@ -418,6 +436,118 @@ spec:
 		})
 	})
 
+	// Without persistence the server container of a crashed primary restarts in
+	// place with its emptyDir, reloads nodes.conf and would come back as the
+	// same node with an empty dataset, and its replica would full-sync to
+	// nothing. The start script drops that identity instead, so the replica is
+	// promoted and keeps the shard's data, and the restarted node rejoins as its
+	// replica.
+	Context("when a primary's server crashes without persistence", Label("primary-crash"), func() {
+		const clusterName = "valkeycluster-primary-crash-e2e"
+		const keyPrefix = "e2e:crash"
+		const seedKeys = 60
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		// dbsizeOf reads the key count of one node.
+		dbsizeOf := func(g Gomega, pod string) int {
+			out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
+			g.Expect(err).NotTo(HaveOccurred())
+			n, err := strconv.Atoi(strings.TrimSpace(out))
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			return n
+		}
+
+		// restartsOf reads the restart count of the server container of a pod.
+		restartsOf := func(g Gomega, pod string) int {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o",
+				`jsonpath={.status.containerStatuses[?(@.name=="server")].restartCount}`))
+			g.Expect(err).NotTo(HaveOccurred())
+			n, err := strconv.Atoi(strings.TrimSpace(out))
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			return n
+		}
+
+		It("keeps the shard's data and rejoins the restarted node as a replica", func() {
+			primary := podFor(clusterName, 0, 0)
+			replica := podFor(clusterName, 0, 1)
+
+			By("creating a 3-shard cluster with 1 replica and no persistence")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicasPerShard: 1
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+  config:
+    enable-debug-command: local
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("seeding keys across all shards")
+			// Few enough writes that no default save rule fires: a snapshot
+			// would mask the empty restart this test is about.
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(primary, keyPrefix, seedKeys, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("recording shard 0's key count once the replica has it")
+			var keysBefore, restartsBefore int
+			Eventually(func(g Gomega) {
+				keysBefore = dbsizeOf(g, primary)
+				g.Expect(keysBefore).To(BeNumerically(">", 0))
+				g.Expect(dbsizeOf(g, replica)).To(Equal(keysBefore))
+				restartsBefore = restartsOf(g, primary)
+			}).Should(Succeed())
+
+			By("crashing shard 0's primary server")
+			// The connection dies with the server, so the command itself fails.
+			_, _ = utils.ValkeyCLI(primary, cliOpts, "DEBUG", "SEGFAULT")
+
+			By("waiting for the server container to restart in place")
+			Eventually(func(g Gomega) {
+				g.Expect(restartsOf(g, primary)).To(BeNumerically(">", restartsBefore))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("waiting for the cluster to return to Ready")
+			waitForReady(clusterName)
+
+			By("verifying the former replica is the primary and kept every key")
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 1)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(Equal("primary"))
+				g.Expect(dbsizeOf(g, replica)).To(Equal(keysBefore))
+			}).Should(Succeed())
+
+			By("verifying the restarted node rejoined as its replica with the same keys")
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 0)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(Equal("replica"))
+				g.Expect(dbsizeOf(g, primary)).To(Equal(keysBefore))
+			}).Should(Succeed())
+
+			By("verifying no keys were lost")
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(podFor(clusterName, 1, 0), keyPrefix, seedKeys, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(seedKeys))
+			}).Should(Succeed())
+		})
+	})
 	// A Deployment creates the replacement of a deleted pod at once, while the
 	// old pod runs its preStop hook and shutdown. For that time two pods carry
 	// the node's labels, and the old primary still serves with all the slots.
@@ -491,7 +621,13 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   workloadType: Deployment
   terminationGracePeriodSeconds: 90
   containers:

@@ -37,8 +37,8 @@ func schedulingCluster(name string, primaries, pods valkeyiov1alpha1.SpreadMode)
 			Namespace: "default",
 		},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   3,
-			Replicas: 1,
+			Shards:           3,
+			ReplicasPerShard: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 				Node: &valkeyiov1alpha1.NodeScheduling{
 					Spread: valkeyiov1alpha1.NodeSpread{
@@ -62,8 +62,8 @@ func schedulingClusterWithPassthrough(name, topologyKey string, action corev1.Un
 			Namespace: "default",
 		},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   3,
-			Replicas: 1,
+			Shards:           3,
+			ReplicasPerShard: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
 					{
@@ -90,8 +90,8 @@ func zoneSchedulingCluster(name string, shard, primaries, pods valkeyiov1alpha1.
 	return &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   3,
-			Replicas: 1,
+			Shards:           3,
+			ReplicasPerShard: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 				Zone: &valkeyiov1alpha1.ZoneScheduling{
 					Spread: valkeyiov1alpha1.ZoneSpread{
@@ -112,8 +112,8 @@ func zoneSchedulingClusterWithPassthrough(name, topologyKey string, action corev
 	return &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   3,
-			Replicas: 1,
+			Shards:           3,
+			ReplicasPerShard: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
 					{MaxSkew: 1, TopologyKey: topologyKey, WhenUnsatisfiable: action},
@@ -139,8 +139,8 @@ func zonePinningCluster(name string, zones []string) *valkeyiov1alpha1.ValkeyClu
 			Namespace: "default",
 		},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   3,
-			Replicas: 1,
+			Shards:           3,
+			ReplicasPerShard: 1,
 			Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 				Zone: &valkeyiov1alpha1.ZoneScheduling{
 					Pinning: &valkeyiov1alpha1.ZonePinning{Zones: zones},
@@ -184,8 +184,8 @@ var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   3,
-				Replicas: 1,
+				Shards:           3,
+				ReplicasPerShard: 1,
 				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 					Node: &valkeyiov1alpha1.NodeScheduling{
 						Spread: valkeyiov1alpha1.NodeSpread{
@@ -235,8 +235,8 @@ var _ = Describe("ValkeyClusterSpec node.spread CEL validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   3,
-				Replicas: 1,
+				Shards:           3,
+				ReplicasPerShard: 1,
 				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
 						{MaxSkew: 1, TopologyKey: corev1.LabelHostname, WhenUnsatisfiable: corev1.DoNotSchedule},
@@ -296,8 +296,8 @@ var _ = Describe("ValkeyClusterSpec zone.spread CEL validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   3,
-				Replicas: 1,
+				Shards:           3,
+				ReplicasPerShard: 1,
 				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 					Zone: &valkeyiov1alpha1.ZoneScheduling{
 						Spread: valkeyiov1alpha1.ZoneSpread{
@@ -319,8 +319,8 @@ var _ = Describe("ValkeyClusterSpec zone.spread CEL validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   3,
-				Replicas: 1,
+				Shards:           3,
+				ReplicasPerShard: 1,
 				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 					Zone: &valkeyiov1alpha1.ZoneScheduling{
 						Spread: valkeyiov1alpha1.ZoneSpread{

@@ -242,6 +242,13 @@ var _ = Describe("Valkey CEL validation", func() {
 		Entry("former replicas Service suffix", "val-replicas"),
 	)
 
+	It("rejects a name with a dot", func() {
+		// Kubernetes admits the dot, but the child Service valkey-cache.prod would be an invalid DNS label.
+		err := k8sClient.Create(ctx, valkeyFor("cache.prod", 0))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("must not contain '.'"))
+	})
+
 	It("rejects a name too long for derived child names", func() {
 		// 38 characters, one over the limit.
 		// See the Valkey type comment for how the limit is derived.

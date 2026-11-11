@@ -44,11 +44,16 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DefaultImage and DefaultExporterImage are used where a spec leaves the image
+// empty. The manager sets them from its required image flags.
+var (
+	DefaultImage         string
+	DefaultExporterImage string
+)
+
 const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
-	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.

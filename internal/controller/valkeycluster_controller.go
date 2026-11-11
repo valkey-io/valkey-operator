@@ -313,7 +313,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
-	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state, nodes.Items); handled {
 		// Reports via an event, not status, so persist any conditions set above.
 		_ = r.updateStatus(ctx, cluster, state)
 		return result, nil
@@ -1553,12 +1553,12 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // With persistence enabled the pod returns with the same node ID, so recovery
 // is left entirely to Valkey.
 // Returns (result, true) if it acted and reconcile should requeue.
-func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
+func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes []valkeyiov1alpha1.ValkeyNode) (ctrl.Result, bool) {
 	if cluster.Spec.Persistence != nil {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	candidates := orphansToTakeOver(state)
+	candidates := orphansToTakeOver(state, nodes)
 	if len(candidates) == 0 {
 		return ctrl.Result{}, false
 	}
@@ -1582,7 +1582,8 @@ type orphan struct {
 
 // orphansToTakeOver returns, in a stable order, the orphaned replicas to
 // promote with TAKEOVER: for each qualifying dead primary, its most caught-up
-// replica. It returns none when native failover can or will recover every
+// replica, preferring a non-terminating pod when known offsets are equal.
+// It returns none when native failover can or will recover every
 // dead primary.
 //
 // Native failover needs a majority of primaries to vote:
@@ -1604,7 +1605,7 @@ type orphan struct {
 // Without persistence, a primary that is only partitioned can still be taken
 // over: the replica claims its slots at a higher epoch, and the old primary
 // demotes itself on reconnect, losing writes it accepted meanwhile.
-func orphansToTakeOver(state *valkey.ClusterState) []orphan {
+func orphansToTakeOver(state *valkey.ClusterState, nodes []valkeyiov1alpha1.ValkeyNode) []orphan {
 	var deadPrimaries []string
 	for _, shard := range state.Shards {
 		if shard.GetPrimaryNode() != nil && len(shard.Slots) > 0 {
@@ -1634,6 +1635,21 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 		replica := state.BestReplicaOf(primaryId)
 		if replica == nil {
 			continue
+		}
+		// Keep the freshest copy even if it is exiting. Only prefer a stable
+		// replacement when its known offset matches the best replica's.
+		if hasNodeWithTerminatingPodIP(nodes, replica.Address) && replica.ReplicationOffset() >= 0 {
+		findReplacement:
+			for _, shard := range state.Shards {
+				for _, candidate := range shard.Nodes {
+					if candidate.PrimaryIdFromSelf() == primaryId &&
+						candidate.ReplicationOffset() == replica.ReplicationOffset() &&
+						!hasNodeWithTerminatingPodIP(nodes, candidate.Address) {
+						replica = candidate
+						break findReplacement
+					}
+				}
+			}
 		}
 		noFailover := replica.Myself().IsAutomaticFailoverDisabled()
 		if !quorum || (noFailover && state.IsNodeFailedByMajority(primaryId)) {

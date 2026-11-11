@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
@@ -83,15 +84,15 @@ func TestOrphansToTakeOver(t *testing.T) {
 	t.Run("without quorum, lists every dead primary in a stable order", func(t *testing.T) {
 		// Every candidate is listed, so a replica whose TAKEOVER fails does not
 		// hold back the others.
-		assert.Equal(t, []string{"p0/r0", "p1/r1"}, pairs(orphansToTakeOver(quorumLost())))
+		assert.Equal(t, []string{"p0/r0", "p1/r1"}, pairs(orphansToTakeOver(quorumLost(), nil)))
 	})
 
 	t.Run("with quorum, leaves the shard to native failover", func(t *testing.T) {
-		assert.Empty(t, orphansToTakeOver(quorumHeld("fail", failoverEnabled)))
+		assert.Empty(t, orphansToTakeOver(quorumHeld("fail", failoverEnabled), nil))
 	})
 
 	t.Run("with quorum, takes over when the replica has failover disabled", func(t *testing.T) {
-		assert.Equal(t, []string{"p0/r0"}, pairs(orphansToTakeOver(quorumHeld("fail", failoverDisabled))))
+		assert.Equal(t, []string{"p0/r0"}, pairs(orphansToTakeOver(quorumHeld("fail", failoverDisabled), nil)))
 	})
 
 	t.Run("with quorum, reads nofailover from the replica's own entry", func(t *testing.T) {
@@ -101,7 +102,7 @@ func TestOrphansToTakeOver(t *testing.T) {
 		state.Shards[1].Nodes[0] = orphanTestNode("p1", "p1 10.0.0.p1:6379@16379 myself,master - 0 0 1 connected 5461-10922",
 			"p0 10.0.0.p0:6379@16379 master,fail - 0 0 1 connected 0-5460",
 			"r0 10.0.0.r0:6379@16379 slave,nofailover p0 0 0 1 connected")
-		assert.Empty(t, orphansToTakeOver(state))
+		assert.Empty(t, orphansToTakeOver(state, nil))
 	})
 
 	t.Run("with quorum, waits for a confirmed failure before taking over", func(t *testing.T) {
@@ -111,7 +112,7 @@ func TestOrphansToTakeOver(t *testing.T) {
 		state.Shards[2].Nodes[0] = orphanTestNode("p2", "p2 10.0.0.p2:6379@16379 myself,master - 0 0 1 connected 10923-16383")
 		state.Shards[1].Nodes[0] = orphanTestNode("p1", "p1 10.0.0.p1:6379@16379 myself,master - 0 0 1 connected 5461-10922",
 			"p0 10.0.0.p0:6379@16379 master,fail? - 0 0 1 connected 0-5460")
-		assert.Empty(t, orphansToTakeOver(state))
+		assert.Empty(t, orphansToTakeOver(state, nil))
 	})
 
 	t.Run("never takes over a primary the operator reached", func(t *testing.T) {
@@ -127,7 +128,7 @@ func TestOrphansToTakeOver(t *testing.T) {
 		state.PendingNodes = []*valkey.NodeState{
 			orphanTestNode("p0", "p0 10.0.0.p0:6379@16379 myself,master - 0 0 1 connected"),
 		}
-		assert.Empty(t, orphansToTakeOver(state))
+		assert.Empty(t, orphansToTakeOver(state, nil))
 	})
 
 	t.Run("skips a shard already served by a promoted replica", func(t *testing.T) {
@@ -141,13 +142,38 @@ func TestOrphansToTakeOver(t *testing.T) {
 			orphanTestNode("r0b", "r0b 10.0.0.r0b:6379@16379 myself,slave p0 0 0 1 connected"),
 		}}
 		state.Shards = state.Shards[:2]
-		assert.Equal(t, []string{"p1/r1"}, pairs(orphansToTakeOver(state)))
+		assert.Equal(t, []string{"p1/r1"}, pairs(orphansToTakeOver(state, nil)))
 	})
 
 	t.Run("does nothing when no primary is reported failed", func(t *testing.T) {
 		state := quorumHeld("fail", failoverDisabled)
 		state.Shards[1].Nodes[0] = orphanTestNode("p1", "p1 10.0.0.p1:6379@16379 myself,master - 0 0 1 connected 5461-10922")
 		state.Shards[2].Nodes[0] = orphanTestNode("p2", "p2 10.0.0.p2:6379@16379 myself,master - 0 0 1 connected 10923-16383")
-		assert.Empty(t, orphansToTakeOver(state))
+		assert.Empty(t, orphansToTakeOver(state, nil))
 	})
+	for _, tt := range []struct {
+		name, oldOffset, newOffset, want string
+		withReplacement                  bool
+	}{
+		{"prefers a stable replica at the same offset", "100", "100", "new", true},
+		{"keeps a terminating replica with newer data", "101", "100", "r0", true},
+		{"selects a fresher replacement", "100", "101", "new", true},
+		{"keeps the only surviving replica", "100", "", "r0", false},
+		{"does not assume unknown offsets are synced", "", "", "r0", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := quorumLost()
+			old := state.Shards[0].Nodes[0]
+			old.Info = map[string]string{"slave_repl_offset": tt.oldOffset}
+			if tt.withReplacement {
+				replacement := orphanTestNode("new", "new 10.0.0.new:6379@16379 myself,slave p0 0 0 1 connected")
+				replacement.Info = map[string]string{"slave_repl_offset": tt.newOffset}
+				state.Shards[0].Nodes = append(state.Shards[0].Nodes, replacement)
+			}
+			nodes := []valkeyiov1alpha1.ValkeyNode{{Status: valkeyiov1alpha1.ValkeyNodeStatus{
+				TerminatingPodIPs: []string{old.Address},
+			}}}
+			assert.Equal(t, []string{"p0/" + tt.want, "p1/r1"}, pairs(orphansToTakeOver(state, nodes)))
+		})
+	}
 }

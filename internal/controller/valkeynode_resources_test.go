@@ -931,6 +931,21 @@ func TestBuildContainersDef_PersistentClusterNodeStartsServerDirectly(t *testing
 	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
+func TestBuildValkeyNodePodTemplateSpec_InitialSyncGate(t *testing.T) {
+	member := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	pts, err := buildValkeyNodePodTemplateSpec(member, valkeyNodeLabels(member))
+	require.NoError(t, err)
+	assert.Equal(t, []corev1.PodReadinessGate{{ConditionType: initialSyncGate}}, pts.Spec.ReadinessGates)
+
+	// A standalone ValkeyNode has no cluster controller to set the gate, even
+	// when it carries the cluster label.
+	standalone := newTestValkeyNode("mynode", "test-ns")
+	standalone.Labels = map[string]string{LabelCluster: "mynode"}
+	pts, err = buildValkeyNodePodTemplateSpec(standalone, valkeyNodeLabels(standalone))
+	require.NoError(t, err)
+	assert.Empty(t, pts.Spec.ReadinessGates)
+}
+
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Image = ""

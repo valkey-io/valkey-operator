@@ -96,6 +96,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -265,6 +266,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
 		c.Reason == valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	}
+
+	// Before the walk, which returns early on many paths. A failure leaves
+	// each gate as it is, so a new pod stays unready until a later pass.
+	gatesPending, err := r.syncInitialSyncGates(ctx, nodes, state)
+	if err != nil {
+		log.Error(err, "failed to update the initial sync readiness gate")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "InitialSyncGateFailed", "SetReadinessGate",
+			"Failed to set the %s readiness gate, so new pods stay unready: %v", initialSyncGate, err)
 	}
 
 	rollSkipped := false
@@ -560,6 +570,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.V(1).Info("reconcile done")
+	if gatesPending {
+		return ctrl.Result{RequeueAfter: initialSyncGateRecheck}, nil
+	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 

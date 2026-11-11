@@ -372,7 +372,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			defer func() { _ = k8sClient.Delete(ctx, pod) }()
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 			pod.Status.PodIP = "10.0.0.8"
-			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			}
 			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 			fake := &fakeConfigClient{aclOnLoad: map[string][]string{"alice": {"aaa"}}}
@@ -443,7 +446,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			defer func() { _ = k8sClient.Delete(ctx, pod) }()
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 			pod.Status.PodIP = "10.0.0.9"
-			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			}
 			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 			fake := &fakeConfigClient{aclOnLoad: map[string][]string{"alice": {"aaa"}}}
@@ -1460,6 +1466,41 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
 		})
+
+		It("returns true while the readiness gate holds the replaced pod unready", func() {
+			// ReadyReplicas and currentRevision wait for Pod Ready, which waits
+			// for the initial sync gate the cluster controller sets after attach.
+			r := makeReconciler()
+			replicas := int32(1)
+			stsNameGate := types.NamespacedName{Name: "valkey-" + nodeName + "-gate", Namespace: ns}
+			nodeGate := makeNode(nodeName+"-gate", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsNameGate.Name, Namespace: stsNameGate.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeGate.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeGate.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			Expect(k8sClient.Get(ctx, stsNameGate, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.ReadyReplicas = 0
+			sts.Status.UpdatedReplicas = 1
+			sts.Status.CurrentRevision = "rev-1"
+			sts.Status.UpdateRevision = "rev-2"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeTrue())
+		})
 	})
 
 	Context("Deployment workload", func() {
@@ -1516,6 +1557,43 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
 
 			rolled, err := r.isWorkloadRolledOut(ctx, node2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeTrue())
+		})
+
+		It("returns false until the new pod exists, and true while the readiness gate holds it", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			depName := "valkey-" + nodeName + "-gate"
+			nodeGate := makeNode(nodeName+"-gate", valkeyiov1alpha1.WorkloadTypeDeployment)
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: ns},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeGate.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeGate.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: ns}, dep)).To(Succeed())
+			dep.Status.ObservedGeneration = dep.Generation
+			dep.Status.Replicas = 1
+			dep.Status.UpdatedReplicas = 0
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: ns}, dep)).To(Succeed())
+			dep.Status.UpdatedReplicas = 1
+			dep.Status.ReadyReplicas = 0
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+			rolled, err = r.isWorkloadRolledOut(ctx, nodeGate)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
 		})
@@ -1627,7 +1705,10 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 		pod.Status.PodIP = "10.0.0.1"
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 	}
 
@@ -1675,13 +1756,43 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		Expect(updated.Status.Role).To(Equal(RolePrimary))
 	})
 
+	It("reports Ready from the containers while the readiness gate is false", func() {
+		seedReadyWorkload(node)
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name + "-pod", Namespace: node.Namespace}, pod)).To(Succeed())
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			{Type: initialSyncGate, Status: corev1.ConditionFalse},
+		}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RoleReplica
+			},
+		}
+		_, err := r.updateStatus(ctx, node, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.Ready).To(BeTrue(), "the walk must reach a pod whose gate it has not set yet")
+		Expect(updated.Status.Role).To(Equal(RoleReplica))
+	})
+
 	It("keeps resolving Role while the workload is mid-roll, but reports Ready=false", func() {
 		seedReadyWorkload(node)
 
 		By("advancing the StatefulSet to a new revision the pods are not on yet")
 		sts := &appsv1.StatefulSet{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}, sts)).To(Succeed())
+		// The StatefulSet controller writes both in one status update.
 		sts.Status.UpdateRevision = "rev-2"
+		sts.Status.UpdatedReplicas = 0
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
 		r := &ValkeyNodeReconciler{
@@ -2444,6 +2555,13 @@ var _ = Describe("ValkeyNode Pod watch wiring", func() {
 		It("admits a readiness flip", func() {
 			old := makePod(false, "10.0.0.1")
 			neu := makePod(true, "10.0.0.1")
+			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
+		})
+
+		It("admits a ContainersReady flip while Pod Ready waits on the readiness gate", func() {
+			old := makePod(false, "10.0.0.1")
+			neu := makePod(false, "10.0.0.1")
+			neu.Status.Conditions = append(neu.Status.Conditions, corev1.PodCondition{Type: corev1.ContainersReady, Status: corev1.ConditionTrue})
 			Expect(p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: neu})).To(BeTrue())
 		})
 

@@ -90,7 +90,10 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status.PodIP = "10.0.0.9"
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 		return r.Reconcile(ctx, req)

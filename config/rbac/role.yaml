@@ -31,6 +31,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/status
+  verbs:
+  - get
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - get

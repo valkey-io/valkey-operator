@@ -370,6 +370,7 @@ These events are emitted during the creation and management of Kubernetes resour
 | `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
 | `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
 | `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |
+| `InitialSyncGateFailed` | Warning | The `valkey.io/initial-sync-complete` readiness gate could not be set on a pod, for example without `patch` on `pods/status`, so new pods stay not Ready |
 
 ### Cluster topology events
 

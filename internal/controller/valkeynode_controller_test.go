@@ -28,6 +28,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -2133,6 +2134,29 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		return current.Status.AppliedACLRevision
 	}
 
+	readNode := func() *valkeyiov1alpha1.ValkeyNode {
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodeWith(aclSecretName)), current)).To(Succeed())
+		return current
+	}
+	sessionsOpen := func() *metav1.Condition {
+		return meta.FindStatusCondition(readNode().Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionDefaultUserSessionsOpen)
+	}
+	expectSessionsOpen := func(status metav1.ConditionStatus, reason string) {
+		GinkgoHelper()
+		cond := sessionsOpen()
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(status))
+		Expect(cond.Reason).To(Equal(reason))
+	}
+	markSessionsOpen := func(status metav1.ConditionStatus, reason string) {
+		current := readNode()
+		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type: valkeyiov1alpha1.ValkeyNodeConditionDefaultUserSessionsOpen, Status: status, Reason: reason,
+		})
+		Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+	}
+
 	BeforeEach(func() {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: aclSecretName, Namespace: "default"},
@@ -2207,114 +2231,102 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(synced).To(BeTrue())
 		Expect(revision).To(Equal("rev1"))
 		Expect(fake.killed).To(Equal([]string{"default"}))
-		Expect(recordedRevision()).To(BeEmpty(), "cleared before the load; the caller records rev1")
+		expectSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
+		Expect(recordedRevision()).To(Equal("rev0"), "the revision only records what was confirmed loaded")
 	})
 
-	It("closes them when a revert lands on the recorded revision after an unrecorded one turned default on", func() {
-		// rev1 (default off) was recorded. A later revision turned default on
-		// and was loaded but never recorded, and the ACL now returns to rev1.
-		// The recorded revision matching must not skip the close.
-		recordRevision("rev1")
+	It("closes them when the mounted aclfile turns default off though the Secret leaves it on", func() {
+		// The kubelet refreshes the mount lazily, so a load can read a newer
+		// or older file than the Secret holds. The close follows the server.
+		const openSecret = "live-acl-users-open"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: openSecret, Namespace: "default"},
+			Data: map[string][]byte{aclFilename: []byte("user default on nopass ~* &* +@all\nuser " +
+				aclRevisionUser + " off resetchannels -@all #rev2\n")},
+		}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
 		fake := &fakeConfigClient{
-			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			aclHashes: staleHashes, enabled: map[string]bool{"default": true},
 			enabledOnLoad: map[string]bool{"default": false},
 		}
-		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(openSecret))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fake.killed).To(Equal([]string{"default"}))
+		Expect(synced).To(BeFalse(), "the mount has not caught up with the Secret")
+		Expect(fake.killed).To(Equal([]string{"default"}), "the kill runs before the sync check")
+		expectSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
 	})
 
 	It("leaves default's connections alone for an ACL change while it is already off", func() {
 		// Clients that have connected but not yet sent AUTH are reported as
 		// default too; a rotated password must not drop them.
-		recordRevision("rev0")
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
 		_, revision, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal("rev1"))
 		Expect(fake.killed).To(BeEmpty())
-		Expect(recordedRevision()).To(Equal("rev0"), "nothing pending, so nothing cleared")
+		Expect(sessionsOpen()).To(BeNil(), "a node never seen with default on carries no condition")
 	})
 
-	It("leaves default's connections alone once the revision is recorded", func() {
-		recordRevision("rev1")
+	It("leaves default's connections alone once they have been closed", func() {
+		markSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.killed).To(BeEmpty())
 	})
 
-	It("closes default's connections while a close is still pending", func() {
-		// The recorded revision is empty: an earlier kill failed, or the
-		// operator restarted between the load and the kill.
+	It("closes them when an earlier reconcile turned default off and stopped before the kill", func() {
+		// An operator restart between the load and the kill: default is
+		// already off before this load, and only the mark remembers it was on.
+		markSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled)
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.killed).To(Equal([]string{"default"}))
+		expectSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
 	})
 
-	It("leaves default's connections alone while it stays on", func() {
-		recordRevision("rev0")
+	It("marks the node while default stays on, without a write per reconcile", func() {
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": true}}
-		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		r := reconcilerFor(fake)
+		synced, _, err := r.applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.killed).To(BeEmpty())
-		Expect(recordedRevision()).To(BeEmpty(), "still pending for the load that turns it off")
-	})
+		expectSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled)
 
-	It("marks the close pending but does not kill before the mounted aclfile has caught up", func() {
-		recordRevision("rev0")
-		fake := &fakeConfigClient{aclHashes: staleHashes, enabled: map[string]bool{"default": true}}
-		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		before := readNode().ResourceVersion
+		_, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(synced).To(BeFalse())
-		Expect(fake.killed).To(BeEmpty())
-		Expect(recordedRevision()).To(BeEmpty())
+		Expect(readNode().ResourceVersion).To(Equal(before), "an unchanged mark is not rewritten")
 	})
 
-	It("withholds the revision when the kill fails, so the next reconcile retries", func() {
-		recordRevision("rev0")
+	It("keeps the close pending when the kill fails, retries it under a lagging mount, and kills once", func() {
 		fake := &fakeConfigClient{
-			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			aclHashes: staleHashes, enabled: map[string]bool{"default": true},
 			enabledOnLoad: map[string]bool{"default": false}, killErr: fmt.Errorf("boom"),
 		}
 		r := reconcilerFor(fake)
-		synced, revision, err := r.applyLiveACL(ctx, nodeWith(aclSecretName))
-		Expect(err).To(HaveOccurred())
+		synced, _, err := r.applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).To(MatchError(ContainSubstring("boom")))
 		Expect(synced).To(BeFalse())
-		Expect(revision).To(BeEmpty(), "the caller must not record a revision whose kill failed")
-		Expect(recordedRevision()).To(BeEmpty(), "the close stays pending")
+		expectSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonCloseFailed)
 		Expect(r.Recorder.(*events.FakeRecorder).Events).To(Receive(ContainSubstring("DefaultUserSessionsCloseFailed")))
 
-		By("reconciling again, with default already off before the load")
+		By("reconciling again, with default already off and the mount still stale")
 		fake.killErr = nil
-		_, revision, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
+		synced, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(revision).To(Equal("rev1"))
+		Expect(synced).To(BeFalse())
 		Expect(fake.killed).To(Equal([]string{"default"}))
-	})
+		expectSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
 
-	It("keeps the recorded revision when the aclfile leaves default on", func() {
-		// A cluster that declares an open default: nothing to close, and the
-		// recorded revision must not churn on every reconcile.
-		const openSecret = "live-acl-users-open"
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: openSecret, Namespace: "default"},
-			Data: map[string][]byte{aclFilename: []byte("user default on nopass ~* &* +@all\nuser " +
-				aclRevisionUser + " off resetchannels -@all #rev1\n")},
-		}
-		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
-		recordRevision("rev1")
-		fake := &fakeConfigClient{
-			aclHashes: map[string][]string{"default": {}, aclRevisionUser: {"rev1"}},
-			enabled:   map[string]bool{"default": true},
-		}
-		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(openSecret))
+		By("reconciling once the mount has caught up")
+		fake.aclHashes = desiredHashes
+		synced, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
-		Expect(fake.killed).To(BeEmpty())
-		Expect(recordedRevision()).To(Equal("rev1"))
+		Expect(fake.killed).To(Equal([]string{"default"}), "the close is not repeated")
 	})
 })
 

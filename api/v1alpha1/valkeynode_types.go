@@ -34,11 +34,11 @@ const (
 )
 
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
-// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable",fieldPath=".persistence.storageClassName",reason="FieldValueForbidden"
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
 	// +optional
@@ -52,7 +52,7 @@ type ValkeyNodeSpec struct {
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.
 	// +kubebuilder:default=StatefulSet
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable",reason="FieldValueForbidden"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -106,6 +106,7 @@ type ValkeyNodeSpec struct {
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// TLS configuration for the node
@@ -164,7 +165,16 @@ type ValkeyNodeSpec struct {
 	// spec.networking.clusterDomain for TLS ServerName and Hostname FQDNs.
 	// +optional
 	ClusterDomain string `json:"clusterDomain,omitempty"`
+
+	// Service is set by the ValkeyCluster controller from
+	// spec.networking.perNodeServices. When set, this node has one ClusterIP
+	// Service. Unset means no Service.
+	// +optional
+	Service *ValkeyNodeServiceSpec `json:"service,omitempty"`
 }
+
+// ValkeyNodeServiceSpec is empty. Presence turns the node's ClusterIP Service on.
+type ValkeyNodeServiceSpec struct{}
 
 // NodeTLSSpec is the node's own TLS API. It deliberately does not reuse the
 // ValkeyCluster TLSSpec: the cluster API expresses user intent whereas this
@@ -192,7 +202,43 @@ type NodeTLSSpec struct {
 	// cluster-owned nodes the ValkeyCluster controller copies
 	// spec.networking.tls.clientAuth here.
 	// +optional
-	ClientAuth *TLSClientAuthSpec `json:"clientAuth,omitempty"`
+	ClientAuth *NodeTLSClientAuthSpec `json:"clientAuth,omitempty"`
+}
+
+// NodeTLSClientAuthSpec is the resolved client certificate authentication for
+// a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
+// controller merges spec.networking.tls.clientAuth.ca into a Secret and
+// references it from certificates.trustBundle.
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode",fieldPath=".certificateUser",reason="FieldValueForbidden"
+type NodeTLSClientAuthSpec struct {
+	// Mode controls whether clients must authenticate with a TLS certificate.
+	// Maps to `tls-auth-clients`. Defaults to `Optional`.
+	// +kubebuilder:default=Optional
+	// +optional
+	Mode TLSAuthClients `json:"mode,omitempty"`
+
+	// CertificateUser configures how Valkey maps an authenticated client
+	// certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+	// `Disabled`, which leaves the directive unset.
+	// +kubebuilder:default=Disabled
+	// +optional
+	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+}
+
+// EffectiveMode returns mode, defaulting to Optional when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveMode() TLSAuthClients {
+	if s == nil || s.Mode == "" {
+		return TLSAuthClientsOptional
+	}
+	return s.Mode
+}
+
+// EffectiveCertificateUser returns certificateUser, defaulting to Disabled when unset.
+func (s *NodeTLSClientAuthSpec) EffectiveCertificateUser() TLSAuthClientsUser {
+	if s == nil || s.CertificateUser == "" {
+		return TLSAuthClientsUserDisabled
+	}
+	return s.CertificateUser
 }
 
 // ClientAuthMode returns the effective client-auth mode for t.
@@ -223,6 +269,25 @@ type NodeTLSCertificates struct {
 	// `tls.crt` and `tls.key`.
 	// +kubebuilder:validation:Required
 	Server NodeCertificateRef `json:"server"`
+
+	// TrustBundle, when set, replaces the server secret's `ca.crt` as the
+	// trust root Valkey verifies clients and peers against
+	// (`tls-ca-cert-file`). It must therefore include the root the server
+	// certificate chains to. The node reloads it live when its contents
+	// change, once its ACL is confirmed live. Probes and the metrics exporter
+	// keep verifying the server against the server secret's `ca.crt`.
+	// +optional
+	TrustBundle *NodeTrustBundleRef `json:"trustBundle,omitempty"`
+}
+
+// NodeTrustBundleRef references a Secret holding PEM CA certificates under key
+// `ca.crt`.
+type NodeTrustBundleRef struct {
+	// SecretName is the name of the secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
 }
 
 // NodeCertificateRef references a certificate and its private key held in a
@@ -267,6 +332,12 @@ type ValkeyNodeStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// AppliedACLRevision is the revision of the operator-managed aclfile that
+	// the running server was last confirmed to hold, recorded as ACLApplied
+	// becomes True.
+	// +optional
+	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
 }
 
 const (
@@ -281,21 +352,35 @@ const (
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
-	// wrote to the mounted Secret is live on the server. It is applied via ACL
-	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// wrote to the mounted Secret, for spec.acl.users (or the deprecated
+	// spec.users) and the system users, is live on the server. It is applied via
+	// ACL LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
 	// means the desired user set, their password hashes, and the current ACL
-	// revision are live, confirmed by a bookkeeping revision user whose password
-	// is a hash of the managed ACL (see aclRevisionUser); permission-only
-	// edits are therefore honoured too.
+	// revision are live, confirmed by a bookkeeping revision user whose password is
+	// a hash of the managed ACL (see aclRevisionUser); permission-only edits are
+	// therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
+	// ValkeyNodeConditionTrustBundleApplied indicates that the server has
+	// reloaded the mounted trust bundle (Spec.TLS.Certificates.TrustBundle) as
+	// its tls-ca-cert-file. The bundle is reloaded live, without a pod roll,
+	// once ACLApplied is True. A failed reload leaves the server on the roots it
+	// last loaded and is retried at a fixed interval. The condition is absent on
+	// a node without a trust bundle.
+	ValkeyNodeConditionTrustBundleApplied = "TrustBundleApplied"
 	// ValkeyNodeReasonApplied, ValkeyNodeReasonPendingPropagation and
-	// ValkeyNodeReasonApplyFailed are the reasons ACLApplied and
-	// LiveConfigApplied carry. The distinction matters to anything aggregating
+	// ValkeyNodeReasonApplyFailed are the reasons ACLApplied, LiveConfigApplied
+	// and TrustBundleApplied carry. The distinction matters to anything aggregating
 	// them: propagation is the normal state after an edit and clears itself once
 	// the mounted file catches up, while a failed apply does not clear on its own.
 	ValkeyNodeReasonApplied            = "Applied"
 	ValkeyNodeReasonPendingPropagation = "PendingPropagation"
 	ValkeyNodeReasonApplyFailed        = "ApplyFailed"
+	// ValkeyNodeReasonAuthenticationFailed is the ACLApplied and
+	// LiveConfigApplied reason when the node rejects the operator's _operator
+	// password (WRONGPASS), so the operator can neither apply nor check either.
+	// It clears on the next node reconcile after the node accepts the password
+	// again; the operator does not change the password itself.
+	ValkeyNodeReasonAuthenticationFailed = "AuthenticationFailed"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means
@@ -309,6 +394,8 @@ const (
 	ValkeyNodeReasonPodRunning = "PodRunning"
 	// ValkeyNodeReasonPodNotReady indicates the pod is not ready.
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
+	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
+	ValkeyNodeReasonServiceError = "ServiceError"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

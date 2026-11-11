@@ -320,14 +320,17 @@ func (p *RolePoller) recordFailure(key types.NamespacedName, now time.Time) {
 // This mirrors the slot-ownership rule the ValkeyNode controller applies in
 // parseClusterNodesRole: the shard's primary is the node that owns slots, so a
 // slot-less master (a node still being added, or one that has just given up its
-// slots) is not reported as a primary. Such a node sits in PendingNodes rather
-// than a shard, so it resolves to "" here and is simply not compared.
+// slots) is not reported as a primary. It either sits in PendingNodes or heads
+// a shard without slots, and resolves to "" here so it is simply not compared.
 func liveRoleForAddress(state *valkey.ClusterState, address string) string {
 	shard := state.FindShardForAddress(address)
 	if shard == nil {
 		return ""
 	}
 	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
+		if len(shard.Slots) == 0 {
+			return ""
+		}
 		return RolePrimary
 	}
 	return RoleReplica

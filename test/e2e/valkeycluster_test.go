@@ -30,6 +30,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -38,7 +39,7 @@ import (
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
-var _ = Describe("ValkeyCluster", Ordered, func() {
+var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 	var valkeyClusterName string
 
 	// After each test, check for failures and collect logs, events,
@@ -197,7 +198,7 @@ var _ = Describe("ValkeyCluster", Ordered, func() {
 			// Valkey's own `default`, which the aclfile does not manage. The node
 			// must still reach ACLApplied=True: aclObservablyInSync has to ignore
 			// the unmanaged `default` rather than loop forever waiting for it to
-			// match a spec.users entry that does not exist.
+			// match a user entry that does not exist.
 			verifyACLApplied := func(g Gomega) {
 				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes",
 					"-l", fmt.Sprintf("valkey.io/cluster=%s", valkeyClusterName),
@@ -393,8 +394,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, singleNodeClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -481,7 +488,31 @@ spec:
 			Eventually(verifyClusterSlotsIP, 1*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
-		It("creates a cluster with custom users", func() {
+		It("rejects a cluster that sets both spec.users and spec.acl.users", Label("acl-users"), func() {
+			manifest := `apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: users-and-acl-users
+spec:
+  shards: 1
+  users:
+    - name: bob
+      nopass: true
+  acl:
+    users:
+      - name: alice
+        password:
+          type: Any
+`
+			// Server dry-run runs admission without storing the object.
+			cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			out, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "apply must be rejected, got: %s", out)
+			Expect(err.Error()).To(ContainSubstring("cannot be combined with spec.acl.users"))
+		})
+
+		It("creates a cluster with custom users", Label("acl-users"), func() {
 			const withUserClusterName = "cluster-sample-with-users"
 			const withUserSampleFile = "config/samples/v1alpha1_valkeycluster-with-user.yaml"
 
@@ -560,13 +591,20 @@ spec:
 					ContainSubstring("user bob on nopass"),
 					// user david is created with 2 passwords
 					MatchRegexp("user david on .* %s %s", passwordHashRegexp, passwordHashRegexp),
-					// user edward is created with resetpass flag, so its ACL entry should not contain a '#' character
+					// user edward has password.type Disabled, so its ACL entry should not contain a '#' character
 					MatchRegexp("user edward on [^#]+"),
 					ContainSubstring("user _exporter on"),
 					ContainSubstring("user _operator on"),
 				))
 			}
 			Eventually(verifyCreatedUsers).Should(Succeed())
+
+			By("verifying spec.acl.users raises no deprecation warning")
+			cr, err := utils.GetValkeyClusterStatus(withUserClusterName)
+			Expect(err).NotTo(HaveOccurred())
+			if cond := meta.FindStatusCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning); cond != nil {
+				Expect(cond.Message).NotTo(ContainSubstring("spec.users is deprecated"))
+			}
 
 			By("verifying allowed commands succeed for operator user")
 			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
@@ -742,8 +780,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, baseShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
 			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
@@ -865,8 +909,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, initialShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scalein.yaml")
 			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
@@ -1021,8 +1071,14 @@ kind: ValkeyCluster
 metadata:
   name: valkeycluster-degraded-status-test
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
 `
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-degraded.yaml")
@@ -1154,14 +1210,15 @@ metadata:
   name: %[1]s
 spec:
   shards: 3
-  replicas: 1
-  users:
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: %[1]s-users
-        keys: [defaultpw]
+  replicasPerShard: 1
+  acl:
+    users:
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          secret:
+            name: %[1]s-users
+            keys: [defaultpw]
 `, failoverClusterName, base64.StdEncoding.EncodeToString([]byte(failoverDefaultPassword)))
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-failover.yaml")
@@ -1410,7 +1467,7 @@ var _ = Describe("ValkeyCluster spec propagation", func() {
 		}
 	})
 
-	Context("workloadType immutability", func() {
+	Context("workloadType immutability", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-immutable-e2e"
 
 		It("rejects a change to workloadType after creation", func() {
@@ -1420,8 +1477,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   workloadType: StatefulSet
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -1443,7 +1506,7 @@ spec:
 		})
 	})
 
-	Context("persistence mutation rules", func() {
+	Context("persistence mutation rules", Label("spec-update"), func() {
 		const addClusterName = "valkeycluster-persistence-add-e2e"
 		const shrinkClusterName = "valkeycluster-persistence-shrink-e2e"
 
@@ -1454,8 +1517,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, addClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1482,8 +1551,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   persistence:
     size: 1Gi
 `, shrinkClusterName)
@@ -1516,8 +1591,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1598,8 +1679,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "%s"
@@ -1646,8 +1733,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1722,8 +1815,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1792,8 +1891,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     zone:
       spread:
@@ -1879,8 +1984,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1908,7 +2019,7 @@ spec:
 		})
 	})
 
-	Context("rolling update", func() {
+	Context("rolling update", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-rolling-e2e"
 
 		It("propagates spec changes one node at a time and returns to Ready", func() {
@@ -1918,8 +2029,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1982,7 +2099,7 @@ spec:
 		})
 	})
 
-	Context("single-node cluster scale-up", func() {
+	Context("single-node cluster scale-up", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-scaleup-e2e"
 
 		AfterEach(func() {
@@ -1997,8 +2114,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2014,7 +2137,7 @@ spec:
 
 			By("scaling to 1 replica")
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2046,8 +2169,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2091,7 +2220,7 @@ spec:
 		})
 	})
 
-	Context("live ACL propagation", func() {
+	Context("live ACL propagation", Label("security"), func() {
 		const clusterName = "valkeycluster-live-acl-e2e"
 		const usersSecret = "valkey-live-acl-users"
 		const aclClientPod = "live-acl-client"
@@ -2109,16 +2238,16 @@ spec:
 			frankSecret, frankUser := "", ""
 			if withFrank {
 				frankSecret = "  frankpw: " + frankPassword + "\n"
-				frankUser = `    - name: frank
-      enabled: true
-      passwordSecret:
-        name: ` + usersSecret + `
-        keys: [frankpw]
-      commands:
-        allow: ["@read", "@connection"]
-      keys:
-        readOnly: ["frank:*"]
-      permissions: "+ping"
+				frankUser = `      - name: frank
+        password:
+          secret:
+            name: ` + usersSecret + `
+            keys: [frankpw]
+        commands:
+          allow: ["@read", "@connection"]
+        keys:
+          readOnly: ["frank:*"]
+        permissions: "+ping"
 `
 			}
 			return fmt.Sprintf(`apiVersion: v1
@@ -2136,7 +2265,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2144,22 +2273,23 @@ spec:
     limits:
       cpu: "500m"
       memory: "512Mi"
-  users:
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: %s
-        keys: [defaultpw]
-    - name: alice
-      enabled: true
-      passwordSecret:
-        name: %s
-        keys: [alicepw]
-      commands:
-        allow: ["@read", "@write", "@connection"]
-      keys:
-        readWrite: ["app:*"]
+  acl:
+    users:
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          secret:
+            name: %s
+            keys: [defaultpw]
+      - name: alice
+        password:
+          secret:
+            name: %s
+            keys: [alicepw]
+        commands:
+          allow: ["@read", "@write", "@connection"]
+        keys:
+          readWrite: ["app:*"]
 %s`, usersSecret, defaultPassword, alicePassword, frankSecret, clusterName, usersSecret, usersSecret, frankUser)
 		}
 
@@ -2278,7 +2408,127 @@ spec:
 		})
 	})
 
-	Context("acl-hash annotation migration", func() {
+	Context("default user", Label("security"), func() {
+		const clusterName = "valkeycluster-default-user-e2e"
+		const usersSecret = "valkey-default-user-users"
+		const clientPod = "default-user-client"
+		const alicePassword = "default-user-alice-pw"
+		clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", clusterName)
+
+		// buildManifest renders the users Secret and a cluster whose only
+		// declared user is alice, plus Valkey's open default when withDefault.
+		buildManifest := func(withDefault bool) string {
+			defaultUser := ""
+			if withDefault {
+				defaultUser = `      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+`
+			}
+			return fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+type: Opaque
+stringData:
+  alicepw: %s
+---
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  acl:
+    users:
+      - name: alice
+        password:
+          secret:
+            name: %s
+            keys: [alicepw]
+        commands:
+          allow: ["@connection"]
+%s`, usersSecret, alicePassword, clusterName, usersSecret, defaultUser)
+		}
+
+		applyManifest := func(manifest string) {
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to apply manifest")
+		}
+
+		// ping runs PING from a throwaway client pod, with the given extra
+		// valkey-cli arguments, and returns its combined output.
+		ping := func(g Gomega, authArgs string) string {
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", clientPod,
+				"--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+			_, err := utils.Run(exec.Command("kubectl", "run", clientPod,
+				"--image="+valkeyClientImage, "--restart=Never", "--",
+				"sh", "-c", fmt.Sprintf("valkey-cli -h %s %s PING 2>&1 || true", clusterFqdn, authArgs)))
+			g.Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "wait", "pod/"+clientPod,
+				"--for=jsonpath={.status.phase}=Succeeded", "--timeout=60s"))
+			g.Expect(err).NotTo(HaveOccurred())
+			out, err := utils.Run(exec.Command("kubectl", "logs", clientPod))
+			g.Expect(err).NotTo(HaveOccurred())
+			return out
+		}
+		anonymous := func(g Gomega) string { return ping(g, "") }
+		alice := func(g Gomega) string {
+			return ping(g, fmt.Sprintf("--user alice --pass %s --no-auth-warning", alicePassword))
+		}
+
+		podUIDs := func(g Gomega) string {
+			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
+				"-l", "valkey.io/cluster="+clusterName, "-o", "jsonpath={.items[*].metadata.uid}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).NotTo(BeEmpty())
+			return out
+		}
+
+		It("disables an undeclared default and follows its declaration live", func() {
+			defer func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", clientPod, "--ignore-not-found=true", "--wait=false"))
+			}()
+
+			By("creating a cluster that declares alice but not default")
+			applyManifest(buildManifest(false))
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+			before := podUIDs(Default)
+
+			By("refusing a client without credentials, while alice authenticates")
+			Eventually(func(g Gomega) {
+				g.Expect(anonymous(g)).To(ContainSubstring("NOAUTH"))
+				g.Expect(alice(g)).To(ContainSubstring("PONG"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("declaring the open default, which applies live")
+			applyManifest(buildManifest(true))
+			Eventually(func(g Gomega) {
+				g.Expect(anonymous(g)).To(ContainSubstring("PONG"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("removing the declaration, which disables default again live")
+			applyManifest(buildManifest(false))
+			Eventually(func(g Gomega) {
+				g.Expect(anonymous(g)).To(ContainSubstring("NOAUTH"))
+				g.Expect(alice(g)).To(ContainSubstring("PONG"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			Expect(podUIDs(Default)).To(Equal(before), "the default user must change without recreating a pod")
+		})
+	})
+
+	Context("acl-hash annotation migration", Label("security"), func() {
 		const clusterName = "valkeycluster-aclhash-migration-e2e"
 		const usersSecret = "valkey-aclhash-users"
 		const (
@@ -2301,7 +2551,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2372,6 +2622,19 @@ spec:
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
 
+			By("reporting the deprecated spec.users field")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				cond := meta.FindStatusCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Message).To(ContainSubstring("spec.users is deprecated"))
+				_, warningEvents, err := utils.GetEvents(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(warningEvents[valkeyiov1alpha1.ReasonDeprecatedField]).To(BeTrue())
+			}).Should(Succeed())
+
 			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
 			// Operator versions before live ACL stamped the ACL hash on the pod
 			// template. Reproduce that pre-upgrade state and assert the current
@@ -2432,8 +2695,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2514,7 +2783,7 @@ spec:
 // ---------------------------------------------------------------------------
 
 // failoverDefaultPassword is the password configured for the default user of
-// the failover test cluster (via a passwordSecret, following the pattern
+// the failover test cluster (via password.secret, following the pattern
 // introduced in #292), so valkey-cli commands run authenticated.
 const failoverDefaultPassword = "e2eFailoverPassw0rd"
 

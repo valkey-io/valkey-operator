@@ -27,7 +27,7 @@ import (
 
 func TestCountReadyShards(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
-		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 1},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{ReplicasPerShard: 1},
 	}
 	// shard returns a one-primary, one-replica shard whose replica has its
 	// link up. peerView is the primary's CLUSTER NODES output, which is where
@@ -42,6 +42,7 @@ func TestCountReadyShards(t *testing.T) {
 				{
 					Id:        "shard-0",
 					PrimaryId: "node-1",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 					Nodes: []*valkey.NodeState{
 						primary,
 						{Id: "node-2", Address: "10.0.0.2", Flags: []string{"slave"},
@@ -72,7 +73,7 @@ func TestCountReadyShards(t *testing.T) {
 // table. That single opinion must not zero the ready count; a majority of the
 // peers agreeing on a node must.
 func TestCountReadyShardsUnderPartition(t *testing.T) {
-	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 0}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{ReplicasPerShard: 0}}
 	ids := []string{"n0", "n1", "n2"}
 	clean := "n0 10.0.0.0:6379@16379 master - 0 0 1 connected 0-5460\n" +
 		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +
@@ -94,7 +95,7 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"},
 				Info: map[string]string{"role": "master"}, ClusterInfo: map[string]string{"cluster_size": "3"}}
 			n.SetClusterNodesForTesting(withMyself(views[i], id))
-			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Nodes: []*valkey.NodeState{n}})
+			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Slots: []valkey.SlotsRange{{Start: 0, End: 100}}, Nodes: []*valkey.NodeState{n}})
 		}
 		return st
 	}

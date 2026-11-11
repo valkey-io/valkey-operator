@@ -233,14 +233,14 @@ type ZoneScheduling struct {
 // ZonePinning assigns every pod a deterministic zone. Rendered as a
 // topology.kubernetes.io/zone entry in the pod's nodeSelector, which Kubernetes
 // ANDs with any affinity the user supplies through the escape hatch.
-// +kubebuilder:validation:XValidation:rule="self.zones.all(z, self.zones.exists_one(y, y == z))",message="zone.pinning.zones entries must be unique: a repeated zone silently biases the round-robin"
+// +kubebuilder:validation:XValidation:rule="self.zones.all(z, self.zones.exists_one(y, y == z))",message="zone.pinning.zones entries must be unique: a repeated zone silently biases the round-robin",fieldPath=".zones",reason="FieldValueForbidden"
 type ZonePinning struct {
 	// Zones is the ordered round-robin sequence. A pod's zone is
 	// zones[(shardIndex + nodeIndex) % len(zones)], so each shard's pods walk
 	// the list from a different starting point, and while there are at least
 	// as many zones as shards, primaries land in distinct zones as a side
-	// effect. When replicas+1 exceeds the zone count, some members of a shard
-	// necessarily share a zone.
+	// effect. When replicasPerShard+1 exceeds the zone count, some members of
+	// a shard necessarily share a zone.
 	//
 	// Adding shards or replicas never moves an existing pod, because a pod's
 	// indices never change. Changing this list would move nearly all of them,
@@ -267,47 +267,49 @@ type ZonePinning struct {
 }
 
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
-// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!(has(self.replicas) && has(self.replicasPerShard))",message="spec.replicas is deprecated and cannot be combined with spec.replicasPerShard: remove spec.replicas (set it to null) in the same update",fieldPath=".replicasPerShard",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable",fieldPath=".persistence.storageClassName",reason="FieldValueForbidden"
 //
 // node.spread: reject primaries and pods both Required (they would render duplicate hostname DoNotSchedule constraints).
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="node.spread.primaries and node.spread.pods cannot both be Required: they render duplicate kubernetes.io/hostname DoNotSchedule topology spread constraints"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="node.spread.primaries and node.spread.pods cannot both be Required: they render duplicate kubernetes.io/hostname DoNotSchedule topology spread constraints",fieldPath=".scheduling.node.spread",reason="FieldValueForbidden"
 //
 // node.spread: reject primaries and pods both Preferred (they would render duplicate hostname ScheduleAnyway constraints).
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="node.spread.primaries and node.spread.pods cannot both be Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway topology spread constraints (set one to Disabled or Required)"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="node.spread.primaries and node.spread.pods cannot both be Preferred: they render duplicate kubernetes.io/hostname ScheduleAnyway topology spread constraints (set one to Disabled or Required)",fieldPath=".scheduling.node.spread",reason="FieldValueForbidden"
 //
 // node.spread: reject a user hostname DoNotSchedule TSC that collides with a Required primaries/pods spread.
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries or node.spread.pods set to Required, which render the same hostname DoNotSchedule constraint: set that node.spread mode to Disabled, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable DoNotSchedule collides with node.spread.primaries or node.spread.pods set to Required, which render the same hostname DoNotSchedule constraint: set that node.spread mode to Disabled, or remove the passthrough constraint",fieldPath=".scheduling.topologySpreadConstraints",reason="FieldValueForbidden"
 //
 // node.spread: reject a user hostname ScheduleAnyway TSC that collides with a Preferred primaries/pods spread.
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries or node.spread.pods set to Preferred, which render the same hostname ScheduleAnyway constraint: set that node.spread mode to Disabled or Required, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'kubernetes.io/hostname' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.node) || !has(self.scheduling.node.spread) || !( ((has(self.scheduling.node.spread.primaries) && has(self.scheduling.node.spread.primaries.mode)) ? self.scheduling.node.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.node.spread.pods) && has(self.scheduling.node.spread.pods.mode)) ? self.scheduling.node.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on kubernetes.io/hostname with whenUnsatisfiable ScheduleAnyway collides with node.spread.primaries or node.spread.pods set to Preferred, which render the same hostname ScheduleAnyway constraint: set that node.spread mode to Disabled or Required, or remove the passthrough constraint",fieldPath=".scheduling.topologySpreadConstraints",reason="FieldValueForbidden"
 //
 // zone.spread: reject more than one of shard/primaries/pods Required (they would render duplicate zone DoNotSchedule constraints).
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Required: they render duplicate topology.kubernetes.io/zone DoNotSchedule topology spread constraints"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Required: they render duplicate topology.kubernetes.io/zone DoNotSchedule topology spread constraints",fieldPath=".scheduling.zone.spread",reason="FieldValueForbidden"
 //
 // zone.spread: reject more than one of shard/primaries/pods Preferred (they would render duplicate zone ScheduleAnyway constraints).
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Preferred: they render duplicate topology.kubernetes.io/zone ScheduleAnyway topology spread constraints (set one to Disabled or Required)"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') || (((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred') )",message="at most one of zone.spread.shard, zone.spread.primaries, zone.spread.pods may be Preferred: they render duplicate topology.kubernetes.io/zone ScheduleAnyway topology spread constraints (set one to Disabled or Required)",fieldPath=".scheduling.zone.spread",reason="FieldValueForbidden"
 //
 // zone.spread: reject a user zone DoNotSchedule TSC that collides with a Required shard/primaries/pods spread.
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable DoNotSchedule collides with zone.spread.shard, primaries, or pods set to Required, which render the same zone DoNotSchedule constraint: set that zone.spread mode to Disabled, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'DoNotSchedule') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Required' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Required' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable DoNotSchedule collides with zone.spread.shard, primaries, or pods set to Required, which render the same zone DoNotSchedule constraint: set that zone.spread mode to Disabled, or remove the passthrough constraint",fieldPath=".scheduling.topologySpreadConstraints",reason="FieldValueForbidden"
 //
 // zone.spread: reject a user zone ScheduleAnyway TSC that collides with a Preferred shard/primaries/pods spread.
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard, primaries, or pods set to Preferred, which render the same zone ScheduleAnyway constraint: set that zone.spread mode to Disabled or Required, or remove the passthrough constraint"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.topologySpreadConstraints) || !self.scheduling.topologySpreadConstraints.exists(c, c.topologyKey == 'topology.kubernetes.io/zone' && c.whenUnsatisfiable == 'ScheduleAnyway') || !has(self.scheduling.zone) || !has(self.scheduling.zone.spread) || !( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Preferred' || ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Preferred' )",message="a topologySpreadConstraints entry on topology.kubernetes.io/zone with whenUnsatisfiable ScheduleAnyway collides with zone.spread.shard, primaries, or pods set to Preferred, which render the same zone ScheduleAnyway constraint: set that zone.spread mode to Disabled or Required, or remove the passthrough constraint",fieldPath=".scheduling.topologySpreadConstraints",reason="FieldValueForbidden"
 //
 // zone.pinning: reject pinning combined with any non-Disabled zone spread (pinning already fixes each pod's zone).
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.zone.spread) || ( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Disabled' )",message="zone.pinning cannot be combined with a non-Disabled zone.spread.shard, primaries, or pods: pinning already assigns every pod a fixed zone, which a zone spread constraint can contradict"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.zone.spread) || ( ((has(self.scheduling.zone.spread.shard) && has(self.scheduling.zone.spread.shard.mode)) ? self.scheduling.zone.spread.shard.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.primaries) && has(self.scheduling.zone.spread.primaries.mode)) ? self.scheduling.zone.spread.primaries.mode : 'Disabled') == 'Disabled' && ((has(self.scheduling.zone.spread.pods) && has(self.scheduling.zone.spread.pods.mode)) ? self.scheduling.zone.spread.pods.mode : 'Disabled') == 'Disabled' )",message="zone.pinning cannot be combined with a non-Disabled zone.spread.shard, primaries, or pods: pinning already assigns every pod a fixed zone, which a zone spread constraint can contradict",fieldPath=".scheduling.zone.pinning",reason="FieldValueForbidden"
 //
 // zone.pinning: the zone list is immutable while set (changing it reassigns nearly every pod); removal and re-adding are allowed.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.scheduling) || !has(oldSelf.scheduling.zone) || !has(oldSelf.scheduling.zone.pinning) || !has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || self.scheduling.zone.pinning.zones == oldSelf.scheduling.zone.pinning.zones",message="zone.pinning.zones is immutable while set: changing it reassigns nearly every pod. Remove zone.pinning, reconcile, then re-add it with the new list"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.scheduling) || !has(oldSelf.scheduling.zone) || !has(oldSelf.scheduling.zone.pinning) || !has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || self.scheduling.zone.pinning.zones == oldSelf.scheduling.zone.pinning.zones",message="zone.pinning.zones is immutable while set: changing it reassigns nearly every pod. Remove zone.pinning, reconcile, then re-add it with the new list",fieldPath=".scheduling.zone.pinning.zones",reason="FieldValueForbidden"
 //
 // zone.pinning: reject a passthrough nodeSelector that sets the zone key the pinning render owns.
-// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.nodeSelector) || !('topology.kubernetes.io/zone' in self.scheduling.nodeSelector)",message="scheduling.nodeSelector cannot set topology.kubernetes.io/zone while zone.pinning is set: pinning renders that key itself, and the curated value would overwrite yours"
+// +kubebuilder:validation:XValidation:rule="!has(self.scheduling) || !has(self.scheduling.zone) || !has(self.scheduling.zone.pinning) || !has(self.scheduling.nodeSelector) || !('topology.kubernetes.io/zone' in self.scheduling.nodeSelector)",message="scheduling.nodeSelector cannot set topology.kubernetes.io/zone while zone.pinning is set: pinning renders that key itself, and the curated value would overwrite yours",fieldPath=".scheduling.nodeSelector",reason="FieldValueForbidden"
 //
 // discovery: Hostname announce needs stable StatefulSet pod names.
-// +kubebuilder:validation:XValidation:rule="!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType) || self.networking.discovery.preferredEndpointType != 'Hostname' || !has(self.workloadType) || self.workloadType == 'StatefulSet'",message="networking.discovery.preferredEndpointType Hostname requires workloadType StatefulSet (or omit workloadType for the StatefulSet default)"
+// +kubebuilder:validation:XValidation:rule="!has(self.networking) || !has(self.networking.discovery) || !has(self.networking.discovery.preferredEndpointType) || self.networking.discovery.preferredEndpointType != 'Hostname' || !has(self.workloadType) || self.workloadType == 'StatefulSet'",message="networking.discovery.preferredEndpointType Hostname requires workloadType StatefulSet (or omit workloadType for the StatefulSet default)",fieldPath=".networking.discovery.preferredEndpointType",reason="FieldValueForbidden"
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
@@ -324,9 +326,16 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Shards int32 `json:"shards"`
 
-	// The number of replicas for each shard group.
+	// Deprecated: use replicasPerShard, which has the same meaning. A spec
+	// cannot set both. This field is removed in v1beta1.
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// The number of replicas in each shard, in addition to its primary.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReplicasPerShard int32 `json:"replicasPerShard,omitempty"`
 
 	// Override resource requirements for the Valkey container in each pod
 	// +optional
@@ -345,7 +354,7 @@ type ValkeyClusterSpec struct {
 
 	// WorkloadType specifies whether ValkeyNodes create StatefulSets or Deployments.
 	// +kubebuilder:default=StatefulSet
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable",reason="FieldValueForbidden"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -353,13 +362,21 @@ type ValkeyClusterSpec struct {
 	// +optional
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
-	// Users, and ACL-related configuration; see valkeyacls_types.go
+	// Valkey users managed by the operator.
+	//
+	// Deprecated: use spec.acl.users; removed in v1beta1.
+	//
 	// +listType=map
 	// +listMapKey=name
 	Users []UserAclSpec `json:"users,omitempty"`
 
+	// ACL configures the Valkey access control the operator manages.
+	// +optional
+	ACL *ACLSpec `json:"acl,omitempty"`
+
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// Additional Valkey configuration parameters
@@ -377,7 +394,7 @@ type ValkeyClusterSpec struct {
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// Networking groups how clients and peers reach cluster nodes (TLS,
-	// in-cluster discovery announce, and later external access).
+	// in-cluster discovery announce, per-node Services, and later external access).
 	// +optional
 	Networking *NetworkingSpec `json:"networking,omitempty"`
 
@@ -441,7 +458,16 @@ type NetworkingSpec struct {
 	// TLS configuration for the cluster.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+
+	// PerNodeServices opts in to one ClusterIP Service per node.
+	// Omit it to create none. Each Service selects that one pod.
+	// Announce settings are unchanged.
+	// +optional
+	PerNodeServices *PerNodeServicesSpec `json:"perNodeServices,omitempty"`
 }
+
+// PerNodeServicesSpec is empty. Presence turns per-node Services on.
+type PerNodeServicesSpec struct{}
 
 // DiscoverySpec configures how nodes announce themselves for in-cluster clients.
 type DiscoverySpec struct {
@@ -491,7 +517,8 @@ const (
 
 // TLSClientAuthSpec configures client certificate authentication for incoming
 // TLS connections.
-// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode",fieldPath=".certificateUser",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.ca) && size(self.ca) > 0)",message="ca has no effect when mode=Disabled: Valkey ignores client certificates in that mode",fieldPath=".ca",reason="FieldValueForbidden"
 type TLSClientAuthSpec struct {
 	// Mode controls whether clients must authenticate with a TLS certificate.
 	// `Required` enforces mTLS, `Optional` allows both authenticated and
@@ -510,6 +537,59 @@ type TLSClientAuthSpec struct {
 	// +kubebuilder:default=Disabled
 	// +optional
 	CertificateUser TLSAuthClientsUser `json:"certificateUser,omitempty"`
+
+	// CA lists additional trust roots for verifying client certificates, for
+	// clients whose certificates are issued by a different CA than the server
+	// certificate. Each entry names a Secret or a ConfigMap, and the key in it
+	// holding the roots (default `ca.crt`) as PEM certificates or a SPIFFE
+	// trust bundle.
+	//
+	// The operator merges the server secret's `ca.crt` with the roots under
+	// each entry's key, in list order and without duplicates, into the
+	// operator-managed `valkey-<cluster>-tls-trust` Secret, and nodes verify clients
+	// and peers against that bundle. The server root always stays in the
+	// bundle, since peers present the server certificate on the cluster bus
+	// and replication links.
+	//
+	// The operator re-reads these sources on every reconcile, and nodes reload
+	// a changed bundle live, without a restart. SPIRE's
+	// bundle ConfigMap can be referenced as is, with its key (`bundle.spiffe`
+	// or `bundle.crt`).
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	CA []TrustSource `json:"ca,omitempty"`
+}
+
+// TrustSource references CA certificates held in a Secret or a ConfigMap.
+// Exactly one of secretName and configMapName must be set.
+// +kubebuilder:validation:XValidation:rule="has(self.secretName) != has(self.configMapName)",message="exactly one of secretName and configMapName must be set"
+type TrustSource struct {
+	// SecretName is the name of a Secret holding the roots. The Secret type
+	// does not matter.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// ConfigMapName is the name of a ConfigMap holding the roots, as SPIRE and
+	// trust-manager publish bundles.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ConfigMapName string `json:"configMapName,omitempty"`
+
+	// Key is the key holding the roots. Defaults to `ca.crt`. Its contents are
+	// either PEM certificates or a SPIFFE trust bundle (a JWK Set, as SPIRE
+	// publishes under `bundle.spiffe`); the operator tells them apart by their
+	// content and, for a SPIFFE bundle, uses the `x5c` certificate of every
+	// key whose `use` is `x509-svid`.
+	// +kubebuilder:default=ca.crt
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // EffectiveMode returns mode, defaulting to Optional when unset.
@@ -565,6 +645,14 @@ func (t *TLSSpec) ClientAuthCertificateUser() TLSAuthClientsUser {
 	return t.ClientAuth.EffectiveCertificateUser()
 }
 
+// ClientAuthCA returns the additional client trust sources for t, or nil.
+func (t *TLSSpec) ClientAuthCA() []TrustSource {
+	if t == nil || t.ClientAuth == nil {
+		return nil
+	}
+	return t.ClientAuth.CA
+}
+
 // TLSCertificates groups the certificate slots for a ValkeyCluster. Today
 // `server` is the only slot; the trust-source, outbound-identity and
 // control-plane-identity slots land in later phases of #360.
@@ -604,9 +692,24 @@ func (c *ValkeyCluster) GetClusterDomain() string {
 	return c.Spec.Networking.ClusterDomain
 }
 
+// GetReplicasPerShard returns spec.replicasPerShard, or the deprecated
+// spec.replicas when replicasPerShard is unset. CEL rejects a spec that sets
+// both, and an unset field reads as 0, so the non-zero field wins.
+func (c *ValkeyCluster) GetReplicasPerShard() int32 {
+	if c.Spec.ReplicasPerShard != 0 {
+		return c.Spec.ReplicasPerShard
+	}
+	return c.Spec.Replicas
+}
+
 // PrefersHostnameAnnounce reports whether discovery announces hostnames.
 func (c *ValkeyCluster) PrefersHostnameAnnounce() bool {
 	return c.GetPreferredEndpointType() == PreferredEndpointTypeHostname
+}
+
+// PerNodeServicesEnabled reports whether per-node ClusterIP Services are requested.
+func (c *ValkeyCluster) PerNodeServicesEnabled() bool {
+	return c != nil && c.Spec.Networking != nil && c.Spec.Networking.PerNodeServices != nil
 }
 
 // CertificateSource references a certificate and its private key. Today the
@@ -649,6 +752,23 @@ type ExporterSpec struct {
 // field keeps the sidecar.
 func (s ValkeyClusterSpec) ExporterEnabled() bool {
 	return s.Exporter.Enabled == nil || *s.Exporter.Enabled
+}
+
+// ACLUsers returns spec.acl.users when set, otherwise the converted
+// spec.users. The result is a deep copy and can be modified freely.
+func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
+	if s.ACL != nil && len(s.ACL.Users) > 0 {
+		users := make([]ACLUserSpec, 0, len(s.ACL.Users))
+		for _, u := range s.ACL.Users {
+			users = append(users, *u.DeepCopy())
+		}
+		return users
+	}
+	users := make([]ACLUserSpec, 0, len(s.Users))
+	for _, u := range s.Users {
+		users = append(users, u.ToACLUser())
+	}
+	return users
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
@@ -698,11 +818,42 @@ const (
 	ConditionSlotsAssigned = "SlotsAssigned"
 	// ConditionConfigurationWarning flags a spec value the operator accepted but
 	// considers risky, for example a terminationGracePeriodSeconds too short for
-	// graceful failover.
+	// graceful failover, or a deprecated field.
 	ConditionConfigurationWarning = "ConfigurationWarning"
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionTLSConfigured reports whether the operator-managed TLS trust
+	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
+	// non-empty.
+	ConditionTLSConfigured = "TLSConfigured"
+)
+
+const (
+	// ReasonTrustBundleReady is used with ConditionTLSConfigured=True when
+	// valkey-<cluster>-tls-trust holds the server root and every clientAuth.ca root.
+	ReasonTrustBundleReady = "TrustBundleReady"
+	// ReasonTrustSourceNotFound is used with ConditionTLSConfigured=False when
+	// a source Secret or ConfigMap, or its configured key, does not exist. The
+	// trust Secret keeps its last good roots.
+	ReasonTrustSourceNotFound = "TrustSourceNotFound"
+	// ReasonTrustSourceInvalid is used with ConditionTLSConfigured=False when a
+	// source's key holds neither PEM certificates nor a SPIFFE bundle with an
+	// X.509 authority. The trust Secret keeps its last good roots.
+	ReasonTrustSourceInvalid = "TrustSourceInvalid"
+	// ReasonTrustBundleConflict is used with ConditionTLSConfigured=False when
+	// a Secret named valkey-<cluster>-tls-trust exists but this cluster does not
+	// control it. Nodes stay on the server root.
+	ReasonTrustBundleConflict = "TrustBundleConflict"
+	// ReasonTrustBundlePending is used with ConditionTLSConfigured=False while
+	// new roots are held back until every node confirms the current ACL. The
+	// trust Secret keeps its current roots meanwhile.
+	ReasonTrustBundlePending = "TrustBundlePending"
+	// ReasonTrustBundleRejected is used with ConditionTLSConfigured=False when
+	// the API server refuses to store the trust Secret, for example because it
+	// is over the size limit or an admission policy denies it. The trust Secret
+	// keeps its current contents and the rest of the reconcile carries on.
+	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
 const (
@@ -727,6 +878,7 @@ const (
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"
 	ReasonRebalanceFailed               = "RebalanceFailed"
+	ReasonScaleInBlocked                = "ScaleInBlocked"
 	ReasonACLApplyFailed                = "ACLApplyFailed"
 	ReasonUsersAclError                 = "UsersACLError"
 	ReasonUpdatingNodes                 = "UpdatingNodes"
@@ -735,11 +887,25 @@ const (
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
-	ReasonServiceAccountNotFound        = "ServiceAccountNotFound"
-	ReasonServiceAccountLookupFailed    = "ServiceAccountLookupFailed"
+	// ReasonDeprecatedField is used with ConditionConfigurationWarning when the
+	// spec uses a field that still works but is scheduled for removal.
+	ReasonDeprecatedField            = "DeprecatedField"
+	ReasonServiceAccountNotFound     = "ServiceAccountNotFound"
+	ReasonServiceAccountLookupFailed = "ServiceAccountLookupFailed"
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonTrustBundleError is used with ConditionReady when the operator
+	// cannot read a trust source or write valkey-<cluster>-tls-trust.
+	ReasonTrustBundleError = "TrustBundleError"
+	// ReasonOperatorAuthenticationFailed is used with ConditionDegraded, Ready
+	// and Progressing when a node rejects the operator's _operator password.
+	ReasonOperatorAuthenticationFailed = "OperatorAuthenticationFailed"
+
+	// ReasonUsersACLUnresolved marks Degraded when a user's password Secret or key
+	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
+	// while topology work continues.
+	ReasonUsersACLUnresolved = "UsersACLUnresolved"
 )
 
 // +kubebuilder:object:root=true
@@ -751,21 +917,25 @@ const (
 // stamps each pod with a controller-revision-hash label of the StatefulSet
 // name plus an 11-character suffix, and label values stop at 63 characters,
 // so a StatefulSet name longer than 52 never gets a pod. The rule counts the
-// digits of the highest shard index (shards - 1) and node index (replicas),
-// so a scale-out that pushes an index into more digits is rejected too. A
-// Deployment carries no such label; there the headless Service valkey-<name>,
-// a DNS label of at most 63 characters, is the limit, until the indexes grow
-// enough for the ValkeyNode name <name>-<shard>-<node>, which every pod
-// carries as its app.kubernetes.io/instance label value, to reach 63 first.
+// digits of the highest shard index (shards - 1) and node index
+// (replicasPerShard), so a scale-out that pushes an index into more digits is
+// rejected too. A Deployment carries no such label; there the headless Service
+// valkey-<name>, a DNS label of at most 63 characters, is the limit, until the
+// indexes grow enough for the ValkeyNode name <name>-<shard>-<node>, which
+// every pod carries as its app.kubernetes.io/instance label value, to reach 63
+// first.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
-// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) <= 56",message="metadata.name is too long: the headless Service name valkey-<name> must stay within 63 characters"
-// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicas) ? self.spec.replicas : 0)) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.clientAuth.ca",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.certificates.server.secretName",reason="FieldValueForbidden"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`
 

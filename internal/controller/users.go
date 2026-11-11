@@ -165,13 +165,10 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 			continue
 		}
 		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
-		userAcl := valkeyiov1alpha1.UserAclSpec{
-			Name:    user,
-			Enabled: true,
-			RawAcl:  systemUsersAcls[user],
-			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-				Name: systemUserSecret.Name,
-				Keys: []string{user},
+		userAcl := valkeyiov1alpha1.ACLUserSpec{
+			Name: user,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				RawAcl: systemUsersAcls[user],
 			},
 		}
 		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, []string{passwordHash}))
@@ -180,22 +177,67 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	return systemsAcls.String(), nil
 }
 
+// defaultUser is the name of Valkey's built-in user.
+const defaultUser = "default"
+
+// disabledDefaultUser is written to the aclfile when the cluster declares no
+// default user. Valkey's stock default is `on nopass +@all`, and a client that
+// never authenticates, or whose certificate names no ACL user, is logged in as
+// it. Any declared default, in any form, is used exactly as written instead.
+//
+// Being off is what locks clients out: an off user cannot be authenticated as.
+// It keeps every permission because Valkey still runs internal work as default
+// and checks its permissions: AOF loading drops transactions default may not
+// run (valkey-io/valkey#3983), and Valkey 9.0.0 slot migrations need
+// cluster|syncslots (valkey-io/valkey#2783).
+var disabledDefaultUser = valkeyiov1alpha1.ACLUserSpec{
+	Name:     defaultUser,
+	State:    valkeyiov1alpha1.ACLUserStateDisabled,
+	Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+	ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+		RawAcl: "~* &* +@all",
+	},
+}
+
+// managedUsers returns the users the aclfile manages: the declared users, plus
+// a disabled default user when none is declared.
+func managedUsers(cluster *valkeyiov1alpha1.ValkeyCluster) []valkeyiov1alpha1.ACLUserSpec {
+	users := cluster.Spec.ACLUsers()
+	if !slices.ContainsFunc(users, func(u valkeyiov1alpha1.ACLUserSpec) bool { return u.Name == defaultUser }) {
+		users = append(users, *disabledDefaultUser.DeepCopy())
+	}
+	return users
+}
+
 func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
 
 	// Sort users for consistency in hash calculations
-	slices.SortFunc(cluster.Spec.Users, func(a, b valkeyiov1alpha1.UserAclSpec) int {
+	users := managedUsers(cluster)
+	slices.SortFunc(users, func(a, b valkeyiov1alpha1.ACLUserSpec) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 
+	// Build the system users first, so a change to them (the _exporter user
+	// appearing when the exporter is enabled, for example) lands in the
+	// system-passwords Secret even when a user below cannot be resolved.
+	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
+	if err != nil {
+		log.Error(err, "failed to generate system users ACL")
+		return err
+	}
+
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
-	for _, user := range cluster.Spec.Users {
+	for _, user := range users {
 
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
 		if err != nil {
+			if _, ok := errors.AsType[*userSecretUnresolvedError](err); ok {
+				return err // already names the user
+			}
 			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
 
@@ -204,11 +246,6 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		fmt.Fprintf(&usersAcls, "%s\n", acl)
 	}
 	// append system users ACL
-	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
-	if err != nil {
-		log.Error(err, "failed to generate system users ACL")
-		return err
-	}
 	fmt.Fprintf(&usersAcls, "%s\n", systemUsersAcl)
 
 	// Append the revision user last, so its password hash covers every
@@ -238,6 +275,26 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	return nil
 }
 
+// deprecatedFieldConfigWarnings flags spec.users and spec.replicas, which
+// spec.acl.users and spec.replicasPerShard replace. spec.replicas of 0 does
+// not warn: the Go field is 0 when the spec omits it and when the spec sets 0.
+func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	var warnings []configWarning
+	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+		})
+	}
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
+		})
+	}
+	return warnings
+}
+
 // Helper for repeated actions
 func appendAcl(acl *strings.Builder, permissions []string, prefix string) {
 	for _, permission := range permissions {
@@ -246,7 +303,7 @@ func appendAcl(acl *strings.Builder, permissions []string, prefix string) {
 }
 
 // Builds a user ACL string
-func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string {
+func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string {
 
 	// Holds the ACL as we build it
 	var acl strings.Builder
@@ -254,21 +311,22 @@ func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string 
 	// Initial acl
 	fmt.Fprintf(&acl, "user %s ", user.Name)
 
-	// Is the user enabled?
-	if user.Enabled {
+	// Unknown states fail closed
+	switch user.State {
+	case valkeyiov1alpha1.ACLUserStateEnabled, "":
 		acl.WriteString("on")
-	} else {
+	default:
 		acl.WriteString("off")
 	}
 
-	// If resetpass flag is false, then add password(s)/nopass flag to the ACL
-	if !user.ResetPass {
-		// If enabled, append password(s), which should already be prefix-hashed
-		if user.NoPassword {
-			fmt.Fprintf(&acl, " nopass")
-		} else {
-			appendAcl(&acl, passwords, "#")
-		}
+	// Password(s) should already be prefix-hashed. A fresh aclfile user has no
+	// passwords and no nopass flag, so Disabled needs no directive.
+	switch user.PasswordType() {
+	case valkeyiov1alpha1.ACLPasswordTypeAny:
+		fmt.Fprintf(&acl, " nopass")
+	case valkeyiov1alpha1.ACLPasswordTypeDisabled:
+	default:
+		appendAcl(&acl, passwords, "#")
 	}
 
 	// Add key restrictions
@@ -292,19 +350,41 @@ func buildUserAcl(user valkeyiov1alpha1.UserAclSpec, passwords []string) string 
 	return acl.String()
 }
 
+// userSecretUnresolvedError reports a user whose password the operator cannot
+// read: the referenced Secret is missing, or it lacks a key listed in
+// password.secret.keys. The cluster controller keeps the last good aclfile and
+// reports the user on the Degraded condition; see reportUsersACLUnresolved.
+type userSecretUnresolvedError struct {
+	User   string
+	Secret string
+	Key    string
+}
+
+func (e *userSecretUnresolvedError) Error() string {
+	if e.Key == "" {
+		return fmt.Sprintf("user %s: Secret %s not found", e.User, e.Secret)
+	}
+	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
+}
+
 // Fetches a Secret, and looks for referenced passwords
-func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
+func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)
 
-	// If this user have resetpass flag, doesn't have a password, or is disabled, return empty
-	if user.NoPassword || !user.Enabled || user.ResetPass {
+	// Only enabled users authenticating with Secret passwords need them
+	enabled := user.State == valkeyiov1alpha1.ACLUserStateEnabled || user.State == ""
+	if !enabled || user.PasswordType() != valkeyiov1alpha1.ACLPasswordTypeSecret {
 		return []string{}, nil
+	}
+	passwordSecret := valkeyiov1alpha1.PasswordSecretSpec{}
+	if user.Password != nil && user.Password.Secret != nil {
+		passwordSecret = *user.Password.Secret
 	}
 	// Look for a Secret matching the user-provided name, or clusterName-users
 	userSecretName := getDefaultSecretName(clusterName)
-	if user.PasswordSecret.Name != "" {
-		userSecretName = user.PasswordSecret.Name
+	if passwordSecret.Name != "" {
+		userSecretName = passwordSecret.Name
 	}
 
 	// Query API for the referenced Secret
@@ -319,13 +399,12 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 		}
 		log.V(1).Info("Users secret not found", "userSecretName", userSecretName, "user", user.Name)
 
-		// The Secret was not found; And since NoPassword is false, then we cannot add this user
-		return []string{}, fmt.Errorf("no password or reference found")
+		// The Secret was not found, and this user needs a password from it
+		return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName}
 	}
 
 	// Sort the password keys; default to username if no keys present
-	passwordKeys := user.PasswordSecret.Keys
-	slices.Sort(passwordKeys)
+	passwordKeys := slices.Sorted(slices.Values(passwordSecret.Keys))
 	if len(passwordKeys) == 0 {
 		passwordKeys = []string{user.Name}
 	}
@@ -340,7 +419,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.UserAclSpec, 
 		password, exists := userSecret.Data[key]
 		if !exists {
 			log.Error(nil, "missing password key in secret", "user", user.Name, "secret", userSecretName, "key", key)
-			return []string{}, fmt.Errorf("missing password key in secret")
+			return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName, Key: key}
 		}
 
 		// Test if the string in the Secret is a pre-hashed sha256 password

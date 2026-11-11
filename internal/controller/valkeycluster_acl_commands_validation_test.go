@@ -50,13 +50,15 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Users: []valkeyiov1alpha1.UserAclSpec{{
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Users: []valkeyiov1alpha1.UserAclSpec{{ //nolint:staticcheck // legacy spec.users
 					Name:       "alice",
 					Enabled:    true,
 					NoPassword: true,
-					Commands:   valkeyiov1alpha1.CommandsAclSpec{Allow: []string{entry}},
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{entry}},
+					},
 				}},
 			},
 		}
@@ -147,13 +149,15 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Users: []valkeyiov1alpha1.UserAclSpec{{
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Users: []valkeyiov1alpha1.UserAclSpec{{ //nolint:staticcheck // legacy spec.users
 					Name:       "alice",
 					Enabled:    true,
 					NoPassword: true,
-					Commands:   valkeyiov1alpha1.CommandsAclSpec{Deny: []string{"NOT A COMMAND"}},
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						Commands: valkeyiov1alpha1.CommandsAclSpec{Deny: []string{"NOT A COMMAND"}},
+					},
 				}},
 			},
 		}

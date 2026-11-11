@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -34,6 +35,9 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
+
+// valkeyReadyRequeue matches the ValkeyCluster healthy requeue.
+const valkeyReadyRequeue = 30 * time.Second
 
 // ValkeyReconciler reconciles a standalone Valkey: one primary, no replicas.
 type ValkeyReconciler struct {
@@ -111,11 +115,15 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		meta.RemoveStatusCondition(&v.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	}
 
-	// The node's status changes requeue this Valkey through Owns, so no periodic requeue is needed.
 	if err := r.updateStatus(ctx, v); err != nil {
 		return ctrl.Result{}, err
 	}
 	log.V(1).Info("reconcile done")
+	// Node status changes requeue this Valkey through Owns.
+	// User password Secrets are not owned, so a ready instance also requeues to pick up a rotated password.
+	if node.Status.Ready {
+		return ctrl.Result{RequeueAfter: valkeyReadyRequeue}, nil
+	}
 	return ctrl.Result{}, nil
 }
 

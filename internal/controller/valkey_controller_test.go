@@ -119,11 +119,13 @@ var _ = Describe("Valkey controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		setNodeStatus(func(s *valkeyiov1alpha1.ValkeyNodeStatus) { s.Ready = true })
 
-		_, err = reconciler.Reconcile(ctx, req)
+		result, err := reconciler.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 		status := getStatus()
 		Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateReady))
 		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonInstanceHealthy))
+		// A ready instance requeues, so a rotated user password Secret is picked up.
+		Expect(result.RequeueAfter).To(Equal(valkeyReadyRequeue))
 	})
 
 	It("reports a child resource error instead of a stale waiting state", func() {

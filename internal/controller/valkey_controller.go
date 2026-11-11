@@ -98,11 +98,18 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	v.Status.Primary = node.Name
-	if node.Status.Ready {
+	// A node that has not yet observed its latest spec still reports the readiness of the old one.
+	// The check matches handleUnchangedValkeyNode in the ValkeyCluster controller.
+	observed := node.Status.ObservedGeneration == 0 || node.Status.ObservedGeneration == node.Generation
+	ready := node.Status.Ready && observed
+	if ready {
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonInstanceHealthy, "Instance is healthy", metav1.ConditionTrue)
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
 	} else {
 		msg := fmt.Sprintf("Waiting for ValkeyNode %s to become ready", node.Name)
+		if !observed {
+			msg = fmt.Sprintf("Waiting for ValkeyNode %s to apply the updated spec", node.Name)
+		}
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionFalse)
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, msg, metav1.ConditionTrue)
 	}
@@ -121,7 +128,7 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log.V(1).Info("reconcile done")
 	// Node status changes requeue this Valkey through Owns.
 	// User password Secrets are not owned, so a ready instance also requeues to pick up a rotated password.
-	if node.Status.Ready {
+	if ready {
 		return ctrl.Result{RequeueAfter: valkeyReadyRequeue}, nil
 	}
 	return ctrl.Result{}, nil

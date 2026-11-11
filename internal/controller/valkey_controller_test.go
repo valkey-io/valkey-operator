@@ -128,6 +128,35 @@ var _ = Describe("Valkey controller", func() {
 		Expect(result.RequeueAfter).To(Equal(valkeyReadyRequeue))
 	})
 
+	It("waits for the node to observe an updated spec before reporting Ready", func() {
+		_, err := reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(v.Name, 0, 0), Namespace: v.Namespace}, node)).To(Succeed())
+		generation := node.Generation
+		setNodeStatus(func(s *valkeyiov1alpha1.ValkeyNodeStatus) {
+			s.Ready = true
+			s.ObservedGeneration = generation
+		})
+
+		// A spec change bumps the node generation, but the node still reports the old one.
+		current := &valkeyiov1alpha1.Valkey{}
+		Expect(k8sClient.Get(ctx, req.NamespacedName, current)).To(Succeed())
+		current.Spec.Image = "valkey/valkey:9.0.1"
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getStatus().State).To(Equal(valkeyiov1alpha1.ValkeyStateReconciling))
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(v.Name, 0, 0), Namespace: v.Namespace}, node)).To(Succeed())
+		Expect(node.Generation).To(BeNumerically(">", generation))
+		newGeneration := node.Generation
+		setNodeStatus(func(s *valkeyiov1alpha1.ValkeyNodeStatus) { s.ObservedGeneration = newGeneration })
+		_, err = reconciler.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(getStatus().State).To(Equal(valkeyiov1alpha1.ValkeyStateReady))
+	})
+
 	It("reports a child resource error instead of a stale waiting state", func() {
 		_, err := reconciler.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())

@@ -83,7 +83,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `role` - current reported replication role from node
 - `podIP` — used by the parent to connect and issue Valkey commands
 - `podName` — name of the managed pod
-- `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`. When a new revision leaves `default` off, it is recorded only after the connections still logged in as `default` have been closed with `CLIENT KILL USER default`, so a failed kill is retried
+- `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`. It is cleared before a load that turns a live `default` off, and recorded again only after the connections still logged in as `default` have been closed with `CLIENT KILL USER default`, so a failed kill is retried
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 

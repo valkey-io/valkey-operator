@@ -2098,11 +2098,11 @@ func (f *fakeConfigClient) UserPasswordHashes(_ context.Context, username string
 var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	ctx := context.Background()
 
-	// One alice password ("aaa") is what the aclfile Secret asks for, at
-	// revision "rev1".
+	// One alice password ("aaa") is what the aclfile Secret asks for, with
+	// default off, at revision "rev1".
 	const aclSecretName = "live-acl-users"
-	const aclFileContent = "user alice on #aaa ~* +@all\nuser " + aclRevisionUser + " off resetchannels -@all #rev1\n"
-	desiredHashes := map[string][]string{"alice": {"aaa"}, aclRevisionUser: {"rev1"}}
+	const aclFileContent = "user alice on #aaa ~* +@all\nuser default off ~* &* +@all\nuser " + aclRevisionUser + " off resetchannels -@all #rev1\n"
+	desiredHashes := map[string][]string{"alice": {"aaa"}, "default": {}, aclRevisionUser: {"rev1"}}
 	staleHashes := map[string][]string{"alice": {"old"}}
 
 	nodeWith := func(secretName string) *valkeyiov1alpha1.ValkeyNode {
@@ -2126,6 +2126,11 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodeWith(aclSecretName)), current)).To(Succeed())
 		current.Status.AppliedACLRevision = revision
 		Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+	}
+	recordedRevision := func() string {
+		current := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodeWith(aclSecretName)), current)).To(Succeed())
+		return current.Status.AppliedACLRevision
 	}
 
 	BeforeEach(func() {
@@ -2191,7 +2196,8 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(synced).To(BeFalse())
 	})
 
-	It("closes default's connections when a new revision leaves it off", func() {
+	It("closes default's connections when a load turns it off", func() {
+		recordRevision("rev0")
 		fake := &fakeConfigClient{
 			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
 			enabledOnLoad: map[string]bool{"default": false},
@@ -2201,11 +2207,36 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(synced).To(BeTrue())
 		Expect(revision).To(Equal("rev1"))
 		Expect(fake.killed).To(Equal([]string{"default"}))
+		Expect(recordedRevision()).To(BeEmpty(), "cleared before the load; the caller records rev1")
+	})
+
+	It("closes them when a revert lands on the recorded revision after an unrecorded one turned default on", func() {
+		// rev1 (default off) was recorded. A later revision turned default on
+		// and was loaded but never recorded, and the ACL now returns to rev1.
+		// The recorded revision matching must not skip the close.
+		recordRevision("rev1")
+		fake := &fakeConfigClient{
+			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			enabledOnLoad: map[string]bool{"default": false},
+		}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(Equal([]string{"default"}))
+	})
+
+	It("leaves default's connections alone for an ACL change while it is already off", func() {
+		// Clients that have connected but not yet sent AUTH are reported as
+		// default too; a rotated password must not drop them.
+		recordRevision("rev0")
+		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
+		_, revision, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revision).To(Equal("rev1"))
+		Expect(fake.killed).To(BeEmpty())
+		Expect(recordedRevision()).To(Equal("rev0"), "nothing pending, so nothing cleared")
 	})
 
 	It("leaves default's connections alone once the revision is recorded", func() {
-		// Clients that have connected but not yet sent AUTH are reported as
-		// default too; killing on every reconcile would keep dropping them.
 		recordRevision("rev1")
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
@@ -2213,10 +2244,9 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(fake.killed).To(BeEmpty())
 	})
 
-	It("closes default's connections again for any other new revision while it is off", func() {
-		// A rotated password is a new revision too; the kill is cheap and the
-		// only clients it can reach are ones that have not authenticated yet.
-		recordRevision("rev0")
+	It("closes default's connections while a close is still pending", func() {
+		// The recorded revision is empty: an earlier kill failed, or the
+		// operator restarted between the load and the kill.
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": false}}
 		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
@@ -2224,24 +2254,27 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	})
 
 	It("leaves default's connections alone while it stays on", func() {
+		recordRevision("rev0")
 		fake := &fakeConfigClient{aclHashes: desiredHashes, enabled: map[string]bool{"default": true}}
 		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.killed).To(BeEmpty())
+		Expect(recordedRevision()).To(BeEmpty(), "still pending for the load that turns it off")
 	})
 
-	It("does not kill before the mounted aclfile has caught up", func() {
-		// The stale load leaves default on; the kill waits for the reload that
-		// confirms the new revision.
+	It("marks the close pending but does not kill before the mounted aclfile has caught up", func() {
+		recordRevision("rev0")
 		fake := &fakeConfigClient{aclHashes: staleHashes, enabled: map[string]bool{"default": true}}
 		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeFalse())
 		Expect(fake.killed).To(BeEmpty())
+		Expect(recordedRevision()).To(BeEmpty())
 	})
 
 	It("withholds the revision when the kill fails, so the next reconcile retries", func() {
+		recordRevision("rev0")
 		fake := &fakeConfigClient{
 			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
 			enabledOnLoad: map[string]bool{"default": false}, killErr: fmt.Errorf("boom"),
@@ -2251,6 +2284,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).To(HaveOccurred())
 		Expect(synced).To(BeFalse())
 		Expect(revision).To(BeEmpty(), "the caller must not record a revision whose kill failed")
+		Expect(recordedRevision()).To(BeEmpty(), "the close stays pending")
 		Expect(r.Recorder.(*events.FakeRecorder).Events).To(Receive(ContainSubstring("DefaultUserSessionsCloseFailed")))
 
 		By("reconciling again, with default already off before the load")
@@ -2259,6 +2293,28 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revision).To(Equal("rev1"))
 		Expect(fake.killed).To(Equal([]string{"default"}))
+	})
+
+	It("keeps the recorded revision when the aclfile leaves default on", func() {
+		// A cluster that declares an open default: nothing to close, and the
+		// recorded revision must not churn on every reconcile.
+		const openSecret = "live-acl-users-open"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: openSecret, Namespace: "default"},
+			Data: map[string][]byte{aclFilename: []byte("user default on nopass ~* &* +@all\nuser " +
+				aclRevisionUser + " off resetchannels -@all #rev1\n")},
+		}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
+		recordRevision("rev1")
+		fake := &fakeConfigClient{
+			aclHashes: map[string][]string{"default": {}, aclRevisionUser: {"rev1"}},
+			enabled:   map[string]bool{"default": true},
+		}
+		synced, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(openSecret))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(synced).To(BeTrue())
+		Expect(fake.killed).To(BeEmpty())
+		Expect(recordedRevision()).To(Equal("rev1"))
 	})
 })
 

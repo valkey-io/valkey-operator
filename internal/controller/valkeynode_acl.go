@@ -156,6 +156,20 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 		return false, "", err
 	}
 
+	// A load that turns a live default off can leave connections logged in
+	// as it. Clear the recorded revision before the load, so the close that
+	// follows it is still pending after a failed kill or an operator restart.
+	if aclFileDisablesDefault(string(secret.Data[aclFilename])) {
+		enabled, err := c.UserEnabled(ctx, defaultUser)
+		if err != nil {
+			return false, "", err
+		}
+		if enabled {
+			if err := r.clearAppliedACLRevision(ctx, node); err != nil {
+				return false, "", err
+			}
+		}
+	}
 	if err := c.LoadACL(ctx); err != nil {
 		return false, "", err
 	}
@@ -170,8 +184,29 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	return true, revision, nil
 }
 
+// aclFileDisablesDefault reports whether the aclfile leaves the default user
+// off. Valkey applies a user's rules in order, so the last on or off wins.
+func aclFileDisablesDefault(aclFile string) bool {
+	off := false
+	for line := range strings.SplitSeq(aclFile, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "user" || fields[1] != defaultUser {
+			continue
+		}
+		for _, f := range fields[2:] {
+			switch f {
+			case "on":
+				off = false
+			case "off":
+				off = true
+			}
+		}
+	}
+	return off
+}
+
 // closeDisabledDefaultSessions closes the connections still logged in as
-// default when a newly confirmed ACL revision leaves it off.
+// default once a load has left it off, while a close is pending.
 //
 // ACL LOAD copies the new default rules into the existing user, and a
 // connection that logged in while default was on keeps its authenticated flag,
@@ -179,27 +214,32 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 // cluster controller writes keeps every permission (see disabledDefaultUser),
 // so without this such a connection keeps full access until it disconnects.
 //
-// It runs only for a revision the node has not recorded in AppliedACLRevision,
-// not on every reconcile. Valkey reports clients that have connected but not
-// yet sent AUTH as default too, and exposes no flag that tells the two apart,
-// so killing on every reconcile would keep dropping them. Any change to
-// default, turning it off included, reaches the server through an ACL LOAD of
-// a new revision, so a new revision is the only point at which a connection
-// can have been left logged in as a default that is now off. The revision is
-// recorded only after this returns, so a failed kill, or an operator restart
-// between the load and the kill, leaves the old revision in status and the
-// next reconcile retries. The cost is that any other ACL change made while
-// default is off also drops clients that have not authenticated yet, which
-// reconnect.
+// A close is pending while AppliedACLRevision is empty. applyLiveACL clears it
+// before any load that turns a live default off, and the caller records the
+// new revision only after this returns, so a failed kill, or an operator
+// restart between the load and the kill, is retried on the next reconcile. The
+// decision rests on default's live state before the load, not on which
+// revision was last recorded: a revision that turned default on may have been
+// loaded and never recorded, and a later return to an earlier recorded
+// revision must still close the connections it let in. A new node also starts
+// with it empty, where the kill can only reach clients that have not
+// authenticated yet.
+//
+// It does not run on every reconcile, or on every ACL change while default is
+// off. Valkey reports clients that have connected but not yet sent AUTH as
+// default too, and exposes no flag that tells the two apart, so a kill outside
+// a pending close would drop them for nothing.
 func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, c valkeyConfigClient, revision string) error {
-	// Read from the API server rather than the cache: a stale cached revision
-	// could match the new one after a change back to an earlier ACL and skip
-	// the kill.
+	if revision == "" {
+		// An aclfile without a revision user (written by an older operator)
+		// gives nothing to record, so the pending state could never clear.
+		return nil
+	}
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		return fmt.Errorf("get ValkeyNode: %w", err)
 	}
-	if current.Status.AppliedACLRevision == revision {
+	if current.Status.AppliedACLRevision != "" {
 		return nil
 	}
 	enabled, err := c.UserEnabled(ctx, defaultUser)
@@ -210,6 +250,25 @@ func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context,
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "DefaultUserSessionsCloseFailed", "CloseDefaultUserSessions",
 			"default is disabled but closing the connections still logged in as it failed, will retry: %v", err)
 		return err
+	}
+	return nil
+}
+
+// clearAppliedACLRevision marks a close of default's connections pending. It
+// reads from the API server rather than the cache: a stale cached empty value
+// would skip the write and lose the pending close.
+func (r *ValkeyNodeReconciler) clearAppliedACLRevision(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if current.Status.AppliedACLRevision == "" {
+		return nil
+	}
+	patchBase := current.DeepCopy()
+	current.Status.AppliedACLRevision = ""
+	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+		return fmt.Errorf("clear appliedACLRevision: %w", err)
 	}
 	return nil
 }

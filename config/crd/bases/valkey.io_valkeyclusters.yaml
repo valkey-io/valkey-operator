@@ -4484,7 +4484,8 @@ spec:
             !has(s.secretName) || s.secretName != ''valkey-%s-tls-trust''.format([self.metadata.name]))'
         - message: metadata.name must not contain '.', because the headless Service
             name valkey-<name> is derived from it
-          rule: '!self.metadata.name.contains(''.'')'
+          optionalOldSelf: true
+          rule: oldSelf.hasValue() || !self.metadata.name.contains('.')
         - fieldPath: .spec.networking.tls.certificates.server.secretName
           message: 'certificates.server.secretName cannot be valkey-<name>-tls-trust
             while clientAuth.ca is set: it is the operator-managed trust bundle'

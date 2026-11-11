@@ -107,6 +107,8 @@ func buildValkeyNode(v *valkeyiov1alpha1.Valkey) *valkeyiov1alpha1.ValkeyNode {
 			Config:                        v.Spec.Config,
 			PodSecurityContext:            v.Spec.PodSecurityContext,
 			TerminationGracePeriodSeconds: v.Spec.TerminationGracePeriodSeconds,
+			ServiceAccountName:            v.Spec.ServiceAccountName,
+			PodMetadata:                   v.Spec.PodMetadata,
 			ClusterDomain:                 v.GetClusterDomain(),
 		},
 	}

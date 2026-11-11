@@ -222,6 +222,21 @@ var _ = Describe("Valkey controller", func() {
 	})
 })
 
+func TestBuildValkeyNodePassesPodIdentity(t *testing.T) {
+	podMeta := &valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{"prometheus.io/scrape": "true"}}
+	v := &valkeyiov1alpha1.Valkey{
+		ObjectMeta: metav1.ObjectMeta{Name: "vk", Namespace: "ns"},
+		Spec:       valkeyiov1alpha1.ValkeySpec{ServiceAccountName: "valkey-sa", PodMetadata: podMeta},
+	}
+	node := buildValkeyNode(v)
+	if node.Spec.ServiceAccountName != "valkey-sa" {
+		t.Errorf("ServiceAccountName = %q", node.Spec.ServiceAccountName)
+	}
+	if node.Spec.PodMetadata == nil || node.Spec.PodMetadata.Annotations["prometheus.io/scrape"] != "true" {
+		t.Errorf("PodMetadata not passed through: %+v", node.Spec.PodMetadata)
+	}
+}
+
 func TestBuildValkeyNode(t *testing.T) {
 	disabled := false
 	tests := []struct {

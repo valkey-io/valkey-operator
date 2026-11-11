@@ -156,41 +156,22 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 		return false, "", err
 	}
 
-	// Record before the load that connections may be logged in as default,
-	// so that closing them survives a failed kill or an operator restart.
-	pending, err := r.defaultUserSessionsPending(ctx, node)
-	if err != nil {
-		return false, "", err
-	}
-	if !pending {
-		enabled, err := c.UserEnabled(ctx, defaultUser)
-		if err != nil {
-			return false, "", err
-		}
-		if enabled {
-			if err := r.setDefaultUserSessionsPending(ctx, node, true); err != nil {
-				return false, "", err
-			}
-			pending = true
-		}
-	}
 	if err := c.LoadACL(ctx); err != nil {
 		return false, "", err
-	}
-	if pending {
-		if err := r.closeDisabledDefaultSessions(ctx, node, c); err != nil {
-			return false, "", err
-		}
 	}
 	synced, err := aclObservablyInSync(ctx, c, desired)
 	if err != nil || !synced {
 		return false, "", err
 	}
-	return true, aclRevision(desired), nil
+	revision := aclRevision(desired)
+	if err := r.closeDisabledDefaultSessions(ctx, node, c, revision); err != nil {
+		return false, "", err
+	}
+	return true, revision, nil
 }
 
 // closeDisabledDefaultSessions closes the connections still logged in as
-// default once it is off, and then clears DefaultUserSessionsPending.
+// default when a newly confirmed ACL revision leaves it off.
 //
 // ACL LOAD copies the new default rules into the existing user, and a
 // connection that logged in while default was on keeps its authenticated flag,
@@ -198,14 +179,29 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 // cluster controller writes keeps every permission (see disabledDefaultUser),
 // so without this such a connection keeps full access until it disconnects.
 //
-// It runs only while DefaultUserSessionsPending is set, not whenever default
-// is off. Valkey reports clients that have connected but not yet sent AUTH as
-// default too, and exposes no flag that tells the two apart, so killing on
-// every reconcile would keep dropping them. The status field is what makes a
-// failed kill, or an operator restart between the load and the kill, retry on
-// the next reconcile. If the pod restarts meanwhile, the retry runs once on a
-// fresh server, where it can only drop clients that have not authenticated.
-func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, c valkeyConfigClient) error {
+// It runs only for a revision the node has not recorded in AppliedACLRevision,
+// not on every reconcile. Valkey reports clients that have connected but not
+// yet sent AUTH as default too, and exposes no flag that tells the two apart,
+// so killing on every reconcile would keep dropping them. Any change to
+// default, turning it off included, reaches the server through an ACL LOAD of
+// a new revision, so a new revision is the only point at which a connection
+// can have been left logged in as a default that is now off. The revision is
+// recorded only after this returns, so a failed kill, or an operator restart
+// between the load and the kill, leaves the old revision in status and the
+// next reconcile retries. The cost is that any other ACL change made while
+// default is off also drops clients that have not authenticated yet, which
+// reconnect.
+func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, c valkeyConfigClient, revision string) error {
+	// Read from the API server rather than the cache: a stale cached revision
+	// could match the new one after a change back to an earlier ACL and skip
+	// the kill.
+	current := &valkeyiov1alpha1.ValkeyNode{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
+		return fmt.Errorf("get ValkeyNode: %w", err)
+	}
+	if current.Status.AppliedACLRevision == revision {
+		return nil
+	}
 	enabled, err := c.UserEnabled(ctx, defaultUser)
 	if err != nil || enabled {
 		return err
@@ -214,35 +210,6 @@ func (r *ValkeyNodeReconciler) closeDisabledDefaultSessions(ctx context.Context,
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "DefaultUserSessionsCloseFailed", "CloseDefaultUserSessions",
 			"default is disabled but closing the connections still logged in as it failed, will retry: %v", err)
 		return err
-	}
-	return r.setDefaultUserSessionsPending(ctx, node, false)
-}
-
-// defaultUserSessionsPending reads DefaultUserSessionsPending from the API
-// server rather than the cache, so a value this reconciler just cleared is not
-// read back stale and does not trigger a second kill.
-func (r *ValkeyNodeReconciler) defaultUserSessionsPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return false, fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	return current.Status.DefaultUserSessionsPending, nil
-}
-
-// setDefaultUserSessionsPending records in status whether connections may
-// still be logged in as default.
-func (r *ValkeyNodeReconciler) setDefaultUserSessionsPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, pending bool) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	if current.Status.DefaultUserSessionsPending == pending {
-		return nil
-	}
-	patchBase := current.DeepCopy()
-	current.Status.DefaultUserSessionsPending = pending
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-		return fmt.Errorf("patch defaultUserSessionsPending: %w", err)
 	}
 	return nil
 }

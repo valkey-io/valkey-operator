@@ -338,13 +338,6 @@ type ValkeyNodeStatus struct {
 	// becomes True.
 	// +optional
 	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
-
-	// DefaultUserSessionsPending is set once the operator has seen the
-	// server's default user enabled, and cleared once default is off and the
-	// operator has closed the connections still logged in as it. While it is
-	// set and default is off, the operator retries closing them.
-	// +optional
-	DefaultUserSessionsPending bool `json:"defaultUserSessionsPending,omitempty"`
 }
 
 const (

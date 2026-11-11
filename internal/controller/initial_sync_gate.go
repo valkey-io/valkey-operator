@@ -45,6 +45,11 @@ const initialSyncGate corev1.PodConditionType = "valkey.io/initial-sync-complete
 // member's gate is still false.
 const initialSyncGateRecheck = 5 * time.Second
 
+// serverRestartSlack absorbs the second-granularity rounding of the server's
+// uptime and of the gate's transition time, so a gate set just after the
+// server started is not read as a restart.
+const serverRestartSlack = 5 * time.Second
+
 // usesInitialSyncGate reports whether the node's pod carries initialSyncGate:
 // a member the cluster controller built, which has all three cluster labels.
 // A standalone ValkeyNode, even one with the cluster label, has no controller
@@ -138,6 +143,7 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		}
 	}
 	newPrimaries := newShardPrimaries(state, nodes)
+	now := time.Now()
 	gated := false
 	var errs []error
 	for i := range nodes.Items {
@@ -156,22 +162,17 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		if pod.DeletionTimestamp != nil || !podHasReadinessGate(pod, initialSyncGate) {
 			continue
 		}
+		// The scrape is keyed by the node's recorded IP. A pod under the same
+		// name with another IP is a replacement the scrape does not describe.
 		var scrape *valkey.NodeState
-		if ip := node.Status.PodIP; ip != "" {
+		if ip := node.Status.PodIP; ip != "" && ip == pod.Status.PodIP {
 			scrape = scraped[ip]
 		}
-		verdict, reason, message := initialSyncVerdict(scrape, newPrimaries[node.Status.PodIP])
-		current, recorded := podConditionStatus(pod, initialSyncGate)
-		want := current
-		switch verdict {
-		case gateSet:
-			want = true
-		case gateClear:
-			want = false
-		}
-		if want != current || (verdict != gateKeep && !recorded) {
+		want, write, reason, message := initialSyncGateChange(pod, scrape, newPrimaries[node.Status.PodIP], now)
+		if write {
 			if err := r.setInitialSyncGate(ctx, pod, want, reason, message); err != nil {
 				errs = append(errs, err)
+				gated = true
 				continue
 			}
 			logf.FromContext(ctx).V(1).Info("initial sync gate updated", "pod", pod.Name, "ready", want, "reason", reason)
@@ -183,9 +184,55 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 	return gated, errors.Join(errs...)
 }
 
+// initialSyncGateChange decides the pod's gate and whether to write it. A true
+// gate belongs to the server process that earned it: when the containers are
+// not ready, or the server has been up for less time than the gate has been
+// set, the server restarted and may be empty, so it has to show its data again.
+func initialSyncGateChange(pod *corev1.Pod, scrape *valkey.NodeState, newShardPrimary bool, now time.Time) (bool, bool, string, string) {
+	condition := podCondition(pod, initialSyncGate)
+	current := condition != nil && condition.Status == corev1.ConditionTrue
+	if !podContainersReady(pod) {
+		if current {
+			return false, true, "ServerNotReady", "The server container is not ready; the gate is set again once its data is verified"
+		}
+		return current, false, "", ""
+	}
+	verdict, reason, message := initialSyncVerdict(scrape, newShardPrimary)
+	if current && serverRestartedSince(scrape, condition.LastTransitionTime.Time, now) {
+		if verdict == gateSet {
+			// Rewrite to date the gate from this server process.
+			return true, true, reason, message
+		}
+		return false, true, "ServerRestarted", "The server restarted after the gate was set; it is set again once its data is verified"
+	}
+	switch verdict {
+	case gateSet:
+		return true, !current, reason, message
+	case gateClear:
+		return false, current || condition == nil, reason, message
+	}
+	return current, false, "", ""
+}
+
+// serverRestartedSince reports whether the scraped server has been up for less
+// time than has passed since the gate was set. Both are durations, so clock
+// skew between the operator and the node does not matter.
+func serverRestartedSince(n *valkey.NodeState, since, now time.Time) bool {
+	if n == nil || since.IsZero() {
+		return false
+	}
+	uptime, err := strconv.ParseInt(n.Info["uptime_in_seconds"], 10, 64)
+	if err != nil {
+		return false
+	}
+	return time.Duration(uptime)*time.Second+serverRestartSlack < now.Sub(since)
+}
+
 // setInitialSyncGate writes initialSyncGate on the pod with a strategic merge
 // patch, which replaces only that condition, so the kubelet's conditions are
-// left alone.
+// left alone. The patch carries the pod's resourceVersion: a replacement pod
+// under the same name gets a conflict instead of a verdict about its
+// predecessor.
 func (r *ValkeyClusterReconciler) setInitialSyncGate(ctx context.Context, pod *corev1.Pod, ready bool, reason, message string) error {
 	status := corev1.ConditionFalse
 	if ready {
@@ -209,7 +256,7 @@ func (r *ValkeyClusterReconciler) setInitialSyncGate(ctx context.Context, pod *c
 	if !replaced {
 		patched.Status.Conditions = append(patched.Status.Conditions, condition)
 	}
-	return r.Status().Patch(ctx, patched, client.StrategicMergeFrom(pod))
+	return r.Status().Patch(ctx, patched, client.StrategicMergeFrom(pod, client.MergeFromWithOptimisticLock{}))
 }
 
 // podHasReadinessGate reports whether the pod spec lists the condition as a
@@ -223,13 +270,12 @@ func podHasReadinessGate(pod *corev1.Pod, condition corev1.PodConditionType) boo
 	return false
 }
 
-// podConditionStatus returns whether the pod condition is True, and whether
-// the pod records it at all.
-func podConditionStatus(pod *corev1.Pod, condition corev1.PodConditionType) (bool, bool) {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == condition {
-			return c.Status == corev1.ConditionTrue, true
+// podCondition returns the pod's condition of the given type, or nil.
+func podCondition(pod *corev1.Pod, condition corev1.PodConditionType) *corev1.PodCondition {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == condition {
+			return &pod.Status.Conditions[i]
 		}
 	}
-	return false, false
+	return nil
 }

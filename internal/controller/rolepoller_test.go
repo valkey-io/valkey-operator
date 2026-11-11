@@ -441,11 +441,13 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      node.Name + "-pod",
 				Namespace: namespace,
-				Labels:    valkeyNodeLabels(node),
+				Labels:    podLabels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
 		}

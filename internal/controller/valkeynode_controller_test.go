@@ -1331,6 +1331,27 @@ var _ = Describe("isWorkloadRolledOut", func() {
 		}
 	}
 
+	// missingPod is a pod the API server does not have, as when the cache still
+	// holds a pod that was deleted.
+	missingPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "isrolled-missing", Namespace: ns}}
+
+	// livePod creates the node's pod on revision with ContainersReady set as given.
+	livePod := func(name, revision string, containersReady bool) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{appsv1.StatefulSetRevisionLabel: revision}},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)) })
+		status := corev1.ConditionFalse
+		if containersReady {
+			status = corev1.ConditionTrue
+		}
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: status}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		return pod
+	}
+
 	Context("StatefulSet workload", func() {
 		const nodeName = "isrolled-sts"
 		stsName := types.NamespacedName{Name: "valkey-" + nodeName, Namespace: ns}
@@ -1338,7 +1359,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 
 		It("returns false when the StatefulSet does not exist", func() {
 			r := makeReconciler()
-			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			rolled, err := r.isWorkloadRolledOut(ctx, node, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 		})
@@ -1361,7 +1382,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			defer func() { _ = k8sClient.Delete(ctx, sts) }()
 
 			// Leave Status.ObservedGeneration at 0 while Generation > 0
-			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			rolled, err := r.isWorkloadRolledOut(ctx, node, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 		})
@@ -1394,7 +1415,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.UpdateRevision = "new-rev"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
-			rolled, err := r.isWorkloadRolledOut(ctx, node2)
+			rolled, err := r.isWorkloadRolledOut(ctx, node2, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 		})
@@ -1429,7 +1450,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.UpdateRevision = "rev-new"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
-			rolled, err := r.isWorkloadRolledOut(ctx, nodeAdopt)
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeAdopt, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 		})
@@ -1462,7 +1483,8 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.UpdateRevision = "rev-1"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
-			rolled, err := r.isWorkloadRolledOut(ctx, node3)
+			pod := livePod(stsName3.Name+"-0", "rev-1", true)
+			rolled, err := r.isWorkloadRolledOut(ctx, node3, pod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
 		})
@@ -1497,9 +1519,59 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			sts.Status.UpdateRevision = "rev-2"
 			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
-			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate)
+			pod := livePod(stsNameGate.Name+"-0", "rev-2", true)
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate, pod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
+		})
+
+		It("returns false when the direct read disagrees with a cached ready pod", func() {
+			r := makeReconciler()
+			replicas := int32(1)
+			stsNameStale := types.NamespacedName{Name: "valkey-" + nodeName + "-stale", Namespace: ns}
+			nodeStale := makeNode(nodeName+"-stale", valkeyiov1alpha1.WorkloadTypeStatefulSet)
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsNameStale.Name, Namespace: stsNameStale.Namespace},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": nodeStale.Name}},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": nodeStale.Name}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+			Expect(k8sClient.Get(ctx, stsNameStale, sts)).To(Succeed())
+			sts.Status.ObservedGeneration = sts.Generation
+			sts.Status.Replicas = 1
+			sts.Status.UpdatedReplicas = 1
+			sts.Status.CurrentRevision = "rev-1"
+			sts.Status.UpdateRevision = "rev-2"
+			Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+
+			By("the replacement's containers are not ready yet, though the cached copy says they are")
+			pod := livePod(stsNameStale.Name+"-0", "rev-2", false)
+			cached := pod.DeepCopy()
+			cached.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeStale, cached)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+
+			By("the cached pod was deleted")
+			rolled, err = r.isWorkloadRolledOut(ctx, nodeStale, missingPod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
+
+			By("the live pod is on another revision")
+			pod.Labels[appsv1.StatefulSetRevisionLabel] = "rev-1"
+			Expect(k8sClient.Update(ctx, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+			rolled, err = r.isWorkloadRolledOut(ctx, nodeStale, pod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse())
 		})
 	})
 
@@ -1525,7 +1597,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			defer func() { _ = k8sClient.Delete(ctx, dep) }()
 
 			// Status.ObservedGeneration stays at 0
-			rolled, err := r.isWorkloadRolledOut(ctx, node)
+			rolled, err := r.isWorkloadRolledOut(ctx, node, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 		})
@@ -1556,7 +1628,8 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			dep.Status.ReadyReplicas = 1
 			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
 
-			rolled, err := r.isWorkloadRolledOut(ctx, node2)
+			pod := livePod(depName+"-abc12", "", true)
+			rolled, err := r.isWorkloadRolledOut(ctx, node2, pod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
 		})
@@ -1585,7 +1658,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			dep.Status.Replicas = 1
 			dep.Status.UpdatedReplicas = 0
 			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
-			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate)
+			rolled, err := r.isWorkloadRolledOut(ctx, nodeGate, missingPod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeFalse())
 
@@ -1593,7 +1666,12 @@ var _ = Describe("isWorkloadRolledOut", func() {
 			dep.Status.UpdatedReplicas = 1
 			dep.Status.ReadyReplicas = 0
 			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
-			rolled, err = r.isWorkloadRolledOut(ctx, nodeGate)
+			rolled, err = r.isWorkloadRolledOut(ctx, nodeGate, missingPod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rolled).To(BeFalse(), "the cached pod is gone")
+
+			pod := livePod(depName+"-def34", "", true)
+			rolled, err = r.isWorkloadRolledOut(ctx, nodeGate, pod)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rolled).To(BeTrue())
 		})
@@ -1694,11 +1772,13 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		sts.Status.UpdateRevision = "rev-1"
 		Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
 
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      node.Name + "-pod",
 				Namespace: node.Namespace,
-				Labels:    valkeyNodeLabels(node),
+				Labels:    podLabels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
 		}

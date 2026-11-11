@@ -18,15 +18,19 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
@@ -115,21 +119,58 @@ func TestNewShardPrimaries(t *testing.T) {
 	assert.Empty(t, newShardPrimaries(state, nodes))
 }
 
-// gatePod is a member pod that lists initialSyncGate, with the gate's current
-// status when recorded.
-func gatePod(name string, gate *corev1.ConditionStatus) *corev1.Pod {
+// gatePod is a member pod at ip that lists initialSyncGate, with the gate's
+// current status when recorded.
+func gatePod(name, ip string, gate *corev1.ConditionStatus) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec: corev1.PodSpec{
 			Containers:     []corev1.Container{{Name: "server", Image: DefaultImage}},
 			ReadinessGates: []corev1.PodReadinessGate{{ConditionType: initialSyncGate}},
 		},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}},
+		Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionTrue}}},
 	}
 	if gate != nil {
 		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: initialSyncGate, Status: *gate})
 	}
 	return pod
+}
+
+func TestInitialSyncGateChange(t *testing.T) {
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	setAt := metav1.NewTime(now.Add(-time.Minute))
+	gated := func(containersReady corev1.ConditionStatus, gate *corev1.ConditionStatus) *corev1.Pod {
+		pod := gatePod("p", "10.0.0.1", nil)
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.ContainersReady, Status: containersReady}}
+		if gate != nil {
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: initialSyncGate, Status: *gate, LastTransitionTime: setAt})
+		}
+		return pod
+	}
+	isTrue := corev1.ConditionTrue
+	up := func(seconds string) map[string]string { return map[string]string{"uptime_in_seconds": seconds} }
+
+	for _, tt := range []struct {
+		name        string
+		pod         *corev1.Pod
+		scrape      *valkey.NodeState
+		want, write bool
+		reason      string
+	}{
+		{"containers stopped after the gate was set", gated(corev1.ConditionFalse, &isTrue), nil, false, true, "ServerNotReady"},
+		{"containers not ready and never gated", gated(corev1.ConditionFalse, nil), gatePrimary("10.0.0.1", "0-16383", nil), false, false, ""},
+		{"server restarted empty after the gate was set", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("3")), false, true, "ServerRestarted"},
+		{"server restarted and owns slots again", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "0-16383", up("3")), true, true, "OwnsSlots"},
+		{"server up since before the gate was set", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("600")), true, false, ""},
+		{"gate set just after the server started", gated(corev1.ConditionTrue, &isTrue), gatePrimary("10.0.0.1", "", up("58")), true, false, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			want, write, reason, _ := initialSyncGateChange(tt.pod, tt.scrape, false, now)
+			assert.Equal(t, tt.want, want)
+			assert.Equal(t, tt.write, write)
+			assert.Equal(t, tt.reason, reason)
+		})
+	}
 }
 
 func TestSyncInitialSyncGates(t *testing.T) {
@@ -138,23 +179,28 @@ func TestSyncInitialSyncGates(t *testing.T) {
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
 	isTrue := corev1.ConditionTrue
 
-	oldPod := gatePod("old", nil)
+	oldPod := gatePod("old", "10.0.0.4", nil)
 	oldPod.Spec.ReadinessGates = nil
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).
-		WithObjects(gatePod("primary", nil), gatePod("syncing", nil), gatePod("dropped", &isTrue), oldPod).Build()
+		WithObjects(gatePod("primary", "10.0.0.1", nil), gatePod("syncing", "10.0.0.2", nil), gatePod("dropped", "10.0.0.3", &isTrue), oldPod,
+			gatePod("replaced", "10.0.0.9", nil)).Build()
 	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme}
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
 		gateMember("0", "0", "10.0.0.1", "primary"),
 		gateMember("0", "1", "10.0.0.2", "syncing"),
 		gateMember("0", "2", "10.0.0.3", "dropped"),
 		gateMember("1", "0", "10.0.0.4", "old"),
+		gateMember("1", "1", "10.0.0.5", "replaced"),
 	}}
 	shard := &valkey.ShardState{Nodes: []*valkey.NodeState{
 		gatePrimary("10.0.0.1", "0-16383", nil),
 		gateReplica("10.0.0.2", map[string]string{"master_link_status": "down", "master_sync_in_progress": "1"}),
 		gateReplica("10.0.0.3", map[string]string{"master_link_status": "down", "master_sync_in_progress": "0"}),
 	}}
-	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard}, PendingNodes: []*valkey.NodeState{gatePrimary("10.0.0.4", "", nil)}}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard}, PendingNodes: []*valkey.NodeState{
+		gatePrimary("10.0.0.4", "", nil),
+		gateReplica("10.0.0.5", map[string]string{"master_link_status": "up", "master_sync_in_progress": "0"}),
+	}}
 
 	gate := func(name string) *corev1.PodCondition {
 		t.Helper()
@@ -179,11 +225,12 @@ func TestSyncInitialSyncGates(t *testing.T) {
 	assert.Equal(t, "FullSyncInProgress", gate("syncing").Reason)
 	assert.Equal(t, corev1.ConditionTrue, gate("dropped").Status, "a dropped link keeps the gate")
 	assert.Nil(t, gate("old"), "a pod without the gate in its spec is left alone")
+	assert.Nil(t, gate("replaced"), "a pod whose IP is not the one scraped is not judged on that scrape")
 
 	shard.Nodes[1] = gateReplica("10.0.0.2", map[string]string{"master_link_status": "up", "master_sync_in_progress": "0"})
 	gated, err = r.syncInitialSyncGates(context.Background(), nodes, state)
 	require.NoError(t, err)
-	assert.False(t, gated)
+	assert.True(t, gated, "the replaced pod is still waiting for a scrape of its own")
 	assert.Equal(t, corev1.ConditionTrue, gate("syncing").Status)
 	assert.Equal(t, "ReplicaSynced", gate("syncing").Reason)
 	containersReady := false
@@ -195,4 +242,24 @@ func TestSyncInitialSyncGates(t *testing.T) {
 		}
 	}
 	assert.True(t, containersReady, "the patch leaves the kubelet's conditions alone")
+}
+
+func TestSyncInitialSyncGatesRetriesAFailedWrite(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).
+		WithObjects(gatePod("primary", "10.0.0.1", nil)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+				return apierrors.NewConflict(corev1.Resource("pods"), "primary", errors.New("modified"))
+			},
+		}).Build()
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{gateMember("0", "0", "10.0.0.1", "primary")}}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{gatePrimary("10.0.0.1", "0-16383", nil)}}}}
+
+	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state)
+	require.Error(t, err)
+	assert.True(t, gated, "a write that failed is retried on the gate recheck")
 }

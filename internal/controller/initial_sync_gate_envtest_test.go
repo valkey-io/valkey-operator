@@ -28,7 +28,7 @@ import (
 var _ = Describe("initial sync gate patch", func() {
 	It("sets the gate without dropping the kubelet's conditions", func() {
 		ctx := context.Background()
-		pod := gatePod("initial-sync-gate", nil)
+		pod := gatePod("initial-sync-gate", "", nil)
 		pod.Namespace = "default"
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, pod) }()

@@ -84,6 +84,7 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		markRolledOut()
 		labels := valkeyNodeLabels(node)
 		labels[appsv1.StatefulSetRevisionLabel] = "rev-1"
+		labels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node) + "-0", Namespace: node.Namespace, Labels: labels},
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},

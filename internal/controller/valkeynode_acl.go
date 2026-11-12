@@ -168,7 +168,7 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	}
 	if wasOn {
 		if err := r.setDefaultUserSessionsOpen(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled,
-			"default is enabled, so connections may be logged in as it"); err != nil {
+			defaultUserEnabledMessage); err != nil {
 			return false, "", err
 		}
 	}
@@ -220,8 +220,14 @@ func (r *ValkeyNodeReconciler) closeDefaultUserSessions(ctx context.Context, nod
 		}
 	}
 	on, err := c.UserEnabled(ctx, defaultUser)
-	if err != nil || on {
+	if err != nil {
 		return err
+	}
+	if on {
+		// The load turned default back on before a pending close ran, so
+		// replace a CloseFailed left by an earlier reconcile.
+		return r.setDefaultUserSessionsOpen(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled,
+			defaultUserEnabledMessage)
 	}
 	if err := c.KillUserClients(ctx, defaultUser); err != nil {
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "DefaultUserSessionsCloseFailed", "CloseDefaultUserSessions",
@@ -232,27 +238,22 @@ func (r *ValkeyNodeReconciler) closeDefaultUserSessions(ctx context.Context, nod
 		}
 		return err
 	}
+	// If this write fails, the mark stays True and the next reconcile kills
+	// again. Clearing the mark before the kill would lose the close when the
+	// kill fails, so the close runs at least once rather than at most once.
 	return r.setDefaultUserSessionsOpen(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed,
 		"connections logged in as default were closed when it was turned off")
 }
+
+// defaultUserEnabledMessage is the DefaultUserSessionsOpen message for reason
+// DefaultUserEnabled.
+const defaultUserEnabledMessage = "default is enabled, so connections may be logged in as it"
 
 // setDefaultUserSessionsOpen sets DefaultUserSessionsOpen. Its skip check
 // reads from the API server: a stale cached copy that already shows the
 // desired value would skip a write the next reconcile depends on.
 func (r *ValkeyNodeReconciler) setDefaultUserSessionsOpen(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	_, err := r.patchStatus(ctx, node, r.APIReader, func(current *valkeyiov1alpha1.ValkeyNode) bool {
-		if shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionDefaultUserSessionsOpen, status, reason, message, current.Generation) {
-			return false
-		}
-		return meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionDefaultUserSessionsOpen,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: current.Generation,
-		})
-	})
-	if err != nil {
+	if err := r.setCondition(ctx, node, r.APIReader, valkeyiov1alpha1.ValkeyNodeConditionDefaultUserSessionsOpen, status, reason, message); err != nil {
 		return fmt.Errorf("patch DefaultUserSessionsOpen condition: %w", err)
 	}
 	return nil

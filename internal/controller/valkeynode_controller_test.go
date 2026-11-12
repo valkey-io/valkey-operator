@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -2327,6 +2329,52 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(synced).To(BeTrue())
 		Expect(fake.killed).To(Equal([]string{"default"}), "the close is not repeated")
+	})
+
+	It("replaces CloseFailed when a load turns default back on before the close ran", func() {
+		markSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonCloseFailed)
+		fake := &fakeConfigClient{
+			aclHashes: desiredHashes, enabled: map[string]bool{"default": false},
+			enabledOnLoad: map[string]bool{"default": true},
+		}
+		_, _, err := reconcilerFor(fake).applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(BeEmpty())
+		expectSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled)
+	})
+
+	It("kills again when recording the close fails, so it runs at least once", func() {
+		fake := &fakeConfigClient{
+			aclHashes: desiredHashes, enabled: map[string]bool{"default": true},
+			enabledOnLoad: map[string]bool{"default": false},
+		}
+		r := reconcilerFor(fake)
+		failClosedWrite := true
+		withWatch, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		r.Client = interceptor.NewClient(withWatch, interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				data, err := patch.Data(obj)
+				if err != nil {
+					return err
+				}
+				if failClosedWrite && strings.Contains(string(data), valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed) {
+					return fmt.Errorf("status write failed")
+				}
+				return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		})
+		_, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).To(MatchError(ContainSubstring("status write failed")))
+		Expect(fake.killed).To(Equal([]string{"default"}))
+		expectSessionsOpen(metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonDefaultUserEnabled)
+
+		By("reconciling again once the status write works")
+		failClosedWrite = false
+		_, _, err = r.applyLiveACL(ctx, nodeWith(aclSecretName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.killed).To(Equal([]string{"default", "default"}))
+		expectSessionsOpen(metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonSessionsClosed)
 	})
 })
 

@@ -439,9 +439,10 @@ func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType stri
 
 // setCondition sets a condition on the node's status. It writes nothing when
 // the condition is unchanged apart from the local address in a network error
-// (see shouldSkipConditionUpdate).
-func (r *ValkeyNodeReconciler) setCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, conditionType string, status metav1.ConditionStatus, reason, message string) error {
-	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+// (see shouldSkipConditionUpdate). The skip check runs on the node read from
+// first (see patchStatus).
+func (r *ValkeyNodeReconciler) setCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, first client.Reader, conditionType string, status metav1.ConditionStatus, reason, message string) error {
+	_, err := r.patchStatus(ctx, node, first, func(current *valkeyiov1alpha1.ValkeyNode) bool {
 		if shouldSkipConditionUpdate(current.Status.Conditions, conditionType, status, reason, message, current.Generation) {
 			return false
 		}
@@ -466,7 +467,7 @@ func (r *ValkeyNodeReconciler) removeCondition(ctx context.Context, node *valkey
 }
 
 func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	if err := r.setCondition(ctx, node, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, message); err != nil {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, message); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
@@ -501,7 +502,7 @@ func liveApplyResult(reason string, err error) (ctrl.Result, error) {
 // setACLCondition sets the ACLApplied condition, reporting whether the ACL the
 // cluster controller wrote to the mounted Secret is live on the server.
 func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	if err := r.setCondition(ctx, node, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, message); err != nil {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, message); err != nil {
 		return fmt.Errorf("patch ACLApplied condition: %w", err)
 	}
 	return nil
@@ -510,7 +511,7 @@ func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkey
 // setTrustBundleCondition sets the TrustBundleApplied condition, reporting
 // whether the server has reloaded the mounted trust bundle.
 func (r *ValkeyNodeReconciler) setTrustBundleCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	if err := r.setCondition(ctx, node, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied, status, reason, message); err != nil {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied, status, reason, message); err != nil {
 		return fmt.Errorf("patch TrustBundleApplied condition: %w", err)
 	}
 	return nil

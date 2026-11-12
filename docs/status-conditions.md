@@ -292,7 +292,7 @@ Common reasons when `TrustBundleApplied=True`:
 #### `DefaultUserSessionsOpen`
 Indicates whether connections may be logged in as Valkey's `default` user. When an `ACL LOAD` turns `default` off, Valkey copies the new rules into the existing user, and a connection that authenticated while `default` was on stays logged in with the disabled `default`'s permissions. The node controller closes those connections with `CLIENT KILL USER default` and uses this condition to remember that a close is owed until it succeeds.
 
-The condition depends only on what the server reports, not on the aclfile Secret, the mounted file or `status.appliedACLRevision`. It is absent on a node that has never been seen with `default` on. It is not part of `Ready` and does not hold back the cluster.
+The condition depends only on what the server reports, not on the aclfile Secret, the mounted file or `status.appliedACLRevision`. It is absent on a node that has never been seen with `default` on. It is not part of `Ready`, but a failed close also fails the node's ACL apply: `ACLApplied` goes `False` with reason `ApplyFailed`, and the cluster reports `Degraded` until the retry succeeds.
 
 | Status | Meaning |
 |---|---|
@@ -307,7 +307,7 @@ Common reasons when `DefaultUserSessionsOpen=True`:
 Common reasons when `DefaultUserSessionsOpen=False`:
 - `SessionsClosed` – the connections were closed when `default` was turned off.
 
-> **Note:** Valkey reports clients that have connected but not yet sent `AUTH` as `default` too, so the kill also drops those, and they reconnect. It runs once for each time `default` goes from on to off, before the operator checks that the mounted aclfile has caught up with the Secret, so a lagging mount does not delay it. ACL changes made while `default` is already off do not run it.
+> **Note:** Valkey reports clients that have connected but not yet sent `AUTH` as `default` too, so the kill also drops those, and they reconnect. It runs once for each time `default` goes from on to off, before the operator checks that the mounted aclfile has caught up with the Secret, so a lagging mount does not delay it. It runs once more if the node's server restarts while a close is pending, or if recording a successful close fails. ACL changes made while `default` is already off do not run it.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

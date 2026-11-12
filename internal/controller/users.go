@@ -451,7 +451,7 @@ func fetchSystemUserPassword(ctx context.Context, username string, apiClient cli
 // Check if byte-string begins with # (byte 35) and is 65 total characters long.
 // If so, we assume this is a pre-hashed sha256 password.
 func isPreHashedPassword(password []byte) bool {
-	return password[0] == 35 && len(password) == 65
+	return len(password) == 65 && password[0] == '#'
 }
 
 // GeneratePassword creates a random (alphanumeric) n chars long password

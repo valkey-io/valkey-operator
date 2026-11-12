@@ -21,6 +21,8 @@ These top-level fields in `.status` provide a high-level, human-readable summary
 
 - **`readyShards`**: The number of shards that are fully healthy, meaning they have a primary and the desired number of replicas.
 
+- **`failback`**: The shards whose primary is away from their `node-index=0` member. Each entry has the shard index, `syncedSince` (when that member last became a Ready replica in sync with the primary, unset while it is not one) and `afterRoll` (true when the operator moved the primary itself to roll a pod). See [Failback](valkeycluster.md#failback).
+
 ---
 
 ## Conditions array (`status.conditions[]`)
@@ -174,6 +176,20 @@ Common reasons:
 - `TrustBundleConflict` – a Secret named `valkey-<cluster>-tls-trust` exists but the cluster does not control it. The operator never adopts or writes it, and nodes stay on the server root.
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
 - `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
+
+#### `PrimaryDisplaced`
+Set while at least one shard's primary is not its `node-index=0` member; absent otherwise. It does not affect `Ready`. See [Failback](valkeycluster.md#failback).
+
+| Status | Meaning |
+|---|---|
+| `True` | A shard's primary is away from `node-index=0`. The message names the lowest such shard and what failback is waiting for. |
+| absent | Every shard's primary is its `node-index=0` member. |
+
+Common reasons:
+- `FailbackWaitingForReplica` – the `node-index=0` member is not yet a Ready replica in sync with the primary.
+- `FailbackWaitingForQuietPeriod` – the member is in sync; failback waits until the quiet period ends at the time given in the message.
+- `FailbackWaitingForCluster` – failback is due and waits for the rest of the cluster to be healthy.
+- `FailbackDisabled` – `spec.failover.failback.mode` is `Disabled`, so the primary stays where it is.
 
 ---
 
@@ -437,6 +453,17 @@ These events are emitted during proactive primary failovers (e.g., when a primar
 | `FailoverFailed` | Warning | The `CLUSTER FAILOVER` command returned an error |
 | `FailoverTimeout` | Warning | The failover did not complete within the allowed timeout |
 | `FailoverCompleted` | Normal | The replica has successfully become the new primary |
+
+### Failback events
+
+These events are emitted when the operator moves a shard's primary back to its `node-index=0` member. See [Failback](valkeycluster.md#failback).
+
+| Event Type | Type | Description |
+|---|---|---|
+| `FailbackInitiated` | Normal | A `CLUSTER FAILOVER` command was sent to the `node-index=0` member |
+| `FailbackFailed` | Warning | The `CLUSTER FAILOVER` command returned an error |
+| `FailbackTimeout` | Warning | The failback did not complete within the allowed timeout |
+| `FailbackCompleted` | Normal | The `node-index=0` member is the shard's primary again |
 
 ### Recovery events
 

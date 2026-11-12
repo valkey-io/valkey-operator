@@ -258,6 +258,26 @@ When omitted, the operator picks a safe value: the larger of the Kubernetes defa
 
 An explicit value is honoured as-is, even if it is below the recommended minimum. In that case the operator sets a `ConfigurationWarning` condition (reason `GracePeriodTooShort`) on the `ValkeyCluster` and emits an event when the cluster first enters that state, rather than silently overriding the value. The value must be a positive integer; the CRD rejects zero or negative values.
 
+### Failback
+
+```yaml
+failover:
+  failback:
+    mode: Enabled          # Enabled (default) or Disabled
+    quietPeriodSeconds: 300
+```
+
+Each shard has an intended primary, its `node-index=0` member, which is where `scheduling.node.spread.primaries`, `scheduling.zone.spread.primaries` and `scheduling.zone.pinning` place it. A failover moves the primary role to a replica. Failback moves it back with a graceful `CLUSTER FAILOVER` sent to the `node-index=0` member, the same handoff the operator makes before rolling a primary. It never uses `FORCE` or `TAKEOVER`.
+
+A shard fails back when its `node-index=0` member is a Ready replica in sync with the primary. When does it happen?
+
+- During a roll, the operator moves the primary away itself before rolling the `node-index=0` pod. It fails the shard back as soon as the rolled pod has synced, without a quiet period. The roll does not wait for that sync and goes on to the next shard in the meantime.
+- After any other failover, for example when the `node-index=0` pod was deleted or its node failed, the operator waits until the member has stayed in sync for `quietPeriodSeconds` and the whole cluster is healthy. One shard fails back per reconcile. A member that restarts or loses its replication link starts the quiet period again, so a pod that keeps restarting does not take the primary role back each time it comes up.
+
+If a failback attempt fails, the shard waits a full quiet period, counted from the failure, before the next one. `status.failback` lists the shards whose primary is away from `node-index=0`, and the `PrimaryDisplaced` condition says what failback is waiting for. See [status conditions](status-conditions.md#primarydisplaced).
+
+`mode: Disabled` leaves the primary wherever the last failover put it. `quietPeriodSeconds` defaults to 300 and must be at least 10.
+
 ### Private image registries
 
 ```yaml
@@ -432,9 +452,7 @@ Each field takes a `mode`:
 
 > **`primaries` targets the primary at creation, not the live primary.**
 >
-> It keys its topology spread constraint on each shard's `node-index=0` pod. A topology spread constraint is only evaluated when a pod is scheduled and never re-evaluated on a running pod, so `primaries` deliberately targets this stable identity rather than a live primary-role label. After a failover the constraint keeps spreading the `node-index=0` pods, which may no longer be the primaries, until primary failback ([#311](https://github.com/valkey-io/valkey-operator/issues/311)) is implemented and realigns desired with actual. You should read `primaries: Required` as "spread the pods that start as primaries", not as a continuous guarantee that the current primaries sit on distinct nodes.
->
-> This note will be removed once [#311](https://github.com/valkey-io/valkey-operator/issues/311) is implemented.
+> It keys its topology spread constraint on each shard's `node-index=0` pod. A topology spread constraint is only evaluated when a pod is scheduled and never re-evaluated on a running pod, so `primaries` deliberately targets this stable identity rather than a live primary-role label. After a failover the primary is away from the `node-index=0` pod until [failback](#failback) returns it, which is immediate after a roll and waits for the quiet period after any other failover. With failback disabled, the primary stays wherever the last failover put it, and `primaries: Required` only spreads the pods that start as primaries.
 
 `shard`, `primaries`, and `pods` all default to `Disabled` when `node.spread`, `scheduling.node`, or `scheduling` itself is omitted. This is opt-in and matches today's behaviour, so an existing cluster that sets no scheduling constraints at all renders byte-identical pod specs after an operator upgrade — no fleet-wide rolling restart. A cluster that already sets `topologySpreadConstraints` is not covered by that guarantee: those constraints lose the old implicit shard-scoping under verbatim rendering (see above), so it gets a one-time re-render on upgrade even without touching `node.spread`. The trade-off is that nothing stops a shard's primary and replica from landing on the same node until you opt in. For production availability, set `shard` to at least `Preferred` so that losing a single node cannot take out every copy of a shard's data.
 
@@ -473,7 +491,7 @@ The zone axis is independent of the node axis. `node.spread` and `zone.spread` k
 
 > **Zone `primaries` is placement-time, not maintained**
 >
-> As on the node axis, `zone.spread.primaries` constrains each shard's `node-index=0` pod — the primary *at creation*, not the live primary. The constraint is evaluated only when a pod is scheduled, so after a failover the promoted primary can sit at `node-index>0` in whatever zone it landed; the spread then reflects where primaries were *placed*, not where they currently are, until primary failback ([#311](https://github.com/valkey-io/valkey-operator/issues/311)) realigns them. Read it as "spread the pods that start as primaries" and not a live guarantee.
+> As on the node axis, `zone.spread.primaries` constrains each shard's `node-index=0` pod — the primary *at creation*, not the live primary. The constraint is evaluated only when a pod is scheduled, so after a failover the promoted primary can sit at `node-index>0` in whatever zone it landed; the spread then reflects where primaries were *placed*, not where they currently are, until [failback](#failback) returns them to `node-index=0`. With failback disabled, read it as "spread the pods that start as primaries" and not a live guarantee.
 
 > **Cross-zone spreading has a cost**
 >
@@ -519,7 +537,7 @@ If a pod cannot be placed in its pinned zone — no capacity, a `nodeSelector`/`
 >
 > **To recover, remove `pinning`.** Each pod reschedules onto its existing volume's zone and the cluster returns to health with no data loss.
 >
-> If you instead want to migrate a live persistent cluster into its pinned zones, the volumes have to be recreated, which is destructive and must be done per shard: recycle one replica's PVC and pod at a time and let it re-sync from its primary, then fail over onto a re-synced replica, then recycle the old primary's PVC and pod. **A shard with no replicas cannot be migrated this way** — deleting its only volume destroys that shard's keyspace and the slots it owns. Note also that the operator sets `persistentVolumeClaimRetentionPolicy: Retain`, so the old volumes are never reclaimed for you and will keep costing money until you delete them, and that failing over leaves each shard's primary away from `node-index=0` until primary failback ([#311](https://github.com/valkey-io/valkey-operator/issues/311)) lands.
+> If you instead want to migrate a live persistent cluster into its pinned zones, the volumes have to be recreated, which is destructive and must be done per shard: recycle one replica's PVC and pod at a time and let it re-sync from its primary, then fail over onto a re-synced replica, then recycle the old primary's PVC and pod. **A shard with no replicas cannot be migrated this way** — deleting its only volume destroys that shard's keyspace and the slots it owns. Note also that the operator sets `persistentVolumeClaimRetentionPolicy: Retain`, so the old volumes are never reclaimed for you and will keep costing money until you delete them, and that after the failover [failback](#failback) moves each shard's primary back to `node-index=0` once the recycled pod has re-synced and the quiet period has passed.
 >
 > A milder form of this applies to `zone.spread.*` set to `Required`: a recreated pod can be pushed away from its volume's zone.
 

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -256,6 +257,13 @@ func serverContainerStatus(pod *corev1.Pod) *corev1.ContainerStatus {
 		}
 	}
 	return nil
+}
+
+// initialSyncGateFailedMessage describes a failed gate write. Each gate stays
+// as it was until a later pass, so a pod waiting for its gate stays not Ready
+// and a pod whose gate should clear stays Ready.
+func initialSyncGateFailedMessage(err error) string {
+	return fmt.Sprintf("Failed to update the %s readiness gate, so a pod waiting for it stays not Ready and a pod whose gate should clear stays Ready: %v", initialSyncGate, err)
 }
 
 // setInitialSyncGate writes initialSyncGate on the pod with a strategic merge

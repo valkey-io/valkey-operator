@@ -44,11 +44,6 @@ spec:
         description: |-
           ValkeySentinel is the Schema for the valkeysentinels API.
           It runs a Sentinel quorum as a StatefulSet.
-
-          Child resource names are derived from metadata.name.
-          The StatefulSet "valkey-sentinel-<name>" is the binding limit.
-          Its pods carry a controller-revision-hash label of "<statefulset>-<10 character hash>", which must fit 63 characters.
-          That leaves 63 - 11 - 16 = 36 characters for the name.
         properties:
           apiVersion:
             description: |-

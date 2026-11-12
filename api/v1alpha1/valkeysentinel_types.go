@@ -263,14 +263,14 @@ type ValkeySentinelStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=vks
-
-// ValkeySentinel is the Schema for the valkeysentinels API.
-// It runs a Sentinel quorum as a StatefulSet.
 //
 // Child resource names are derived from metadata.name.
 // The StatefulSet "valkey-sentinel-<name>" is the binding limit.
 // Its pods carry a controller-revision-hash label of "<statefulset>-<10 character hash>", which must fit 63 characters.
 // That leaves 63 - 11 - 16 = 36 characters for the name.
+
+// ValkeySentinel is the Schema for the valkeysentinels API.
+// It runs a Sentinel quorum as a StatefulSet.
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 36",message="metadata.name must be at most 36 characters, because child resource names are derived from it"
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="metadata.name must not contain '.', because child Service names are derived from it"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the quorum"

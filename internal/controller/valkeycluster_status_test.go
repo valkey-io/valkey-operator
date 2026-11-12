@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	dto "github.com/prometheus/client_model/go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,13 @@ import (
 
 var _ = Describe("ValkeyCluster updateStatus", func() {
 	ctx := context.Background()
+
+	stateGauge := func(c *valkeyiov1alpha1.ValkeyCluster, state valkeyiov1alpha1.ClusterState) float64 {
+		GinkgoHelper()
+		var m dto.Metric
+		Expect(clusterStateInfo.WithLabelValues(c.Name, c.Namespace, string(state)).Write(&m)).To(Succeed())
+		return m.GetGauge().GetValue()
+	}
 
 	newReconciler := func() *ValkeyClusterReconciler {
 		return &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(10)}
@@ -75,6 +83,10 @@ var _ = Describe("ValkeyCluster updateStatus", func() {
 		Expect(meta.FindStatusCondition(got.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeTrue())
 		Expect(got.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+
+		By("the metrics still reporting the status the API server holds")
+		Expect(stateGauge(got, valkeyiov1alpha1.ClusterStateReady)).To(Equal(float64(1)))
+		Expect(stateGauge(got, valkeyiov1alpha1.ClusterStateDegraded)).To(Equal(float64(0)))
 	})
 
 	It("writes repeatedly within one reconcile", func() {

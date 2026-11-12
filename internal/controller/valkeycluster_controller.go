@@ -555,6 +555,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
+		// A conflict means the cluster changed after this reconcile read it,
+		// which updateStatus already logged. Retry from a fresh read without
+		// reporting it as a failure.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		log.Error(err, statusUpdateFailedMsg)
 		return ctrl.Result{}, err
 	}
@@ -1745,9 +1751,6 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Message = readyCondition.Message
 	}
 
-	// Update Prometheus metrics
-	updateClusterMetrics(current)
-
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
 			if apierrors.IsConflict(err) {
@@ -1761,6 +1764,11 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
+
+	// Metrics follow the status the API server holds, so they are published
+	// only once that status is written (or already current), never for a write
+	// the lock rejected.
+	updateClusterMetrics(current)
 
 	// Sync back to caller so subsequent logic sees the latest state
 	cluster.Status = current.Status

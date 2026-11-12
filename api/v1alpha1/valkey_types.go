@@ -195,7 +195,6 @@ type ValkeySpec struct {
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
 
 	// ACL configures the Valkey access control the operator manages.
-	// The controller does not apply these users yet.
 	// +optional
 	ACL *ValkeyACLSpec `json:"acl,omitempty"`
 
@@ -206,7 +205,7 @@ type ValkeySpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
-	// Config holds additional Valkey configuration parameters.
+	// The rules on spec.config below are explained here, so the explanation does not end up in the CRD description.
 	//
 	// Cluster mode directives are rejected.
 	// A Valkey always runs with cluster-enabled no.
@@ -222,16 +221,20 @@ type ValkeySpec struct {
 	// The base config still emits cluster-config-file for every node.
 	// That keeps the node state file on the writable /data volume.
 	// See buildManagedConfig.
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-') && key.lowerAscii() != 'tls-cluster')",message="spec.config must not contain cluster- keys or tls-cluster: a Valkey runs standalone, so cluster mode directives are not supported"
 	//
 	// replicaof and its alias slaveof are rejected too.
 	// The operator owns replication topology.
 	// A user-set directive would fight the operator's own wiring.
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))",message="spec.config must not contain replicaof or slaveof: the operator owns replication topology"
 	//
 	// Keys may contain only letters, digits, '.', '_' and '-'.
 	// Valkey trims and unquotes each config line before reading its key, so a key such as " cluster-enabled" or "replicaof" in quotes would pass the rules above.
 	// The '.' keeps module configs such as search.<name> valid.
+
+	// Config holds additional Valkey configuration parameters.
+	// Cluster mode directives and replicaof or slaveof are rejected.
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().startsWith('cluster-') && key.lowerAscii() != 'tls-cluster')",message="spec.config must not contain cluster- keys or tls-cluster: a Valkey runs standalone, so cluster mode directives are not supported"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['replicaof', 'slaveof']))",message="spec.config must not contain replicaof or slaveof: the operator owns replication topology"
 	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
@@ -316,8 +319,6 @@ type ValkeyStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
-// Valkey is the Schema for the valkeys API.
 //
 // The name is bounded because child resource names are derived from it.
 // Every derived name is held to a 63 character DNS label.
@@ -330,10 +331,12 @@ type ValkeyStatus struct {
 //
 // The limit is in place from the start.
 // Tightening it later would reject objects that already exist.
-// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 37",message="metadata.name must be at most 37 characters, because child resource names are derived from it"
 //
 // Kubernetes admits a dot in a custom resource name, but the child Service name is a DNS label and cannot hold one.
-// The rule skips updates, because the name cannot change.
+// The dot rule skips updates, because the name cannot change.
+
+// Valkey is the Schema for the valkeys API.
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= 37",message="metadata.name must be at most 37 characters, because child resource names are derived from it"
 // +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !self.metadata.name.contains('.')",optionalOldSelf=true,message="metadata.name must not contain '.', because child Service names are derived from it"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the instance"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"

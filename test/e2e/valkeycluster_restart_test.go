@@ -67,7 +67,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   persistence:
     size: 1Gi
   config:

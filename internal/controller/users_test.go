@@ -277,6 +277,20 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 		assert.Contains(t, warnings[0].message, "spec.acl.users")
 	}
 
+	replicas := &valkeyiov1alpha1.ValkeyCluster{}
+	replicas.Spec.Replicas = 2 //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	warnings = deprecatedFieldConfigWarnings(replicas)
+	if assert.Len(t, warnings, 1) {
+		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
+		assert.Contains(t, warnings[0].message, "set spec.replicasPerShard: 2 and remove spec.replicas in the same update")
+	}
+
+	both := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy}, //nolint:staticcheck // legacy spec.users
+	}
+	both.Spec.Replicas = 1 //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	assert.Len(t, deprecatedFieldConfigWarnings(both), 2)
+
 	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 			ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "bob"}}},

@@ -51,7 +51,7 @@ Indicates whether the cluster is fully functional and serving traffic.
 Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
 - `ConfigMapError` – failed to create/update configuration
-- `UsersACLError` – failed to reconcile ACL users/secrets
+- `UsersACLError` – the aclfile could not be built: a user Secret or key is missing and the cluster has no aclfile yet, a Secret read failed for another reason, or the internal ACL Secret could not be updated. The reconcile stops until the next pass. Once an aclfile exists, a missing user Secret or key is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
 - `OperatorAuthenticationFailed` – one or more nodes reject the operator's `_operator` password. See [`Degraded`](#degraded)
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
@@ -100,6 +100,7 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
+- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `internal-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
 - `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 
 ---
@@ -132,7 +133,7 @@ Common reasons:
 - `SlotsUnassigned` – waiting for slots to be assigned
 
 #### `ConfigurationWarning`
-Indicates the operator accepted a spec value it considers risky, rather than rejecting or overriding it.
+Indicates the operator accepted a spec value it considers risky or deprecated, rather than rejecting or overriding it.
 
 | Status | Meaning |
 |---|---|
@@ -144,7 +145,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
-- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces. The field keeps working until `v1beta1`; see [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers).
+- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces, and `spec.replicas`, which `spec.replicasPerShard` replaces. The field keeps working until `v1beta1`. See [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers) and [Migrating from `spec.replicas`](valkeycluster.md#migrating-from-specreplicas).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -287,6 +288,26 @@ Common reasons when `TrustBundleApplied=True`:
 - `Applied` – the mounted trust bundle is loaded.
 
 > **Note:** On a failed reload the node controller emits a `TrustBundleReloadFailed` warning event and retries every 10 seconds, not with exponential backoff, so a fixed bundle is picked up within one retry of the mounted file refreshing.
+
+#### `DefaultUserSessionsOpen`
+Indicates whether connections may be logged in as Valkey's `default` user. When an `ACL LOAD` turns `default` off, Valkey copies the new rules into the existing user, and a connection that authenticated while `default` was on stays logged in with the disabled `default`'s permissions. The node controller closes those connections with `CLIENT KILL USER default` and uses this condition to remember that a close is owed until it succeeds.
+
+The condition depends only on what the server reports, not on the aclfile Secret, the mounted file or `status.appliedACLRevision`. It is absent on a node that has never been seen with `default` on. It is not part of `Ready`, but a failed close also fails the node's ACL apply: `ACLApplied` goes `False` with reason `ApplyFailed`, and the cluster reports `Degraded` until the retry succeeds.
+
+| Status | Meaning |
+|---|---|
+| `True` | `default` is on, or it was turned off and its connections have not been closed yet. |
+| `False` | `default` was turned off and the connections logged in as it were closed. |
+| absent | The node has never been seen with `default` on. |
+
+Common reasons when `DefaultUserSessionsOpen=True`:
+- `DefaultUserEnabled` – `default` is on, for example because the cluster declares an open `default` in `acl.users`. Nothing is closed while it stays on.
+- `CloseFailed` – `default` is off, but `CLIENT KILL USER default` failed. The message field contains the error. The node controller emits a `DefaultUserSessionsCloseFailed` warning event and retries on the next reconcile.
+
+Common reasons when `DefaultUserSessionsOpen=False`:
+- `SessionsClosed` – the connections were closed when `default` was turned off.
+
+> **Note:** Valkey reports clients that have connected but not yet sent `AUTH` as `default` too, so the kill also drops those, and they reconnect. It runs once for each time `default` goes from on to off, before the operator checks that the mounted aclfile has caught up with the Secret, so a lagging mount does not delay it. It runs once more if the node's server restarts while a close is pending, or if recording a successful close fails. ACL changes made while `default` is already off do not run it.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
@@ -467,6 +488,8 @@ These events are emitted during ACL user management.
 | `InternalSecretsCreationFailed` | Warning | Failed to create or take ownership of internal ACL secret |
 | `InternalSecretsUpdateFailed` | Warning | Failed to update internal ACL secret |
 | `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
+| `UsersACLUnresolved` | Warning | A user's password Secret is missing or lacks a listed key, so the aclfile was not rebuilt; the nodes keep the last applied one. Emitted when the failure appears or changes |
+| `UsersACLResolved` | Normal | The aclfile was rebuilt after a `UsersACLUnresolved` failure |
 
 ### Viewing events
 
@@ -663,8 +686,8 @@ Metadata:
   Resource Version:    108933
   UID:                 7b60e0f4-2842-4929-bc94-3fa3cfb1dfa5
 Spec:
-  Replicas:  1
-  Shards:    3
+  Replicas Per Shard:  1
+  Shards:              3
 Status:
   Conditions:
     Last Transition Time:  2025-12-19T06:07:21Z
@@ -716,7 +739,7 @@ Events:
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary def456 (shard 1)
   Normal  ReplicaCreated     14m   valkeycluster-controller  Created replica for primary ghi789 (shard 2)
   Normal  ReplicasAttached   14m   valkeycluster-controller  Attached 3 replica node(s)
-  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready with 3 shards and 1 replicas
+  Normal  ClusterReady       14m   valkeycluster-controller  Cluster ready: shards 3, replicasPerShard 1
 ```
 
 ### How to read it
@@ -728,7 +751,7 @@ Events:
 - **Conditions**
   - `Progressing=False (ReconcileComplete)` → controller is not actively changing anything.
   - `Ready=True (ClusterHealthy)` → cluster is fully functional.
-  - `ClusterFormed=True (TopologyComplete)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicas=1`).
+  - `ClusterFormed=True (TopologyComplete)` → nodes have joined and match the requested topology (`spec.shards=3`, `spec.replicasPerShard=1`).
   - `SlotsAssigned=True (AllSlotsAssigned)` → all 16384 hash slots are assigned.
 
 - **Observed Generation**

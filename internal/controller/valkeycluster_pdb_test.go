@@ -54,8 +54,8 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())

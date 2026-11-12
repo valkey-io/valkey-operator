@@ -387,6 +387,24 @@ const (
 	// waiting for the ValkeyCluster controller to advance Spec.WorkloadRevision
 	// (one node at a time today). Expected staging, not an error.
 	ValkeyNodeConditionWorkloadRollPending = "WorkloadRollPending"
+	// ValkeyNodeConditionDefaultUserSessionsOpen indicates that connections may
+	// be logged in as the default user. It is True while default is enabled, and
+	// stays True after an ACL LOAD turns default off until the operator has closed
+	// those connections with CLIENT KILL USER default: ACL LOAD copies the new
+	// rules into the existing user, so a connection authenticated while default
+	// was on keeps its access. False means they have been closed. The condition
+	// is absent on a node that has never been seen with default enabled. It is
+	// not part of Ready.
+	ValkeyNodeConditionDefaultUserSessionsOpen = "DefaultUserSessionsOpen"
+	// ValkeyNodeReasonDefaultUserEnabled is the DefaultUserSessionsOpen=True
+	// reason while default is enabled.
+	ValkeyNodeReasonDefaultUserEnabled = "DefaultUserEnabled"
+	// ValkeyNodeReasonCloseFailed is the DefaultUserSessionsOpen=True reason when
+	// default is off but closing its connections failed. It is retried.
+	ValkeyNodeReasonCloseFailed = "CloseFailed"
+	// ValkeyNodeReasonSessionsClosed is the DefaultUserSessionsOpen=False reason
+	// once the connections logged in as default have been closed.
+	ValkeyNodeReasonSessionsClosed = "SessionsClosed"
 )
 
 const (

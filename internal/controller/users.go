@@ -59,7 +59,7 @@ var (
 	systemUsers     = []string{operatorUser, exporterUser, replicationUser}
 	systemUsersAcls = map[string]string{
 		operatorUser: strings.Join([]string{
-			"+@connection",               // client handshake (CLIENT TRACKING, SETINFO, AUTH, PING)
+			"+@connection",               // client handshake (CLIENT TRACKING, SETINFO, AUTH, PING), and CLIENT KILL USER default when default is disabled
 			"+cluster|myid",              // get node ID
 			"+cluster|myshardid",         // get shard ID
 			"+cluster|info",              // cluster state
@@ -219,6 +219,15 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		return strings.Compare(a.Name, b.Name)
 	})
 
+	// Build the system users first, so a change to them (the _exporter user
+	// appearing when the exporter is enabled, for example) lands in the
+	// system-passwords Secret even when a user below cannot be resolved.
+	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
+	if err != nil {
+		log.Error(err, "failed to generate system users ACL")
+		return err
+	}
+
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
 	for _, user := range users {
@@ -226,6 +235,9 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		// Get passwords from Secret
 		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
 		if err != nil {
+			if _, ok := errors.AsType[*userSecretUnresolvedError](err); ok {
+				return err // already names the user
+			}
 			return fmt.Errorf("user %s: %w", user.Name, err)
 		}
 
@@ -234,11 +246,6 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		fmt.Fprintf(&usersAcls, "%s\n", acl)
 	}
 	// append system users ACL
-	systemUsersAcl, err := r.createSystemUsersAcl(ctx, cluster)
-	if err != nil {
-		log.Error(err, "failed to generate system users ACL")
-		return err
-	}
 	fmt.Fprintf(&usersAcls, "%s\n", systemUsersAcl)
 
 	// Append the revision user last, so its password hash covers every
@@ -268,15 +275,24 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 	return nil
 }
 
-// deprecatedFieldConfigWarnings flags spec.users, which spec.acl.users replaces.
+// deprecatedFieldConfigWarnings flags spec.users and spec.replicas, which
+// spec.acl.users and spec.replicasPerShard replace. spec.replicas of 0 does
+// not warn: the Go field is 0 when the spec omits it and when the spec sets 0.
 func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	if len(cluster.Spec.Users) == 0 { //nolint:staticcheck // legacy spec.users
-		return nil
+	var warnings []configWarning
+	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+		})
 	}
-	return []configWarning{{
-		reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-		message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
-	}}
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+		warnings = append(warnings, configWarning{
+			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
+			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
+		})
+	}
+	return warnings
 }
 
 // Helper for repeated actions
@@ -334,6 +350,23 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 	return acl.String()
 }
 
+// userSecretUnresolvedError reports a user whose password the operator cannot
+// read: the referenced Secret is missing, or it lacks a key listed in
+// password.secret.keys. The cluster controller keeps the last good aclfile and
+// reports the user on the Degraded condition; see reportUsersACLUnresolved.
+type userSecretUnresolvedError struct {
+	User   string
+	Secret string
+	Key    string
+}
+
+func (e *userSecretUnresolvedError) Error() string {
+	if e.Key == "" {
+		return fmt.Sprintf("user %s: Secret %s not found", e.User, e.Secret)
+	}
+	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
+}
+
 // Fetches a Secret, and looks for referenced passwords
 func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
 
@@ -367,7 +400,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 		log.V(1).Info("Users secret not found", "userSecretName", userSecretName, "user", user.Name)
 
 		// The Secret was not found, and this user needs a password from it
-		return []string{}, fmt.Errorf("no password or reference found")
+		return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName}
 	}
 
 	// Sort the password keys; default to username if no keys present
@@ -386,7 +419,7 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 		password, exists := userSecret.Data[key]
 		if !exists {
 			log.Error(nil, "missing password key in secret", "user", user.Name, "secret", userSecretName, "key", key)
-			return []string{}, fmt.Errorf("missing password key in secret")
+			return []string{}, &userSecretUnresolvedError{User: user.Name, Secret: userSecretName, Key: key}
 		}
 
 		// Test if the string in the Secret is a pre-hashed sha256 password

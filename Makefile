@@ -150,7 +150,9 @@ build: manifests generate fmt vet lint ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd/main.go \
+		--default-valkey-image=valkey/valkey:9.0.0 \
+		--default-exporter-image=oliver006/redis_exporter:v1.88.0
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

@@ -1700,9 +1700,17 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		return err
 	}
 
-	// Snapshot for patch base and comparison
+	// Snapshot for patch base and comparison. The conditions written below come
+	// from cluster, the copy this reconcile read when it started, and a merge
+	// patch replaces status.conditions as a whole. So the write is locked to
+	// cluster's resourceVersion, not current's: if the object has moved since
+	// this reconcile read it (a status write the cache had not delivered yet, or
+	// a spec edit), the API server rejects the patch with a conflict instead of
+	// putting back the older conditions. That newer write enqueues the cluster
+	// again, so the next reconcile starts from it.
 	patchBase := current.DeepCopy()
-	patch := client.MergeFrom(patchBase)
+	patchBase.SetResourceVersion(cluster.ResourceVersion)
+	patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
 
 	// Update shard counts. A nil state leaves the stored counts in place.
 	if state != nil {
@@ -1742,6 +1750,10 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				log.V(1).Info("status not written; the cluster changed since this reconcile read it")
+				return err
+			}
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}

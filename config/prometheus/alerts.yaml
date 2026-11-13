@@ -1,0 +1,119 @@
+# Alerting rules for the valkey-operator's own metrics (internal/controller/metrics.go)
+# and the per-node metrics-exporter sidecar (oliver006/redis_exporter, see podmonitor.yaml).
+# Requires the Prometheus Operator CRDs.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/name: valkey-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: valkey-operator-alerts
+  namespace: system
+spec:
+  groups:
+    - name: valkey-operator.cluster
+      rules:
+        - alert: ValkeyClusterFailed
+          expr: valkey_operator_cluster_state_info{state="Failed"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ValkeyCluster {{ $labels.valkey_cluster }} is in the Failed state"
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has reported state=Failed for at least 1m. See status conditions on the ValkeyCluster for the reason."
+
+        - alert: ValkeyClusterDegraded
+          expr: valkey_operator_cluster_state_info{state="Degraded"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ValkeyCluster {{ $labels.valkey_cluster }} is Degraded"
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has been Degraded for at least 5m."
+
+        - alert: ValkeyClusterNoShardsReady
+          expr: valkey_operator_cluster_shards_desired > 0 and valkey_operator_cluster_shards_ready == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ValkeyCluster {{ $labels.valkey_cluster }} has no ready shards"
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has 0 of {{ $value }} desired shards ready. This also fires when a shard is entirely unreachable and has dropped out of the observed topology."
+
+        - alert: ValkeyClusterShardsNotFullyReady
+          expr: valkey_operator_cluster_shards_ready < valkey_operator_cluster_shards_desired
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ValkeyCluster {{ $labels.valkey_cluster }} has unready shards"
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has only {{ $value }} ready shard(s), fewer than spec.shards, for at least 15m. Compares against the desired count, so a shard that has dropped out of the observed topology entirely still counts as missing."
+
+        - alert: ValkeyClusterFrequentFailovers
+          expr: increase(valkey_operator_failovers_total[30m]) > 3
+          labels:
+            severity: warning
+          annotations:
+            summary: "ValkeyCluster {{ $labels.valkey_cluster }} is failing over repeatedly"
+            description: "{{ $labels.valkey_cluster }} in namespace {{ $labels.target_namespace }} has had {{ $value }} failovers (type={{ $labels.type }}) in the last 30m, which usually means an underlying node or network problem rather than a planned roll."
+
+        - alert: ValkeyRolePollerTriggersDropped
+          expr: increase(valkey_operator_role_triggers_dropped_total[5m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "RolePoller is dropping triggers for {{ $labels.valkey_cluster }}"
+            description: "The ValkeyNode workqueue for {{ $labels.valkey_cluster }} in {{ $labels.target_namespace }} is not draining fast enough to keep up with the RolePoller; a role change may go undetected until the 30s backstop requeue."
+
+    - name: valkey-operator.node
+      rules:
+        - alert: ValkeyNodeDown
+          expr: redis_up{valkey_cluster!=""} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} is down"
+            description: "The metrics-exporter on pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has been unable to reach its Valkey server for at least 2m."
+
+        # redis_up only reports when the exporter itself can still reach
+        # Valkey. If the exporter process or pod is unreachable entirely, its
+        # series (including redis_up) go stale rather than reporting 0, so
+        # ValkeyNodeDown alone misses that failure mode. `up` is Prometheus's
+        # own synthetic per-target metric and carries the same relabeled
+        # labels as every other metric from this PodMonitor (see
+        # podmonitor.yaml), so it can be scoped and alerted on the same way.
+        - alert: ValkeyNodeUnreachable
+          expr: up{valkey_cluster!=""} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} cannot be scraped"
+            description: "Prometheus has been unable to scrape the metrics-exporter sidecar on pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) for at least 2m."
+
+        - alert: ValkeyNodeHighMemoryUsage
+          expr: redis_memory_max_bytes{valkey_cluster!=""} > 0 and (redis_memory_used_bytes{valkey_cluster!=""} / redis_memory_max_bytes{valkey_cluster!=""}) > 0.90
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} is near maxmemory"
+            description: "Pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has used over 90% of its configured maxmemory for at least 10m."
+
+        - alert: ValkeyNodeRejectingConnections
+          expr: increase(redis_rejected_connections_total{valkey_cluster!=""}[5m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} is rejecting connections"
+            description: "Pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) rejected {{ $value }} connections in the last 5m, usually maxclients being hit."
+
+        - alert: ValkeyClusterSlotsFailed
+          expr: redis_cluster_slots_fail{valkey_cluster!=""} > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Valkey node {{ $labels.pod }} reports failed cluster slots"
+            description: "Pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) reports {{ $value }} slot(s) in the fail state via CLUSTER INFO."

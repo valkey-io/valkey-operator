@@ -92,13 +92,6 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 	}, nil
 }
 
-// primaryHandoffCommand starts the server through /scripts/primary-handoff.sh when the
-// mounted ConfigMap carries it, and directly otherwise, so a node that mounts
-// an external ConfigMap without the script still starts. $0 is the server
-// binary and $@ its arguments.
-const primaryHandoffCommand = `if [ -f /scripts/` + primaryHandoffScriptKey + ` ]; then exec /bin/sh /scripts/` +
-	primaryHandoffScriptKey + ` "$@"; fi; exec "$0" "$@"`
-
 // usesPrimaryHandoffScript reports whether the server container of the node starts
 // through primary-handoff.sh: a cluster member without persistence. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
@@ -114,15 +107,14 @@ func usesPrimaryHandoffScript(node *valkeyiov1alpha1.ValkeyNode) bool {
 	return node.Spec.Persistence == nil && node.Labels[LabelCluster] != ""
 }
 
-// serverCommand returns the command of the server container.
+// serverCommand returns the command of the server container: a shell that
+// reads the replication password when the process starts, then starts the
+// server, through primary-handoff.sh where usesPrimaryHandoffScript.
 func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []string {
-	args := make([]string, 0, 9+len(announceArgs))
-	if usesPrimaryHandoffScript(node) {
-		args = append(args, shellPath, "-c", primaryHandoffCommand)
-	}
-	args = append(args, "valkey-server", "/config/valkey.conf")
+	args := make([]string, 0, 7+len(announceArgs))
+	args = append(args, shellPath, "-c", replicationAuthShell(usesPrimaryHandoffScript(node)), "valkey-server", "/config/valkey.conf")
 	args = append(args, announceArgs...)
-	return append(args, "--primaryuser", replicationUser, "--primaryauth", "$(PRIMARY_AUTH)")
+	return append(args, "--primaryuser", replicationUser)
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe,
@@ -675,6 +667,36 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	if node.Spec.TLS != nil {
 		podSpec.Volumes = append(podSpec.Volumes, tlsVolume(node.Spec.TLS))
+	}
+
+	// The system-password files are how probes and a restarted server pick up
+	// a rotation. The Secret name is fixed, so a later password change does
+	// not change this pod template and does not roll the pod.
+	// 0444, not 0400: the operator does not set fsGroup. A pod with
+	// runAsUser and no fsGroup still has to read these files. They are
+	// mounted only into this pod.
+	if clusterName := node.Labels[LabelCluster]; clusterName != "" {
+		mode := int32(0444)
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: systemPasswordVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: getSystemPasswordSecretName(clusterName),
+					// The server reads _operator (probes) and _replication
+					// (start). The exporter password stays in its own env var.
+					Items: []corev1.KeyToPath{
+						{Key: operatorUser, Path: operatorUser},
+						{Key: replicationUser, Path: replicationUser},
+					},
+					DefaultMode: &mode,
+				},
+			},
+		})
+		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      systemPasswordVolumeName,
+			MountPath: systemPasswordMountPath,
+			ReadOnly:  true,
+		})
 	}
 
 	if node.Spec.ServiceAccountName != "" {

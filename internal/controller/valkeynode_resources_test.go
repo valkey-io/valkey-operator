@@ -102,11 +102,16 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command: a standalone node starts the server directly
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+	// Command: a standalone node starts the server without primary-handoff.sh.
+	// The shell reads the replication password at process start. Kubelet must
+	// not expand it, or a rotation would stay on the value from the last
+	// container start.
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
+		"--primaryuser", replicationUser}, c.Command)
+	assert.NotContains(t, strings.Join(c.Command, "\n"), primaryHandoffScriptKey)
+	assert.NotContains(t, c.Command, "$(PRIMARY_AUTH)")
+	assert.Contains(t, strings.Join(c.Command, "\n"), systemPasswordMountPath)
 
 	// Env
 	require.Len(t, c.Env, 2)
@@ -887,10 +892,9 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHan
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
 	require.Len(t, containers, 1)
-	assert.Equal(t, []string{shellPath, "-c", primaryHandoffCommand, "valkey-server", "/config/valkey.conf",
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+		"--primaryuser", replicationUser}, containers[0].Command)
 	// The startup probe allows for the replica hand-off wait of up to 300s.
 	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
@@ -904,7 +908,7 @@ func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *test
 	node.Spec.ServerConfigMapName = "my-own-config"
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
-	assert.Equal(t, []string{shellPath, "-c", primaryHandoffCommand, "valkey-server"}, containers[0].Command[:4])
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server"}, containers[0].Command[:4])
 	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 
@@ -918,16 +922,15 @@ func TestStartupFailureThreshold(t *testing.T) {
 	assert.Equal(t, int32(20), startupFailureThreshold(node))
 }
 
-func TestBuildContainersDef_PersistentClusterNodeStartsServerDirectly(t *testing.T) {
+func TestBuildContainersDef_PersistentClusterNodeSkipsPrimaryHandoffScript(t *testing.T) {
 	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
 	require.Len(t, containers, 1)
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, containers[0].Command)
+		"--primaryuser", replicationUser}, containers[0].Command)
 	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 

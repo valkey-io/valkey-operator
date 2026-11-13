@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -813,6 +814,19 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 	return users
 }
 
+// SystemPasswordRotationInterval returns how long an internal user's password
+// stays current, or zero when spec.acl.systemPasswordRotation is unset.
+func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
+	if s.ACL == nil || s.ACL.SystemPasswordRotation == nil {
+		return 0
+	}
+	days := s.ACL.SystemPasswordRotation.IntervalDays
+	if days < 1 {
+		days = DefaultSystemPasswordRotationDays
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -865,6 +879,9 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionExporterPasswordHeld is set while _exporter.previous is still
+	// accepted. Non-blocking: the other system passwords keep rotating.
+	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 	// ConditionTLSConfigured reports whether the operator-managed TLS trust
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
@@ -912,15 +929,17 @@ const ReasonPauseAnnotationSet = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing                  = "Initializing"
-	ReasonReconciling                   = "Reconciling"
-	ReasonClusterHealthy                = "ClusterHealthy"
-	ReasonServiceError                  = "ServiceError"
-	ReasonConfigMapError                = "ConfigMapError"
-	ReasonValkeyNodeError               = "ValkeyNodeError"
-	ReasonValkeyNodeListError           = "ValkeyNodeListError"
-	ReasonAddingNodes                   = "AddingNodes"
-	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	// ReasonExporterNotRestarted is used with ConditionExporterPasswordHeld.
+	ReasonExporterNotRestarted          = "ExporterNotRestarted"
 	ReasonMissingShards                 = "MissingShards"
 	ReasonMissingReplicas               = "MissingReplicas"
 	ReasonReconcileComplete             = "ReconcileComplete"

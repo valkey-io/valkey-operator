@@ -25,7 +25,7 @@ import (
 )
 
 // ClusterState represents the high-level state of the ValkeyCluster.
-// +kubebuilder:validation:Enum=Initializing;Reconciling;Ready;Degraded;Failed
+// +kubebuilder:validation:Enum=Initializing;Reconciling;Ready;Degraded;Failed;Hibernated
 type ClusterState string
 
 const (
@@ -39,6 +39,9 @@ const (
 	ClusterStateDegraded ClusterState = "Degraded"
 	// ClusterStateFailed indicates the cluster has failed and cannot recover.
 	ClusterStateFailed ClusterState = "Failed"
+	// ClusterStateHibernated indicates every Valkey pod of the cluster is
+	// stopped on request, with the cluster's objects and volumes kept.
+	ClusterStateHibernated ClusterState = "Hibernated"
 )
 
 // ClusterStates lists all possible ValkeyCluster states.
@@ -48,6 +51,7 @@ var ClusterStates = []ClusterState{
 	ClusterStateReady,
 	ClusterStateDegraded,
 	ClusterStateFailed,
+	ClusterStateHibernated,
 }
 
 // PDBMode selects how the operator manages PodDisruptionBudgets for the cluster.
@@ -846,6 +850,7 @@ type ValkeyClusterStatus struct {
 	// Valkey-specific condition types:
 	// - "ClusterFormed": all nodes have joined and meet the shard/replica layout
 	// - "SlotsAssigned": all 16384 hash slots are assigned to primaries
+	// - "Hibernated": the cluster is hibernated, or on its way down or back up
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -869,6 +874,48 @@ const (
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
 	ConditionTLSConfigured = "TLSConfigured"
+	// ConditionHibernated reports hibernation, requested with
+	// AnnotationHibernate. It is True once every pod is stopped, False while
+	// the cluster is on its way down or back up, and absent otherwise.
+	ConditionHibernated = "Hibernated"
+)
+
+// AnnotationHibernate hibernates a ValkeyCluster while its value is exactly
+// "true": the operator stops every Valkey pod and keeps the cluster, its
+// ValkeyNodes, Secrets, ConfigMaps, Services and PVCs. Any other value, or
+// removing it, wakes the cluster. The operator copies it onto the ValkeyNodes
+// of the cluster, replicas first and primaries after them, and removes it
+// from them when the cluster wakes.
+const AnnotationHibernate = "valkey.io/hibernate"
+
+// AnnotationHibernateDataPoint is set by the operator on each primary
+// ValkeyNode of a hibernating cluster when its replicas stop. It identifies
+// the dataset every replica had reached and saved, as
+// "<replid>:<changes since last save>:<saves>" from INFO, or
+// "<replid>:aof:<AOF size>" with the AOF on. Any write moves it, while the
+// PINGs a primary sends its replicas do not, and a restart changes the
+// replication ID. The primary only stops while it still holds that dataset,
+// so every node of a shard hibernates with the same data.
+const AnnotationHibernateDataPoint = "valkey.io/hibernate-data-point"
+
+// Reasons of ConditionHibernated. ReasonHibernating, ReasonHibernated and
+// ReasonWaking are also the Ready and Progressing reasons meanwhile.
+const (
+	// ReasonHibernationWaitingForHealthy: hibernation is requested and waits
+	// for the cluster to be healthy, with no scale, slot migration or roll in
+	// flight. Also set when a descent backed off and waits to start over.
+	ReasonHibernationWaitingForHealthy = "WaitingForHealthy"
+	// ReasonHibernating: the cluster is on its way down. Writes are paused on
+	// the primaries, and the message says which step the descent is at.
+	ReasonHibernating = "Hibernating"
+	// ReasonHibernated: every pod of the cluster is stopped.
+	ReasonHibernated = "Hibernated"
+	// ReasonHibernationSaveFailed: a node could not save its data. Writes are
+	// resumed, no pod is stopped, and the descent is retried later.
+	ReasonHibernationSaveFailed = "SaveFailed"
+	// ReasonWaking: the annotation was removed and the pods are starting,
+	// primaries first.
+	ReasonWaking = "Waking"
 )
 
 const (

@@ -225,6 +225,11 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !node.DeletionTimestamp.IsZero() {
 		return r.reconcileDeletion(ctx, node)
 	}
+	// A hibernated node only needs its workload at zero, so an error in the
+	// ConfigMap or PVC steps below must not keep its pod running.
+	if nodeHibernated(node) {
+		return r.reconcileHibernatedNode(ctx, node)
+	}
 	if requeue, err := r.reconcilePersistenceFinalizer(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	} else if requeue {
@@ -561,14 +566,21 @@ func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valk
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	var err error
 	switch node.Spec.WorkloadType {
 	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
-		return r.ensureStatefulSet(ctx, node)
+		err = r.ensureStatefulSet(ctx, node)
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
-		return r.ensureDeployment(ctx, node)
+		err = r.ensureDeployment(ctx, node)
 	default:
 		return fmt.Errorf("unsupported workload type: %q", node.Spec.WorkloadType)
 	}
+	if err != nil {
+		return err
+	}
+	// A deferred template roll leaves the workload spec alone, replica count
+	// included, so a node woken from hibernation is scaled back up here.
+	return r.scaleWorkload(ctx, node, 1)
 }
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
@@ -1037,6 +1049,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 			current.Status.Role = ""
 			if node.Spec.Persistence != nil {
 				_, readyReason, readyMessage = pvcStatusCondition(pvc)
+			}
+			if nodeHibernated(node) {
+				readyReason = valkeyiov1alpha1.ValkeyNodeReasonHibernated
+				readyMessage = "Workload scaled to zero while the ValkeyCluster is hibernated"
 			}
 		} else {
 			current.Status.PodName = pod.Name

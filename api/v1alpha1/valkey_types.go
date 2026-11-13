@@ -156,6 +156,14 @@ const (
 //
 // The has() guard on mode is defensive: the default fills it before validation runs.
 // +kubebuilder:validation:XValidation:rule="!has(self.sentinel) || (has(self.mode) && self.mode == 'Sentinel')",message="failover.sentinel requires failover.mode: Sentinel",fieldPath=".sentinel",reason="FieldValueForbidden"
+//
+// Once the sentinel block exists it cannot be removed while the mode stays Sentinel.
+// The monitorName rules on SentinelFailoverSpec only run when the block is present before
+// and after an update. Without this rule, a user could drop the block and add it back
+// with a different monitorName, and those rules would never run.
+// Leaving Sentinel mode is how a block is dropped on purpose. That path goes through
+// deregistration, so coming back later with a new name is allowed.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sentinel) || !(has(self.mode) && self.mode == 'Sentinel') || has(self.sentinel)",message="failover.sentinel cannot be removed while failover.mode stays Sentinel; set the mode to None first",fieldPath=".sentinel",reason="FieldValueForbidden"
 type FailoverSpec struct {
 	// Mode selects the failover engine.
 	//   None     - nobody promotes automatically.
@@ -176,9 +184,9 @@ type FailoverSpec struct {
 
 // SentinelFailoverSpec configures how Sentinel monitors one Valkey.
 //
-// The rules are transition rules, so they run on updates only.
-// Adding the whole sentinel block, or removing it, is therefore not checked here.
-// They apply once the block exists.
+// The rules are transition rules, so they run on updates only, and only while the block
+// is present before and after the update. FailoverSpec stops the block from being removed
+// while the mode stays Sentinel, so they cannot be skipped that way.
 // +kubebuilder:validation:XValidation:rule="has(self.monitorName) == has(oldSelf.monitorName)",message="monitorName cannot be added or removed after the sentinel block is created",fieldPath=".monitorName",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(self.monitorName) || !has(oldSelf.monitorName) || self.monitorName == oldSelf.monitorName",message="monitorName is immutable",fieldPath=".monitorName",reason="FieldValueForbidden"
 type SentinelFailoverSpec struct {

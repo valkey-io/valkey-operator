@@ -2169,6 +2169,12 @@ spec:
                   message: 'failover.sentinel requires failover.mode: Sentinel'
                   reason: FieldValueForbidden
                   rule: '!has(self.sentinel) || (has(self.mode) && self.mode == ''Sentinel'')'
+                - fieldPath: .sentinel
+                  message: failover.sentinel cannot be removed while failover.mode
+                    stays Sentinel; set the mode to None first
+                  reason: FieldValueForbidden
+                  rule: '!has(oldSelf.sentinel) || !(has(self.mode) && self.mode ==
+                    ''Sentinel'') || has(self.sentinel)'
               image:
                 description: Image overrides the default Valkey image.
                 type: string

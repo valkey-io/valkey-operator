@@ -124,7 +124,7 @@ var _ = Describe("Pause reconciliation", func() {
 		cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReconciliationPaused)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonReconciliationPaused))
+		Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonPauseAnnotationSet))
 
 		node := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, nodeKey, node)).To(Succeed())

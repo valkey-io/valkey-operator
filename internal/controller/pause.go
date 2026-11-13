@@ -36,7 +36,7 @@ const pausedRequeue = 30 * time.Second
 // reconciliationPaused reports whether obj carries the pause annotation with
 // the exact value "true". Any other value, or no annotation, means running.
 func reconciliationPaused(obj metav1.Object) bool {
-	return obj.GetAnnotations()[valkeyiov1alpha1.AnnotationPauseReconciliation] == "true"
+	return annotationTrue(obj, valkeyiov1alpha1.AnnotationPauseReconciliation)
 }
 
 // syncNodePause sets the pause annotation on every ValkeyNode of the cluster
@@ -49,27 +49,14 @@ func (r *ValkeyClusterReconciler) syncNodePause(ctx context.Context, cluster *va
 	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
 		return err
 	}
-	for i := range nodes.Items {
-		node := &nodes.Items[i]
-		// The label alone can also sit on a standalone node, whose own pause
-		// annotation is not this cluster's to set or clear.
-		if !metav1.IsControlledBy(node, cluster) {
-			continue
-		}
-		_, hasPauseAnnotation := node.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation]
-		if paused && reconciliationPaused(node) {
-			continue
-		}
-		if !paused && !hasPauseAnnotation {
-			continue
-		}
-		patch := client.MergeFrom(node.DeepCopy())
+	for _, node := range ownedValkeyNodes(cluster, nodes) {
+		var err error
 		if paused {
-			upsertAnnotation(node, valkeyiov1alpha1.AnnotationPauseReconciliation, "true")
+			err = r.patchNodeAnnotations(ctx, node, map[string]string{valkeyiov1alpha1.AnnotationPauseReconciliation: annotationTrueValue}, nil)
 		} else {
-			delete(node.Annotations, valkeyiov1alpha1.AnnotationPauseReconciliation)
+			err = r.patchNodeAnnotations(ctx, node, nil, []string{valkeyiov1alpha1.AnnotationPauseReconciliation})
 		}
-		if err := r.Patch(ctx, node, patch); client.IgnoreNotFound(err) != nil {
+		if err != nil {
 			return err
 		}
 	}
@@ -91,7 +78,7 @@ func (r *ValkeyClusterReconciler) reconcilePaused(ctx context.Context, cluster *
 	logf.FromContext(ctx).Info("Paused reconciliation of ValkeyCluster", "annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReconciliationPaused", "PauseReconciliation",
 		"Reconciliation paused by the %s annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)
-	setCondition(cluster, valkeyiov1alpha1.ConditionReconciliationPaused, valkeyiov1alpha1.ReasonReconciliationPaused,
+	setCondition(cluster, valkeyiov1alpha1.ConditionReconciliationPaused, valkeyiov1alpha1.ReasonPauseAnnotationSet,
 		"The "+valkeyiov1alpha1.AnnotationPauseReconciliation+" annotation is set to \"true\"; the operator changes nothing until it is removed",
 		metav1.ConditionTrue)
 	return r.updateStatus(ctx, cluster, nil)

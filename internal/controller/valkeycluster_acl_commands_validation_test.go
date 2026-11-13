@@ -50,8 +50,8 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 				Users: []valkeyiov1alpha1.UserAclSpec{{ //nolint:staticcheck // legacy spec.users
 					Name:       "alice",
 					Enabled:    true,
@@ -149,8 +149,8 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 				Users: []valkeyiov1alpha1.UserAclSpec{{ //nolint:staticcheck // legacy spec.users
 					Name:       "alice",
 					Enabled:    true,

@@ -63,6 +63,8 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --default-valkey-image=valkey/valkey:9.0.0
+          - --default-exporter-image=oliver006/redis_exporter:v1.88.0
         image: controller:latest
         name: manager
         ports:

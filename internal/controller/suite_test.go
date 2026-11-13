@@ -49,6 +49,12 @@ var (
 	k8sClient client.Client
 )
 
+func TestMain(m *testing.M) {
+	DefaultImage = "valkey/valkey:9.0.0"
+	DefaultExporterImage = "oliver006/redis_exporter:v1.88.0"
+	os.Exit(m.Run())
+}
+
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
 

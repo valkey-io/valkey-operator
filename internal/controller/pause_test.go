@@ -52,7 +52,7 @@ var _ = Describe("Pause reconciliation", func() {
 		key := types.NamespacedName{Name: "paused-cluster", Namespace: "default"}
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
-			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 		nodeKey := types.NamespacedName{Name: "paused-cluster-0-0", Namespace: "default"}

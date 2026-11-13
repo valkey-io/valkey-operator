@@ -34,11 +34,11 @@ const (
 )
 
 // ValkeyNodeSpec defines the desired state of ValkeyNode.
-// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded"
-// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable"
+// +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName) && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName) && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName == oldSelf.persistence.storageClassName))",message="persistence.storageClassName is immutable",fieldPath=".persistence.storageClassName",reason="FieldValueForbidden"
 type ValkeyNodeSpec struct {
 	// Image is the Valkey container image to use.
 	// +optional
@@ -52,7 +52,7 @@ type ValkeyNodeSpec struct {
 	// WorkloadType specifies whether to create a StatefulSet or Deployment.
 	// This field is immutable after creation.
 	// +kubebuilder:default=StatefulSet
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="workloadType is immutable",reason="FieldValueForbidden"
 	// +optional
 	WorkloadType WorkloadType `json:"workloadType,omitempty"`
 
@@ -106,7 +106,7 @@ type ValkeyNodeSpec struct {
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
 	// TLS configuration for the node
@@ -209,7 +209,7 @@ type NodeTLSSpec struct {
 // a ValkeyNode. Client trust roots are not listed here: the ValkeyCluster
 // controller merges spec.networking.tls.clientAuth.ca into a Secret and
 // references it from certificates.trustBundle.
-// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'Disabled' && has(self.certificateUser) && self.certificateUser != 'Disabled')",message="certificateUser has no effect when mode=Disabled: Valkey ignores client certificates in that mode",fieldPath=".certificateUser",reason="FieldValueForbidden"
 type NodeTLSClientAuthSpec struct {
 	// Mode controls whether clients must authenticate with a TLS certificate.
 	// Maps to `tls-auth-clients`. Defaults to `Optional`.
@@ -352,12 +352,13 @@ const (
 	// controller blocks one-at-a-time progress until this condition is True.
 	ValkeyNodeConditionLiveConfigApplied = "LiveConfigApplied"
 	// ValkeyNodeConditionACLApplied indicates that the ACL the cluster controller
-	// wrote to the mounted Secret is live on the server. It is applied via ACL
-	// LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
+	// wrote to the mounted Secret, for spec.acl.users (or the deprecated
+	// spec.users) and the system users, is live on the server. It is applied via
+	// ACL LOAD without a pod roll, so ACL never enters Spec.WorkloadRevision. True
 	// means the desired user set, their password hashes, and the current ACL
-	// revision are live, confirmed by a bookkeeping revision user whose password
-	// is a hash of the managed ACL (see aclRevisionUser); permission-only
-	// edits are therefore honoured too.
+	// revision are live, confirmed by a bookkeeping revision user whose password is
+	// a hash of the managed ACL (see aclRevisionUser); permission-only edits are
+	// therefore honoured too.
 	ValkeyNodeConditionACLApplied = "ACLApplied"
 	// ValkeyNodeConditionTrustBundleApplied indicates that the server has
 	// reloaded the mounted trust bundle (Spec.TLS.Certificates.TrustBundle) as
@@ -374,12 +375,36 @@ const (
 	ValkeyNodeReasonApplied            = "Applied"
 	ValkeyNodeReasonPendingPropagation = "PendingPropagation"
 	ValkeyNodeReasonApplyFailed        = "ApplyFailed"
+	// ValkeyNodeReasonAuthenticationFailed is the ACLApplied and
+	// LiveConfigApplied reason when the node rejects the operator's _operator
+	// password (WRONGPASS), so the operator can neither apply nor check either.
+	// It clears on the next node reconcile after the node accepts the password
+	// again; the operator does not change the password itself.
+	ValkeyNodeReasonAuthenticationFailed = "AuthenticationFailed"
 	// ValkeyNodeConditionWorkloadRollPending indicates a rolling pod-template update
 	// is intentionally deferred: the desired template differs from live, and
 	// Spec.WorkloadRevision has not yet authorized that template. Status True means
 	// waiting for the ValkeyCluster controller to advance Spec.WorkloadRevision
 	// (one node at a time today). Expected staging, not an error.
 	ValkeyNodeConditionWorkloadRollPending = "WorkloadRollPending"
+	// ValkeyNodeConditionDefaultUserSessionsOpen indicates that connections may
+	// be logged in as the default user. It is True while default is enabled, and
+	// stays True after an ACL LOAD turns default off until the operator has closed
+	// those connections with CLIENT KILL USER default: ACL LOAD copies the new
+	// rules into the existing user, so a connection authenticated while default
+	// was on keeps its access. False means they have been closed. The condition
+	// is absent on a node that has never been seen with default enabled. It is
+	// not part of Ready.
+	ValkeyNodeConditionDefaultUserSessionsOpen = "DefaultUserSessionsOpen"
+	// ValkeyNodeReasonDefaultUserEnabled is the DefaultUserSessionsOpen=True
+	// reason while default is enabled.
+	ValkeyNodeReasonDefaultUserEnabled = "DefaultUserEnabled"
+	// ValkeyNodeReasonCloseFailed is the DefaultUserSessionsOpen=True reason when
+	// default is off but closing its connections failed. It is retried.
+	ValkeyNodeReasonCloseFailed = "CloseFailed"
+	// ValkeyNodeReasonSessionsClosed is the DefaultUserSessionsOpen=False reason
+	// once the connections logged in as default have been closed.
+	ValkeyNodeReasonSessionsClosed = "SessionsClosed"
 )
 
 const (

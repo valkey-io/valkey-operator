@@ -178,15 +178,16 @@ func TestApplyLiveACLReturnsTheConfirmedRevision(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
 	acl := "user alice on #aaa ~* +@all\nuser " + aclRevisionUser + " off resetchannels -@all #rev1\n"
-	k := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "acl", Namespace: "ns"},
-		Data:       map[string][]byte{aclFilename: []byte(acl)},
-	}).Build()
 	node := &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "n", Namespace: "ns"},
 		Spec:       valkeyv1.ValkeyNodeSpec{UsersACLSecretName: "acl"},
 	}
+	k := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "acl", Namespace: "ns"},
+		Data:       map[string][]byte{aclFilename: []byte(acl)},
+	}, node.DeepCopy()).Build()
 	live := map[string][]string{"alice": {"aaa"}, aclRevisionUser: {"rev1"}}
 	reconciler := func(c *fakeConfigClient) *ValkeyNodeReconciler {
 		return &ValkeyNodeReconciler{

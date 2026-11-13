@@ -59,7 +59,7 @@ var (
 	systemUsers     = []string{operatorUser, exporterUser, replicationUser}
 	systemUsersAcls = map[string]string{
 		operatorUser: strings.Join([]string{
-			"+@connection",               // client handshake (CLIENT TRACKING, SETINFO, AUTH, PING)
+			"+@connection",               // client handshake (CLIENT TRACKING, SETINFO, AUTH, PING), and CLIENT KILL USER default when default is disabled
 			"+cluster|myid",              // get node ID
 			"+cluster|myshardid",         // get shard ID
 			"+cluster|info",              // cluster state

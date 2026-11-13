@@ -44,11 +44,16 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DefaultImage and DefaultExporterImage are used where a spec leaves the image
+// empty. The manager sets them from its required image flags.
+var (
+	DefaultImage         string
+	DefaultExporterImage string
+)
+
 const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
-	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.
@@ -154,6 +159,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	initClusterMetrics(req.Name, req.Namespace)
+
+	// A paused cluster gets its ValkeyNodes marked and its condition set, and
+	// nothing else: no owned object is written and no command is sent.
+	if reconciliationPaused(cluster) {
+		if err := r.reconcilePaused(ctx, cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pausedRequeue}, nil
+	}
+	if resumed, err := r.resumeIfPaused(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	} else if resumed {
+		// Node status stayed frozen while paused. Give node controllers a turn
+		// to refresh pod IPs and readiness before the cluster scrapes them.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)

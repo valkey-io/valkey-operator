@@ -175,6 +175,17 @@ Common reasons:
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
 - `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
+#### `ReconciliationPaused`
+Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annotation. The operator changes nothing in the cluster until the annotation is removed, so the other conditions keep the values they had when the pause began. See [Pausing reconciliation](valkeycluster.md#pausing-reconciliation).
+
+| Status | Meaning |
+|---|---|
+| `True` | Reconciliation is paused. |
+| (absent) | Reconciliation runs. The condition is removed on resume, with a `ReconciliationResumed` event. |
+
+Common reasons:
+- `PauseAnnotationSet` – the pause annotation is set to `"true"`.
+
 #### `ExporterPasswordHeld`
 Non-blocking. Set during [system password rotation](valkeycluster.md#system-password-rotation) while the metrics exporter's previous password is still accepted. `Ready` is not affected, and the other system passwords keep rotating.
 
@@ -299,6 +310,26 @@ Common reasons when `TrustBundleApplied=True`:
 - `Applied` – the mounted trust bundle is loaded.
 
 > **Note:** On a failed reload the node controller emits a `TrustBundleReloadFailed` warning event and retries every 10 seconds, not with exponential backoff, so a fixed bundle is picked up within one retry of the mounted file refreshing.
+
+#### `DefaultUserSessionsOpen`
+Indicates whether connections may be logged in as Valkey's `default` user. When an `ACL LOAD` turns `default` off, Valkey copies the new rules into the existing user, and a connection that authenticated while `default` was on stays logged in with the disabled `default`'s permissions. The node controller closes those connections with `CLIENT KILL USER default` and uses this condition to remember that a close is owed until it succeeds.
+
+The condition depends only on what the server reports, not on the aclfile Secret, the mounted file or `status.appliedACLRevision`. It is absent on a node that has never been seen with `default` on. It is not part of `Ready`, but a failed close also fails the node's ACL apply: `ACLApplied` goes `False` with reason `ApplyFailed`, and the cluster reports `Degraded` until the retry succeeds.
+
+| Status | Meaning |
+|---|---|
+| `True` | `default` is on, or it was turned off and its connections have not been closed yet. |
+| `False` | `default` was turned off and the connections logged in as it were closed. |
+| absent | The node has never been seen with `default` on. |
+
+Common reasons when `DefaultUserSessionsOpen=True`:
+- `DefaultUserEnabled` – `default` is on, for example because the cluster declares an open `default` in `acl.users`. Nothing is closed while it stays on.
+- `CloseFailed` – `default` is off, but `CLIENT KILL USER default` failed. The message field contains the error. The node controller emits a `DefaultUserSessionsCloseFailed` warning event and retries on the next reconcile.
+
+Common reasons when `DefaultUserSessionsOpen=False`:
+- `SessionsClosed` – the connections were closed when `default` was turned off.
+
+> **Note:** Valkey reports clients that have connected but not yet sent `AUTH` as `default` too, so the kill also drops those, and they reconnect. It runs once for each time `default` goes from on to off, before the operator checks that the mounted aclfile has caught up with the Secret, so a lagging mount does not delay it. It runs once more if the node's server restarts while a close is pending, or if recording a successful close fails. ACL changes made while `default` is already off do not run it.
 
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.

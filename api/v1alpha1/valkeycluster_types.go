@@ -267,6 +267,35 @@ type ZonePinning struct {
 	Zones []string `json:"zones"`
 }
 
+// ReservedConfigKeys are the directives the operator sets itself.
+// A user value for one of these in spec.config is refused rather than silently dropped.
+//
+// The list also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
+var ReservedConfigKeys = []string{
+	"aclfile",
+	"cluster-allow-replica-migration",
+	"cluster-announce-hostname",
+	"cluster-announce-ip",
+	"cluster-config-file",
+	"cluster-enabled",
+	"cluster-preferred-endpoint-type",
+	"cluster-replica-validity-factor",
+	"dir",
+	"port",
+	"primaryauth",
+	"primaryuser",
+	"protected-mode",
+	"shutdown-on-sigterm",
+	"tls-auth-clients",
+	"tls-auth-clients-user",
+	"tls-ca-cert-file",
+	"tls-cert-file",
+	"tls-cluster",
+	"tls-key-file",
+	"tls-port",
+	"tls-replication",
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
@@ -380,7 +409,20 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
-	// Additional Valkey configuration parameters
+	// The operator sets the reserved keys itself.
+	// A user value would be overridden, and the user would get no signal.
+	// Keys are compared in lowercase, because Valkey ignores key case.
+	// Valkey trims and unquotes keys, so the format rule stops " port" from bypassing the reserved list.
+	// MaxProperties is high on purpose.
+	// The API server costs the rules below against the largest map the schema allows, so they need a bound.
+	// Raising a bound later is compatible. Lowering it is not.
+
+	// Config holds additional Valkey configuration parameters.
+	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -844,6 +886,9 @@ const (
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
 	ConditionTLSConfigured = "TLSConfigured"
+	// ConditionReconciliationPaused is True while the cluster carries the
+	// AnnotationPauseReconciliation annotation and the operator leaves it alone.
+	ConditionReconciliationPaused = "ReconciliationPaused"
 )
 
 const (
@@ -872,6 +917,15 @@ const (
 	// keeps its current contents and the rest of the reconcile carries on.
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
+
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
+// of a standalone ValkeyNode, while its value is exactly "true". The operator
+// copies it onto the ValkeyNodes of a paused cluster and removes it from them
+// when the cluster resumes.
+const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
+
+// ReasonPauseAnnotationSet is the reason of ConditionReconciliationPaused.
+const ReasonPauseAnnotationSet = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions
@@ -943,10 +997,17 @@ const (
 // indexes grow enough for the ValkeyNode name <name>-<shard>-<node>, which
 // every pod carries as its app.kubernetes.io/instance label value, to reach 63
 // first.
+//
+// Kubernetes admits a dot in a custom resource name, but the headless Service
+// valkey-<name> is a DNS label and cannot hold one. The dot rule rejects it at
+// creation instead of leaving the cluster at ServiceError. It skips updates,
+// because the name cannot change, so a cluster that already has a dotted name
+// can still be updated and deleted.
 
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
+// +kubebuilder:printcolumn:name="Paused",type="string",JSONPath=".status.conditions[?(@.type==\"ReconciliationPaused\")].status",description="True while reconciliation is paused"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"
@@ -954,6 +1015,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 61",message="metadata.name is too long: the ValkeyNode name <name>-<shard>-<node> is the app.kubernetes.io/instance label value of its pod and must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.perNodeServices) || size(self.metadata.name) + 9 + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 63",message="metadata.name is too long: the per-node Service name valkey-<name>-<shard>-<node> must stay within 63 characters"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || self.spec.networking.tls.clientAuth.ca.all(s, !has(s.secretName) || s.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name]))",message="clientAuth.ca cannot name valkey-<name>-tls-trust: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.clientAuth.ca",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !self.metadata.name.contains('.')",optionalOldSelf=true,message="metadata.name must not contain '.', because the headless Service name valkey-<name> is derived from it"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.networking) || !has(self.spec.networking.tls) || !has(self.spec.networking.tls.clientAuth) || !has(self.spec.networking.tls.clientAuth.ca) || size(self.spec.networking.tls.clientAuth.ca) == 0 || self.spec.networking.tls.certificates.server.secretName != 'valkey-%s-tls-trust'.format([self.metadata.name])",message="certificates.server.secretName cannot be valkey-<name>-tls-trust while clientAuth.ca is set: it is the operator-managed trust bundle",fieldPath=".spec.networking.tls.certificates.server.secretName",reason="FieldValueForbidden"
 type ValkeyCluster struct {
 	metav1.TypeMeta `json:",inline"`

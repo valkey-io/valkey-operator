@@ -26,7 +26,9 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,6 +95,32 @@ var (
 		}, " "),
 	}
 )
+
+// versionGatedAclRules maps rules in systemUsersAcls to the first Valkey
+// release that knows the command. An older server refuses to load an ACL file
+// that names an unknown command, so it would not start.
+var versionGatedAclRules = map[string]*semver.Version{
+	"+cluster|getslotmigrations": semver.MustParse("9.0.0-rc1"),
+	"+cluster|migrateslots":      semver.MustParse("9.0.0-rc1"),
+	"+cluster|syncslots":         semver.MustParse("9.0.0-rc1"),
+	"+commandlog|len":            semver.MustParse("8.1.0-rc1"),
+}
+
+// systemUserAcl returns the ACL rules of a system user for image, without the
+// rules its Valkey version does not know. A rule is kept when the version
+// cannot be read from the image tag.
+func systemUserAcl(user, image string) string {
+	version, ok := valkey.VersionFromImage(effectiveImage(image))
+	if !ok {
+		return systemUsersAcls[user]
+	}
+	rules := strings.Fields(systemUsersAcls[user])
+	rules = slices.DeleteFunc(rules, func(rule string) bool {
+		minVersion, gated := versionGatedAclRules[rule]
+		return gated && version.LessThan(minVersion)
+	})
+	return strings.Join(rules, " ")
+}
 
 var (
 	errUnknownSystemUser = errors.New("unknown system user")
@@ -168,7 +196,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 		userAcl := valkeyiov1alpha1.ACLUserSpec{
 			Name: user,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-				RawAcl: systemUsersAcls[user],
+				RawAcl: systemUserAcl(user, cluster.Spec.Image),
 			},
 		}
 		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, []string{passwordHash}))

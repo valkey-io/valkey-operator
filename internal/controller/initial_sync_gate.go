@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -264,6 +265,26 @@ func serverContainerStatus(pod *corev1.Pod) *corev1.ContainerStatus {
 // and a pod whose gate should clear stays Ready.
 func initialSyncGateFailedMessage(err error) string {
 	return fmt.Sprintf("Failed to update the %s readiness gate, so a pod waiting for it stays not Ready and a pod whose gate should clear stays Ready: %v", initialSyncGate, err)
+}
+
+// initialSyncGateHoldsWalk reports whether a failed gate write holds the node
+// walk: the API server refused it (403), as without patch on pods/status, or
+// the pod changed under it (409). Each error joined by syncInitialSyncGates
+// is checked, since apierrors stops at the first API error in a chain.
+func initialSyncGateHoldsWalk(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return slices.ContainsFunc(joined.Unwrap(), initialSyncGateHoldsWalk)
+	}
+	return apierrors.IsForbidden(err) || apierrors.IsConflict(err)
+}
+
+// reportInitialSyncGateHold sets Ready and Progressing while a failed gate
+// write holds the node walk.
+func reportInitialSyncGateHold(cluster *valkeyiov1alpha1.ValkeyCluster, err error) {
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonInitialSyncGateFailed,
+		initialSyncGateFailedMessage(err), metav1.ConditionFalse)
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonInitialSyncGateFailed,
+		"Holding the node walk until the initial sync gate can be written", metav1.ConditionTrue)
 }
 
 // setInitialSyncGate writes initialSyncGate on the pod with a strategic merge

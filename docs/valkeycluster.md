@@ -224,7 +224,7 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 
 A PDB counts a pod as available only when the pod is Ready. Each cluster pod has the readiness gate `valkey.io/initial-sync-complete`, which the operator sets once the pod holds its shard's data: it owns slots, or it is a replica that finished its full sync from its primary. The primary of a shard that is not in the cluster yet is marked straight away, since it has nothing to copy. Until then the pod is not Ready, so a node drain cannot evict a primary while its replacement replica is still copying the data. A dropped replication link does not clear the gate; a new full sync, a dataset load, or a restart of the server container does, and the pod has to show its data again. The operator's own roll waits for the containers to be ready, not for the gate.
 
-If the operator is down, new pods stay not Ready and drains wait until it is back; running pods keep their gate. The operator needs `get` and `patch` on `pods/status` to set it. When a write fails, it reports an `InitialSyncGateFailed` event and, if the cluster is otherwise healthy, `Degraded` with the same reason.
+If the operator is down, new pods stay not Ready and drains wait until it is back; running pods keep their gate. The operator needs `get` and `patch` on `pods/status` to set it. When a write fails, it reports an `InitialSyncGateFailed` event. A refused (403) or conflicting (409) write also holds the roll for that pass, reported on `Ready`, so without the permission only the pods replaced before the first refused write stay not Ready. Any other failure is reported on `Degraded` once the cluster is otherwise healthy.
 
 ### Pod metadata
 

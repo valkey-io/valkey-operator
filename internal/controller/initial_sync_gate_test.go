@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -309,6 +310,77 @@ func TestSyncInitialSyncGatesRetriesAFailedWrite(t *testing.T) {
 	gated, err := r.syncInitialSyncGates(context.Background(), nodes, state, r.readyServerContainers(context.Background(), nodes))
 	require.Error(t, err)
 	assert.True(t, gated, "a write that failed is retried on the gate recheck")
+}
+
+func TestSyncInitialSyncGatesWithoutAScrape(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	isTrue := corev1.ConditionTrue
+
+	restarted := gatePod("restarted", "10.0.0.2", &isTrue)
+	restarted.Status.ContainerStatuses[0].ContainerID = "containerd://restarted-2"
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).
+		WithObjects(gatePod("kept", "10.0.0.1", &isTrue), restarted, gatePod("new", "10.0.0.3", nil)).Build()
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme}
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{
+		gateMember("0", "0", "10.0.0.1", "kept"),
+		gateMember("0", "1", "10.0.0.2", "restarted"),
+		gateMember("1", "0", "10.0.0.3", "new"),
+	}}
+	gate := func(name string) *corev1.PodCondition {
+		t.Helper()
+		pod := &corev1.Pod{}
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: name}, pod))
+		return podCondition(pod, initialSyncGate)
+	}
+
+	gated, err := r.syncInitialSyncGates(context.Background(), nodes, nil, nil)
+	require.NoError(t, err)
+	assert.True(t, gated)
+	assert.Equal(t, corev1.ConditionTrue, gate("kept").Status, "a gate whose server container is unchanged stays")
+	require.NotNil(t, gate("restarted"))
+	assert.Equal(t, corev1.ConditionFalse, gate("restarted").Status)
+	assert.Equal(t, "ServerRestarted", gate("restarted").Reason)
+	assert.Nil(t, gate("new"), "no gate is earned without a scrape, not even a new shard's primary")
+}
+
+func TestInitialSyncGateHoldsWalk(t *testing.T) {
+	forbidden := apierrors.NewForbidden(corev1.Resource("pods/status"), "p0", errors.New("cannot patch"))
+	conflict := apierrors.NewConflict(corev1.Resource("pods"), "p0", errors.New("modified"))
+	notFound := apierrors.NewNotFound(corev1.Resource("pods"), "p0")
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no error", nil, false},
+		{"forbidden", forbidden, true},
+		{"conflict", conflict, true},
+		{"not found", notFound, false},
+		{"another error", errors.New("timeout"), false},
+		{"forbidden after another pod's API error", errors.Join(notFound, forbidden), true},
+		{"conflict after another error", errors.Join(errors.New("timeout"), conflict), true},
+		{"wrapped forbidden", fmt.Errorf("patch: %w", forbidden), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, initialSyncGateHoldsWalk(tt.err))
+		})
+	}
+}
+
+func TestReportInitialSyncGateHold(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	reportInitialSyncGateHold(cluster, apierrors.NewForbidden(corev1.Resource("pods/status"), "p0", errors.New("cannot patch")))
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, ready.Reason)
+	assert.Contains(t, ready.Message, "forbidden")
+	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	require.NotNil(t, progressing)
+	assert.Equal(t, metav1.ConditionTrue, progressing.Status)
+	assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, progressing.Reason)
 }
 
 func TestSetHealthyDegraded(t *testing.T) {

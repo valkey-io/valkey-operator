@@ -262,6 +262,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// the steps below would act on a partial view and blame the topology.
 	if rejecting := nodesRejectingOperator(nodes); len(rejecting) > 0 {
 		r.reportOperatorLockout(cluster, rejecting)
+		// The scrape is partial here, so no gate can be earned. A nil state
+		// still clears the gate of a pod whose server container restarted,
+		// which reads only the pod's own status.
+		if _, err := r.syncInitialSyncGates(ctx, nodes, nil, nil); err != nil {
+			log.Error(err, "failed to update the initial sync readiness gate")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
+				"%s", initialSyncGateFailedMessage(err))
+		}
 		// The partial scrape would zero the shard counts; keep the last ones.
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
@@ -285,7 +293,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// which shard is waiting and why. It comes up as a typed error so the
 	// walk can stop at that node the way it stops at one mid-roll.
 	var deferred *rollDeferredError
-	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	var requeue bool
+	if initialSyncGateHoldsWalk(gateErr) {
+		// A pod the walk replaced now might never become Ready, so the walk
+		// stops at the pods already replaced. The steps below still run, as
+		// for a skipped roll.
+		rollSkipped = true
+		reportInitialSyncGateHold(cluster, gateErr)
+	} else {
+		requeue, err = r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	}
 	if errors.As(err, &deferred) {
 		err = nil
 	}
@@ -526,8 +543,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// A shard's roll was skipped. Conditions were set at detection; persist them
-	// and requeue so the next pass re-evaluates.
+	// A shard's roll was skipped, or a failed gate write held the walk.
+	// Conditions were set at detection; persist them and requeue so the next
+	// pass re-evaluates.
 	if rollSkipped {
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil

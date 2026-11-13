@@ -27,6 +27,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
@@ -121,6 +123,24 @@ spec:
 			g.Expect(cli(g, "ACL", "GETUSER", "app")).To(BeEmpty())
 		}, 35*time.Second, 5*time.Second).Should(Succeed())
 
+		By("replacing the replica while its ValkeyNode status stays frozen")
+		const replicaName = "valkey-" + name + "-0-1-0"
+		var oldPod corev1.Pod
+		Expect(json.Unmarshal([]byte(kubectl(Default, "get", "pod", replicaName, "-o", "json")), &oldPod)).To(Succeed())
+		kubectl(Default, "delete", "pod", replicaName)
+		var replacementIP string
+		Eventually(func(g Gomega) {
+			var pod corev1.Pod
+			g.Expect(json.Unmarshal([]byte(kubectl(g, "get", "pod", replicaName, "-o", "json")), &pod)).To(Succeed())
+			g.Expect(pod.UID).NotTo(Equal(oldPod.UID))
+			g.Expect(pod.Status.PodIP).NotTo(BeEmpty())
+			g.Expect(pod.Status.PodIP).NotTo(Equal(oldPod.Status.PodIP))
+			replacementIP = pod.Status.PodIP
+		}).Should(Succeed())
+		var frozen valkeyiov1alpha1.ValkeyNode
+		Expect(json.Unmarshal([]byte(kubectl(Default, "get", "valkeynode", name+"-0-1", "-o", "json")), &frozen)).To(Succeed())
+		Expect(frozen.Status.PodIP).To(Equal(oldPod.Status.PodIP))
+
 		By("resuming and applying the pending changes")
 		kubectl(Default, "annotate", "valkeycluster", name, annotation+"-")
 		Eventually(func(g Gomega) {
@@ -133,6 +153,9 @@ spec:
 			g.Expect(current).To(HaveLen(4))
 			for _, node := range current {
 				g.Expect(node.Annotations).NotTo(HaveKey(annotation))
+				if node.Name == name+"-0-1" {
+					g.Expect(node.Status.PodIP).To(Equal(replacementIP))
+				}
 			}
 			g.Expect(cli(g, "CONFIG", "GET", "maxmemory-policy")).To(ContainSubstring("allkeys-lru"))
 			g.Expect(cli(g, "ACL", "GETUSER", "app")).NotTo(BeEmpty())

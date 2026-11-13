@@ -56,8 +56,11 @@ func (r *ValkeyClusterReconciler) syncNodePause(ctx context.Context, cluster *va
 		if !metav1.IsControlledBy(node, cluster) {
 			continue
 		}
-		_, has := node.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation]
-		if paused == reconciliationPaused(node) && (paused || !has) {
+		_, hasPauseAnnotation := node.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation]
+		if paused && reconciliationPaused(node) {
+			continue
+		}
+		if !paused && !hasPauseAnnotation {
 			continue
 		}
 		patch := client.MergeFrom(node.DeepCopy())
@@ -94,15 +97,18 @@ func (r *ValkeyClusterReconciler) reconcilePaused(ctx context.Context, cluster *
 
 // resumeIfPaused undoes a pause once the annotation is gone: it removes the
 // annotation from the ValkeyNodes and clears the condition, with an event.
-func (r *ValkeyClusterReconciler) resumeIfPaused(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+func (r *ValkeyClusterReconciler) resumeIfPaused(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (bool, error) {
 	if err := r.syncNodePause(ctx, cluster, false); err != nil {
-		return err
+		return false, err
 	}
 	if meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReconciliationPaused) == nil {
-		return nil
+		return false, nil
 	}
 	logf.FromContext(ctx).Info("Resumed reconciliation of ValkeyCluster")
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReconciliationResumed", "PauseReconciliation", "Reconciliation resumed")
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReconciliationPaused)
-	return r.updateStatus(ctx, cluster, nil)
+	if err := r.updateStatus(ctx, cluster, nil); err != nil {
+		return false, err
+	}
+	return true, nil
 }

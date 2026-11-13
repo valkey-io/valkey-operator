@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -25,10 +27,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -87,11 +91,17 @@ var _ = Describe("Pause reconciliation", func() {
 		}
 
 		By("reconciling the paused cluster twice")
-		for range 2 {
+		for i := range 2 {
+			if i == 1 {
+				// A restarted operator has no metric series even though the pause
+				// condition is already present in the API server.
+				deleteClusterMetrics(key.Name, key.Namespace)
+			}
 			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(Equal(pausedRequeue))
 		}
+		Expect(clusterShards.DeleteLabelValues(key.Name, key.Namespace)).To(BeTrue(), "paused clusters retain metric series after an operator restart")
 		Expect(recorder.Events).To(HaveLen(1))
 		Expect(<-recorder.Events).To(ContainSubstring("ReconciliationPaused"))
 
@@ -118,8 +128,11 @@ var _ = Describe("Pause reconciliation", func() {
 		By("resuming with a value that is not exactly \"true\"")
 		cluster.Annotations[valkeyiov1alpha1.AnnotationPauseReconciliation] = "True"
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(time.Second))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: headlessServiceName(key.Name), Namespace: key.Namespace}, &corev1.Service{}))).To(BeTrue(), "resume yields before normal cluster work")
 
 		Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
 		Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReconciliationPaused)).To(BeNil())
@@ -148,4 +161,87 @@ var _ = Describe("Pause reconciliation", func() {
 		Expect(node.Finalizers).To(BeEmpty())
 		Expect(node.Status).To(Equal(valkeyiov1alpha1.ValkeyNodeStatus{}))
 	})
+	It("maintains persistence finalizers before pausing a node", func() {
+		key := types.NamespacedName{Name: "paused-persistent-node", Namespace: "default"}
+		node := &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Persistence: &valkeyiov1alpha1.PersistenceSpec{
+					Size: resource.MustParse("1Gi"), ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { deleteNode(key) })
+		r := &ValkeyNodeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(100)}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(time.Second))
+		Expect(k8sClient.Get(ctx, key, node)).To(Succeed())
+		Expect(node.Finalizers).To(ContainElement(persistentVolumeCleanupFinalizer))
+
+		res, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(pausedRequeue))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: "valkey-" + key.Name, Namespace: key.Namespace}, &appsv1.StatefulSet{}))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, key, node)).To(Succeed())
+		Expect(node.Status).To(Equal(valkeyiov1alpha1.ValkeyNodeStatus{}))
+	})
+
+	It("returns only an error when pause propagation fails", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "pause-error", Namespace: "default", Annotations: pauseOn},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, cluster)).To(Succeed()) })
+		withWatch, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		r := &ValkeyClusterReconciler{Client: interceptor.NewClient(withWatch, interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return fmt.Errorf("pause propagation failed")
+			},
+		})}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+		Expect(err).To(MatchError("pause propagation failed"))
+		Expect(res.RequeueAfter).To(BeZero())
+	})
+
+	It("keeps reconciling a sibling cluster in the same namespace", func() {
+		r := &ValkeyClusterReconciler{
+			Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(100),
+		}
+		for _, paused := range []bool{true, false} {
+			name := "pause-sibling"
+			annotations := map[string]string{}
+			if paused {
+				name = "pause-neighbor"
+				annotations = pauseOn
+			}
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+					Shards: 1,
+					ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "app"}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, cluster)).To(Succeed()) })
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+			service := &corev1.Service{}
+			key := types.NamespacedName{Name: headlessServiceName(name), Namespace: "default"}
+			if paused {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, service))).To(BeTrue())
+			} else {
+				// The sibling reaches ACL resolution after creating its Service;
+				// a missing app password stops it before any Valkey connection.
+				Expect(err).To(HaveOccurred())
+				Expect(k8sClient.Get(ctx, key, service)).To(Succeed())
+			}
+		}
+	})
+
 })

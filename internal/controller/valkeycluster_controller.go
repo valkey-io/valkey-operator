@@ -286,6 +286,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Error(gateErr, "failed to update the initial sync readiness gate")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
 			"%s", initialSyncGateFailedMessage(gateErr))
+	} else {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonInitialSyncGateFailed)
 	}
 
 	rollSkipped := false

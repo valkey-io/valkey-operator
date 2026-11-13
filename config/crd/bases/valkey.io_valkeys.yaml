@@ -2101,6 +2101,74 @@ spec:
                         type: object
                     type: object
                 type: object
+              failover:
+                description: |-
+                  Failover declares how primary failover is performed for this instance.
+                  Nothing reads it yet. Sentinel selection and registration use it later.
+                properties:
+                  mode:
+                    default: None
+                    description: |-
+                      Mode selects the failover engine.
+                        None     - nobody promotes automatically.
+                        Sentinel - a ValkeySentinel quorum is the failover authority.
+                      The value Operator is reserved and is not accepted yet.
+                    enum:
+                    - None
+                    - Sentinel
+                    type: string
+                  sentinel:
+                    description: |-
+                      Sentinel configures Sentinel-mode failover.
+                      Only valid when mode is Sentinel.
+                      This block does not by itself cause monitoring:
+                      a ValkeySentinel must also select this object.
+                    properties:
+                      config:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Config is per-master Sentinel tuning, forwarded as
+                          SENTINEL SET <monitorName> <key> <value>.
+                          The operator does not validate the values.
+                        type: object
+                      monitorName:
+                        description: |-
+                          MonitorName is the Sentinel master-name for this instance.
+                          It defaults to metadata.name, which Valkey.MonitorName resolves.
+                          There is no kubebuilder default, because a materialized default
+                          cannot be told apart from a user-set value by the transition rules above.
+                          It stays settable so an adopted deployment keeps the master-name
+                          its clients already use.
+                        minLength: 1
+                        type: string
+                      quorum:
+                        description: |-
+                          Quorum is the number of Sentinels that must agree the primary is down.
+                          It is passed to SENTINEL MONITOR.
+                          When unset it defaults to (the selecting ValkeySentinel's replicas / 2) + 1.
+                          The default is computed at registration time. Set it explicitly to pin it.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - fieldPath: .monitorName
+                      message: monitorName cannot be added or removed after the sentinel
+                        block is created
+                      reason: FieldValueForbidden
+                      rule: has(self.monitorName) == has(oldSelf.monitorName)
+                    - fieldPath: .monitorName
+                      message: monitorName is immutable
+                      reason: FieldValueForbidden
+                      rule: '!has(self.monitorName) || !has(oldSelf.monitorName) ||
+                        self.monitorName == oldSelf.monitorName'
+                type: object
+                x-kubernetes-validations:
+                - fieldPath: .sentinel
+                  message: 'failover.sentinel requires failover.mode: Sentinel'
+                  reason: FieldValueForbidden
+                  rule: '!has(self.sentinel) || (has(self.mode) && self.mode == ''Sentinel'')'
               image:
                 description: Image overrides the default Valkey image.
                 type: string
@@ -3862,6 +3930,37 @@ spec:
                 description: Message provides human-readable details about the current
                   state.
                 type: string
+              monitoring:
+                description: |-
+                  Monitoring reports which ValkeySentinel monitors this instance.
+                  It stays unset until the registration work fills it in.
+                properties:
+                  availableQuorum:
+                    description: AvailableQuorum is the number of Sentinels currently
+                      reachable for this monitor.
+                    format: int32
+                    type: integer
+                  monitorName:
+                    description: MonitorName is the master-name this instance is registered
+                      under.
+                    type: string
+                  monitoredBy:
+                    description: |-
+                      MonitoredBy lists the ValkeySentinels currently selecting this instance.
+                      At most one is permitted. A second selector is rejected and reported as Degraded.
+                    items:
+                      type: string
+                    type: array
+                  quorum:
+                    description: Quorum is the quorum the monitor was registered with.
+                    format: int32
+                    type: integer
+                  registered:
+                    description: |-
+                      Registered is true when every ready pod of the selecting
+                      ValkeySentinel reports this monitor.
+                    type: boolean
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the most recent spec generation
                   observed by the controller.
@@ -3887,6 +3986,32 @@ spec:
                   the primary.
                 format: int32
                 type: integer
+              sentinelCredentialsSecret:
+                description: |-
+                  SentinelCredentialsSecret locates the _sentinel user's password.
+                  It is the only credential a selecting ValkeySentinel reads.
+                  It stays unset until the credential work fills it in.
+                properties:
+                  key:
+                    description: The key of the secret to select from.  Must be a
+                      valid secret key.
+                    type: string
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                  optional:
+                    description: Specify whether the Secret or its key must be defined
+                    type: boolean
+                required:
+                - key
+                type: object
+                x-kubernetes-map-type: atomic
               state:
                 default: Initializing
                 description: State provides a high-level summary of the instance's

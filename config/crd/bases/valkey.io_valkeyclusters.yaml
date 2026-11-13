@@ -192,8 +192,22 @@ spec:
               config:
                 additionalProperties:
                   type: string
-                description: Additional Valkey configuration parameters
+                description: |-
+                  Config holds additional Valkey configuration parameters.
+                  Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
+                  Keys may contain only letters, digits, '.', '_' and '-'.
+                maxProperties: 1000
                 type: object
+                x-kubernetes-validations:
+                - message: 'spec.config must not set operator-owned keys: the operator
+                    sets these itself and a user value would be ignored or would break
+                    its connection to the nodes. See docs/valkeycluster.md for the
+                    full list'
+                  rule: self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))
+                - message: spec.config keys may contain only letters, digits, '.',
+                    '_' and '-'. Valkey unquotes and trims keys, so quoted or padded
+                    keys are rejected
+                  rule: self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))
               containers:
                 description: Additional containers or overrides for existing containers,
                   applied using strategic merge patch

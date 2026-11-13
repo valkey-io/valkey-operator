@@ -266,6 +266,35 @@ type ZonePinning struct {
 	Zones []string `json:"zones"`
 }
 
+// ReservedConfigKeys are the directives the operator sets itself.
+// A user value for one of these in spec.config is refused rather than silently dropped.
+//
+// The list also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
+var ReservedConfigKeys = []string{
+	"aclfile",
+	"cluster-allow-replica-migration",
+	"cluster-announce-hostname",
+	"cluster-announce-ip",
+	"cluster-config-file",
+	"cluster-enabled",
+	"cluster-preferred-endpoint-type",
+	"cluster-replica-validity-factor",
+	"dir",
+	"port",
+	"primaryauth",
+	"primaryuser",
+	"protected-mode",
+	"shutdown-on-sigterm",
+	"tls-auth-clients",
+	"tls-auth-clients-user",
+	"tls-ca-cert-file",
+	"tls-cert-file",
+	"tls-cluster",
+	"tls-key-file",
+	"tls-port",
+	"tls-replication",
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
@@ -379,7 +408,20 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
-	// Additional Valkey configuration parameters
+	// The operator sets the reserved keys itself.
+	// A user value would be overridden, and the user would get no signal.
+	// Keys are compared in lowercase, because Valkey ignores key case.
+	// Valkey trims and unquotes keys, so the format rule stops " port" from bypassing the reserved list.
+	// MaxProperties is high on purpose.
+	// The API server costs the rules below against the largest map the schema allows, so they need a bound.
+	// Raising a bound later is compatible. Lowering it is not.
+
+	// Config holds additional Valkey configuration parameters.
+	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

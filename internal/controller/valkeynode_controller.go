@@ -230,6 +230,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else if requeue {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	// Paused through its own annotation, which the cluster controller sets on
+	// the nodes of a paused cluster: no workload update, no CONFIG SET, no ACL
+	// LOAD and no status write until it is removed.
+	if reconciliationPaused(node) {
+		log.V(1).Info("ValkeyNode reconciliation paused", "annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)
+		return ctrl.Result{RequeueAfter: pausedRequeue}, nil
+	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
 		return ctrl.Result{}, err

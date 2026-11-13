@@ -175,6 +175,17 @@ Common reasons:
 - `TrustBundlePending` – while anything mounts the bundle, new `clientAuth.ca` roots are held back until every node confirms it runs the current ACL (`status.appliedACLRevision`); only those roots wait. A bundle nothing mounts is written whole and reports `TrustBundleReady`. Removed roots are dropped and the server secret's current root is added at once.
 - `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
+#### `ReconciliationPaused`
+Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annotation. The operator changes nothing in the cluster until the annotation is removed, so the other conditions keep the values they had when the pause began. See [Pausing reconciliation](valkeycluster.md#pausing-reconciliation).
+
+| Status | Meaning |
+|---|---|
+| `True` | Reconciliation is paused. |
+| (absent) | Reconciliation runs. The condition is removed on resume, with a `ReconciliationResumed` event. |
+
+Common reasons:
+- `PauseAnnotationSet` – the pause annotation is set to `"true"`.
+
 ---
 
 ### ValkeyNode conditions

@@ -555,6 +555,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
+		// A conflict means the cluster changed after this reconcile read it,
+		// which updateStatus already logged. Retry from a fresh read without
+		// reporting it as a failure.
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		log.Error(err, statusUpdateFailedMsg)
 		return ctrl.Result{}, err
 	}
@@ -1700,9 +1706,17 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		return err
 	}
 
-	// Snapshot for patch base and comparison
+	// Snapshot for patch base and comparison. The conditions written below come
+	// from cluster, the copy this reconcile read when it started, and a merge
+	// patch replaces status.conditions as a whole. So the write is locked to
+	// cluster's resourceVersion, not current's: if the object has moved since
+	// this reconcile read it (a status write the cache had not delivered yet, or
+	// a spec edit), the API server rejects the patch with a conflict instead of
+	// putting back the older conditions. That newer write enqueues the cluster
+	// again, so the next reconcile starts from it.
 	patchBase := current.DeepCopy()
-	patch := client.MergeFrom(patchBase)
+	patchBase.SetResourceVersion(cluster.ResourceVersion)
+	patch := client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})
 
 	// Update shard counts. A nil state leaves the stored counts in place.
 	if state != nil {
@@ -1737,11 +1751,12 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Message = readyCondition.Message
 	}
 
-	// Update Prometheus metrics
-	updateClusterMetrics(current)
-
 	if !reflect.DeepEqual(patchBase.Status, current.Status) {
 		if err := r.Status().Patch(ctx, current, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				log.V(1).Info("status not written; the cluster changed since this reconcile read it")
+				return err
+			}
 			log.Error(err, statusUpdateFailedMsg)
 			return err
 		}
@@ -1749,6 +1764,11 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
+
+	// Metrics follow the status the API server holds, so they are published
+	// only once that status is written (or already current), never for a write
+	// the lock rejected.
+	updateClusterMetrics(current)
 
 	// Sync back to caller so subsequent logic sees the latest state
 	cluster.Status = current.Status

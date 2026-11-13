@@ -55,7 +55,7 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
-`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, recovery is left to Valkey.
+`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence and quorum, the operator can use TAKEOVER when automatic failover is disabled and the failure is confirmed; without quorum, takeover requires the `valkey.io/force-takeover` annotation described below.
 
 #### Version-gated config
 
@@ -214,6 +214,26 @@ persistence:
 When `persistence` is set, the operator manages a PVC for each ValkeyNode. With the [save config option](https://valkey.io/topics/persistence/), memory state survives pod rolls and [partial resyncs](https://valkey.io/topics/replication/) are possible.
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
+
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`. Its message and a Warning event identify the shard, failed primary, eligible replica, and command to authorize takeover.
+
+To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:
+
+```sh
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
+```
+
+The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A reachable primary, including one loading its dataset, cannot be taken over through this annotation. The operator removes the ID after TAKEOVER succeeds; a failed command retains the authorization and retries the same replica. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary's persistent volume returns, Valkey can recover without discarding its data, and the `AwaitingManualTakeover` condition clears.
+
+The operator pins each uncertain attempt to its selected replica so it cannot promote a sibling using the same approval. If that replica becomes unavailable before the result can be confirmed, the operator waits on that primary while continuing recovery on other approved shards. To cancel the pinned attempt and choose again, remove the approval, wait until that primary's entry disappears from `valkey.io/force-takeover-attempt`, then annotate the failed primary ID again:
+
+```sh
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover-
+# Wait until <primary-node-id>/<replica-node-id> is absent from valkey.io/force-takeover-attempt.
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
+```
+
+Removing the approval cancels the attempt; no takeover happens until it is re-applied.
 
 #### Constraints
 

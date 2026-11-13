@@ -102,6 +102,7 @@ Common reasons:
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 - `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `internal-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
 - `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
+- `AwaitingManualTakeover` – a persistent primary is orphaned without failover quorum. The message names the shard, primary, eligible replica, and the `valkey.io/force-takeover` command that authorizes possible data loss.
 
 ---
 
@@ -456,6 +457,7 @@ These events are emitted when the operator intervenes to recover the cluster.
 | Event Type | Type | Description |
 |---|---|---|
 | `ReplicasTakenOver` | Normal | Orphaned replicas promoted via `CLUSTER FAILOVER TAKEOVER`, for shards Valkey's own election cannot recover |
+| `AwaitingManualTakeover` | Warning | A persistent primary is orphaned without quorum; identifies the failed primary, eligible replica, and annotation command to authorize takeover |
 
 ### Maintenance events
 

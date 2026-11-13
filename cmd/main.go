@@ -270,6 +270,7 @@ func main() {
 
 	if err := (&controller.ValkeyClusterReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Scheme:        mgr.GetScheme(),
 		Recorder:      mgr.GetEventRecorder("valkeycluster-controller"),
 		ValkeyClients: valkeyClients,

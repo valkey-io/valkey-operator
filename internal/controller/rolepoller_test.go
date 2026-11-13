@@ -441,18 +441,23 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      node.Name + "-pod",
 				Namespace: namespace,
-				Labels:    valkeyNodeLabels(node),
+				Labels:    podLabels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 		pod.Status.PodIP = "10.0.0.1"
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 		// envtest runs no StatefulSet controller, so the rollout has to be

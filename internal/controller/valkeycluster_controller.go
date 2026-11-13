@@ -96,6 +96,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -252,12 +253,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	// Before the scrape, so a gate is earned only by a server container that
+	// was already ready when its INFO was read.
+	readyBefore := r.readyServerContainers(ctx, nodes)
 	state := r.scrapeClusterState(ctx, nodes, dial)
 
 	// A node that rejects the operator's password is missing from state, so
 	// the steps below would act on a partial view and blame the topology.
 	if rejecting := nodesRejectingOperator(nodes); len(rejecting) > 0 {
 		r.reportOperatorLockout(cluster, rejecting)
+		// The scrape is partial here, so no gate can be earned. A nil state
+		// still clears the gate of a pod whose server container restarted,
+		// which reads only the pod's own status.
+		if _, err := r.syncInitialSyncGates(ctx, nodes, nil, nil); err != nil {
+			log.Error(err, "failed to update the initial sync readiness gate")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
+				"%s", initialSyncGateFailedMessage(err))
+		}
 		// The partial scrape would zero the shard counts; keep the last ones.
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
@@ -267,12 +279,32 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	}
 
+	// Before the walk, which returns early on many paths. A failure leaves
+	// each gate as it is until a later pass (initialSyncGateFailedMessage).
+	gatesPending, gateErr := r.syncInitialSyncGates(ctx, nodes, state, readyBefore)
+	if gateErr != nil {
+		log.Error(gateErr, "failed to update the initial sync readiness gate")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
+			"%s", initialSyncGateFailedMessage(gateErr))
+	} else {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonInitialSyncGateFailed)
+	}
+
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says
 	// which shard is waiting and why. It comes up as a typed error so the
 	// walk can stop at that node the way it stops at one mid-roll.
 	var deferred *rollDeferredError
-	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	var requeue bool
+	if initialSyncGateHoldsWalk(gateErr) {
+		// A pod the walk replaced now might never become Ready, so the walk
+		// stops at the pods already replaced. The steps below still run, as
+		// for a skipped roll.
+		rollSkipped = true
+		reportInitialSyncGateHold(cluster, gateErr)
+	} else {
+		requeue, err = r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	}
 	if errors.As(err, &deferred) {
 		err = nil
 	}
@@ -513,8 +545,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// A shard's roll was skipped. Conditions were set at detection; persist them
-	// and requeue so the next pass re-evaluates.
+	// A shard's roll was skipped, or a failed gate write held the walk.
+	// Conditions were set at detection; persist them and requeue so the next
+	// pass re-evaluates.
 	if rollSkipped {
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -523,32 +556,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Cluster is healthy - set all positive conditions
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
-	// A node whose ACL the operator cannot apply leaves the declared users out of
-	// Valkey while every other check passes, so the cluster would otherwise read
-	// as fully healthy with an ACL that is not in effect.
-	//
-	// Degraded is cleared only in the healthy branch. Removing it first and
-	// setting it again would hand SetStatusCondition an absent condition every
-	// reconcile, which resets LastTransitionTime and loses when the failure
-	// actually started.
-	//
-	// An aclfile the operator could not rebuild this pass is already on
-	// Degraded (reportUsersACLUnresolved) and stays there: the nodes run the
-	// last good aclfile, so they report ACLApplied, but the declared users are
-	// not all in effect. A node that cannot load even that aclfile is named in
-	// the same message.
-	failed := nodesWithFailedACL(nodes)
-	switch {
-	case aclErr != nil:
-		if len(failed) > 0 {
-			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved,
-				aclErr.Error()+aclNotAppliedSeparator+strings.Join(failed, ", "), metav1.ConditionTrue)
-		}
-	case len(failed) > 0:
-		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
-			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
-	default:
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	if !setHealthyDegraded(cluster, aclErr, nodesWithFailedACL(nodes), gateErr) {
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready: shards %d, replicasPerShard %d", cluster.Spec.Shards, cluster.GetReplicasPerShard())
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
@@ -560,6 +568,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.V(1).Info("reconcile done")
+	if gatesPending {
+		return ctrl.Result{RequeueAfter: initialSyncGateRecheck}, nil
+	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
@@ -2144,6 +2155,45 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // aclNotAppliedSeparator joins the users ACL failure and the nodes that
 // cannot apply even the last aclfile in one Degraded message.
 const aclNotAppliedSeparator = "; ACL not applied on "
+
+// setHealthyDegraded sets or clears Degraded on a cluster that passed every
+// topology check, and reports whether the cluster stays degraded.
+//
+// A node whose ACL the operator cannot apply leaves the declared users out of
+// Valkey while every other check passes, so the cluster would otherwise read
+// as fully healthy with an ACL that is not in effect. The same holds for a
+// readiness gate the operator could not write: the pod's Ready, which the
+// PodDisruptionBudget and the Service follow, stays wrong until a later pass.
+//
+// Degraded is cleared only in the healthy branch. Removing it first and
+// setting it again would hand SetStatusCondition an absent condition every
+// reconcile, which resets LastTransitionTime and loses when the failure
+// actually started.
+//
+// An aclfile the operator could not rebuild this pass is already on
+// Degraded (reportUsersACLUnresolved) and stays there: the nodes run the
+// last good aclfile, so they report ACLApplied, but the declared users are
+// not all in effect. A node that cannot load even that aclfile is named in
+// the same message.
+func setHealthyDegraded(cluster *valkeyiov1alpha1.ValkeyCluster, aclErr error, failedACL []string, gateErr error) bool {
+	switch {
+	case aclErr != nil:
+		if len(failedACL) > 0 {
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved,
+				aclErr.Error()+aclNotAppliedSeparator+strings.Join(failedACL, ", "), metav1.ConditionTrue)
+		}
+	case len(failedACL) > 0:
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
+			fmt.Sprintf("ACL not applied on %s", strings.Join(failedACL, ", ")), metav1.ConditionTrue)
+	case gateErr != nil:
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonInitialSyncGateFailed,
+			initialSyncGateFailedMessage(gateErr), metav1.ConditionTrue)
+	default:
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		return false
+	}
+	return true
+}
 
 // internalAclSecretExists reports whether the cluster already has an aclfile
 // in its internal ACL Secret, which is what the nodes keep running while a

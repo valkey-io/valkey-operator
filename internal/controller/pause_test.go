@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -42,6 +45,11 @@ import (
 var _ = Describe("Pause reconciliation", func() {
 	ctx := context.Background()
 	pauseOn := map[string]string{valkeyiov1alpha1.AnnotationPauseReconciliation: "true"}
+	gaugeValue := func(gauge prometheus.Gauge) float64 {
+		var metric dto.Metric
+		Expect(gauge.Write(&metric)).To(Succeed())
+		return metric.GetGauge().GetValue()
+	}
 
 	deleteNode := func(key types.NamespacedName) {
 		node := &valkeyiov1alpha1.ValkeyNode{}
@@ -59,6 +67,11 @@ var _ = Describe("Pause reconciliation", func() {
 			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		cluster.Status.Shards = 3
+		cluster.Status.ReadyShards = 3
+		cluster.Status.State = valkeyiov1alpha1.ClusterStateReady
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
+		Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
 		nodeKey := types.NamespacedName{Name: "paused-cluster-0-0", Namespace: "default"}
 		owned := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: nodeKey.Name, Namespace: nodeKey.Namespace,
@@ -101,7 +114,9 @@ var _ = Describe("Pause reconciliation", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.RequeueAfter).To(Equal(pausedRequeue))
 		}
-		Expect(clusterShards.DeleteLabelValues(key.Name, key.Namespace)).To(BeTrue(), "paused clusters retain metric series after an operator restart")
+		Expect(gaugeValue(clusterShards.WithLabelValues(key.Name, key.Namespace))).To(Equal(float64(3)))
+		Expect(gaugeValue(clusterShardsReady.WithLabelValues(key.Name, key.Namespace))).To(Equal(float64(3)))
+		Expect(gaugeValue(clusterStateInfo.WithLabelValues(key.Name, key.Namespace, string(valkeyiov1alpha1.ClusterStateReady)))).To(Equal(float64(1)))
 		Expect(recorder.Events).To(HaveLen(1))
 		Expect(<-recorder.Events).To(ContainSubstring("ReconciliationPaused"))
 

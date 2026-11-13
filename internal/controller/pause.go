@@ -84,6 +84,8 @@ func (r *ValkeyClusterReconciler) reconcilePaused(ctx context.Context, cluster *
 		return err
 	}
 	if meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReconciliationPaused) {
+		// Rebuild gauge values from saved status after an operator restart.
+		updateClusterMetrics(cluster)
 		return nil
 	}
 	logf.FromContext(ctx).Info("Paused reconciliation of ValkeyCluster", "annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)

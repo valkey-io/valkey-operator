@@ -2393,12 +2393,16 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 			},
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{
-			"maxmemory-policy": "allkeys-lru",
-			"appendonly":       "yes",
+			"maxmemory-policy":  "allkeys-lru",
+			"maxmemory-clients": "0",
+			"appendonly":        "yes",
 		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(applied).To(BeTrue())
-		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+		Expect(fake.params).To(Equal(map[string]string{
+			"maxmemory-policy":  "allkeys-lru",
+			"maxmemory-clients": "0",
+		}))
 	})
 
 	It("returns an error when CONFIG SET fails", func() {

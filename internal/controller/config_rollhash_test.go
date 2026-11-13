@@ -160,3 +160,20 @@ func TestNodeServerConfigRollHashChangesOnNonLiveKey(t *testing.T) {
 	assert.NotEqual(t, nodeServerConfigRollHash(before), nodeServerConfigRollHash(after),
 		"non-live key change must change the roll hash so the pod rolls")
 }
+
+func TestClientMemoryBudgetIsLive(t *testing.T) {
+	for _, value := range []string{"5%", "1mb", "0"} {
+		config := map[string]string{"maxmemory-clients": value}
+		after := pinTestCluster(config, false)
+		if got := liveConfigToApply(config)["maxmemory-clients"]; got != value {
+			t.Errorf("live value = %q, want %q", got, value)
+		}
+		if got := buildServerConfig(after); !strings.Contains(got, "maxmemory-clients "+value+"\n") {
+			t.Errorf("maxmemory-clients %q is missing from the startup config", value)
+		}
+		node := &valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: config}}
+		if got := nodeServerConfigRollHash(node); got != nodeServerConfigRollHash(&valkeyiov1alpha1.ValkeyNode{}) {
+			t.Errorf("maxmemory-clients %q changes the node roll hash", value)
+		}
+	}
+}

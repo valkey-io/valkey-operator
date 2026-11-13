@@ -171,9 +171,10 @@ func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, ima
 // liveConfigAllowlist is the set of user-config keys the operator applies live
 // via CONFIG SET. Keys outside this set roll the pod when changed.
 var liveConfigAllowlist = map[string]struct{}{
-	"maxmemory-policy": {},
-	"maxmemory":        {},
-	"maxclients":       {},
+	"maxmemory-policy":  {},
+	"maxmemory":         {},
+	"maxclients":        {},
+	"maxmemory-clients": {},
 }
 
 // liveConfigToApply returns the subset of config whose keys are live-settable.

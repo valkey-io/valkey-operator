@@ -40,7 +40,11 @@ Listed below are configurations can be applied live without rolling pods. We are
 maxclients
 maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
 maxmemory-policy
+maxmemory-clients
 ```
+
+To disable a previously set client memory budget, set `maxmemory-clients: "0"`.
+Clusters that already set this key may roll once when upgrading from an operator version that hashed it into the pod template.
 
 #### Failover tuning
 

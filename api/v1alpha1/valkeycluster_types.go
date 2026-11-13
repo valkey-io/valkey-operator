@@ -269,15 +269,7 @@ type ZonePinning struct {
 // ReservedConfigKeys are the directives the operator sets itself.
 // A user value for one of these in spec.config is refused rather than silently dropped.
 //
-// Two sources count as operator-owned.
-// The base config the operator writes to valkey.conf, with TLS both on and off.
-// The flags the operator passes on the valkey-server command line, which override the file.
-// TestReservedConfigKeysMatchBaseConfig enforces the union of both.
-//
 // The list also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
-// Adding a key therefore means editing both, and the tests say so when you miss one.
-//
-// Lowercase entries only, because the CEL rule lowercases before comparing.
 var ReservedConfigKeys = []string{
 	"aclfile",
 	"cluster-allow-replica-migration",

@@ -72,6 +72,14 @@ func imageTag(image string) (string, bool) {
 }
 
 // MeetsMinVersion reports whether the version parsed from image meets min.
+//
+// When min names a final release, a prerelease image is compared on its release
+// core. Semver orders a prerelease below its own release, so a direct comparison
+// refuses the release candidates of the very version that introduced a feature
+// while accepting every prerelease of a later one: against a 9.1.0 minimum,
+// 9.2.0-rc1 passes and 9.1.0-rc1 does not, though both builds carry the
+// feature. When min is itself a prerelease the ordering already places the
+// release candidates of that version correctly, so it is left alone.
 func MeetsMinVersion(image string, min *semver.Version) bool {
 	if min == nil {
 		return false
@@ -79,6 +87,13 @@ func MeetsMinVersion(image string, min *semver.Version) bool {
 	version, ok := VersionFromImage(image)
 	if !ok {
 		return false
+	}
+	if version.Prerelease() != "" && min.Prerelease() == "" {
+		core, err := version.SetPrerelease("")
+		if err != nil {
+			return false
+		}
+		version = &core
 	}
 	return !version.LessThan(min)
 }

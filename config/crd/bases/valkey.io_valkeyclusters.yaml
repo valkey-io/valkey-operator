@@ -23,6 +23,10 @@ spec:
       jsonPath: .status.reason
       name: Reason
       type: string
+    - description: True while reconciliation is paused
+      jsonPath: .status.conditions[?(@.type=="ReconciliationPaused")].status
+      name: Paused
+      type: string
     - description: Ready shards
       jsonPath: .status.readyShards
       name: ReadyShards

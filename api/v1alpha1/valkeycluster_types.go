@@ -940,6 +940,7 @@ const (
 	ReasonPodDisruptionBudgetError      = "PodDisruptionBudgetError"
 	ReasonPodUnschedulable              = "PodUnschedulable"
 	ReasonUnsupportedConfigDirective    = "UnsupportedConfigDirective"
+	ReasonUnsupportedAclDirective       = "UnsupportedAclDirective"
 	ReasonMultipleConfigurationWarnings = "MultipleConfigurationWarnings"
 	// ReasonDeprecatedField is used with ConditionConfigurationWarning when the
 	// spec uses a field that still works but is scheduled for removal.

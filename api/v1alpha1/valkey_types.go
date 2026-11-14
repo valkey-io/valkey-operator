@@ -137,6 +137,110 @@ type ValkeyPodDisruptionBudgetConfig struct {
 	Mode ValkeyPDBMode `json:"mode,omitempty"`
 }
 
+// FailoverMode selects who promotes a replica when the primary is lost.
+// Values may be added in future versions, so clients must handle unknown values.
+type FailoverMode string
+
+const (
+	// FailoverModeNone means nobody promotes automatically.
+	// It covers a standalone instance and manual failover.
+	FailoverModeNone FailoverMode = "None"
+	// FailoverModeSentinel means a ValkeySentinel quorum is the failover authority.
+	FailoverModeSentinel FailoverMode = "Sentinel"
+)
+
+// FailoverSpec declares who is responsible for promoting a replica.
+//
+// It is deliberately self-contained and references no sibling or parent field,
+// so a future ValkeyCell can embed the same type for the Valkeys it manages.
+//
+// The has() guard on mode is defensive: the default fills it before validation runs.
+// +kubebuilder:validation:XValidation:rule="!has(self.sentinel) || (has(self.mode) && self.mode == 'Sentinel')",message="failover.sentinel requires failover.mode: Sentinel",fieldPath=".sentinel",reason="FieldValueForbidden"
+//
+// Once the sentinel block exists it cannot be removed while the mode stays Sentinel.
+// The monitorName rules on SentinelFailoverSpec only run when the block is present before
+// and after an update. Without this rule, a user could drop the block and add it back
+// with a different monitorName, and those rules would never run.
+// Leaving Sentinel mode is how a block is dropped on purpose. That path goes through
+// deregistration, so coming back later with a new name is allowed.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sentinel) || !(has(self.mode) && self.mode == 'Sentinel') || has(self.sentinel)",message="failover.sentinel cannot be removed while failover.mode stays Sentinel; set the mode to None first",fieldPath=".sentinel",reason="FieldValueForbidden"
+type FailoverSpec struct {
+	// Mode selects the failover engine.
+	//   None     - nobody promotes automatically.
+	//   Sentinel - a ValkeySentinel quorum is the failover authority.
+	// The value Operator is reserved and is not accepted yet.
+	// +kubebuilder:validation:Enum=None;Sentinel
+	// +kubebuilder:default=None
+	// +optional
+	Mode FailoverMode `json:"mode,omitempty"`
+
+	// Sentinel configures Sentinel-mode failover.
+	// Only valid when mode is Sentinel.
+	// This block does not by itself cause monitoring:
+	// a ValkeySentinel must also select this object.
+	// +optional
+	Sentinel *SentinelFailoverSpec `json:"sentinel,omitempty"`
+}
+
+// SentinelFailoverSpec configures how Sentinel monitors one Valkey.
+//
+// The rules are transition rules, so they run on updates only, and only while the block
+// is present before and after the update. FailoverSpec stops the block from being removed
+// while the mode stays Sentinel, so they cannot be skipped that way.
+// +kubebuilder:validation:XValidation:rule="has(self.monitorName) == has(oldSelf.monitorName)",message="monitorName cannot be added or removed after the sentinel block is created",fieldPath=".monitorName",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(self.monitorName) || !has(oldSelf.monitorName) || self.monitorName == oldSelf.monitorName",message="monitorName is immutable",fieldPath=".monitorName",reason="FieldValueForbidden"
+type SentinelFailoverSpec struct {
+	// MonitorName is the Sentinel master-name for this instance.
+	// It defaults to metadata.name, which Valkey.MonitorName resolves.
+	// There is no kubebuilder default, because a materialized default
+	// cannot be told apart from a user-set value by the transition rules above.
+	// It stays settable so an adopted deployment keeps the master-name
+	// its clients already use.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	MonitorName string `json:"monitorName,omitempty"`
+
+	// Quorum is the number of Sentinels that must agree the primary is down.
+	// It is passed to SENTINEL MONITOR.
+	// When unset it defaults to (the selecting ValkeySentinel's replicas / 2) + 1.
+	// The default is computed at registration time. Set it explicitly to pin it.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	Quorum *int32 `json:"quorum,omitempty"`
+
+	// Config is per-master Sentinel tuning, forwarded as
+	// SENTINEL SET <monitorName> <key> <value>.
+	// The operator does not validate the values.
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
+}
+
+// MonitoringStatus reports which ValkeySentinel monitors a Valkey.
+// Nothing sets it yet. The registration work fills it in.
+type MonitoringStatus struct {
+	// MonitoredBy lists the ValkeySentinels currently selecting this instance.
+	// At most one is permitted. A second selector is rejected and reported as Degraded.
+	// +optional
+	MonitoredBy []string `json:"monitoredBy,omitempty"`
+
+	// MonitorName is the master-name this instance is registered under.
+	// +optional
+	MonitorName string `json:"monitorName,omitempty"`
+
+	// Registered is true when every ready pod of the selecting
+	// ValkeySentinel reports this monitor.
+	// +optional
+	Registered bool `json:"registered,omitempty"`
+
+	// Quorum is the quorum the monitor was registered with.
+	// +optional
+	Quorum int32 `json:"quorum,omitempty"`
+
+	// AvailableQuorum is the number of Sentinels currently reachable for this monitor.
+	// +optional
+	AvailableQuorum int32 `json:"availableQuorum,omitempty"`
+}
+
 // ValkeySpec defines the desired state of Valkey.
 //
 // Replication is not implemented yet, so spec.replicas is pinned to 0 for now.
@@ -161,6 +265,11 @@ type ValkeySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// Failover declares how primary failover is performed for this instance.
+	// Nothing reads it yet. Sentinel selection and registration use it later.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 
 	// Image overrides the default Valkey image.
 	// +optional
@@ -302,6 +411,17 @@ type ValkeyStatus struct {
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
+	// Monitoring reports which ValkeySentinel monitors this instance.
+	// It stays unset until the registration work fills it in.
+	// +optional
+	Monitoring *MonitoringStatus `json:"monitoring,omitempty"`
+
+	// SentinelCredentialsSecret locates the _sentinel user's password.
+	// It is the only credential a selecting ValkeySentinel reads.
+	// It stays unset until the credential work fills it in.
+	// +optional
+	SentinelCredentialsSecret *corev1.SecretKeySelector `json:"sentinelCredentialsSecret,omitempty"`
+
 	// ObservedGeneration is the most recent spec generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -366,6 +486,21 @@ type ValkeyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []Valkey `json:"items"`
+}
+
+// ReasonSentinelWithoutReplicas is used with ConditionConfigurationWarning when a
+// Valkey declares failover mode Sentinel but has no replicas. Sentinel can track
+// the lone primary's liveness, but it has nothing to promote.
+const ReasonSentinelWithoutReplicas = "SentinelWithoutReplicas"
+
+// MonitorName resolves the effective Sentinel master-name.
+// It is shared so the Valkey and ValkeySentinel controllers cannot disagree.
+func (v *Valkey) MonitorName() string {
+	if v.Spec.Failover != nil && v.Spec.Failover.Sentinel != nil &&
+		v.Spec.Failover.Sentinel.MonitorName != "" {
+		return v.Spec.Failover.Sentinel.MonitorName
+	}
+	return v.Name
 }
 
 func init() {

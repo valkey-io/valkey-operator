@@ -590,26 +590,33 @@ func headlessServiceName(clusterName string) string {
 
 // Create or update a headless service (client connects to pods directly)
 func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	rc := &resourceClient{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Recorder: r.Recorder}
+	return upsertHeadlessService(ctx, rc, cluster, cluster.Name, cluster.Namespace, labels(cluster))
+}
+
+// upsertHeadlessService creates or updates the headless Service over the pods labelled LabelCluster=name.
+// Shared by the ValkeyCluster and Valkey controllers.
+func upsertHeadlessService(ctx context.Context, rc *resourceClient, owner client.Object, name, namespace string, labels map[string]string) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      headlessServiceName(cluster.Name),
-			Namespace: cluster.Namespace,
+			Name:      headlessServiceName(name),
+			Namespace: namespace,
 		},
 	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+	result, err := controllerutil.CreateOrUpdate(ctx, rc.Client, svc, func() error {
 		// SetControllerReference already rejects another controller. This
 		// error names the ValkeyNode. A free name is still created.
 		// Another cluster object with the same name is not enough.
 		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
 			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
 		}
-		svc.Labels = labels(cluster)
+		svc.Labels = labels
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		// ClusterIP is immutable after creation; preserve the existing value on updates.
 		if svc.Spec.ClusterIP == "" {
 			svc.Spec.ClusterIP = "None"
 		}
-		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
+		svc.Spec.Selector = map[string]string{LabelCluster: name}
 		// Protocol and TargetPort are API-server defaults; set them explicitly
 		// so the rebuilt slice deep-equals the stored one and CreateOrUpdate
 		// stops updating the Service on every reconcile (#315).
@@ -619,14 +626,14 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt32(DefaultPort),
 		}}
-		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
+		return controllerutil.SetControllerReference(owner, svc, rc.Scheme)
 	})
 	if err != nil {
-		r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert Service: %v", err)
+		rc.Recorder.Eventf(owner, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert Service: %v", err)
 		return err
 	}
 	if result == controllerutil.OperationResultCreated {
-		r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
+		rc.Recorder.Eventf(owner, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
 	}
 	return nil
 }

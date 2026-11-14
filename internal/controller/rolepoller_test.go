@@ -139,7 +139,7 @@ var _ = Describe("RolePoller", func() {
 
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Replicas: 1},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 1},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
@@ -257,6 +257,23 @@ var _ = Describe("RolePoller", func() {
 
 		poller.pollOnce(ctx, nowStamp)
 		Expect(scrapes).To(BeZero(), "a cluster being torn down must not be dialled")
+		Expect(names()).To(BeEmpty())
+	})
+
+	It("does not scrape a paused cluster", func() {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Annotations = map[string]string{valkeyiov1alpha1.AnnotationPauseReconciliation: "true"}
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		By("swapping both recorded roles, so only the pause guard can keep it quiet")
+		for node, role := range map[*valkeyiov1alpha1.ValkeyNode]string{primary: RoleReplica, replica: RolePrimary} {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			node.Status.Role = role
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		}
+
+		poller.pollOnce(ctx, nowStamp)
+		Expect(scrapes).To(BeZero(), "a paused cluster must not be dialled")
 		Expect(names()).To(BeEmpty())
 	})
 

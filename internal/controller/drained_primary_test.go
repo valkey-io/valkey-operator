@@ -34,7 +34,7 @@ func TestDrainedPrimaryShardIsNotServing(t *testing.T) {
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Id: "s1", PrimaryId: "p1", Nodes: []*valkey.NodeState{primary, replica}}}}
 
 	r := &ValkeyClusterReconciler{}
-	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 1}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{ReplicasPerShard: 1}}
 	assert.Equal(t, int32(0), r.countReadyShards(state, cluster))
 	assert.Empty(t, liveRoleForAddress(state, "10.0.1.1"))
 	assert.Equal(t, RoleReplica, liveRoleForAddress(state, "10.0.1.2"))

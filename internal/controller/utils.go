@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	appName        = "valkey"
-	resourcePrefix = "valkey-"
+	appName             = "valkey"
+	resourcePrefix      = "valkey-"
+	annotationTrueValue = "true"
 
 	// shellPath used in exec for running scripts
 	shellPath = "/bin/sh"
@@ -168,6 +169,44 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	o.SetAnnotations(annotations)
 
 	return true
+}
+
+// annotationTrue reports whether obj carries key with the exact value "true".
+func annotationTrue(obj metav1.Object, key string) bool {
+	return obj.GetAnnotations()[key] == annotationTrueValue
+}
+
+// ownedValkeyNodes returns the nodes in the list that the cluster controls.
+func ownedValkeyNodes(cluster *valkeyv1.ValkeyCluster, nodes *valkeyv1.ValkeyNodeList) []*valkeyv1.ValkeyNode {
+	owned := make([]*valkeyv1.ValkeyNode, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		if metav1.IsControlledBy(&nodes.Items[i], cluster) {
+			owned = append(owned, &nodes.Items[i])
+		}
+	}
+	return owned
+}
+
+// patchNodeAnnotations sets and removes annotations on a ValkeyNode, and
+// patches only when something changed.
+func (r *ValkeyClusterReconciler) patchNodeAnnotations(ctx context.Context, node *valkeyv1.ValkeyNode, set map[string]string, remove []string) error {
+	patch := client.MergeFrom(node.DeepCopy())
+	changed := false
+	for key, value := range set {
+		if upsertAnnotation(node, key, value) {
+			changed = true
+		}
+	}
+	for _, key := range remove {
+		if _, ok := node.Annotations[key]; ok {
+			delete(node.Annotations, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Patch(ctx, node, patch))
 }
 
 // nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address

@@ -44,11 +44,16 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DefaultImage and DefaultExporterImage are used where a spec leaves the image
+// empty. The manager sets them from its required image flags.
+var (
+	DefaultImage         string
+	DefaultExporterImage string
+)
+
 const (
 	DefaultPort           = 6379
 	DefaultClusterBusPort = 16379
-	DefaultImage          = "valkey/valkey:9.0.0"
-	DefaultExporterImage  = "oliver006/redis_exporter:v1.88.0"
 	DefaultExporterPort   = 9121
 
 	// AclSecretType is the Secret type used for operator-managed ACL Secrets.
@@ -104,13 +109,16 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
+//   - Build the Valkey cluster state by connecting to each node and scraping
+//     CLUSTER INFO / CLUSTER NODES.
+//   - Stop if a Ready node rejects the operator's password
+//     (nodesRejectingOperator), so the steps below never act on a partial
+//     scrape.
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
 //     primary cannot be identified has its roll skipped; other shards still roll,
 //     and once none is mid-roll the phases below run to repair it.
-//   - Build the Valkey cluster state by connecting to each node and scraping
-//     CLUSTER INFO / CLUSTER NODES.
 //   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
 //     is lost (promoteOrphanedReplicas).
 //   - Forget stale nodes that no longer have a backing ValkeyNode.
@@ -152,6 +160,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	initClusterMetrics(req.Name, req.Namespace)
 
+	// A paused cluster gets its ValkeyNodes marked and its condition set, and
+	// nothing else: no owned object is written and no command is sent.
+	if reconciliationPaused(cluster) {
+		if err := r.reconcilePaused(ctx, cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pausedRequeue}, nil
+	}
+	if resumed, err := r.resumeIfPaused(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	} else if resumed {
+		// Node status stayed frozen while paused. Give node controllers a turn
+		// to refresh pod IPs and readiness before the cluster scrapes them.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	if err := r.upsertService(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonServiceError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
@@ -164,11 +188,24 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileUsersAcl(ctx, cluster); err != nil {
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, err.Error(), metav1.ConditionFalse)
+	// A user Secret the operator cannot read must not stop topology work. Once
+	// an aclfile exists, that failure is reported on Degraded and the reconcile
+	// carries on with the last good aclfile; see reportUsersACLUnresolved. Any
+	// other ACL failure, and a missing Secret before the first aclfile exists,
+	// still return here (#500 replaces the first-reconcile case with per-user
+	// handling).
+	aclErr := r.reconcileUsersAcl(ctx, cluster)
+	var unresolved *userSecretUnresolvedError
+	fallback := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
+	if aclErr != nil && !fallback {
+		// A fallback that stops being usable (the aclfile entry removed from
+		// the internal Secret, say) must not keep reporting the old reason.
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, aclErr.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, aclErr
 	}
+	r.reportUsersACLUnresolved(ctx, cluster, aclErr)
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
@@ -199,7 +236,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
-
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
 	configWarnings = append(configWarnings, deprecatedFieldConfigWarnings(cluster)...)
 	r.applyConfigurationWarnings(ctx, cluster, configWarnings)
@@ -233,6 +269,19 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	state := r.scrapeClusterState(ctx, nodes, dial)
+
+	// A node that rejects the operator's password is missing from state, so
+	// the steps below would act on a partial view and blame the topology.
+	if rejecting := nodesRejectingOperator(nodes); len(rejecting) > 0 {
+		r.reportOperatorLockout(cluster, rejecting)
+		// The partial scrape would zero the shard counts; keep the last ones.
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
+	}
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
+		c.Reason == valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	}
 
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says
@@ -406,9 +455,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if countSlots(shard.Slots) == 0 {
 			continue
 		}
-		if len(shard.Nodes) < (1 + int(cluster.Spec.Replicas)) {
+		if len(shard.Nodes) < (1 + int(cluster.GetReplicasPerShard())) {
 			log.V(1).Info("missing replicas, requeue..")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.Spec.Replicas))
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "WaitingForReplicas", "CheckReplicas", "Shard has %d of %d nodes", len(shard.Nodes), 1+int(cluster.GetReplicasPerShard()))
 			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for all replicas to be created", metav1.ConditionFalse)
 			setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Creating replicas", metav1.ConditionTrue)
 			setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonMissingReplicas, "Waiting for replicas", metav1.ConditionFalse)
@@ -465,8 +514,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if move != nil {
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
-		// that hadn't received slots yet during scale-out).
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		// that hadn't received slots yet during scale-out). A users ACL
+		// failure is not stale: only the ACL step clears it.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
 		// Name the shard receiving this batch. With more than one shard
 		// under its share, the name changes as each one fills.
 		msg := "Rebalancing slots across primaries"
@@ -497,12 +547,25 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// setting it again would hand SetStatusCondition an absent condition every
 	// reconcile, which resets LastTransitionTime and loses when the failure
 	// actually started.
-	if failed := nodesWithFailedACL(nodes); len(failed) > 0 {
+	//
+	// An aclfile the operator could not rebuild this pass is already on
+	// Degraded (reportUsersACLUnresolved) and stays there: the nodes run the
+	// last good aclfile, so they report ACLApplied, but the declared users are
+	// not all in effect. A node that cannot load even that aclfile is named in
+	// the same message.
+	failed := nodesWithFailedACL(nodes)
+	switch {
+	case aclErr != nil:
+		if len(failed) > 0 {
+			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved,
+				aclErr.Error()+aclNotAppliedSeparator+strings.Join(failed, ", "), metav1.ConditionTrue)
+		}
+	case len(failed) > 0:
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed,
 			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
-	} else {
+	default:
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready with %d shards and %d replicas", cluster.Spec.Shards, cluster.Spec.Replicas)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready: shards %d, replicasPerShard %d", cluster.Spec.Shards, cluster.GetReplicasPerShard())
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
@@ -656,7 +719,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, clusterState *valkey.ClusterState, trustBundle string) (bool, error) {
 	log := logf.FromContext(ctx)
 
-	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	totalCreated := 0
 
 	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
@@ -824,7 +887,7 @@ func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.C
 		}
 		return ""
 	}
-	if cluster.Spec.Replicas == 0 {
+	if cluster.GetReplicasPerShard() == 0 {
 		return ""
 	}
 	// findFailoverShard returned nil for one of three reasons:
@@ -1305,7 +1368,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 	//    (1 shard, 0 replicas), isolation is the permanent correct state,
 	//    there is nobody to MEET, so the guard is skipped.
 	//  - post-failover replacements whose shard already has a live primary.
-	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.Spec.Replicas == 0
+	isSingleNodeCluster := cluster.Spec.Shards == 1 && cluster.GetReplicasPerShard() == 0
 	primaries := make([]*valkey.NodeState, 0, len(state.PendingNodes))
 	for _, node := range state.PendingNodes {
 		if node.IsIsolated() && !isSingleNodeCluster {
@@ -1713,7 +1776,7 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 // and have all replicas in sync with their primary.
 func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, cluster *valkeyiov1alpha1.ValkeyCluster) int32 {
 	var readyCount int32 = 0
-	requiredNodes := 1 + int(cluster.Spec.Replicas)
+	requiredNodes := 1 + int(cluster.GetReplicasPerShard())
 	for _, shard := range state.Shards {
 		// A shard whose primary owns no slots, drained or not yet filled,
 		// serves nothing.
@@ -1825,7 +1888,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	case drained:
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -1933,14 +1996,14 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 }
 
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired
-// spec: shard-index >= spec.Shards OR node-index >= 1 + spec.Replicas. An
+// spec: shard-index >= spec.Shards OR node-index >= 1 + replicasPerShard. An
 // excess shard's node that may still own slots is kept, and its name returned.
 func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted bool, kept []string, err error) {
 	log := logf.FromContext(ctx)
 	owners := slotOwningPrimaryAddresses(state)
 	// Slots no scraped primary owns may belong to a node we could not reach.
 	unaccounted := len(state.GetUnassignedSlots()) > 0
-	nodesPerShard := 1 + int(cluster.Spec.Replicas)
+	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 		shardIndex, err := strconv.Atoi(node.Labels[LabelShardIndex])
@@ -2040,11 +2103,48 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// nodesWithFailedACL returns the names of nodes whose ACL the operator tried to
-// apply and could not. PendingPropagation is deliberately not included: it is
-// the normal state after every ACL edit and clears itself once the mounted
-// aclfile catches up, so reporting it would take the cluster out of healthy on
-// every routine user change.
+// nodesRejectingOperator returns the sorted names of Ready nodes that reject
+// the operator's password, from their ACLApplied condition. A node that is not
+// Ready is left out: its node reconcile stops before re-checking the password,
+// so the condition may be stale, and the readiness checks already cover it.
+func nodesRejectingOperator(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
+	var rejecting []string
+	for i := range nodes.Items {
+		if !nodes.Items[i].Status.Ready {
+			continue
+		}
+		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed {
+			rejecting = append(rejecting, nodes.Items[i].Name)
+		}
+	}
+	slices.Sort(rejecting)
+	return rejecting
+}
+
+// reportOperatorLockout sets Degraded and Ready for nodes that reject the
+// operator's password, and emits a warning event when the lockout starts.
+func (r *ValkeyClusterReconciler) reportOperatorLockout(cluster *valkeyiov1alpha1.ValkeyCluster, rejecting []string) {
+	verb := "rejects"
+	if len(rejecting) > 1 {
+		verb = "reject"
+	}
+	msg := fmt.Sprintf("%s %s the %s password in Secret %s", strings.Join(rejecting, ", "), verb, operatorUser, getSystemPasswordSecretName(cluster.Name))
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c == nil ||
+		c.Reason != valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed, "ReconcileCluster", "%s", msg)
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed, msg, metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed, msg, metav1.ConditionFalse)
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed,
+		"Waiting for every node to accept the operator password", metav1.ConditionFalse)
+}
+
+// nodesWithFailedACL returns the sorted names of nodes whose ACL the operator
+// tried to apply and could not. PendingPropagation is deliberately not
+// included: it is the normal state after every ACL edit and clears itself once
+// the mounted aclfile catches up, so reporting it would take the cluster out of
+// healthy on every routine user change.
 func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 	var failed []string
 	for i := range nodes.Items {
@@ -2053,5 +2153,55 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 			failed = append(failed, nodes.Items[i].Name)
 		}
 	}
+	slices.Sort(failed)
 	return failed
+}
+
+// aclNotAppliedSeparator joins the users ACL failure and the nodes that
+// cannot apply even the last aclfile in one Degraded message.
+const aclNotAppliedSeparator = "; ACL not applied on "
+
+// internalAclSecretExists reports whether the cluster already has an aclfile
+// in its internal ACL Secret, which is what the nodes keep running while a
+// rebuild fails. A Secret whose aclfile entry is missing or empty is no
+// fallback: the nodes have nothing to keep.
+func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
+		return false
+	}
+	return len(secret.Data[aclFilename]) > 0
+}
+
+// reportUsersACLUnresolved carries the result of the ACL step on the Degraded
+// condition. A nil aclErr clears the condition it set earlier, with a Normal
+// event on the transition. A non-nil aclErr sets Degraded=UsersACLUnresolved
+// and, when the failure first appears or changes, logs it and emits a Warning
+// event. The internal ACL Secret keeps its last good aclfile, which the
+// running nodes already use and new nodes mount too; the system users take
+// their passwords from the system-passwords Secret, so the operator still
+// reaches every node.
+func (r *ValkeyClusterReconciler) reportUsersACLUnresolved(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclErr error) {
+	// Copy the condition: SetStatusCondition updates the stored one in place.
+	var previous metav1.Condition
+	if found := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); found != nil {
+		previous = *found
+	}
+	wasUnresolved := previous.Status == metav1.ConditionTrue && previous.Reason == valkeyiov1alpha1.ReasonUsersACLUnresolved
+	if aclErr == nil {
+		if wasUnresolved {
+			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "UsersACLResolved", "ReconcileUsersACL", "Users ACL rebuilt; previously: %s", previous.Message)
+		}
+		return
+	}
+	message := aclErr.Error()
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, message, metav1.ConditionTrue)
+	// The healthy branch may have appended the nodes that cannot apply the
+	// aclfile to this message; the failure itself is unchanged then.
+	if wasUnresolved && (previous.Message == message || strings.HasPrefix(previous.Message, message+aclNotAppliedSeparator)) {
+		return
+	}
+	logf.FromContext(ctx).Error(aclErr, "users ACL not updated, nodes keep the last applied aclfile")
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "UsersACLUnresolved", "ReconcileUsersACL", "Users ACL not updated, nodes keep the last applied aclfile: %v", aclErr)
 }

@@ -34,20 +34,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          Valkey is the Schema for the valkeys API.
-
-          The name is bounded because child resource names are derived from it.
-          Every derived name is held to a 63 character DNS label.
-          That is stricter than some child types need: Secret names allow 253.
-          One rule for every child keeps the limit simple.
-          It also leaves room for derived names used as labels or volume names.
-
-          The longest derived name is the Secret "internal-<name>-system-passwords".
-          Its 26 fixed characters leave 37 for the name.
-
-          The limit is in place from the start.
-          Tightening it later would reject objects that already exist.
+        description: Valkey is the Schema for the valkeys API.
         properties:
           apiVersion:
             description: |-
@@ -70,9 +57,8 @@ spec:
             description: spec defines the desired state of Valkey
             properties:
               acl:
-                description: |-
-                  ACL configures the Valkey access control the operator manages.
-                  The controller does not apply these users yet.
+                description: ACL configures the Valkey access control the operator
+                  manages.
                 properties:
                   users:
                     description: Users managed by the operator.
@@ -203,29 +189,8 @@ spec:
                   type: string
                 description: |-
                   Config holds additional Valkey configuration parameters.
-
-                  Cluster mode directives are rejected.
-                  A Valkey always runs with cluster-enabled no.
-                  Every cluster- key is therefore inert or actively wrong here.
-                  Accepting one would store an unhonourable spec.
-                  Every cluster directive except tls-cluster carries the prefix.
-                  A prefix test plus tls-cluster therefore covers them all without enumerating each key.
-
-                  The comparison is lowercased because Valkey keys are case-insensitive.
-                  Cluster-Enabled has to be caught alongside cluster-enabled.
-
-                  This rejects user input only.
-                  The base config still emits cluster-config-file for every node.
-                  That keeps the node state file on the writable /data volume.
-                  See buildManagedConfig.
-
-                  replicaof and its alias slaveof are rejected too.
-                  The operator owns replication topology.
-                  A user-set directive would fight the operator's own wiring.
-
+                  Cluster mode directives and replicaof or slaveof are rejected.
                   Keys may contain only letters, digits, '.', '_' and '-'.
-                  Valkey trims and unquotes each config line before reading its key, so a key such as " cluster-enabled" or "replicaof" in quotes would pass the rules above.
-                  The '.' keeps module configs such as search.<name> valid.
                 type: object
                 x-kubernetes-validations:
                 - message: 'spec.config must not contain cluster- keys or tls-cluster:
@@ -3906,6 +3871,10 @@ spec:
         - message: metadata.name must be at most 37 characters, because child resource
             names are derived from it
           rule: self.metadata.name.size() <= 37
+        - message: metadata.name must not contain '.', because child Service names
+            are derived from it
+          optionalOldSelf: true
+          rule: oldSelf.hasValue() || !self.metadata.name.contains('.')
     served: true
     storage: true
     subresources:

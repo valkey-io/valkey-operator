@@ -737,7 +737,7 @@ func testSystemPasswordACL(data map[string][]byte, users []string) (string, stri
 		acl := buildUserAcl(valkeyiov1alpha1.ACLUserSpec{
 			Name:           user,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: systemUsersAcls[user]},
-		}, systemUserPasswordHashes(data, user))
+		}, systemUserPasswordHashes(data, user), false)
 		fmt.Fprintf(&body, "%s\n", acl)
 	}
 	managed := body.String()

@@ -56,6 +56,69 @@ var versionGatedConfig = map[string]*semver.Version{
 	"tls-auto-reload-interval": semver.MustParse("9.1.0-rc1"),
 }
 
+// aclDatabasesMinVersion is the minimum Valkey version that understands the
+// db=/alldbs/resetdbs ACL directives behind UserAclSpec.Databases.
+//
+// The floor is the -rc1 prerelease rather than 9.1.0, deliberately and to match
+// versionGatedConfig["tls-auto-reload-interval"]: semver orders a prerelease
+// below its release, so a 9.1.0-rc1 image would fail a 9.1.0 minimum and have
+// the directive dropped despite supporting it. Do not "tidy" this to 9.1.0; the
+// user-facing docs say "9.1.0 or newer" in prose instead.
+var aclDatabasesMinVersion = semver.MustParse("9.1.0-rc1")
+
+// databasesAclSupported reports whether the cluster's image understands the
+// database-scoping ACL directives.
+//
+// This is the single seam through which every db= version decision flows: the
+// ACL renderer takes a plain bool and knows nothing about images or semver, so
+// migrating to runtime INFO-based detection later is a change to this function
+// and its callers rather than a hunt through the rendering code.
+func databasesAclSupported(image string) bool {
+	return valkey.MeetsMinVersion(effectiveImage(image), aclDatabasesMinVersion)
+}
+
+// hasDatabasesDirective reports whether a user's spec would render a database
+// directive at all. An empty block renders nothing, so it is not something the
+// version gate can drop and not something to warn about.
+func hasDatabasesDirective(databases valkeyiov1alpha1.DatabasesAclSpec) bool {
+	return len(databases.IDs) > 0 || databases.AllDbs || databases.ResetDbs
+}
+
+// aclVersionGateWarnings returns a warning naming every user whose databases
+// block is set while the detected Valkey version cannot support it. It reports
+// exactly what appendDatabasesAcl drops. The users are read the way the
+// renderer reads them, through ACLUsers(), so a user under the deprecated
+// spec.users is gated too, and the message names the field that carries them.
+func aclVersionGateWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	if databasesAclSupported(cluster.Spec.Image) {
+		return nil
+	}
+
+	var affected []string
+	for _, user := range cluster.Spec.ACLUsers() {
+		if hasDatabasesDirective(user.Databases) {
+			affected = append(affected, user.Name)
+		}
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	slices.Sort(affected)
+
+	// Mirrors the fallback in ACLUsers(): spec.users is only read when
+	// spec.acl.users is empty.
+	field := "spec.acl.users"
+	if cluster.Spec.ACL == nil || len(cluster.Spec.ACL.Users) == 0 {
+		field = "spec.users"
+	}
+
+	return []configWarning{{
+		reason: valkeyiov1alpha1.ReasonUnsupportedAclDirective,
+		message: fmt.Sprintf("%s[%s].databases requires Valkey %s+, %s",
+			field, strings.Join(affected, ","), aclDatabasesMinVersion, detectedVersionDetail(cluster.Spec.Image)),
+	}}
+}
+
 // tlsAuthClientsUserMinVersion lists client certificate-to-user mappings that
 // need a newer Valkey release. Values absent from this map have no additional
 // version requirement.

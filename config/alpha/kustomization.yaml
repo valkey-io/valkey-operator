@@ -1,0 +1,12 @@
+# The default install plus the alpha CRDs, with their feature gates turned on.
+resources:
+- ../default
+- ../crd/alpha
+
+patches:
+- target:
+    kind: Deployment
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --feature-gates=Valkey=true

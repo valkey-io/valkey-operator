@@ -206,6 +206,15 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
+.PHONY: install-alpha
+install-alpha: manifests kustomize ## Install the alpha CRDs (Valkey) into the K8s cluster specified in ~/.kube/config.
+	"$(KUSTOMIZE)" build --load-restrictor LoadRestrictionsNone config/crd/alpha | "$(KUBECTL)" apply -f -
+
+.PHONY: deploy-alpha
+deploy-alpha: manifests kustomize ## Deploy the controller with the alpha CRDs installed and their feature gates on.
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${CONTAINER_IMAGE_NAME}
+	"$(KUSTOMIZE)" build --load-restrictor LoadRestrictionsNone config/alpha | "$(KUBECTL)" apply -f -
+
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${CONTAINER_IMAGE_NAME}

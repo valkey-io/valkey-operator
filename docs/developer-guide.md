@@ -103,6 +103,9 @@ make install
 make deploy IMG=<some-registry>/valkey-operator:tag
 ```
 
+Alpha APIs such as `Valkey` are not part of `make install` or `make deploy`.
+See [feature gates](feature-gates.md).
+
 **Create a sample ValkeyCluster:**
 
 ```sh

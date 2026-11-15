@@ -33,7 +33,7 @@ func TestFindFailoverShard(t *testing.T) {
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
 						{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": "up"}},
 					},
 				},
 			},
@@ -51,7 +51,7 @@ func TestFindFailoverShard(t *testing.T) {
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
 						{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": "up"}},
 					},
 				},
 			},
@@ -86,7 +86,7 @@ func TestFindFailoverShard(t *testing.T) {
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
 						{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": "down"}},
 					},
 				},
 			},
@@ -110,7 +110,7 @@ func TestFindFailoverShard(t *testing.T) {
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
 						primary,
-						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": "up"}},
 					},
 				},
 			},

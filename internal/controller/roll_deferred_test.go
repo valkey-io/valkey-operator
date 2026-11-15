@@ -38,7 +38,7 @@ func shardState(link string) *valkey.ClusterState {
 			PrimaryId: "node-1",
 			Nodes: []*valkey.NodeState{
 				{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-				{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": link}},
+				{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": link}},
 			},
 		}},
 	}

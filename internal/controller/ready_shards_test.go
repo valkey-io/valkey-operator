@@ -34,8 +34,8 @@ func TestCountReadyShards(t *testing.T) {
 	// a failure flag on the replica would appear.
 	shard := func(peerView string) *valkey.ClusterState {
 		primary := &valkey.NodeState{Id: "node-1", Address: "10.0.0.1", Flags: []string{"myself", "master"},
-			ClusterInfo: map[string]string{"cluster_size": "1"},
-			Info:        map[string]string{"role": "master"}}
+			ClusterInfo:     map[string]string{"cluster_size": "1"},
+			ReplicationInfo: map[string]string{"role": "master"}}
 		primary.SetClusterNodesForTesting(peerView)
 		return &valkey.ClusterState{
 			Shards: []*valkey.ShardState{
@@ -46,7 +46,7 @@ func TestCountReadyShards(t *testing.T) {
 					Nodes: []*valkey.NodeState{
 						primary,
 						{Id: "node-2", Address: "10.0.0.2", Flags: []string{"slave"},
-							Info: map[string]string{"role": "slave", "master_link_status": "up"}},
+							ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "up"}},
 					},
 				},
 			},
@@ -93,7 +93,7 @@ func TestCountReadyShardsUnderPartition(t *testing.T) {
 		st := &valkey.ClusterState{}
 		for i, id := range ids {
 			n := &valkey.NodeState{Id: id, Address: "10.0.0." + string(rune('0'+i)), Flags: []string{"myself", "master"},
-				Info: map[string]string{"role": "master"}, ClusterInfo: map[string]string{"cluster_size": "3"}}
+				ReplicationInfo: map[string]string{"role": "master"}, ClusterInfo: map[string]string{"cluster_size": "3"}}
 			n.SetClusterNodesForTesting(withMyself(views[i], id))
 			st.Shards = append(st.Shards, &valkey.ShardState{Id: "s" + id, PrimaryId: id, Slots: []valkey.SlotsRange{{Start: 0, End: 100}}, Nodes: []*valkey.NodeState{n}})
 		}

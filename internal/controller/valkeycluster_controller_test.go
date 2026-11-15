@@ -117,7 +117,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				Slots:     []valkey.SlotsRange{{Start: 10923, End: 16383}},
 				Nodes: []*valkey.NodeState{
 					{Address: "10.0.0.1", Id: "p", Flags: []string{"master"}},
-					{Address: "10.0.0.2", Id: "r", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+					{Address: "10.0.0.2", Id: "r", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"master_link_status": "down"}},
 				},
 			}}}
 

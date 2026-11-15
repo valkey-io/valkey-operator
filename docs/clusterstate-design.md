@@ -109,7 +109,9 @@ Each predicate names the question it answers, because the distinction is easy to
 wrong. `HasFlag` remains available for the one caller that wants `fail` but not
 `fail?`.
 
-## Known limitations
+## Replication info
 
-**`Info` keeps the whole INFO map.** Only `slave_repl_offset` and
-`master_link_status` are read, so the rest is retained per node for nothing.
+The scrape sends `INFO replication`, not a full `INFO`, and keeps it as
+`ReplicationInfo`. Every key in the section is parsed, but only `slave_repl_offset`
+and `master_link_status` are used. A full `INFO` reply is about 6 KiB per node on
+every scrape; the replication section is about 0.4 KiB.

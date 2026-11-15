@@ -98,9 +98,9 @@ func pinTestCluster(config map[string]string, tls bool) *valkeyiov1alpha1.Valkey
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "pin-test", Namespace: "default"},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:   1,
-			Replicas: 0,
-			Config:   config,
+			Shards:           1,
+			ReplicasPerShard: 0,
+			Config:           config,
 		},
 	}
 	if tls {

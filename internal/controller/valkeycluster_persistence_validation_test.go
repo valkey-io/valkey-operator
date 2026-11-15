@@ -38,10 +38,10 @@ func persistenceCluster(name string, workloadType valkeyiov1alpha1.WorkloadType,
 	return &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-			Shards:       1,
-			Replicas:     0,
-			WorkloadType: workloadType,
-			Persistence:  p,
+			Shards:           1,
+			ReplicasPerShard: 0,
+			WorkloadType:     workloadType,
+			Persistence:      p,
 		},
 	}
 }
@@ -84,7 +84,7 @@ var _ = Describe("ValkeyClusterSpec persistence CEL validation", func() {
 
 	// bumpReplicas makes an update that leaves persistence alone still carry
 	// a real spec change.
-	bumpReplicas := func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Replicas = 1 }
+	bumpReplicas := func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.ReplicasPerShard = 1 }
 
 	// expectInvalid requires a validation rejection, not some other error
 	// such as a conflict, carrying the given rule message.

@@ -107,6 +107,7 @@ func main() {
 		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
 			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
 			"bind it to localhost and do not add it to a Service.")
+	imageFlags(flag.CommandLine)
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -128,6 +129,11 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if err := validateDefaultImages(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -318,4 +324,23 @@ func main() {
 		setupLog.Error(startErr, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+func imageFlags(fs *flag.FlagSet) {
+	fs.StringVar(&controller.DefaultImage, "default-valkey-image", "",
+		"Required. Valkey image used when spec.image is empty.")
+	fs.StringVar(&controller.DefaultExporterImage, "default-exporter-image", "",
+		"Required. Metrics exporter image used when spec.exporter.image is empty.")
+}
+
+func validateDefaultImages() error {
+	controller.DefaultImage = strings.TrimSpace(controller.DefaultImage)
+	controller.DefaultExporterImage = strings.TrimSpace(controller.DefaultExporterImage)
+	if controller.DefaultImage == "" {
+		return fmt.Errorf("--default-valkey-image must not be empty")
+	}
+	if controller.DefaultExporterImage == "" {
+		return fmt.Errorf("--default-exporter-image must not be empty")
+	}
+	return nil
 }

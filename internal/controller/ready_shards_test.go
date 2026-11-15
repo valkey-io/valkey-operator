@@ -27,7 +27,7 @@ import (
 
 func TestCountReadyShards(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{
-		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 1},
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{ReplicasPerShard: 1},
 	}
 	// shard returns a one-primary, one-replica shard whose replica has its
 	// link up. peerView is the primary's CLUSTER NODES output, which is where
@@ -73,7 +73,7 @@ func TestCountReadyShards(t *testing.T) {
 // table. That single opinion must not zero the ready count; a majority of the
 // peers agreeing on a node must.
 func TestCountReadyShardsUnderPartition(t *testing.T) {
-	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{Replicas: 0}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{ReplicasPerShard: 0}}
 	ids := []string{"n0", "n1", "n2"}
 	clean := "n0 10.0.0.0:6379@16379 master - 0 0 1 connected 0-5460\n" +
 		"n1 10.0.0.1:6379@16379 master - 0 0 1 connected 5461-10922\n" +

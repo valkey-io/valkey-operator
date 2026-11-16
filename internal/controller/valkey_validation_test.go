@@ -454,4 +454,212 @@ var _ = Describe("Valkey CEL validation", func() {
 			Expect(err.Error()).To(ContainSubstring("secret is only used when type is Secret"))
 		})
 	})
+
+	Context("spec.failover", func() {
+		// withFailover creates a Valkey carrying the given failover block.
+		withFailover := func(name string, failover *valkeyiov1alpha1.FailoverSpec) *valkeyiov1alpha1.Valkey {
+			valkey := valkeyFor(name, 0)
+			valkey.Spec.Failover = failover
+			return valkey
+		}
+
+		// createAndClean creates the object and deletes it when the spec ends.
+		createAndClean := func(valkey *valkeyiov1alpha1.Valkey) {
+			Expect(k8sClient.Create(ctx, valkey)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, valkey)).To(Succeed())
+			})
+		}
+
+		It("leaves failover unset by default", func() {
+			valkey := valkeyFor("val-fo-unset", 0)
+			createAndClean(valkey)
+
+			got := &valkeyiov1alpha1.Valkey{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(valkey), got)).To(Succeed())
+			Expect(got.Spec.Failover).To(BeNil())
+		})
+
+		It("defaults the mode to None", func() {
+			valkey := withFailover("val-fo-default", &valkeyiov1alpha1.FailoverSpec{})
+			createAndClean(valkey)
+
+			got := &valkeyiov1alpha1.Valkey{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(valkey), got)).To(Succeed())
+			Expect(got.Spec.Failover.Mode).To(Equal(valkeyiov1alpha1.FailoverModeNone))
+		})
+
+		It("admits mode Sentinel with a sentinel block", func() {
+			quorum := int32(2)
+			valkey := withFailover("val-fo-sentinel", &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverModeSentinel,
+				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{
+					MonitorName: "orders",
+					Quorum:      &quorum,
+					Config:      map[string]string{"down-after-milliseconds": "5000"},
+				},
+			})
+			createAndClean(valkey)
+		})
+
+		It("rejects a mode outside the enum", func() {
+			err := k8sClient.Create(ctx, withFailover("val-fo-bad-mode", &valkeyiov1alpha1.FailoverSpec{
+				Mode: "Operator",
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.failover.mode"))
+			Expect(err.Error()).To(ContainSubstring("Unsupported value"))
+		})
+
+		It("rejects a sentinel block under mode None", func() {
+			err := k8sClient.Create(ctx, withFailover("val-fo-none-sentinel", &valkeyiov1alpha1.FailoverSpec{
+				Mode:     valkeyiov1alpha1.FailoverModeNone,
+				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{MonitorName: "orders"},
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.failover.sentinel"))
+			Expect(err.Error()).To(ContainSubstring("failover.sentinel requires failover.mode: Sentinel"))
+		})
+
+		It("rejects a sentinel block when the mode is left to default", func() {
+			err := k8sClient.Create(ctx, withFailover("val-fo-default-sentinel", &valkeyiov1alpha1.FailoverSpec{
+				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{},
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("failover.sentinel requires failover.mode: Sentinel"))
+		})
+
+		It("rejects a quorum below 1", func() {
+			quorum := int32(0)
+			err := k8sClient.Create(ctx, withFailover("val-fo-quorum", &valkeyiov1alpha1.FailoverSpec{
+				Mode:     valkeyiov1alpha1.FailoverModeSentinel,
+				Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{Quorum: &quorum},
+			}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.failover.sentinel.quorum"))
+		})
+
+		Context("monitorName transitions", func() {
+			sentinelValkey := func(name, monitorName string) *valkeyiov1alpha1.Valkey {
+				return withFailover(name, &valkeyiov1alpha1.FailoverSpec{
+					Mode:     valkeyiov1alpha1.FailoverModeSentinel,
+					Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{MonitorName: monitorName},
+				})
+			}
+
+			It("holds monitorName immutable", func() {
+				valkey := sentinelValkey("val-fo-immutable", "orders")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel.MonitorName = "payments"
+				err := k8sClient.Update(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("monitorName is immutable"))
+			})
+
+			It("admits an update that leaves monitorName unchanged", func() {
+				valkey := sentinelValkey("val-fo-unchanged", "orders")
+				createAndClean(valkey)
+
+				quorum := int32(3)
+				valkey.Spec.Failover.Sentinel.Quorum = &quorum
+				Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+			})
+
+			It("rejects removing monitorName once the sentinel block exists", func() {
+				valkey := sentinelValkey("val-fo-remove", "orders")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel.MonitorName = ""
+				err := k8sClient.Update(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("monitorName cannot be added or removed after the sentinel block is created"))
+			})
+
+			It("rejects adding monitorName once the sentinel block exists", func() {
+				valkey := sentinelValkey("val-fo-add", "")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel.MonitorName = "orders"
+				err := k8sClient.Update(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("monitorName cannot be added or removed after the sentinel block is created"))
+				// The immutability rule must not also fail to evaluate when oldSelf has no monitorName.
+				Expect(err.Error()).NotTo(ContainSubstring("no such key"))
+			})
+
+			It("rejects dropping the sentinel block while the mode stays Sentinel", func() {
+				valkey := sentinelValkey("val-fo-drop", "orders")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel = nil
+				err := k8sClient.Update(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("spec.failover.sentinel"))
+				Expect(err.Error()).To(ContainSubstring("cannot be removed while failover.mode stays Sentinel"))
+			})
+
+			It("rejects dropping a sentinel block that never set a monitorName", func() {
+				// The effective name is metadata.name, so dropping the block and adding it
+				// back with a name would still change what Sentinel knows the instance as.
+				valkey := sentinelValkey("val-fo-drop-unnamed", "")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel = nil
+				err := k8sClient.Update(ctx, valkey)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("cannot be removed while failover.mode stays Sentinel"))
+			})
+
+			It("admits dropping the block when the mode moves to None", func() {
+				valkey := sentinelValkey("val-fo-to-none", "orders")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Mode = valkeyiov1alpha1.FailoverModeNone
+				valkey.Spec.Failover.Sentinel = nil
+				Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+			})
+
+			It("admits coming back to Sentinel with a new monitorName after going through None", func() {
+				// This is the relabel path. The controller deregisters the old monitor while
+				// the mode is None, so a new name is safe afterwards.
+				valkey := sentinelValkey("val-fo-relabel", "orders")
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Mode = valkeyiov1alpha1.FailoverModeNone
+				valkey.Spec.Failover.Sentinel = nil
+				Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+
+				valkey.Spec.Failover.Mode = valkeyiov1alpha1.FailoverModeSentinel
+				valkey.Spec.Failover.Sentinel = &valkeyiov1alpha1.SentinelFailoverSpec{MonitorName: "payments"}
+				Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+			})
+
+			It("admits adding the whole sentinel block later", func() {
+				valkey := withFailover("val-fo-late-block", &valkeyiov1alpha1.FailoverSpec{
+					Mode: valkeyiov1alpha1.FailoverModeSentinel,
+				})
+				createAndClean(valkey)
+
+				valkey.Spec.Failover.Sentinel = &valkeyiov1alpha1.SentinelFailoverSpec{MonitorName: "orders"}
+				Expect(k8sClient.Update(ctx, valkey)).To(Succeed())
+			})
+		})
+
+		DescribeTable("resolves the monitor name",
+			func(failover *valkeyiov1alpha1.FailoverSpec, want string) {
+				valkey := valkeyFor("my-valkey", 0)
+				valkey.Spec.Failover = failover
+				Expect(valkey.MonitorName()).To(Equal(want))
+			},
+			Entry("no failover block", nil, "my-valkey"),
+			Entry("no sentinel block", &valkeyiov1alpha1.FailoverSpec{Mode: valkeyiov1alpha1.FailoverModeSentinel}, "my-valkey"),
+			Entry("sentinel block without a name", &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverModeSentinel, Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{},
+			}, "my-valkey"),
+			Entry("an explicit name", &valkeyiov1alpha1.FailoverSpec{
+				Mode: valkeyiov1alpha1.FailoverModeSentinel, Sentinel: &valkeyiov1alpha1.SentinelFailoverSpec{MonitorName: "orders"},
+			}, "orders"),
+		)
+	})
 })

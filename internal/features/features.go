@@ -24,6 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -33,9 +35,6 @@ const (
 	// ValkeySentinel enables the ValkeySentinel controller.
 	ValkeySentinel featuregate.Feature = "ValkeySentinel"
 )
-
-// Group is the API group of the gated kinds.
-const Group = "valkey.io"
 
 var specs = map[featuregate.Feature]featuregate.FeatureSpec{
 	Valkey:         {Default: false, PreRelease: featuregate.Alpha},
@@ -64,7 +63,7 @@ func requireCRD(g featuregate.FeatureGate, mapper meta.RESTMapper, f featuregate
 	if !g.Enabled(f) {
 		return nil
 	}
-	gk := schema.GroupKind{Group: Group, Kind: string(f)}
+	gk := schema.GroupKind{Group: valkeyiov1alpha1.GroupVersion.Group, Kind: string(f)}
 	if _, err := mapper.RESTMapping(gk); err != nil {
 		if meta.IsNoMatchError(err) {
 			return fmt.Errorf("feature gate %s is enabled but its CRD is not installed: install the alpha CRDs first (make install-alpha)", f)

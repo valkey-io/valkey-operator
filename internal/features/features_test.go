@@ -23,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/component-base/featuregate"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 func TestGatesDefaultOff(t *testing.T) {
@@ -48,8 +50,8 @@ func TestGateSet(t *testing.T) {
 }
 
 func TestRequireCRD(t *testing.T) {
-	installed := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: Group, Version: "v1alpha1"}})
-	installed.Add(schema.GroupVersionKind{Group: Group, Version: "v1alpha1", Kind: "Valkey"}, meta.RESTScopeNamespace)
+	installed := meta.NewDefaultRESTMapper([]schema.GroupVersion{valkeyiov1alpha1.GroupVersion})
+	installed.Add(valkeyiov1alpha1.GroupVersion.WithKind("Valkey"), meta.RESTScopeNamespace)
 	missing := meta.NewDefaultRESTMapper(nil)
 
 	tests := []struct {

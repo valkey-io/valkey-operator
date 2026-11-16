@@ -57,16 +57,18 @@ kind: Valkey
 metadata:
   name: cache
 spec:
-  users:
-    - name: alice
-      enabled: true
-      passwordSecret:
-        name: cache-users
-        keys: [alicepw]
-      commands:
-        allow: ["@read", "@write", "@connection"]
-      keys:
-        readWrite: ["app:*"]
+  acl:
+    users:
+      - name: alice
+        state: Enabled
+        password:
+          secret:
+            name: cache-users
+            keys: [alicepw]
+        commands:
+          allow: ["@read", "@write", "@connection"]
+        keys:
+          readWrite: ["app:*"]
   config:
     maxmemory: 100mb
     maxmemory-policy: allkeys-lru

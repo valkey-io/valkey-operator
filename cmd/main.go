@@ -265,9 +265,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Feature gates",
-		"Valkey", gates.Enabled(features.Valkey),
-		"ValkeySentinel", gates.Enabled(features.ValkeySentinel))
+	setupLog.Info("Feature gates", "gates", features.State(gates))
 	if err := features.RequireCRDs(gates, mgr.GetRESTMapper()); err != nil {
 		setupLog.Error(err, "Feature gate check failed")
 		os.Exit(1)

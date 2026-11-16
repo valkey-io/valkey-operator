@@ -49,6 +49,19 @@ func TestGateSet(t *testing.T) {
 	}
 }
 
+func TestState(t *testing.T) {
+	g := NewGate()
+	if got, want := State(g), "Valkey=false,ValkeySentinel=false"; got != want {
+		t.Errorf("State = %q, want %q", got, want)
+	}
+	if err := g.Set("ValkeySentinel=true"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := State(g), "Valkey=false,ValkeySentinel=true"; got != want {
+		t.Errorf("State = %q, want %q", got, want)
+	}
+}
+
 func TestRequireCRD(t *testing.T) {
 	installed := meta.NewDefaultRESTMapper([]schema.GroupVersion{valkeyiov1alpha1.GroupVersion})
 	installed.Add(valkeyiov1alpha1.GroupVersion.WithKind("Valkey"), meta.RESTScopeNamespace)

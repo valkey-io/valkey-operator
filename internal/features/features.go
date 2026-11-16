@@ -19,6 +19,9 @@ package features
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -46,6 +49,17 @@ func NewGate() featuregate.MutableFeatureGate {
 	g := featuregate.NewFeatureGate()
 	utilruntime.Must(g.Add(specs))
 	return g
+}
+
+// State returns every known gate and its value, sorted by name.
+// For example "Valkey=false,ValkeySentinel=true".
+func State(g featuregate.FeatureGate) string {
+	names := slices.Sorted(maps.Keys(specs))
+	parts := make([]string, 0, len(names))
+	for _, f := range names {
+		parts = append(parts, fmt.Sprintf("%s=%t", f, g.Enabled(f)))
+	}
+	return strings.Join(parts, ",")
 }
 
 // RequireCRDs returns an error when an enabled gate has no CRD installed.

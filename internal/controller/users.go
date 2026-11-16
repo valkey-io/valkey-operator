@@ -29,8 +29,10 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -630,4 +632,49 @@ func upsertInternalAclSecret(ctx context.Context, rc *resourceClient, owner clie
 
 	rc.Recorder.Eventf(owner, nil, corev1.EventTypeNormal, "InternalSecretsUpdated", "ReconcileUsers", "Synchronized internal ACLs")
 	return nil
+}
+
+// internalACLSecretExists reports whether the owner already has an aclfile
+// in its internal ACL Secret, which is what the nodes keep running while a
+// rebuild fails. A Secret whose aclfile entry is missing or empty is no
+// fallback: the nodes have nothing to keep.
+func internalACLSecretExists(ctx context.Context, c client.Reader, name, namespace string) bool {
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKey{Name: getInternalSecretName(name), Namespace: namespace}, secret); err != nil {
+		return false
+	}
+	return len(secret.Data[aclFilename]) > 0
+}
+
+// reportUsersACLUnresolved carries the result of the ACL step on the Degraded
+// condition. A nil aclErr clears the condition it set earlier, with a Normal
+// event on the transition. A non-nil aclErr sets Degraded=UsersACLUnresolved
+// and, when the failure first appears or changes, logs it and emits a Warning
+// event. The internal ACL Secret keeps its last good aclfile, which the
+// running nodes already use and new nodes mount too; the system users take
+// their passwords from the system-passwords Secret, so the operator still
+// reaches every node.
+func reportUsersACLUnresolved(ctx context.Context, recorder events.EventRecorder, obj client.Object, conditions *[]metav1.Condition, generation int64, aclErr error) {
+	// Copy the condition: SetStatusCondition updates the stored one in place.
+	var previous metav1.Condition
+	if found := meta.FindStatusCondition(*conditions, valkeyiov1alpha1.ConditionDegraded); found != nil {
+		previous = *found
+	}
+	wasUnresolved := previous.Status == metav1.ConditionTrue && previous.Reason == valkeyiov1alpha1.ReasonUsersACLUnresolved
+	if aclErr == nil {
+		if wasUnresolved {
+			meta.RemoveStatusCondition(conditions, valkeyiov1alpha1.ConditionDegraded)
+			recorder.Eventf(obj, nil, corev1.EventTypeNormal, "UsersACLResolved", "ReconcileUsersACL", "Users ACL rebuilt; previously: %s", previous.Message)
+		}
+		return
+	}
+	message := aclErr.Error()
+	setConditionOn(conditions, generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, message, metav1.ConditionTrue)
+	// The healthy branch may have appended the nodes that cannot apply the
+	// aclfile to this message; the failure itself is unchanged then.
+	if wasUnresolved && (previous.Message == message || strings.HasPrefix(previous.Message, message+aclNotAppliedSeparator)) {
+		return
+	}
+	logf.FromContext(ctx).Error(aclErr, "users ACL not updated, nodes keep the last applied aclfile")
+	recorder.Eventf(obj, nil, corev1.EventTypeWarning, "UsersACLUnresolved", "ReconcileUsersACL", "Users ACL not updated, nodes keep the last applied aclfile: %v", aclErr)
 }

@@ -40,50 +40,59 @@ func (r *ValkeyClusterReconciler) reconcilePodDisruptionBudget(ctx context.Conte
 	if cfg := cluster.Spec.PodDisruptionBudget; cfg != nil && cfg.Mode != "" {
 		mode = cfg.Mode
 	}
+	rc := &resourceClient{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Recorder: r.Recorder}
+	// Cluster mode (and any unknown future value) creates the cluster-wide PDB.
+	return reconcilePDB(ctx, rc, cluster, cluster.Name, cluster.Namespace, labels(cluster), mode != valkeyiov1alpha1.PDBModeDisabled)
+}
 
-	if mode == valkeyiov1alpha1.PDBModeDisabled {
+// reconcilePDB keeps a maxUnavailable 1 PodDisruptionBudget over the pods labelled LabelCluster=name.
+// When enabled is false it deletes any existing one instead.
+// Shared by the ValkeyCluster and Valkey controllers.
+func reconcilePDB(ctx context.Context, rc *resourceClient, owner client.Object, name, namespace string, labels map[string]string, enabled bool) error {
+	pdbResourceName := resourcePrefix + name
+
+	if !enabled {
 		pdb := &policyv1.PodDisruptionBudget{}
-		err := r.Get(ctx, client.ObjectKey{Name: pdbName(cluster), Namespace: cluster.Namespace}, pdb)
+		err := rc.Get(ctx, client.ObjectKey{Name: pdbResourceName, Namespace: namespace}, pdb)
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("getting PDB for deletion: %w", err)
 		}
-		if err := r.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+		if err := rc.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting PDB: %w", err)
 		}
-		r.Recorder.Eventf(cluster, pdb, corev1.EventTypeNormal, "PodDisruptionBudgetDeleted", "DeletePodDisruptionBudget", "Deleted PodDisruptionBudget")
+		rc.Recorder.Eventf(owner, pdb, corev1.EventTypeNormal, "PodDisruptionBudgetDeleted", "DeletePodDisruptionBudget", "Deleted PodDisruptionBudget")
 		return nil
 	}
 
-	// Cluster mode (and any unknown future value) creates the cluster-wide PDB.
 	maxUnavailable := intstr.FromInt32(1)
 	existing := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      pdbName(cluster),
-			Namespace: cluster.Namespace,
+			Name:      pdbResourceName,
+			Namespace: namespace,
 		},
 	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
-		existing.Labels = labels(cluster)
+	result, err := controllerutil.CreateOrUpdate(ctx, rc.Client, existing, func() error {
+		existing.Labels = labels
 		existing.Spec.MaxUnavailable = &maxUnavailable
 		existing.Spec.MinAvailable = nil
 		existing.Spec.Selector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				LabelCluster: cluster.Name,
+				LabelCluster: name,
 			},
 		}
-		return controllerutil.SetControllerReference(cluster, existing, r.Scheme)
+		return controllerutil.SetControllerReference(owner, existing, rc.Scheme)
 	})
 	if err != nil {
 		return fmt.Errorf("upserting PDB: %w", err)
 	}
 	switch result {
 	case controllerutil.OperationResultCreated:
-		r.Recorder.Eventf(cluster, existing, corev1.EventTypeNormal, "PodDisruptionBudgetCreated", "CreatePodDisruptionBudget", "Created PodDisruptionBudget")
+		rc.Recorder.Eventf(owner, existing, corev1.EventTypeNormal, "PodDisruptionBudgetCreated", "CreatePodDisruptionBudget", "Created PodDisruptionBudget")
 	case controllerutil.OperationResultUpdated:
-		r.Recorder.Eventf(cluster, existing, corev1.EventTypeNormal, "PodDisruptionBudgetUpdated", "UpdatePodDisruptionBudget", "Updated PodDisruptionBudget")
+		rc.Recorder.Eventf(owner, existing, corev1.EventTypeNormal, "PodDisruptionBudgetUpdated", "UpdatePodDisruptionBudget", "Updated PodDisruptionBudget")
 	}
 	return nil
 }

@@ -51,6 +51,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/internal/features"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
 	// +kubebuilder:scaffold:imports
 )
@@ -108,6 +109,9 @@ func main() {
 			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
 			"bind it to localhost and do not add it to a Service.")
 	imageFlags(flag.CommandLine)
+	gates := features.NewGate()
+	flag.Func("feature-gates", "Comma-separated key=value pairs that enable alpha APIs. Options:\n"+
+		strings.Join(gates.KnownFeatures(), "\n"), gates.Set)
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -258,6 +262,12 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Feature gates", "gates", features.State(gates))
+	if err := features.RequireCRDs(gates, mgr.GetRESTMapper()); err != nil {
+		setupLog.Error(err, "Feature gate check failed")
 		os.Exit(1)
 	}
 

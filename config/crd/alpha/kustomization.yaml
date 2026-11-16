@@ -1,0 +1,5 @@
+# CRDs of the alpha APIs, left out of the default install.
+# The CRD files live in ../bases, so build with --load-restrictor LoadRestrictionsNone.
+# Use `make install-alpha` rather than building this directly.
+resources:
+- ../bases/valkey.io_valkeys.yaml

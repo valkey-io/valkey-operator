@@ -21,6 +21,7 @@ make install-alpha
 ```
 
 `make deploy-alpha` installs the CRDs and deploys the operator with the gates on.
+`make uninstall-alpha` and `make undeploy-alpha` remove them again.
 
 ## Behaviour
 

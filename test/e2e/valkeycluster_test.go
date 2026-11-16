@@ -401,7 +401,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, singleNodeClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -787,7 +787,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, baseShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scaleout.yaml")
 			err := os.WriteFile(manifestFile, []byte(scaleOutManifest), 0644)
@@ -916,7 +916,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: %d
-  replicas: 1
+  replicasPerShard: 1
 `, valkeyClusterName, initialShards)
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-scalein.yaml")
 			err := os.WriteFile(manifestFile, []byte(manifest), 0644)
@@ -1078,7 +1078,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
 `
 
 			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-degraded.yaml")
@@ -1210,7 +1210,7 @@ metadata:
   name: %[1]s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   acl:
     users:
       - name: default
@@ -1484,7 +1484,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   workloadType: StatefulSet
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -1524,7 +1524,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, addClusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -1558,7 +1558,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   persistence:
     size: 1Gi
 `, shrinkClusterName)
@@ -1598,7 +1598,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1686,7 +1686,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "%s"
@@ -1740,7 +1740,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     node:
       spread:
@@ -1822,7 +1822,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -1898,7 +1898,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     zone:
       spread:
@@ -1991,7 +1991,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     nodeSelector:
       %s: "true"
@@ -2036,7 +2036,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 2
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2121,7 +2121,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2137,7 +2137,7 @@ spec:
 
 			By("scaling to 1 replica")
 			cmd = exec.Command("kubectl", "patch", "valkeycluster", clusterName,
-				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+				"--type=merge", "-p", `{"spec":{"replicasPerShard":1}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2176,7 +2176,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)
@@ -2265,7 +2265,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2412,6 +2412,7 @@ spec:
 		const clusterName = "valkeycluster-default-user-e2e"
 		const usersSecret = "valkey-default-user-users"
 		const clientPod = "default-user-client"
+		const heldPod = "default-user-held"
 		const alicePassword = "default-user-alice-pw"
 		clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", clusterName)
 
@@ -2481,6 +2482,19 @@ spec:
 			return ping(g, fmt.Sprintf("--user alice --pass %s --no-auth-warning", alicePassword))
 		}
 
+		// pongs counts the PONG replies the held connection has logged so far.
+		pongs := func(g Gomega) int {
+			out, err := utils.Run(exec.Command("kubectl", "logs", heldPod))
+			g.Expect(err).NotTo(HaveOccurred())
+			n := 0
+			for line := range strings.SplitSeq(out, "\n") {
+				if strings.TrimSpace(line) == "PONG" {
+					n++
+				}
+			}
+			return n
+		}
+
 		podUIDs := func(g Gomega) string {
 			out, err := utils.Run(exec.Command("kubectl", "get", "pods",
 				"-l", "valkey.io/cluster="+clusterName, "-o", "jsonpath={.items[*].metadata.uid}"))
@@ -2493,7 +2507,7 @@ spec:
 			defer func() {
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false"))
 				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", usersSecret, "--ignore-not-found=true", "--wait=false"))
-				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", clientPod, "--ignore-not-found=true", "--wait=false"))
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", clientPod, heldPod, "--ignore-not-found=true", "--wait=false"))
 			}()
 
 			By("creating a cluster that declares alice but not default")
@@ -2517,12 +2531,33 @@ spec:
 				g.Expect(anonymous(g)).To(ContainSubstring("PONG"))
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
+			By("holding one anonymous connection open, pinging every second")
+			_, err := utils.Run(exec.Command("kubectl", "run", heldPod,
+				"--image="+valkeyClientImage, "--restart=Never", "--",
+				"sh", "-c", fmt.Sprintf("valkey-cli -h %s -r -1 -i 1 PING 2>&1", clusterFqdn)))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(pongs(g)).To(BeNumerically(">=", 3))
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
 			By("removing the declaration, which disables default again live")
 			applyManifest(buildManifest(false))
 			Eventually(func(g Gomega) {
 				g.Expect(anonymous(g)).To(ContainSubstring("NOAUTH"))
 				g.Expect(alice(g)).To(ContainSubstring("PONG"))
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("closing the connection that logged in while default was on")
+			// Without the kill it keeps its authenticated flag and goes on
+			// getting PONG; once closed, any reconnect gets NOAUTH.
+			last := -1
+			Eventually(func(g Gomega) {
+				current := pongs(g)
+				settled := current == last
+				last = current
+				g.Expect(settled).To(BeTrue(), "the held anonymous connection is still getting PONG")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			Consistently(func(g Gomega) int { return pongs(g) }, 15*time.Second, 3*time.Second).Should(Equal(last))
 
 			Expect(podUIDs(Default)).To(Equal(before), "the default user must change without recreating a pod")
 		})
@@ -2551,7 +2586,7 @@ metadata:
   name: %s
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   resources:
     requests:
       cpu: "100m"
@@ -2702,7 +2737,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
 `, clusterName)
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(manifest)

@@ -105,7 +105,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     tolerations:
     - key: "dedicated"
@@ -185,7 +185,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     tolerations:
       - key: "dedicated"
@@ -270,7 +270,7 @@ spec:
           type: Any
         permissions: "~* &* +@all"
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
   scheduling:
     tolerations: []
 `, valkeyName)

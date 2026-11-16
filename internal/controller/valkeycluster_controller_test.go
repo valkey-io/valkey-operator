@@ -51,7 +51,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		It("names the waiting shard in the UpdatingNodes message and writes the status at most once per reconcile", func() {
 			cluster := &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
-				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			DeferCleanup(func() {
@@ -165,6 +165,82 @@ var _ = Describe("ValkeyCluster Controller", func() {
 		})
 	})
 
+	Context("When a node rejects the operator's password", func() {
+		const resourceName = "operator-lockout"
+		ctx := context.Background()
+		key := types.NamespacedName{Name: resourceName, Namespace: "default"}
+
+		It("reports the lockout as Degraded before the topology checks, and clears it once the node accepts the password", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+				Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 1},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			DeferCleanup(func() {
+				nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
+				_ = k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: resourceName})
+				for i := range nodeList.Items {
+					_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+				}
+				_ = k8sClient.Delete(ctx, cluster)
+			})
+
+			// A locked-out node fails the scrape, so the scrape sees nothing.
+			reconciler := &ValkeyClusterReconciler{
+				Client:        k8sClient,
+				APIReader:     k8sClient,
+				Scheme:        k8sClient.Scheme(),
+				Recorder:      events.NewFakeRecorder(200),
+				ValkeyClients: testValkeyClients(k8sClient),
+				clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
+					return &valkey.ClusterState{}
+				},
+			}
+			reconcileOnce := func() {
+				GinkgoHelper()
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			condition := func(condType string) *metav1.Condition {
+				GinkgoHelper()
+				updated := &valkeyiov1alpha1.ValkeyCluster{}
+				Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
+				return testutils.FindCondition(updated.Status.Conditions, condType)
+			}
+			setACLApplied := func(reason string, status metav1.ConditionStatus) {
+				GinkgoHelper()
+				node := &valkeyiov1alpha1.ValkeyNode{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(resourceName, 0, 1), Namespace: "default"}, node)).To(Succeed())
+				node.Status.Ready = true
+				meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+					Type: valkeyiov1alpha1.ValkeyNodeConditionACLApplied, Status: status, Reason: reason, Message: "test",
+				})
+				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			}
+
+			By("creating the nodes, then marking the replica as rejecting the operator's password")
+			reconcileOnce()
+			setACLApplied(valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, metav1.ConditionFalse)
+
+			By("reporting the lockout, not missing shards")
+			reconcileOnce()
+			degraded := condition(valkeyiov1alpha1.ConditionDegraded)
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+			Expect(degraded.Reason).To(Equal(valkeyiov1alpha1.ReasonOperatorAuthenticationFailed))
+			Expect(degraded.Message).To(ContainSubstring(valkeyNodeName(resourceName, 0, 1) + " rejects the _operator password"))
+			Expect(degraded.Message).To(ContainSubstring(getSystemPasswordSecretName(resourceName)))
+			Expect(condition(valkeyiov1alpha1.ConditionReady).Reason).To(Equal(valkeyiov1alpha1.ReasonOperatorAuthenticationFailed))
+			Expect(condition(valkeyiov1alpha1.ConditionProgressing).Status).To(Equal(metav1.ConditionFalse))
+
+			By("clearing Degraded once the node accepts the password")
+			setACLApplied(valkeyiov1alpha1.ValkeyNodeReasonApplied, metav1.ConditionTrue)
+			reconcileOnce()
+			Expect(condition(valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+			Expect(condition(valkeyiov1alpha1.ConditionReady).Reason).NotTo(Equal(valkeyiov1alpha1.ReasonOperatorAuthenticationFailed))
+		})
+	})
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -186,8 +262,8 @@ var _ = Describe("ValkeyCluster Controller", func() {
 						Namespace: "default",
 					},
 					Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-						Shards:   3,
-						Replicas: 1,
+						Shards:           3,
+						ReplicasPerShard: 1,
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -262,7 +338,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:             3,
-					Replicas:           1,
+					ReplicasPerShard:   1,
 					ServiceAccountName: "missing-sa",
 				},
 			}
@@ -302,7 +378,7 @@ var _ = Describe("ValkeyCluster Controller", func() {
 			cluster := &valkeyiov1alpha1.ValkeyCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "sa-lookup-failed", Namespace: "default"},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards: 1, Replicas: 0, ServiceAccountName: "valkey-sa",
+					Shards: 1, ReplicasPerShard: 0, ServiceAccountName: "valkey-sa",
 				},
 			}
 			r := &ValkeyClusterReconciler{APIReader: errorReader{err: stderrors.New("connection refused")}}
@@ -334,8 +410,8 @@ var _ = Describe("ValkeyCluster Controller", func() {
 					Finalizers: []string{"test.valkey.io/block-deletion"},
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -399,9 +475,9 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Config:   map[string]string{"maxmemory": "100mb"},
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Config:           map[string]string{"maxmemory": "100mb"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -513,9 +589,9 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Config:   map[string]string{"maxmemory": "100mb"},
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Config:           map[string]string{"maxmemory": "100mb"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -578,8 +654,8 @@ var _ = Describe("pod scheduling issue handling", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 1,
+				Shards:           1,
+				ReplicasPerShard: 1,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -652,8 +728,8 @@ var _ = Describe("pod scheduling issue handling", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 1,
+				Shards:           1,
+				ReplicasPerShard: 1,
 			},
 		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, "Pod is unschedulable", metav1.ConditionFalse)
@@ -699,8 +775,8 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   1,
-					Replicas: 0,
+					Shards:           1,
+					ReplicasPerShard: 0,
 					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:    "testuser",
@@ -736,8 +812,8 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   1,
-					Replicas: 0,
+					Shards:           1,
+					ReplicasPerShard: 0,
 					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
 						{
 							Name:       "testuser",
@@ -934,8 +1010,8 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   1,
-					Replicas: 0,
+					Shards:           1,
+					ReplicasPerShard: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
 						Enabled: new(false),
 					},
@@ -1011,8 +1087,8 @@ var _ = Describe("reconcileUsersAcl", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   1,
-					Replicas: 0,
+					Shards:           1,
+					ReplicasPerShard: 0,
 					Exporter: valkeyiov1alpha1.ExporterSpec{
 						Enabled: new(false),
 					},
@@ -1166,8 +1242,8 @@ var _ = Describe("UpdatingNodes topology status", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   3,
-				Replicas: 0,
+				Shards:           3,
+				ReplicasPerShard: 0,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1409,7 +1485,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
 		cluster.Spec.Shards = 1
-		cluster.Spec.Replicas = 1
+		cluster.Spec.ReplicasPerShard = 1
 		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
@@ -1508,8 +1584,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1531,8 +1607,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1562,8 +1638,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1583,8 +1659,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1617,8 +1693,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1643,8 +1719,8 @@ var _ = Describe("EventRecorder", func() {
 					Namespace: "default",
 				},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-					Shards:   3,
-					Replicas: 1,
+					Shards:           3,
+					ReplicasPerShard: 1,
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -1719,10 +1795,10 @@ var _ = Describe("reconcileValkeyNodes", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:       2,
-				Replicas:     1,
-				Image:        "valkey/valkey:9.0.0",
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Shards:           2,
+				ReplicasPerShard: 1,
+				Image:            "valkey/valkey:9.0.0",
+				WorkloadType:     valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(testCtx, cluster)).To(Succeed())
@@ -2124,10 +2200,10 @@ var _ = Describe("reconcileValkeyNode", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:       1,
-				Replicas:     0,
-				Image:        "valkey/valkey:9.0.0",
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Image:            "valkey/valkey:9.0.0",
+				WorkloadType:     valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(testCtx, cluster)).To(Succeed())
@@ -2248,9 +2324,9 @@ var _ = Describe("buildClusterValkeyNode config passthrough", Label("liveconfig"
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Config:   map[string]string{"maxmemory-policy": "allkeys-lru"},
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Config:           map[string]string{"maxmemory-policy": "allkeys-lru"},
 			},
 		}
 		node := buildClusterValkeyNode(cluster, 0, 0)
@@ -2263,8 +2339,8 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 				Scheduling: &valkeyiov1alpha1.SchedulingSpec{
 					PriorityClassName: "high-priority",
 				},
@@ -2278,8 +2354,8 @@ var _ = Describe("buildClusterValkeyNode scheduling passthrough", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 			},
 		}
 		node := buildClusterValkeyNode(cluster, 0, 0)

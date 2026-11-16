@@ -45,6 +45,15 @@ func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason st
 	}
 }
 
+// removeConditionUnlessReason removes condType unless it carries reason, whose
+// owner clears it itself.
+func removeConditionUnlessReason(conditions *[]metav1.Condition, condType, reason string) {
+	condition := meta.FindStatusCondition(*conditions, condType)
+	if condition != nil && condition.Reason != reason {
+		meta.RemoveStatusCondition(conditions, condType)
+	}
+}
+
 // configWarning represents a configuration warning with a reason and message.
 type configWarning struct {
 	reason  string

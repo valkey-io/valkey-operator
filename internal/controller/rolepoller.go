@@ -181,6 +181,11 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	if !cluster.DeletionTimestamp.IsZero() {
 		return
 	}
+	// A paused cluster gets no commands from the operator, reads included, and
+	// the reconcile it would trigger does nothing until the pause is lifted.
+	if reconciliationPaused(cluster) {
+		return
+	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := p.Client.List(ctx, nodes,

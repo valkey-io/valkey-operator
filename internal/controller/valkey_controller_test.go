@@ -162,7 +162,8 @@ var _ = Describe("Valkey controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(getStatus().State).To(Equal(valkeyiov1alpha1.ValkeyStateReconciling))
 
-		// A user whose password Secret does not exist makes the ACL step fail.
+		// With no aclfile to fall back on, a user whose password Secret does not exist fails the ACL step.
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(v.Name), Namespace: v.Namespace}})).To(Succeed())
 		current := &valkeyiov1alpha1.Valkey{}
 		Expect(k8sClient.Get(ctx, req.NamespacedName, current)).To(Succeed())
 		current.Spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
@@ -176,6 +177,59 @@ var _ = Describe("Valkey controller", func() {
 		status := getStatus()
 		Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateFailed))
 		Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersAclError))
+	})
+
+	Context("when a user password Secret is missing", func() {
+		var secretKey types.NamespacedName
+
+		BeforeEach(func() {
+			secretKey = types.NamespacedName{Name: "alice-password", Namespace: v.Namespace}
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretKey.Name, Namespace: secretKey.Namespace}})
+			})
+		})
+
+		updateSpec := func(mutate func(*valkeyiov1alpha1.ValkeySpec)) {
+			current := &valkeyiov1alpha1.Valkey{}
+			Expect(k8sClient.Get(ctx, req.NamespacedName, current)).To(Succeed())
+			mutate(&current.Spec)
+			Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		}
+
+		It("keeps reconciling the node and reports Degraded, then clears it once the Secret exists", func() {
+			_, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			updateSpec(func(spec *valkeyiov1alpha1.ValkeySpec) {
+				spec.Config = map[string]string{"maxmemory": "120mb"}
+				spec.ACL = &valkeyiov1alpha1.ValkeyACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name:     "alice",
+					Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: secretKey.Name}},
+				}}}
+			})
+
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			status := getStatus()
+			Expect(status.State).To(Equal(valkeyiov1alpha1.ValkeyStateDegraded))
+			Expect(status.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersACLUnresolved))
+			Expect(status.Message).To(ContainSubstring("alice"))
+			Expect(status.Message).To(ContainSubstring(secretKey.Name))
+
+			// The unrelated config change still reaches the node.
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: valkeyNodeName(v.Name, 0, 0), Namespace: v.Namespace}, node)).To(Succeed())
+			Expect(node.Spec.Config).To(HaveKeyWithValue("maxmemory", "120mb"))
+
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretKey.Name, Namespace: secretKey.Namespace},
+				StringData: map[string]string{"alice": "s3cret"},
+			})).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getStatus().Reason).NotTo(Equal(valkeyiov1alpha1.ReasonUsersACLUnresolved))
+			Expect(getStatus().State).NotTo(Equal(valkeyiov1alpha1.ValkeyStateDegraded))
+		})
 	})
 
 	It("reports Degraded when the node cannot apply live config", func() {

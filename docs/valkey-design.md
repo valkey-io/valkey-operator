@@ -118,6 +118,7 @@ The controller runs these steps in order on every reconcile:
 2. Upsert the headless Service.
 3. Reconcile the PDB. At `spec.replicas: 0` this deletes any existing budget.
 4. Reconcile the ACL. This creates the system password Secret if missing, then writes the internal ACL Secret.
+   A user whose password Secret cannot be read does not stop the reconcile once an aclfile exists. The node keeps the last aclfile and the failure goes on `Degraded`.
 5. Upsert the server ConfigMap with the standalone `valkey.conf`.
 6. Create or update the single `ValkeyNode`.
 7. Derive conditions from the node's status, then patch the `Valkey` status.
@@ -161,7 +162,7 @@ Conditions follow [status-conditions.md](status-conditions.md).
 | --- | --- |
 | `Ready` | The node reports ready. Reason `InstanceHealthy` |
 | `Progressing` | Waiting for the node to become ready |
-| `Degraded` | The node failed to apply the ACL (`ACLApplyFailed`) or live config (`LiveConfigApplyFailed`) |
+| `Degraded` | A user password Secret is missing or lacks a listed key (`UsersACLUnresolved`), or the node failed to apply the ACL (`ACLApplyFailed`) or live config (`LiveConfigApplyFailed`) |
 
 A child resource error sets `Ready=False` with the existing reason for that resource, such as `ServiceError` or `ConfigMapError`, and the reconcile is retried.
 

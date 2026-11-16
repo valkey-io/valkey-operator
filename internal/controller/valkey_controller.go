@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -84,9 +85,18 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonPodDisruptionBudgetError, err)
 	}
 
-	if err := reconcileUsersAcl(ctx, rc, v, v.Name, v.Namespace, labels, v.Spec.ACLUsers(), v.Spec.ExporterEnabled()); err != nil {
-		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonUsersAclError, err)
+	// A user Secret the operator cannot read must not stop the instance.
+	// Once an aclfile exists, the failure is reported on Degraded and the reconcile carries on with that aclfile.
+	// Any other ACL failure, and a missing Secret before the first aclfile exists, still fail the reconcile.
+	aclErr := reconcileUsersAcl(ctx, rc, v, v.Name, v.Namespace, labels, v.Spec.ACLUsers(), v.Spec.ExporterEnabled())
+	var unresolved *userSecretUnresolvedError
+	fallback := errors.As(aclErr, &unresolved) && internalACLSecretExists(ctx, r.Client, v.Name, v.Namespace)
+	if aclErr != nil && !fallback {
+		// A fallback that stops being usable must not keep reporting the old reason.
+		removeConditionIfReason(&v.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonUsersAclError, aclErr)
 	}
+	reportUsersACLUnresolved(ctx, r.Recorder, v, &v.Status.Conditions, v.Generation, aclErr)
 
 	if err := upsertServerConfigMap(ctx, rc, v, v.Name, v.Namespace, labels, buildValkeyServerConfig(v)); err != nil {
 		return r.failChild(ctx, v, valkeyiov1alpha1.ReasonConfigMapError, err)
@@ -116,7 +126,14 @@ func (r *ValkeyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// A node whose ACL or live config the operator cannot apply runs with settings the spec does not declare.
 	// The instance would otherwise read as healthy with that change not in effect.
-	if nodeConditionFailed(node, valkeyiov1alpha1.ValkeyNodeConditionACLApplied) {
+	// An aclfile the operator could not rebuild is already on Degraded and stays there.
+	// The node runs the last good aclfile, so it reports ACLApplied, but the declared users are not all in effect.
+	aclNotApplied := nodeConditionFailed(node, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+	if aclErr != nil {
+		if aclNotApplied {
+			setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, aclErr.Error()+aclNotAppliedSeparator+node.Name, metav1.ConditionTrue)
+		}
+	} else if aclNotApplied {
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonACLApplyFailed, fmt.Sprintf("ACL not applied on %s", node.Name), metav1.ConditionTrue)
 	} else if nodeConditionFailed(node, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied) {
 		setConditionOn(&v.Status.Conditions, v.Generation, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonLiveConfigApplyFailed, fmt.Sprintf("Live config not applied on %s", node.Name), metav1.ConditionTrue)

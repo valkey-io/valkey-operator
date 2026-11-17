@@ -1121,14 +1121,16 @@ func TestGetClusterStateDialsConcurrentlyUpToTheCap(t *testing.T) {
 	var mu sync.Mutex
 	active, peak, dialled := 0, 0, 0
 	full := make(chan struct{})
+	var fullOnce sync.Once
 	release := make(chan struct{})
 	var dial DialFunc = func(_ context.Context, _ string) (vclient.Client, error) {
 		mu.Lock()
 		active++
 		dialled++
 		peak = max(peak, active)
+		// Queued dials can refill the slots after release; signal only the first.
 		if active == scrapeConcurrency {
-			close(full)
+			fullOnce.Do(func() { close(full) })
 		}
 		mu.Unlock()
 		<-release

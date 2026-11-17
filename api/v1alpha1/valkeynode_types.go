@@ -347,6 +347,24 @@ type ValkeyNodeStatus struct {
 	// container that started after it may hold an older password from the file.
 	// +optional
 	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
+
+	// AppliedLiveConfig holds the live-settable keys of spec.config that the
+	// server last accepted through CONFIG SET, recorded as LiveConfigApplied
+	// becomes True.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AppliedLiveConfig []AppliedLiveConfigEntry `json:"appliedLiveConfig,omitempty"`
+}
+
+// AppliedLiveConfigEntry is one live-settable directive the server accepted.
+type AppliedLiveConfigEntry struct {
+	// Name is the directive name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Value is the directive's value.
+	Value string `json:"value"`
 }
 
 const (

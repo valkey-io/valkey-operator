@@ -2,7 +2,7 @@
 
 This document describes the internal implementation of the valkey-operator for developers contributing to the codebase.
 
-For the user-facing API see [valkeycluster.md](valkeycluster.md). For the ValkeyNode CRD design rationale see [valkeynode-design.md](valkeynode-design.md). For status conditions and events see [status-conditions.md](status-conditions.md).
+For the user-facing API see [valkeycluster.md](valkeycluster.md). For the ValkeyNode CRD design rationale see [valkeynode-design.md](valkeynode-design.md). For the standalone Valkey CRD and controller see [valkey-design.md](valkey-design.md). For status conditions and events see [status-conditions.md](status-conditions.md).
 
 ## Controllers
 

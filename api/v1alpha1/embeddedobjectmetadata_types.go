@@ -38,7 +38,7 @@ type EmbeddedObjectMetadata struct {
 	// are reserved for the operator.
 	// +kubebuilder:validation:MaxProperties=1024
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$') && (!k.contains('/') || k.indexOf('/') <= 253))",message="label keys must be an optional DNS subdomain prefix (lowercase, at most 253 characters) and '/', followed by a name of at most 63 alphanumerics, '-', '_' or '.', starting and ending with an alphanumeric"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name', 'app.kubernetes.io/instance', 'app.kubernetes.io/component', 'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))",message="label keys under valkey.io/ and app.kubernetes.io/ name, instance, component, part-of and managed-by are reserved for the operator"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name', 'app.kubernetes.io/instance', 'app.kubernetes.io/component', 'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))",message="label keys under valkey.io/ and app.kubernetes.io/ name, instance, component, part-of and managed-by are reserved for the operator",reason="FieldValueForbidden"
 	// +optional
 	Labels map[string]LabelValue `json:"labels,omitempty"`
 
@@ -48,7 +48,7 @@ type EmbeddedObjectMetadata struct {
 	// +kubebuilder:validation:MaxProperties=1024
 	// +kubebuilder:validation:XValidation:rule="self.map(k, size(k) + size(self[k])).sum() <= 262059",message="annotations must total at most 262059 characters (keys plus values): 256 KiB less the operator's valkey.io/config-hash annotation"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$') && (!k.contains('/') || k.indexOf('/') <= 253))",message="annotation keys must be an optional DNS subdomain prefix (at most 253 characters) and '/', followed by a name of at most 63 alphanumerics, '-', '_' or '.', starting and ending with an alphanumeric"
-	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('valkey.io/'))",message="annotation keys under valkey.io/ are reserved for the operator"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('valkey.io/'))",message="annotation keys under valkey.io/ are reserved for the operator",reason="FieldValueForbidden"
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 }

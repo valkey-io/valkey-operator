@@ -108,9 +108,15 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -360,9 +366,15 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -573,7 +585,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -584,15 +596,20 @@ spec:
         certificateUser: CN
   exporter:
     enabled: true
-  users:
-    - name: alice
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~* &*"
-    - name: valkey-cluster-mtls.default.svc.cluster.local
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~* &*"
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+      - name: alice
+        password:
+          type: Disabled
+        permissions: "+@all ~* &*"
+      - name: valkey-cluster-mtls.default.svc.cluster.local
+        password:
+          type: Disabled
+        permissions: "+@all ~* &*"
 `, clusterName, serverCertSecret)
 		clusterFile := filepath.Join(tmpDir, "valkeycluster-mtls.yaml")
 		Expect(os.WriteFile(clusterFile, []byte(clusterManifest), 0644)).To(Succeed())

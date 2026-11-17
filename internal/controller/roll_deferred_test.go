@@ -46,7 +46,7 @@ func shardState(link string) *valkey.ClusterState {
 
 func TestMaybeProactiveFailoverBeforeRollCause(t *testing.T) {
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(10)}
-	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1}}
+	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1}}
 	primary := &valkeyv1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-0"},
 		Status:     valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"},
@@ -58,7 +58,7 @@ func TestMaybeProactiveFailoverBeforeRollCause(t *testing.T) {
 	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), primary, false), "a spec update that does not roll the pod needs no failover")
 	replica := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-1"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.2"}}
 	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("down"), replica, true), "a replica rolls without failover")
-	single := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 0}}
+	single := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 0}}
 	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), single, shardState("down"), primary, true), "without replicas there is nothing to wait for")
 }
 
@@ -71,7 +71,7 @@ func TestMaybeProactiveFailoverBeforeRollFailoverError(t *testing.T) {
 	t.Cleanup(func() { proactiveFailoverFn = orig })
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(10)}
-	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1}}
+	cluster := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1}}
 	primary := &valkeyv1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-2-0"}, Status: valkeyv1.ValkeyNodeStatus{PodIP: "10.0.0.1"}}
 
 	cause := r.maybeProactiveFailoverBeforeRoll(context.Background(), cluster, shardState("up"), primary, true)

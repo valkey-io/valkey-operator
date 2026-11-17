@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -76,11 +77,7 @@ func (c *writeCountingClient) Count(kind, verb string) int {
 func (c *writeCountingClient) Counts() map[writeKey]int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make(map[writeKey]int, len(c.counts))
-	for k, v := range c.counts {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(c.counts)
 }
 
 // Reset clears every count.

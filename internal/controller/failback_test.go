@@ -76,7 +76,7 @@ func failbackStateFollowing(primaryIP, link, follows string, uptime int) *valkey
 }
 
 func failbackCluster(failback *valkeyv1.FailbackSpec) *valkeyv1.ValkeyCluster {
-	c := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 1}}
+	c := &valkeyv1.ValkeyCluster{Spec: valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 1}}
 	if failback != nil {
 		c.Spec.Failover = &valkeyv1.ClusterFailoverSpec{Failback: failback}
 	}

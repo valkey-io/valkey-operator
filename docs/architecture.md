@@ -62,6 +62,7 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 - `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the ConfigMap
 - `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
+- `internal/controller/hibernate.go` — hibernation and wake (`valkey.io/hibernate`): pauses writes, saves every node, stops replicas then primaries by marking their ValkeyNodes, and checks before stopping a primary that it still holds the data its replicas saved; wakes primaries before their replicas; also the ValkeyNode side that scales a marked node's workload to zero
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
 - `internal/controller/status.go` — condition helpers (`setCondition`)
 

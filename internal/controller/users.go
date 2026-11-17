@@ -77,6 +77,10 @@ var (
 			"+acl|load",                  // reload the aclfile live to apply ACL changes without a pod roll
 			"+acl|getuser",               // read back a user's password hashes to verify the reload landed
 			"+acl|users",                 // read the user set to verify membership after a reload
+			"+client|pause",              // hold writes while a hibernating cluster saves its data
+			"+client|unpause",            // resume writes when hibernation stops or is cancelled
+			"+bgsave",                    // save the dataset before a hibernating node stops
+			"+bgrewriteaof",              // same, for a node that persists through the AOF
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
 		}, " "),

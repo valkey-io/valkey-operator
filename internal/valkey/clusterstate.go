@@ -17,11 +17,11 @@ http://www.apache.org/licenses/LICENSE-2.0
 package valkey
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -284,7 +284,7 @@ func unionSlots(a, b []SlotsRange) []SlotsRange {
 	out := make([]SlotsRange, 0, len(a)+len(b))
 	out = append(out, a...)
 	out = append(out, b...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
+	slices.SortFunc(out, func(x, y SlotsRange) int { return cmp.Compare(x.Start, y.Start) })
 	merged := []SlotsRange{out[0]}
 	for _, r := range out[1:] {
 		last := &merged[len(merged)-1]
@@ -866,7 +866,7 @@ func (s *ClusterState) HeldPrimaries() []HeldPrimary {
 			}
 		}
 	}
-	sort.Strings(order)
+	slices.Sort(order)
 	out := make([]HeldPrimary, 0, len(order))
 	for _, id := range order {
 		out = append(out, *byID[id])

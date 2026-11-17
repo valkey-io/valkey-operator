@@ -29,13 +29,7 @@ import (
 
 // setCondition is a helper to set a condition with ObservedGeneration
 func setCondition(cluster *valkeyiov1alpha1.ValkeyCluster, condType, reason, message string, status metav1.ConditionStatus) {
-	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: cluster.Generation,
-	})
+	setConditionOn(&cluster.Status.Conditions, cluster.Generation, condType, reason, message, status)
 }
 
 func removeConditionIfReason(conditions *[]metav1.Condition, condType, reason string) {

@@ -653,26 +653,33 @@ func headlessServiceName(clusterName string) string {
 
 // Create or update a headless service (client connects to pods directly)
 func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
+	rc := &resourceClient{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Recorder: r.Recorder}
+	return upsertHeadlessService(ctx, rc, cluster, cluster.Name, cluster.Namespace, labels(cluster))
+}
+
+// upsertHeadlessService creates or updates the headless Service over the pods labelled LabelCluster=name.
+// Shared by the ValkeyCluster and Valkey controllers.
+func upsertHeadlessService(ctx context.Context, rc *resourceClient, owner client.Object, name, namespace string, labels map[string]string) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      headlessServiceName(cluster.Name),
-			Namespace: cluster.Namespace,
+			Name:      headlessServiceName(name),
+			Namespace: namespace,
 		},
 	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+	result, err := controllerutil.CreateOrUpdate(ctx, rc.Client, svc, func() error {
 		// SetControllerReference already rejects another controller. This
 		// error names the ValkeyNode. A free name is still created.
 		// Another cluster object with the same name is not enough.
 		if ref := metav1.GetControllerOfNoCopy(svc); ref != nil && ref.Kind == "ValkeyNode" {
 			return fmt.Errorf("service %s/%s is owned by ValkeyNode %s", svc.Namespace, svc.Name, ref.Name)
 		}
-		svc.Labels = labels(cluster)
+		svc.Labels = labels
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		// ClusterIP is immutable after creation; preserve the existing value on updates.
 		if svc.Spec.ClusterIP == "" {
 			svc.Spec.ClusterIP = "None"
 		}
-		svc.Spec.Selector = map[string]string{LabelCluster: cluster.Name}
+		svc.Spec.Selector = map[string]string{LabelCluster: name}
 		// Protocol and TargetPort are API-server defaults; set them explicitly
 		// so the rebuilt slice deep-equals the stored one and CreateOrUpdate
 		// stops updating the Service on every reconcile (#315).
@@ -682,14 +689,14 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt32(DefaultPort),
 		}}
-		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
+		return controllerutil.SetControllerReference(owner, svc, rc.Scheme)
 	})
 	if err != nil {
-		r.Recorder.Eventf(cluster, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert Service: %v", err)
+		rc.Recorder.Eventf(owner, svc, corev1.EventTypeWarning, "ServiceUpdateFailed", "UpdateService", "Failed to upsert Service: %v", err)
 		return err
 	}
 	if result == controllerutil.OperationResultCreated {
-		r.Recorder.Eventf(cluster, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
+		rc.Recorder.Eventf(owner, svc, corev1.EventTypeNormal, "ServiceCreated", "CreateService", "Created headless Service")
 	}
 	return nil
 }
@@ -2161,47 +2168,12 @@ func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // cannot apply even the last aclfile in one Degraded message.
 const aclNotAppliedSeparator = "; ACL not applied on "
 
-// internalAclSecretExists reports whether the cluster already has an aclfile
-// in its internal ACL Secret, which is what the nodes keep running while a
-// rebuild fails. A Secret whose aclfile entry is missing or empty is no
-// fallback: the nodes have nothing to keep.
+// internalAclSecretExists reports whether the cluster has an aclfile to fall back on; see internalACLSecretExists.
 func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
-		return false
-	}
-	return len(secret.Data[aclFilename]) > 0
+	return internalACLSecretExists(ctx, r.Client, cluster.Name, cluster.Namespace)
 }
 
-// reportUsersACLUnresolved carries the result of the ACL step on the Degraded
-// condition. A nil aclErr clears the condition it set earlier, with a Normal
-// event on the transition. A non-nil aclErr sets Degraded=UsersACLUnresolved
-// and, when the failure first appears or changes, logs it and emits a Warning
-// event. The internal ACL Secret keeps its last good aclfile, which the
-// running nodes already use and new nodes mount too; the system users take
-// their passwords from the system-passwords Secret, so the operator still
-// reaches every node.
+// reportUsersACLUnresolved reports the ACL step on the cluster's Degraded condition; see the shared function.
 func (r *ValkeyClusterReconciler) reportUsersACLUnresolved(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclErr error) {
-	// Copy the condition: SetStatusCondition updates the stored one in place.
-	var previous metav1.Condition
-	if found := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); found != nil {
-		previous = *found
-	}
-	wasUnresolved := previous.Status == metav1.ConditionTrue && previous.Reason == valkeyiov1alpha1.ReasonUsersACLUnresolved
-	if aclErr == nil {
-		if wasUnresolved {
-			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "UsersACLResolved", "ReconcileUsersACL", "Users ACL rebuilt; previously: %s", previous.Message)
-		}
-		return
-	}
-	message := aclErr.Error()
-	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, message, metav1.ConditionTrue)
-	// The healthy branch may have appended the nodes that cannot apply the
-	// aclfile to this message; the failure itself is unchanged then.
-	if wasUnresolved && (previous.Message == message || strings.HasPrefix(previous.Message, message+aclNotAppliedSeparator)) {
-		return
-	}
-	logf.FromContext(ctx).Error(aclErr, "users ACL not updated, nodes keep the last applied aclfile")
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "UsersACLUnresolved", "ReconcileUsersACL", "Users ACL not updated, nodes keep the last applied aclfile: %v", aclErr)
+	reportUsersACLUnresolved(ctx, r.Recorder, cluster, &cluster.Status.Conditions, cluster.Generation, aclErr)
 }

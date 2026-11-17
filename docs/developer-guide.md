@@ -38,6 +38,12 @@ Run a specific e2e test by label:
 TEST_LABELS="<label>" make test-e2e
 ```
 
+## Selecting standalone e2e tests
+
+Use the `standalone` label to select the standalone `Valkey` specs. Run them on a fresh, disposable test cluster: the suite first checks the default installation without the alpha CRD, then installs it and enables the `Valkey` feature gate. Cleanup restores the manager arguments and removes the test namespace and alpha CRD.
+
+These specs cover standalone mode, live config with an unresolved ACL Secret, password recovery and persisted data across pod replacement with a read-only server root filesystem. Replication, rolling handoff, scaling and TLS coverage remain separate follow-ups under #611.
+
 ## Keeping the "_operator" ACL in sync
 
 The operator connects to Valkey as a system user called `_operator`, whose ACL is

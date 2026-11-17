@@ -288,13 +288,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.ValkeyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("valkey-controller"),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "Valkey")
-		os.Exit(1)
+	if gates.Enabled(features.Valkey) {
+		if err := (&controller.ValkeyReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorder("valkey-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "Valkey")
+			os.Exit(1)
+		}
 	}
 
 	// The RolePoller detects role changes that move nothing in Kubernetes (a

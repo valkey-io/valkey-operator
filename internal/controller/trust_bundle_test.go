@@ -86,27 +86,27 @@ func TestMergeTrustBundle(t *testing.T) {
 	clientB := selfSignedCAPEM(t)
 
 	t.Run("server root alone when there are no client sources", func(t *testing.T) {
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server)}, bundleDERs(t, got))
 	})
 
 	t.Run("keeps source order", func(t *testing.T) {
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"b", clientB, "PEM"}, {"a", clientA, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "b", pem: clientB, format: "PEM"}, {ref: "a", pem: clientA, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientB), derOf(t, clientA)}, bundleDERs(t, got))
 	})
 
 	t.Run("drops duplicates at their first position", func(t *testing.T) {
 		both := append(append([]byte{}, clientA...), server...)
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"both", both, "PEM"}, {"a-again", clientA, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "both", pem: both, format: "PEM"}, {ref: "a-again", pem: clientA, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA)}, bundleDERs(t, got))
 	})
 
 	t.Run("allows whitespace between blocks", func(t *testing.T) {
 		spaced := append(append(append([]byte("\n  \n"), clientA...), []byte("\r\n\n")...), clientB...)
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"spaced", spaced, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "spaced", pem: spaced, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
@@ -118,7 +118,7 @@ func TestMergeTrustBundle(t *testing.T) {
 			clientA, []byte("\nOther Root CA\n=============\n"), clientB, []byte("trailing text"))
 		// The text form openssl x509 -text prints ahead of the certificate.
 		dump := join([]byte("Certificate:\n    Data:\n        Version: 3 (0x2)\n        Serial Number:\n            01:02:03\n"), clientA)
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"curl", curl, "PEM"}, {"dump", dump, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "curl", pem: curl, format: "PEM"}, {ref: "dump", pem: dump, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
@@ -133,20 +133,20 @@ func TestMergeTrustBundle(t *testing.T) {
 		}
 		// Every line indented, and a block indented only on its BEGIN line.
 		beginOnly := append([]byte("\t"), clientB...)
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"indented", append(indent(clientA, "    "), beginOnly...), "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "indented", pem: append(indent(clientA, "    "), beginOnly...), format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
 
 	t.Run("keeps every certificate of a multi-root source", func(t *testing.T) {
 		rotating := append(append([]byte{}, clientA...), clientB...)
-		got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"rotating", rotating, "PEM"}})
+		got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "rotating", pem: rotating, format: "PEM"}})
 		require.NoError(t, err)
 		assert.Equal(t, [][]byte{derOf(t, server), derOf(t, clientA), derOf(t, clientB)}, bundleDERs(t, got))
 	})
 
 	t.Run("is byte-stable for the same input", func(t *testing.T) {
-		in := []trustSource{{"server", server, "PEM"}, {"a", clientA, "PEM"}}
+		in := []trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "a", pem: clientA, format: "PEM"}}
 		first, err := mergeTrustBundle(in)
 		require.NoError(t, err)
 		second, err := mergeTrustBundle(in)
@@ -175,7 +175,7 @@ func TestMergeTrustBundle(t *testing.T) {
 		"a malformed BEGIN line": {append([]byte("x"), clientA...), `malformed PEM BEGIN line at line 1: "x-----BEGIN CERTIFICATE-----"`},
 	} {
 		t.Run("rejects a source that is "+name, func(t *testing.T) {
-			got, err := mergeTrustBundle([]trustSource{{"server", server, "PEM"}, {"bad", tc.pem, "PEM"}})
+			got, err := mergeTrustBundle([]trustSource{{ref: "server", pem: server, format: "PEM"}, {ref: "bad", pem: tc.pem, format: "PEM"}})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 			assert.Nil(t, got, "a failed merge must not return a partial bundle")

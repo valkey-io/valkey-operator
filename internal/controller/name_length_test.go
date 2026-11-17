@@ -44,7 +44,7 @@ var _ = Describe("Resource name length validation", func() {
 	nameCluster := func(name string, shards, replicas int32, workload valkeyiov1alpha1.WorkloadType) *valkeyiov1alpha1.ValkeyCluster {
 		return &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: shards, Replicas: replicas, WorkloadType: workload},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: shards, ReplicasPerShard: replicas, WorkloadType: workload},
 		}
 	}
 
@@ -68,6 +68,13 @@ var _ = Describe("Resource name length validation", func() {
 
 		By("a two-digit node index")
 		err = k8sClient.Create(ctx, nameCluster(strings.Repeat("b", 41), 1, 10, "")) // valkey-<41>-0-10 is 53
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(statefulSetLimit))
+
+		By("a two-digit node index from the deprecated replicas field")
+		legacy := nameCluster(strings.Repeat("b", 41), 1, 0, "")
+		legacy.Spec.Replicas = 10           //nolint:staticcheck // the rule must still count spec.replicas
+		err = k8sClient.Create(ctx, legacy) // valkey-<41>-0-10 is 53
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(statefulSetLimit))
 	})

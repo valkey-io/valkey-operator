@@ -41,9 +41,10 @@ const (
 	configHashKey  = "valkey.io/config-hash"
 	configFileKey  = "valkey.conf"
 
-	readinessScriptKey = "readiness-check.sh"
-	livenessScriptKey  = "liveness-check.sh"
-	initScriptKey      = "init.sh"
+	readinessScriptKey      = "readiness-check.sh"
+	livenessScriptKey       = "liveness-check.sh"
+	initScriptKey           = "init.sh"
+	primaryHandoffScriptKey = "primary-handoff.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -325,6 +326,12 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded init.sh: %w", err)
 	}
 
+	// Embed the primary handoff script
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
+	}
+
 	// Get the new server config
 	newServerConfig := buildServerConfig(cluster)
 
@@ -357,10 +364,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			},
 		}
 		serverConfigMap.Data = map[string]string{
-			readinessScriptKey: string(readiness),
-			livenessScriptKey:  string(liveness),
-			initScriptKey:      string(initScript),
-			configFileKey:      newServerConfig,
+			readinessScriptKey:      string(readiness),
+			livenessScriptKey:       string(liveness),
+			initScriptKey:           string(initScript),
+			primaryHandoffScriptKey: string(primaryHandoff),
+			configFileKey:           newServerConfig,
 		}
 
 		// Register ownership of the configMap
@@ -386,10 +394,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, liveness and init scripts")
+		log.V(1).Info("updated readiness, liveness, init and primary handoff scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
 		serverConfigMap.Data[initScriptKey] = string(initScript)
+		serverConfigMap.Data[primaryHandoffScriptKey] = string(primaryHandoff)
 	}
 
 	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
@@ -447,6 +456,12 @@ func init() {
 		panic("failure reading embedded init.sh")
 	}
 
+	// Read the primary handoff script
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	if err != nil {
+		panic("failure reading embedded primary-handoff.sh")
+	}
+
 	// Calculate hash of all scripts
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(append(readiness, liveness...), initScript...)))
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(slices.Concat(readiness, liveness, initScript, primaryHandoff)))
 }

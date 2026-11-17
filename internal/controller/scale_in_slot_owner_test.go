@@ -268,7 +268,7 @@ func TestDeleteExcessValkeyNodesDeletesNodesThatCannotOwnSlots(t *testing.T) {
 }
 
 // TestDeleteExcessValkeyNodesIgnoresSlotsOnExcessNodeIndex: a promoted replica
-// past spec.replicas is deleted even though it owns slots. Nothing would move
+// past replicasPerShard is deleted even though it owns slots. Nothing would move
 // the slots off it, so keeping it would block the scale-in for good.
 func TestDeleteExcessValkeyNodesIgnoresSlotsOnExcessNodeIndex(t *testing.T) {
 	promoted := primaryNode(0)
@@ -283,6 +283,33 @@ func TestDeleteExcessValkeyNodesIgnoresSlotsOnExcessNodeIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, kept)
 	assert.False(t, nodeExists(t, r.Client, promoted))
+}
+
+// TestDeleteExcessValkeyNodesKeepsReplicasFromEitherField: node index 1 is in
+// spec whether the cluster asks for one replica through replicasPerShard or
+// through the deprecated replicas field.
+func TestDeleteExcessValkeyNodesKeepsReplicasFromEitherField(t *testing.T) {
+	for name, spec := range map[string]valkeyiov1alpha1.ValkeyClusterSpec{
+		"replicasPerShard": {Shards: 2, ReplicasPerShard: 1},
+		"replicas":         {Shards: 2, Replicas: 1}, //nolint:staticcheck // the deprecated field must keep its replicas
+	} {
+		t.Run(name, func(t *testing.T) {
+			replica := primaryNode(0)
+			replica.Name = "c-0-1"
+			replica.Labels[LabelNodeIndex] = "1"
+			replica.Status.Role = RoleReplica
+			r, cluster, _ := scaleInReconciler(t, primaryNode(0), replica)
+			cluster.Spec = spec
+			state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+				primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383}),
+			}}
+
+			deleted, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), replica))
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			assert.True(t, nodeExists(t, r.Client, replica))
+		})
+	}
 }
 
 // TestHandleScaleInWithoutDestination: with no in-spec primary anywhere there

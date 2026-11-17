@@ -52,11 +52,12 @@ func clientOption(address string, cfg connConfig) vclient.ClientOption {
 		// Tuned to this controller's usage: one connection shared by the
 		// poller and both reconcilers, each issuing a few commands, CLUSTER
 		// NODES the largest response and CLUSTER MIGRATESLOTS the largest
-		// request. Exceeding a buffer costs a flush, no error.
+		// request. Exceeding a buffer costs a flush, no error. The pool keeps
+		// a client per node, so these sizes are paid once per node.
 		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
-		ReadBufferEachConn:  16 * 1024,
-		WriteBufferEachConn: 8 * 1024,
-		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
+		ReadBufferEachConn:  4 * 1024,
+		WriteBufferEachConn: 4 * 1024,
+		RingScaleEachConn:   2, // 2^2 slots, which covers the poller, both reconcilers and valkey-go's background PING
 	}
 }
 

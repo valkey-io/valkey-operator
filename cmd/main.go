@@ -214,6 +214,10 @@ func main() {
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	})
 	cacheOpts := cache.Options{
+		// The operator never reads managedFields, which can be as large as the
+		// object itself, and every cached object and copy carries them. An
+		// update without them keeps the server's existing entries.
+		DefaultTransform: cache.TransformStripManagedFields(),
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Service{}:               {Label: managedBySelector},
 			&appsv1.StatefulSet{}:           {Label: managedBySelector},

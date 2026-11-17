@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"reflect"
 	"slices"
 	"strings"
@@ -1113,44 +1112,55 @@ func TestGetClusterStateBracketsIPv6Addresses(t *testing.T) {
 }
 
 // Dead addresses each cost a full dial timeout. Dialled one at a time, k of
-// them cost k timeouts; the scrape should cost about one per batch of
-// scrapeConcurrency.
-func TestGetClusterStateDialsConcurrently(t *testing.T) {
-	const block = 200 * time.Millisecond
+// them cost k timeouts; dialled together, up to scrapeConcurrency share one.
+func TestGetClusterStateDialsConcurrentlyUpToTheCap(t *testing.T) {
 	addresses := make([]string, 40)
-	blocked := map[string]bool{}
 	for i := range addresses {
 		addresses[i] = fmt.Sprintf("10.0.0.%d", i+1)
-		if i < 33 {
-			blocked[net.JoinHostPort(addresses[i], "6379")] = true
-		}
 	}
 	var mu sync.Mutex
-	dialled := 0
-	dial := func(ctx context.Context, address string) (vclient.Client, error) {
+	active, peak, dialled := 0, 0, 0
+	full := make(chan struct{})
+	release := make(chan struct{})
+	var dial DialFunc = func(_ context.Context, _ string) (vclient.Client, error) {
 		mu.Lock()
+		active++
 		dialled++
-		mu.Unlock()
-		if blocked[address] {
-			select {
-			case <-time.After(block):
-			case <-ctx.Done():
-			}
-			return nil, errors.New("dial timeout")
+		peak = max(peak, active)
+		if active == scrapeConcurrency {
+			close(full)
 		}
-		return nil, errors.New("connection refused")
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return nil, errors.New("dial timeout")
 	}
 
-	start := time.Now()
-	GetClusterState(context.Background(), addresses, 6379, dial)
-	elapsed := time.Since(start)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		GetClusterState(context.Background(), addresses, 6379, dial)
+	}()
+
+	select {
+	case <-full:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatalf("only %d dials in flight at once, want %d", peak, scrapeConcurrency)
+	}
+	// Give a dial past the cap time to enter before releasing them all.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	<-done
 
 	if dialled != len(addresses) {
 		t.Errorf("dialled %d addresses, want %d", dialled, len(addresses))
 	}
-	// About two batches of one block each; serial dials take 33 blocks.
-	if elapsed >= 10*block {
-		t.Errorf("scrape took %v, want under %v", elapsed, 10*block)
+	if peak != scrapeConcurrency {
+		t.Errorf("%d dials in flight at once, want at most %d", peak, scrapeConcurrency)
 	}
 }
 

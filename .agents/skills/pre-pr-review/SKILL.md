@@ -18,7 +18,7 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
 3. **Fast checks.** Run `make lint` and `make test` as separate commands, so a lint failure doesn't skip the tests. Then run `hack/check-copyright.sh <base>`, CI's check that new Go files carry the current year in their header. The script reads committed files only, so on a dirty run also check the header of each new uncommitted Go file. Record pass or fail, and the failing output, for the report. Continue to step 4 on failure.
 
    `make test` runs `manifests generate fmt`, so it rewrites files the contributor forgot to regenerate or format. Compare `git status --porcelain` with `/tmp/review-<slug>-status.before` and `git diff | sha256sum` with `/tmp/review-<slug>-diff.before`; the hash catches a rewrite of a file that was already modified, whose status line reads ` M` both times. Run `git diff` on anything that changed. Report these files that make changed as a "fix first" finding: CI's generated-code check fails on them. Repeat this check after step 6.
-4. **Start the static review in the background.** On Claude Code, invoke the `code-review` skill on the diff at `medium` effort. On other agents, use the agent's own review command, or dispatch a subagent to review `git diff <base>` for correctness bugs. Give every reviewer the untracked files from step 2 as well as the diff. When the diff touches `api/`, a `*_types.go`, or `config/crd/`, also apply every item of the [API checklist](#api-checklist) to those files. The findings feed steps 7 and 9.
+4. **Start the static review in the background.** On Claude Code, invoke the `code-review` skill on the diff at `medium` effort. On other agents, use the agent's own review command, or dispatch a subagent to review `git diff <base>` for correctness bugs. Give every reviewer the untracked files from step 2 as well as the diff. When the diff or the untracked files from step 2 touch `api/`, a `*_types.go`, or `config/crd/`, also apply every item of the [API checklist](#api-checklist) to those files. The findings feed steps 7 and 9.
 5. **Create the cluster.** Always a fresh one, with its own kubeconfig. The contributor's ambient kubectl context may point at a real cluster, and `make install`/`deploy`/`undeploy` act on whatever context is current, so the review cluster never touches `~/.kube/config`:
 
    ```sh
@@ -62,6 +62,7 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
    set -e
    export KUBECONFIG=/tmp/kind-review-<slug>.kubeconfig
    [ "$(kubectl config current-context)" = kind-review-<slug> ] || exit 1
+   git worktree remove --force /tmp/review-<slug>-base 2>/dev/null || true   # clears a leftover from an aborted run
    git worktree add /tmp/review-<slug>-base <base>
    cd /tmp/review-<slug>-base
    make docker-build IMG=valkey-operator:review-<slug>-base
@@ -71,7 +72,7 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
    kubectl -n valkey-operator-system rollout status deploy --timeout=180s
    ```
 
-   Create a cluster with some data. Then run step 6's block again from the branch, with the newest branch tag. The image reference changes from `-base`, so the operator rolls onto branch code; check that the Valkey pods roll one at a time with the data kept. Remove the worktree afterwards with `git worktree remove /tmp/review-<slug>-base`. This is the only scenario that checks the order of operations on upgrade, such as the ConfigMap updating before the first pod rolls.
+   Create a cluster with some data. Then run step 6's block again from the branch, with the newest branch tag. The image reference changes from `-base`, so the operator rolls onto branch code; check that the Valkey pods roll one at a time with the data kept. Remove the worktree afterwards with `git worktree remove --force /tmp/review-<slug>-base`; `--force` is needed because `make deploy` modified it. This is the only scenario that checks the order of operations on upgrade, such as the ConfigMap updating before the first pod rolls.
 
    Before marking a static finding refuted, grep `test/e2e/` and `internal/controller/*_test.go` for its scenario and reuse their setup (Secrets, ConfigMaps, cluster shape). Refute only when a working repro shows the behaviour is fine, or the code path is unreachable. A repro that fails for an unrelated reason refutes nothing.
 8. **Run the related e2e specs.** Grep `test/e2e/` for the functions, fields, files and resource names the diff touches, and list the `Label(...)` values on the matching `Describe`/`Context`/`It` blocks. Pick the narrowest label that covers each match (`external-cm`, not `valkeynode`). Each label takes about two minutes. AfterSuite removes the review deployment and the CRDs, so this is the last cluster step:
@@ -106,9 +107,10 @@ Validate the contributor's branch on a fresh kind cluster, review its diff, and 
      ```markdown
      Validated on kind (`review-<slug>`, image `valkey-operator:review-<slug>`, HEAD `<short-sha>`):
 
-     - `make lint`, `make test`: pass
-     - <scenario purpose>: pass
-     - e2e `<label>`: pass
+     - `make lint`: <pass or fail>
+     - `make test`: <pass or fail>
+     - <scenario purpose>: <pass or fail>
+     - e2e `<label>`: <pass or fail>
      ```
    - The report path.
    - The teardown command: `kind delete cluster --name review-<slug>`.

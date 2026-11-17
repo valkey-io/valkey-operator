@@ -989,6 +989,13 @@ spec:
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
                   the rest take effect on the next pod roll.
                 type: object
+              configRevision:
+                description: |-
+                  ConfigRevision names the pinned config revision the pod template
+                  references: a short sha256 prefix of the rendered restart-only config.
+                  The parent sets it. It stays at the live workload's revision while only
+                  live-settable keys differ, so those changes roll nothing.
+                type: string
               containers:
                 description: |-
                   Containers allows patching the default containers via a strategic merge
@@ -3669,6 +3676,28 @@ spec:
                   the running server was last confirmed to hold, recorded as ACLApplied
                   becomes True.
                 type: string
+              appliedLiveConfig:
+                description: |-
+                  AppliedLiveConfig is the live-settable config the running server last
+                  accepted via CONFIG SET, recorded as LiveConfigApplied becomes True.
+                items:
+                  description: ConfigEntry is one Valkey config directive.
+                  properties:
+                    name:
+                      description: Name is the directive name.
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the directive's value.
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:

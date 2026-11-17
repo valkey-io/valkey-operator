@@ -153,6 +153,13 @@ type ValkeyNodeSpec struct {
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
 
+	// ConfigRevision names the pinned config revision the pod template
+	// references: a short sha256 prefix of the rendered restart-only config.
+	// The parent sets it. It stays at the live workload's revision while only
+	// live-settable keys differ, so those changes roll nothing.
+	// +optional
+	ConfigRevision string `json:"configRevision,omitempty"`
+
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
 	// flags and managed config to hostname mode. Standalone nodes leave this empty
@@ -338,6 +345,23 @@ type ValkeyNodeStatus struct {
 	// becomes True.
 	// +optional
 	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
+
+	// AppliedLiveConfig is the live-settable config the running server last
+	// accepted via CONFIG SET, recorded as LiveConfigApplied becomes True.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AppliedLiveConfig []ConfigEntry `json:"appliedLiveConfig,omitempty"`
+}
+
+// ConfigEntry is one Valkey config directive.
+type ConfigEntry struct {
+	// Name is the directive name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Value is the directive's value.
+	Value string `json:"value"`
 }
 
 const (

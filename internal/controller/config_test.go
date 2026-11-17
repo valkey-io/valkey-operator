@@ -259,11 +259,11 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 	})
 
 	It("keeps the roll hash stable when only an allowlisted key changes", func() {
-		before := nodeServerConfigRollHash(newNode(map[string]string{
+		before := renderPinnedConfig(newNode(map[string]string{
 			"maxmemory-policy": "allkeys-lru",
 			"appendonly":       "yes",
 		}))
-		after := nodeServerConfigRollHash(newNode(map[string]string{
+		after := renderPinnedConfig(newNode(map[string]string{
 			"maxmemory-policy": "volatile-lru",
 			"appendonly":       "yes",
 		}))
@@ -271,8 +271,8 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 	})
 
 	It("changes the roll hash when a non-allowlisted key changes", func() {
-		before := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "yes"}))
-		after := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "no"}))
+		before := renderPinnedConfig(newNode(map[string]string{"appendonly": "yes"}))
+		after := renderPinnedConfig(newNode(map[string]string{"appendonly": "no"}))
 		Expect(after).NotTo(Equal(before))
 	})
 

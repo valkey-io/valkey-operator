@@ -2393,7 +2393,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 			"appendonly":       "yes",
 		}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeTrue())
+		Expect(applied).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 
@@ -2406,7 +2406,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {
@@ -2419,7 +2419,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 		Expect(called).To(BeFalse())
 	})
 })

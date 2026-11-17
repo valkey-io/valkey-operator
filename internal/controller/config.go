@@ -284,14 +284,13 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 	return configBuilder.String()
 }
 
-// buildServerConfig renders the full config written to the shared ConfigMap.
+// buildServerConfig renders the cluster's full server config, live keys included.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
 	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
-// Create or update a default valkey.conf
-// If additional config is provided, append to the default map
+// upsertConfigMap creates or updates the cluster's scripts ConfigMap.
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
@@ -319,12 +318,6 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
 	}
 
-	// Get the new server config
-	newServerConfig := buildServerConfig(cluster)
-
-	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
-	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
-
 	// Look for, and fetch existing configMap for this cluster
 	serverConfigMapName := GetServerConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
@@ -346,7 +339,6 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{
-				configHashKey:  newServerConfigHash,
 				scriptsHashKey: scriptsHash,
 			},
 		}
@@ -355,7 +347,6 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			livenessScriptKey:       string(liveness),
 			initScriptKey:           string(initScript),
 			primaryHandoffScriptKey: string(primaryHandoff),
-			configFileKey:           newServerConfig,
 		}
 
 		// Register ownership of the configMap
@@ -388,20 +379,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		serverConfigMap.Data[primaryHandoffScriptKey] = string(primaryHandoff)
 	}
 
-	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
-	// annotation is always updated when the config changes — even when updatedScripts
-	// is true and would otherwise short-circuit the && below.
-	updatedConfig := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
-
-	// If the generated config contents hash (from above) matches the hash of the current
-	// config contents, and we did not update the scripts contents, exit early
-	if !updatedScripts && !updatedConfig {
-		log.V(1).Info("server config unchanged")
+	if !updatedScripts {
+		log.V(1).Info("server configMap unchanged")
 		return nil
 	}
-
-	// Update the configMap with the generated config contents
-	serverConfigMap.Data[configFileKey] = newServerConfig
 
 	// Update
 	if err := r.Update(ctx, serverConfigMap); err != nil {

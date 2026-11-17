@@ -61,6 +61,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      GetServerConfigMapName(resourceName),
 			Namespace: "default",
 		}
+		nodeConfigName := types.NamespacedName{
+			Name:      nodeConfigMapName(resourceName),
+			Namespace: "default",
+		}
 		secretName := types.NamespacedName{
 			Name:      getInternalSecretName(resourceName),
 			Namespace: "default",
@@ -90,7 +94,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 
-			Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+			node = &valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
@@ -99,7 +103,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 					},
 				},
 				Spec: spec,
-			})).To(Succeed())
+			}
+			if spec.ConfigRevision == "" {
+				withConfigRevision(node)
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		}
 
 		BeforeEach(func() {
@@ -119,7 +127,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 					},
 				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+				Expect(k8sClient.Create(ctx, withConfigRevision(resource))).To(Succeed())
 			}
 			By("creating the ACL secret")
 			secret := &corev1.Secret{}
@@ -138,12 +146,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		AfterEach(func() {
 			// Delete owned resources explicitly — envtest does not run garbage collection.
-			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, configName, cm); err == nil {
-				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
-				Eventually(func() bool {
-					return apierrors.IsNotFound(k8sClient.Get(ctx, configName, &corev1.ConfigMap{}))
-				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			for _, name := range []types.NamespacedName{configName, nodeConfigName} {
+				cm := &corev1.ConfigMap{}
+				if err := k8sClient.Get(ctx, name, cm); err == nil {
+					Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+					Eventually(func() bool {
+						return apierrors.IsNotFound(k8sClient.Get(ctx, name, &corev1.ConfigMap{}))
+					}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+				}
 			}
 			sts := &appsv1.StatefulSet{}
 			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
@@ -190,6 +200,15 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(cm.Data).To(HaveKey("valkey.conf"))
 			Expect(cm.Data).To(HaveKey("liveness-check.sh"))
 			Expect(cm.Data).To(HaveKey("readiness-check.sh"))
+
+			By("verifying the node ConfigMap holds the pinned revision and live.conf")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			nodeCM := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, nodeConfigName, nodeCM)).To(Succeed())
+			Expect(nodeCM.Data).To(HaveKey(configRevisionFileKey(node.Spec.ConfigRevision)))
+			Expect(nodeCM.Data).To(HaveKey(liveConfigFileKey))
+			Expect(metav1.IsControlledBy(nodeCM, node)).To(BeTrue())
 
 			By("verifying the StatefulSet was created with correct labels")
 			sts := &appsv1.StatefulSet{}
@@ -965,8 +984,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				ServerConfigMapName: "ext-config",
 				Config:              map[string]string{"appendfsync": "everysec"},
-				ConfigRevision:      "aaaaaaaaaaaa",
 			})
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			revA := node.Spec.ConfigRevision
 
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -981,53 +1002,57 @@ var _ = Describe("ValkeyNode Controller", func() {
 			By("verifying the StatefulSet pod template carries the config revision")
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, "aaaaaaaaaaaa"))
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA))
 			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
 
 			By("changing a restart-only key without a new config revision")
-			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			node.Spec.Config["appendfsync"] = "always"
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, "aaaaaaaaaaaa"),
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA),
 				"only the parent's config revision moves the template")
 
 			By("setting a new config revision")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			node.Spec.ConfigRevision = "bbbbbbbbbbbb"
+			revB := withConfigRevision(node).Spec.ConfigRevision
+			Expect(revB).NotTo(Equal(revA))
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, "bbbbbbbbbbbb"),
+			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revB),
 				"a new config revision must reach the template to roll the pod")
 		})
 
-		It("does not add a config revision annotation when spec.configRevision is empty", func() {
-			By("recreating a standalone ValkeyNode with Config but no ServerConfigMapName")
+		It("builds no workload when spec.configRevision is empty", func() {
+			By("recreating a ValkeyNode without a config revision")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Config:       map[string]string{"appendfsync": "everysec"},
 			})
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.ConfigRevision = ""
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: events.NewFakeRecorder(100),
 			}
-
-			By("reconciling to create the StatefulSet")
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the pod template has no config annotation")
-			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
-			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configRevisionKey))
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, statefulSetName, &appsv1.StatefulSet{}))).To(BeTrue())
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, nodeConfigName, &corev1.ConfigMap{}))).To(BeTrue())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			ready := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(reasonMissingConfigRevision))
 		})
 
 		It("should defer rolling template updates for cluster-owned nodes until Spec.WorkloadRevision matches", func() {
@@ -1121,6 +1146,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      GetServerConfigMapName(resourceName),
 			Namespace: "default",
 		}
+		nodeConfigName := types.NamespacedName{
+			Name:      nodeConfigMapName(resourceName),
+			Namespace: "default",
+		}
 		secretName := types.NamespacedName{
 			Name:      getInternalSecretName(resourceName),
 			Namespace: "default",
@@ -1130,7 +1159,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			err := k8sClient.Get(ctx, typeNamespacedName, node)
 			if err != nil && apierrors.IsNotFound(err) {
-				Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+				Expect(k8sClient.Create(ctx, withConfigRevision(&valkeyiov1alpha1.ValkeyNode{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -1144,7 +1173,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						// below are about the workload, not the exporter.
 						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 					},
-				})).To(Succeed())
+				}))).To(Succeed())
 			}
 			secret := &corev1.Secret{}
 			err = k8sClient.Get(ctx, secretName, secret)
@@ -1158,9 +1187,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 		})
 
 		AfterEach(func() {
-			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, configName, cm); err == nil {
-				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+			for _, name := range []types.NamespacedName{configName, nodeConfigName} {
+				cm := &corev1.ConfigMap{}
+				if err := k8sClient.Get(ctx, name, cm); err == nil {
+					Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+				}
 			}
 			deploy := &appsv1.Deployment{}
 			if err := k8sClient.Get(ctx, childName, deploy); err == nil {
@@ -1238,7 +1269,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 					return apierrors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &valkeyiov1alpha1.ValkeyNode{}))
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
-			Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+			Expect(k8sClient.Create(ctx, withConfigRevision(&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
@@ -1250,9 +1281,10 @@ var _ = Describe("ValkeyNode Controller", func() {
 					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
 					ServerConfigMapName: "ext-config",
 					Config:              map[string]string{"appendfsync": "everysec"},
-					ConfigRevision:      "aaaaaaaaaaaa",
 				},
-			})).To(Succeed())
+			}))).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			revA := node.Spec.ConfigRevision
 
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -1268,12 +1300,13 @@ var _ = Describe("ValkeyNode Controller", func() {
 			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
-			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, "aaaaaaaaaaaa"))
+			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA))
 
 			By("setting a new config revision")
 			updated := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			updated.Spec.ConfigRevision = "bbbbbbbbbbbb"
+			updated.Spec.Config["appendfsync"] = "always"
+			revB := withConfigRevision(updated).Spec.ConfigRevision
 			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
 			By("reconciling after the revision change")
@@ -1283,7 +1316,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			By("verifying the annotation moved to the new revision, causing a rolling update")
 			dep2 := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
-			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, "bbbbbbbbbbbb"),
+			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revB),
 				"a new config revision must reach the template to roll the pod")
 		})
 	})

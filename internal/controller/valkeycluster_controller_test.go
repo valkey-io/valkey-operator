@@ -510,11 +510,11 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("reading the config hash from the cluster ConfigMap")
+		By("checking the cluster ConfigMap holds the scripts and no valkey.conf")
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
-		initialCMHash := cm.Annotations[configHashKey]
-		Expect(initialCMHash).NotTo(BeEmpty())
+		Expect(cm.Data).To(HaveKey(initScriptKey))
+		Expect(cm.Data).NotTo(HaveKey(configFileKey))
 
 		By("capturing each ValkeyNode's config revision and authorized WorkloadRevision")
 		// The pinned config excludes live-settable keys so that changes to
@@ -542,13 +542,6 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		By("reconciling after the config change")
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
-
-		By("verifying the ConfigMap has a new full hash (all keys changed)")
-		updatedCM := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
-		newCMHash := updatedCM.Annotations[configHashKey]
-		Expect(newCMHash).NotTo(BeEmpty())
-		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
 		By("verifying config revision and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -625,10 +618,10 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("reading the config hash the operator persisted to the ConfigMap")
+		By("reading the scripts ConfigMap the operator created")
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
-		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
+		Expect(cm.Data).To(HaveKey(initScriptKey))
 
 		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}

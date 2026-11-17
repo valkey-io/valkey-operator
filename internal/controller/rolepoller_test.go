@@ -456,7 +456,7 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		Expect(k8sClient.Create(ctx, withConfigRevision(node))).To(Succeed())
 
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{

@@ -84,6 +84,7 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.ConfigRevision = "0123456789ab"
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
 	require.NoError(t, err)
@@ -164,8 +165,18 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: readinessScriptKey, Path: readinessScriptKey},
+		{Key: livenessScriptKey, Path: livenessScriptKey},
+		{Key: initScriptKey, Path: initScriptKey},
+		{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+	}, pts.Spec.Volumes[0].ConfigMap.Items, "scripts mount the script keys only")
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: "valkey.conf"},
+		{Key: "live.conf", Path: "live.conf"},
+	}, pts.Spec.Volumes[1].ConfigMap.Items)
 	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
 	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
@@ -832,7 +843,7 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
 		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 
 	t.Run("falls back to resource name when ServerConfigMapName is empty", func(t *testing.T) {
@@ -841,7 +852,7 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
 		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 		require.NoError(t, err)
 		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
+		assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 	})
 }
 

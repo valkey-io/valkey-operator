@@ -139,7 +139,7 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		Expect(k8sClient.Create(ctx, withConfigRevision(node))).To(Succeed())
 	})
 
 	AfterEach(func() {

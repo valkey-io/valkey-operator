@@ -81,7 +81,7 @@ Stack PRs for larger changes — break work into a sequence of focused, reviewab
 
 #### Optional: pre-PR review with an agent
 
-If you use an AI coding agent, the repo ships a `pre-pr-review` skill at [`.agents/skills/pre-pr-review/`](.agents/skills/pre-pr-review/SKILL.md). It runs `make lint test`, reviews your diff, deploys your branch to a fresh kind cluster, and exercises the changed behaviour. It writes a report to `.review/<branch>.md` and prints a block to paste into the PR's Testing section.
+If you use an AI coding agent, the repo ships a `pre-pr-review` skill at [`.agents/skills/pre-pr-review/`](.agents/skills/pre-pr-review/SKILL.md). It runs `make lint test`, reviews your diff, deploys your branch to a fresh kind cluster, and exercises the changed behaviour. It writes a report to `.review/`, named after your branch, and prints a block to paste into the PR's Testing section.
 
 You need Docker, [kind](https://kind.sigs.k8s.io/), and the Go toolchain from the [Developer Guide](./docs/developer-guide.md). [`gh`](https://cli.github.com/) is optional; the skill uses it to read linked issues. The kind cluster stays up afterwards, and the skill prints the command to delete it.
 

@@ -204,8 +204,9 @@ var _ = Describe("RolePoller", func() {
 		Expect(names()).To(BeEmpty(), "a node with no pod IP has nothing to compare against")
 	})
 
-	// Scrapes dial serially with a 5s timeout each, so without a deadline a
-	// partitioned cluster would stretch the interval for every other cluster.
+	// An unreachable node costs a scrape a 5s dial timeout, so without a
+	// deadline a partitioned cluster would stretch the interval for every other
+	// cluster.
 	It("bounds each pass with a deadline", func() {
 		var deadline time.Time
 		var bounded bool

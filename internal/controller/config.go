@@ -45,7 +45,7 @@ const (
 	livenessScriptKey       = "liveness-check.sh"
 	initScriptKey           = "init.sh"
 	primaryHandoffScriptKey = "primary-handoff.sh"
-	preStopScriptKey = "prestop-failover.sh"
+	preStopScriptKey        = "prestop-failover.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -375,7 +375,7 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 			initScriptKey:           string(initScript),
 			primaryHandoffScriptKey: string(primaryHandoff),
 			configFileKey:           newServerConfig,
-			preStopScriptKey: string(preStop),
+			preStopScriptKey:        string(preStop),
 		}
 
 		// Register ownership of the configMap

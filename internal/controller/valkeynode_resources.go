@@ -92,7 +92,7 @@ func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.Config
 			"readiness-check.sh":    string(readiness),
 			initScriptKey:           string(initScript),
 			primaryHandoffScriptKey: string(primaryHandoff),
-			preStopScriptKey: string(preStop),
+			preStopScriptKey:        string(preStop),
 		},
 	}, nil
 }

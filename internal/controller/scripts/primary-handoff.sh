@@ -117,7 +117,7 @@ promotable_replicas() {
         }' "$nodes_conf"
 }
 
-# load_operator_auth sets the password for the next ROLE call. As in the probe
+# load_operator_auth sets the password for the next call. As in the probe
 # scripts, the mounted file is the current _operator password and updates when
 # the Secret rotates. It is read before every call, so a rotation during the
 # wait is picked up. VALKEYCLI_AUTH from the environment is fixed at container
@@ -137,8 +137,40 @@ load_operator_auth() {
     fi
 }
 
+# node_owns_slots IP PORT checks the node's own CLUSTER NODES assignment,
+# including in-flight migration markers, as resolveRole does. A restarting
+# replica can report master before rejoining its primary, without owning slots.
+node_owns_slots() {
+    reply="$data_dir/.cluster-reply"
+    load_operator_auth
+    if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} CLUSTER NODES > "$reply" 2>/dev/null; then
+        rm -f "$reply"
+        return 1
+    fi
+    rc=0
+    awk '
+        { sub(/\r$/, "") }
+        $3 ~ /(^|,)myself(,|$)/ {
+            for (i = 9; i <= NF; i++) {
+                if ($i ~ /^\[[0-9]+-(>|<)-.+\]$/) marker = 1
+                else if ($i ~ /^[0-9]+$/) owned = 1
+                else if ($i ~ /^[0-9]+-[0-9]+$/) {
+                    split($i, bounds, "-")
+                    if (bounds[1] + 0 <= bounds[2] + 0) owned = 1
+                    else invalid = 1
+                } else invalid = 1
+            }
+            found = !invalid && (marker || owned)
+            exit
+        }
+        END { exit !found }
+    ' "$reply" || rc=$?
+    rm -f "$reply"
+    return "$rc"
+}
+
 # replica_moved_on IP PORT succeeds once the replica reports itself a primary
-# or a replica of another node. The reply goes through a file under the data
+# with a slot assignment, or a replica of another node. Replies use the data
 # dir: the root filesystem may be read-only, and a call cut short by the
 # timeout must not hold a pipe open.
 replica_moved_on() {
@@ -152,7 +184,7 @@ replica_moved_on() {
     primary=$(sed -n 2p "$reply" | tr -d '\r')
     rm -f "$reply"
     case $role in
-        master) return 0 ;;
+        master) node_owns_slots "$1" "$2" ;;
         slave) [ -n "$primary" ] && [ "$primary" != "$my_ip" ] && [ "$primary" != "$my_hostname" ] ;;
         *) return 1 ;;
     esac

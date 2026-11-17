@@ -722,7 +722,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	totalCreated := 0
 
-	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
+	liveTemplates, err := r.liveWorkloadTemplates(ctx, nodes)
 	if err != nil {
 		return false, err
 	}
@@ -749,7 +749,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveTemplates, trustBundle)
 			var deferred *rollDeferredError
 			if errors.As(err, &deferred) {
 				err = nil
@@ -798,16 +798,13 @@ const (
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
-// liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
-// and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string, trustBundle string) (nodeResult, error) {
+// liveTemplates is the reconcileValkeyNodes snapshot so WorkloadRevision,
+// config revision and failover decisions stay consistent for the whole pass.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplates map[string]liveWorkloadTemplate, trustBundle string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 	withTrustBundle(desired, trustBundle)
-	if err := setDesiredWorkloadRevision(desired); err != nil {
-		return nodeUnchanged, err
-	}
 
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -816,7 +813,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Load current node (if any) for failover decisions.
+	// Load current node (if any) for the config revision and failover decisions.
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	currentExists := true
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
@@ -826,10 +823,19 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		currentExists = false
 	}
 
-	liveHash := ""
-	if liveTemplateHashes != nil {
-		liveHash = liveTemplateHashes[desired.Name]
+	live := liveTemplates[desired.Name]
+	var existing *valkeyiov1alpha1.ValkeyNode
+	if currentExists {
+		existing = current
 	}
+	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
+		return nodeUnchanged, err
+	}
+	if err := setDesiredWorkloadRevision(desired); err != nil {
+		return nodeUnchanged, err
+	}
+
+	liveHash := live.hash
 	// Proactive failover only when the Spec update implies a real pod template
 	// change, not pure WorkloadRevision backfill when live already matches.
 	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
@@ -931,29 +937,34 @@ func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context,
 	return nodeUnchanged, nil
 }
 
-// liveWorkloadTemplateHashes returns podTemplateRollHash of each cluster node's
-// live StatefulSet or Deployment template (empty string when missing).
-func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]string, error) {
-	out := make(map[string]string, len(nodes.Items))
+// liveWorkloadTemplate is what the parent reads from a node's live
+// StatefulSet or Deployment template.
+type liveWorkloadTemplate struct {
+	// hash is podTemplateRollHash of the template.
+	hash string
+	// configRevision is the pinned config revision the template references.
+	configRevision string
+}
+
+// liveWorkloadTemplates returns each cluster node's live workload template
+// summary. Nodes without a workload are absent.
+func (r *ValkeyClusterReconciler) liveWorkloadTemplates(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]liveWorkloadTemplate, error) {
+	out := make(map[string]liveWorkloadTemplate, len(nodes.Items))
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		hash, err := r.livePodTemplateHash(ctx, n)
+		template, err := livePodTemplate(ctx, r.Client, n)
 		if err != nil {
 			return nil, err
 		}
-		if hash != "" {
-			out[n.Name] = hash
+		if template == nil {
+			continue
+		}
+		out[n.Name] = liveWorkloadTemplate{
+			hash:           podTemplateRollHash(*template),
+			configRevision: template.Annotations[configRevisionKey],
 		}
 	}
 	return out, nil
-}
-
-func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
-	template, err := livePodTemplate(ctx, r.Client, node)
-	if err != nil || template == nil {
-		return "", err
-	}
-	return podTemplateRollHash(*template), nil
 }
 
 // livePodTemplate returns the pod template of a node's workload, or nil when

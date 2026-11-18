@@ -464,6 +464,7 @@ const (
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role",description="Valkey replication role"
 // +kubebuilder:printcolumn:name="Pod",type="string",JSONPath=".status.podName",description="Pod name"
 // +kubebuilder:printcolumn:name="IP",type="string",JSONPath=".status.podIP",description="Pod IP",priority=1
+// +kubebuilder:printcolumn:name="Config",type="string",JSONPath=".spec.configRevision",description="Pinned config revision",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 type ValkeyNode struct {
 	metav1.TypeMeta   `json:",inline"`

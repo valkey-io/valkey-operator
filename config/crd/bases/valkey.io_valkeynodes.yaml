@@ -32,6 +32,11 @@ spec:
       name: IP
       priority: 1
       type: string
+    - description: Pinned config revision
+      jsonPath: .spec.configRevision
+      name: Config
+      priority: 1
+      type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age

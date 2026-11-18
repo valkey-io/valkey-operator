@@ -87,6 +87,24 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 	return valkey.GetClusterState(ctx, nodeAddresses(nodes), DefaultPort, dial)
 }
 
+// dropInvalidTopologyPendingNodes removes the pending nodes whose address is
+// the pod IP of a ValkeyNode with invalid topology labels, so CLUSTER MEET
+// never adds them to the cluster. The scrape still dials these nodes: one that
+// is a primary owning slots stays in state.Shards, where
+// deleteExcessValkeyNodes sees it and keeps it.
+func dropInvalidTopologyPendingNodes(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
+	invalid := map[string]bool{}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if _, _, ok := topologyIndexes(node); !ok && node.Status.PodIP != "" {
+			invalid[node.Status.PodIP] = true
+		}
+	}
+	state.PendingNodes = slices.DeleteFunc(state.PendingNodes, func(n *valkey.NodeState) bool {
+		return invalid[n.Address]
+	})
+}
+
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=valkey.io,resources=valkeyclusters/finalizers,verbs=update
@@ -269,6 +287,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	state := r.scrapeClusterState(ctx, nodes, dial)
+	dropInvalidTopologyPendingNodes(state, nodes)
 
 	// A node that rejects the operator's password is missing from state, so
 	// the steps below would act on a partial view and blame the topology.
@@ -2006,11 +2025,17 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		shardIndex, shardErr := strconv.Atoi(node.Labels[LabelShardIndex])
-		nodeIndex, nodeErr := strconv.Atoi(node.Labels[LabelNodeIndex])
-		if shardErr != nil || nodeErr != nil || shardIndex < 0 || nodeIndex < 0 {
+		shardIndex, nodeIndex, ok := topologyIndexes(node)
+		if !ok {
 			// The shard-index and node-index labels are not a usable shard
-			// index and node index, so the node is deleted.
+			// index and node index, so the node is deleted, unless its pod
+			// IP is a primary that still owns slots. Deleting that primary
+			// loses its keys.
+			if owners[node.Status.PodIP] {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Keeping ValkeyNode %s with invalid topology labels (shard-index %q, node-index %q): it still owns slots", node.Name, node.Labels[LabelShardIndex], node.Labels[LabelNodeIndex])
+				kept = append(kept, node.Name)
+				continue
+			}
 			if pruned, err := r.deleteInvalidTopologyNode(ctx, cluster, node); err != nil {
 				return false, nil, err
 			} else if pruned {

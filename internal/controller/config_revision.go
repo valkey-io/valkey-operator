@@ -20,9 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -89,4 +94,44 @@ func readConfigRevision(ctx context.Context, reader client.Reader, node *valkeyi
 	}
 	content, ok := cm.Data[configRevisionFileKey(rev)]
 	return content, ok, nil
+}
+
+// nodeConfigToCluster maps a node's ConfigMap to the ValkeyCluster named by
+// its cluster label. The ValkeyNode owns the ConfigMap, so Owns on the parent
+// does not see it.
+func nodeConfigToCluster(_ context.Context, obj client.Object) []reconcile.Request {
+	name := obj.GetLabels()[LabelCluster]
+	if name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: obj.GetNamespace()}}}
+}
+
+// configRevisionKeysPredicate passes ConfigMap creates and deletes, and
+// updates that change the set of pinned revision keys. A live.conf write
+// changes no revision key, so it does not wake the parent.
+func configRevisionKeysPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCM, ok1 := e.ObjectOld.(*corev1.ConfigMap)
+			newCM, ok2 := e.ObjectNew.(*corev1.ConfigMap)
+			if !ok1 || !ok2 {
+				return false
+			}
+			return !slices.Equal(configRevisionKeys(oldCM), configRevisionKeys(newCM))
+		},
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
+func configRevisionKeys(cm *corev1.ConfigMap) []string {
+	var out []string
+	for key := range cm.Data {
+		if _, ok := configRevisionFromKey(key); ok {
+			out = append(out, key)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

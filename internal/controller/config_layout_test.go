@@ -616,6 +616,44 @@ var _ = Describe("config layout", func() {
 		Expect(parentPass()).To(BeTrue())
 		Expect(getNode(name).Spec.ConfigRevision).NotTo(Equal(rev))
 	})
+
+	It("rolls a node to the desired revision when its live revision's key is gone", func() {
+		newCluster("cfg-gone", 3, map[string]string{"appendfsync": "everysec"})
+		settle()
+		before := revisions()
+
+		By("growing the allowlist, so each node keeps a live revision that differs from the desired one")
+		liveConfigAllowlist["appendfsync"] = struct{}{}
+		DeferCleanup(func() { delete(liveConfigAllowlist, "appendfsync") })
+		settle()
+		Expect(revisions()).To(Equal(before))
+
+		By("deleting one node's ConfigMap")
+		name := valkeyNodeName(cluster.Name, 1, 0)
+		Expect(k8sClient.Delete(ctx, nodeCM(name))).To(Succeed())
+		reconcileNode(name)
+		ready := meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).To(HaveField("Reason", valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
+		markReady(name)
+
+		By("the parent naming the desired revision for that node only")
+		Expect(parentPass()).To(BeTrue())
+		desired := pinnedConfigRevision(renderPinnedConfig(getNode(name)))
+		Expect(desired).NotTo(Equal(before[name]))
+		for n, rev := range revisions() {
+			if n == name {
+				Expect(rev).To(Equal(desired))
+			} else {
+				Expect(rev).To(Equal(before[n]), "%s keeps its live revision", n)
+			}
+		}
+
+		settle()
+		Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(desired)}))
+		Expect(mountedConfigRevision(&sts(name).Spec.Template.Spec)).To(Equal(desired))
+		ready = meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).NotTo(HaveField("Reason", valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
+	})
 })
 
 // configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.

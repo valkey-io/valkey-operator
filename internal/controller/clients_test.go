@@ -151,7 +151,7 @@ func TestForCluster(t *testing.T) {
 		assert.Equal(t, -1, got[0].PipelineMultiplex)
 		assert.Equal(t, 4*1024, got[0].ReadBufferEachConn)
 		assert.Equal(t, 4*1024, got[0].WriteBufferEachConn)
-		assert.Equal(t, 2, got[0].RingScaleEachConn)
+		assert.Equal(t, 4, got[0].RingScaleEachConn)
 	})
 
 	t.Run("TLS on sets the CA and server name", func(t *testing.T) {

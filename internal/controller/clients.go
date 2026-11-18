@@ -57,7 +57,7 @@ func clientOption(address string, cfg connConfig) vclient.ClientOption {
 		PipelineMultiplex:   -1, // at most 1 connection, not the default 4
 		ReadBufferEachConn:  4 * 1024,
 		WriteBufferEachConn: 4 * 1024,
-		RingScaleEachConn:   2, // 2^2 slots, which covers the poller, both reconcilers and valkey-go's background PING
+		RingScaleEachConn:   4, // 2^4 slots, used by concurrent ops only
 	}
 }
 

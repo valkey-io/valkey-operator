@@ -27,7 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
@@ -241,4 +244,49 @@ func TestMarkRollHandoff(t *testing.T) {
 	node0 := failbackNodes(true).Items[0]
 	assert.Empty(t, r.maybeProactiveFailoverBeforeRoll(context.Background(), c, failbackState("10.0.0.1", "up"), &node0, true))
 	assert.Equal(t, []valkeyv1.ShardFailbackStatus{{Shard: 0, AfterRoll: true}}, c.Status.Failback)
+}
+
+// failbackCachedClient keeps reads behind the status writer, as a manager cache can.
+type failbackCachedClient struct {
+	client.Client
+	cached *valkeyv1.ValkeyCluster
+}
+
+func (c *failbackCachedClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if cluster, ok := obj.(*valkeyv1.ValkeyCluster); ok {
+		*cluster = *c.cached.DeepCopy()
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func TestUpdateStatusClearsFailbackClock(t *testing.T) {
+	for _, useAPIReader := range []bool{true, false} {
+		name := "client fallback"
+		if useAPIReader {
+			name = "stale cache with API reader"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			require.NoError(t, valkeyv1.AddToScheme(scheme))
+			synced := metav1.NewTime(time.Unix(1760000000, 0))
+			stored := failbackCluster(nil)
+			stored.Name, stored.Namespace = "clock-reset", "default"
+			stored.Status.Failback = []valkeyv1.ShardFailbackStatus{{Shard: 0, SyncedSince: &synced}}
+			writer := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(stored).WithObjects(stored).Build()
+			desired := stored.DeepCopy()
+			desired.Status.Failback[0].SyncedSince = nil
+			r := &ValkeyClusterReconciler{Client: writer}
+			if useAPIReader {
+				r.Client = &failbackCachedClient{Client: writer, cached: desired}
+				r.APIReader = writer
+			}
+			require.NoError(t, r.updateStatus(ctx, desired, nil))
+			actual := &valkeyv1.ValkeyCluster{}
+			require.NoError(t, writer.Get(ctx, client.ObjectKeyFromObject(stored), actual))
+			require.Len(t, actual.Status.Failback, 1)
+			assert.Nil(t, actual.Status.Failback[0].SyncedSince, "losing sync must clear the stored quiet-period clock")
+		})
+	}
 }

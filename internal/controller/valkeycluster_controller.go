@@ -1804,9 +1804,13 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 // updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
-	// Fetch the latest version to avoid conflicts from stale resourceVersion
+	// Read the stored status: a stale patch base can hide a failback clock reset.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	current := &valkeyiov1alpha1.ValkeyCluster{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
 

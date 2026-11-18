@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unique"
 )
 
 // clusterNodesMinFields is the number of fields every CLUSTER NODES line has
@@ -147,10 +148,10 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 	}
 
 	node := ClusterNode{
-		Id:        head[0],
-		Host:      hostFromClusterNodesEndpoint(head[1]),
-		Flags:     strings.Split(head[2], ","),
-		PrimaryId: head[3],
+		Id:        shared(head[0]),
+		Host:      shared(hostFromClusterNodesEndpoint(head[1])),
+		Flags:     splitFlags(head[2]),
+		PrimaryId: shared(head[3]),
 	}
 
 	// Owned ranges and migration markers are interleaved in the same trailing
@@ -239,5 +240,24 @@ func parseSlotMigration(field string) (SlotMigration, slotMigrationDirection, bo
 	if err != nil || peer == "" {
 		return SlotMigration{}, slotMigrating, false
 	}
-	return SlotMigration{Slot: slot, Peer: peer}, direction, true
+	return SlotMigration{Slot: slot, Peer: shared(peer)}, direction, true
+}
+
+// shared returns s as a copy that is not part of the reply it was cut from.
+// Equal values share one copy until the next garbage collection, because unique
+// forgets a value once no Handle to it is held. Every scraped node parses a
+// table that lists all the nodes, so the ids and hosts repeat in each of them.
+// Cutting them from the reply would keep each reply alive, and copying them per
+// entry would keep one copy per node and table.
+func shared(s string) string {
+	return unique.Make(s).Value()
+}
+
+// splitFlags splits the comma-separated flags of a CLUSTER NODES line.
+func splitFlags(s string) []string {
+	flags := strings.Split(s, ",")
+	for i, flag := range flags {
+		flags[i] = shared(flag)
+	}
+	return flags
 }

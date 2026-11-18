@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestParseClusterNodes(t *testing.T) {
@@ -180,6 +181,33 @@ func TestParseClusterNodes_Memory(t *testing.T) {
 		}
 		if got := len(ParseClusterNodes(raw.String())); got != clusterNodesPreallocMax+10 {
 			t.Errorf("expected %d nodes, got %d", clusterNodesPreallocMax+10, got)
+		}
+	})
+
+	// A node keeps its table for the whole scrape, so an entry that points into
+	// the reply would keep the reply alive too.
+	t.Run("entries do not point into the reply", func(t *testing.T) {
+		raw := strings.Clone("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-9 [5461->-def456] [5462-<-ghi789]\n" +
+			"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
+		start := uintptr(unsafe.Pointer(unsafe.StringData(raw)))
+		end := start + uintptr(len(raw))
+		inReply := func(s string) bool {
+			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+			return s != "" && p >= start && p < end
+		}
+		for _, node := range ParseClusterNodes(raw) {
+			texts := append([]string{node.Id, node.Host, node.PrimaryId}, node.Flags...)
+			for _, m := range node.Migrating {
+				texts = append(texts, m.Peer)
+			}
+			for _, m := range node.Importing {
+				texts = append(texts, m.Peer)
+			}
+			for _, s := range texts {
+				if inReply(s) {
+					t.Errorf("%q points into the reply", s)
+				}
+			}
 		}
 	})
 }

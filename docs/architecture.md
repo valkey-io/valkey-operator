@@ -27,7 +27,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
 4. Deletes config revision keys that nothing uses any more
 5. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
-6. Once the pod is ready, applies live config with CONFIG SET and records it in `status.appliedLiveConfig`
+6. Once the pod is ready, applies live config with CONFIG SET, records it in `status.appliedLiveConfig`, and rewrites `live.conf` to match
 
 #### Role resolution
 
@@ -93,7 +93,7 @@ The ValkeyNode controller owns `valkey-<node>` through a controller reference an
 - writes `live.conf` when the key is missing or its content differs from the render.
 - removes any key that is neither a revision key nor `live.conf`, such as scripts an older operator left under the same name.
 
-The node controller writes `status.appliedLiveConfig` in the same status update that sets `LiveConfigApplied=True`, after CONFIG SET succeeds. When `spec.config` holds no allowlisted key, the update that clears the condition also clears `status.appliedLiveConfig`.
+The node controller writes `status.appliedLiveConfig` in the same status update that sets `LiveConfigApplied=True`, after CONFIG SET succeeds. When `spec.config` holds no allowlisted key, the update that clears the condition also clears `status.appliedLiveConfig`. After either write it rewrites `live.conf` in the same reconcile, again only when the content differs.
 
 ### Pods
 

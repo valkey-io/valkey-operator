@@ -61,7 +61,7 @@ func (e *configRevisionMismatchError) Error() string {
 // nodeConfigMapName names the ConfigMap holding a node's pinned revisions and
 // live.conf.
 func nodeConfigMapName(nodeName string) string {
-	return nodeName + "-config"
+	return resourcePrefix + nodeName + "-config"
 }
 
 // configRevisionFileKey is the ConfigMap key of pinned revision rev.

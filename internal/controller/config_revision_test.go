@@ -31,7 +31,7 @@ import (
 func TestConfigRevisionKeysPredicate(t *testing.T) {
 	const rev1, rev2 = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
 	cm := func(data map[string]string) *corev1.ConfigMap {
-		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "c-0-0-config", Namespace: "default"}, Data: data}
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-0-0-config", Namespace: "default"}, Data: data}
 	}
 	p := configRevisionKeysPredicate()
 
@@ -92,7 +92,7 @@ func TestConfigRevisionKeysPredicate(t *testing.T) {
 
 func TestNodeConfigToCluster(t *testing.T) {
 	labelled := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "c-0-0-config", Namespace: "ns", Labels: map[string]string{LabelCluster: "c"},
+		Name: "valkey-c-0-0-config", Namespace: "ns", Labels: map[string]string{LabelCluster: "c"},
 	}}
 	assert.Equal(t, []reconcile.Request{{NamespacedName: types.NamespacedName{Name: "c", Namespace: "ns"}}},
 		nodeConfigToCluster(context.Background(), labelled))

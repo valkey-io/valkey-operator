@@ -93,7 +93,7 @@ Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CL
 
 ## Config files
 
-Each ValkeyNode owns a ConfigMap named `<name>-config` that holds its server config in two kinds of key:
+Each ValkeyNode owns a ConfigMap named `valkey-<name>-config` that holds its server config in two kinds of key:
 
 - `valkey-<rev>.conf`: a pinned file with the restart-only config. `<rev>` is the first 12 hex characters of the SHA-256 of its content. A key is written once and never rewritten.
 - `live.conf`: the live-settable keys, rendered from `status.appliedLiveConfig`. The pinned file ends with `include /config/live.conf`.
@@ -120,7 +120,7 @@ Child resources created by ValkeyNode have `valkey-` prepended to the ValkeyNode
 | Resource               | Pattern                         | Example                      |
 | ---------------------- | ------------------------------- | ---------------------------- |
 | Deployment/StatefulSet | `valkey-<name>`                 | `valkey-cluster-sample-0-0`  |
-| Config ConfigMap       | `<name>-config`                 | `cluster-sample-0-0-config`  |
+| Config ConfigMap       | `valkey-<name>-config`                 | `valkey-cluster-sample-0-0-config`  |
 | PVC                    | `valkey-<name>-data`            | `valkey-cluster-sample-0-0-data` |
 | Pod                    | Managed by workload controller  | `valkey-cluster-sample-0-0-0` (StatefulSet) |
 

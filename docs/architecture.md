@@ -23,7 +23,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 `internal/controller/valkeynode_controller.go` — manages the workload for a single node:
 
 1. Ensures a scripts ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
-2. Writes the node's config ConfigMap `<node>-config`: the pinned file for `spec.configRevision` when it is missing, and `live.conf`
+2. Writes the node's config ConfigMap `valkey-<node>-config`: the pinned file for `spec.configRevision` when it is missing, and `live.conf`
 3. Ensures a PVC (if persistence is configured)
 4. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
 5. Deletes config revision keys that nothing uses any more
@@ -65,7 +65,7 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 - `internal/controller/config.go` — renders server config from `spec.config` and the base config, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the scripts ConfigMap
 - `internal/controller/config_pinned.go`: renders the pinned file and `live.conf`, names a revision, and decides which revision a node references (`pinnedConfigRef`)
 - `internal/controller/config_revision.go`: the parent sets `spec.configRevision` here, reading the live revision from the node's ConfigMap
-- `internal/controller/node_config.go`: the node controller writes `<node>-config` here and deletes unused revision keys
+- `internal/controller/node_config.go`: the node controller writes `valkey-<node>-config` here and deletes unused revision keys
 - `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
@@ -77,7 +77,7 @@ ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-ind
 
 ## Config revisions
 
-A node's server config is split into two files, both in the node's `<node>-config` ConfigMap.
+A node's server config is split into two files, both in the node's `valkey-<node>-config` ConfigMap.
 
 The pinned file holds the user's restart-only keys and the base config: everything in `spec.config` except the live-settable allowlist (`liveConfigAllowlist`: `maxmemory`, `maxmemory-policy`, `maxclients`) and keys the image's Valkey version does not support. It ends with `include /config/live.conf`, so a live value overrides any copy in the pinned file. Its revision is the first 12 hex characters of the SHA-256 of its content, and it is stored under the key `valkey-<rev>.conf`.
 
@@ -85,9 +85,9 @@ The pinned file holds the user's restart-only keys and the base config: everythi
 
 ### Who writes what
 
-The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `<node>-config` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist therefore rolls nothing. If its cache lacks the live revision's key, it reads the ConfigMap through the APIReader. When the API server has the key, the parent requeues until the cache catches up. When the ConfigMap or the key is gone, for example because a user deleted it, the parent uses the desired revision and the node rolls through the usual one-at-a-time gate.
+The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>-config` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist therefore rolls nothing. If its cache lacks the live revision's key, it reads the ConfigMap through the APIReader. When the API server has the key, the parent requeues until the cache catches up. When the ConfigMap or the key is gone, for example because a user deleted it, the parent uses the desired revision and the node rolls through the usual one-at-a-time gate.
 
-The ValkeyNode controller owns `<node>-config` through a controller reference and is its only writer. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
+The ValkeyNode controller owns `valkey-<node>-config` through a controller reference and is its only writer. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
 
 - writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. With an empty `spec.configRevision` it sets `Ready=False` with reason `MissingConfigRevision` and builds no workload.
 - never rewrites an existing revision key, and merge-patches the keys it changes, so other keys are kept.
@@ -101,7 +101,7 @@ The ValkeyCluster controller watches ConfigMaps and maps them to the cluster in 
 
 The pod template carries the `valkey.io/config-revision` annotation set to `spec.configRevision`, so a new revision changes the template and rolls the pod. The template stays a pure function of the node spec, so the ValkeyCluster controller and the ValkeyNode controller compute the same `spec.workloadRevision`, and the roll is authorized one node at a time.
 
-The `valkey-conf` volume is one ConfigMap volume on `<node>-config` with two items: `valkey-<rev>.conf` mounted as `/config/valkey.conf` and `live.conf` as `/config/live.conf`. One volume means the kubelet swaps both files in one atomic write. The server command is `valkey-server /config/valkey.conf`. The `scripts` volume mounts only the script keys of `valkey-<cluster>`.
+The `valkey-conf` volume is one ConfigMap volume on `valkey-<node>-config` with two items: `valkey-<rev>.conf` mounted as `/config/valkey.conf` and `live.conf` as `/config/live.conf`. One volume means the kubelet swaps both files in one atomic write. The server command is `valkey-server /config/valkey.conf`. The `scripts` volume mounts only the script keys of `valkey-<cluster>`.
 
 ### Cleanup
 
@@ -112,11 +112,11 @@ The node controller deletes a revision key when all of these hold:
 - no pod of the node mounts it, read through the APIReader with terminating pods included
 - the workload has finished its roll: its controller has observed the latest generation, and for a StatefulSet `updateRevision` equals `currentRevision`, or for a Deployment every replica is updated
 
-Pods and the workload are read only when the ConfigMap holds more than one revision key. The delete is an optimistic-lock merge patch, so a key written since the read is not dropped. `<node>-config` itself is deleted with its ValkeyNode through the owner reference.
+Pods and the workload are read only when the ConfigMap holds more than one revision key. The delete is an optimistic-lock merge patch, so a key written since the read is not dropped. `valkey-<node>-config` itself is deleted with its ValkeyNode through the owner reference.
 
 ### Upgrading
 
-Older operators wrote the full `valkey.conf` into `valkey-<cluster>` and stamped a `valkey.io/config-hash` annotation on the pod template. The new template drops that annotation, carries `valkey.io/config-revision` and mounts `<node>-config`, so existing clusters roll once on upgrade, one node at a time. The `valkey.conf` key an older operator left in `valkey-<cluster>` is no longer updated, and pods that have rolled do not mount it.
+Older operators wrote the full `valkey.conf` into `valkey-<cluster>` and stamped a `valkey.io/config-hash` annotation on the pod template. The new template drops that annotation, carries `valkey.io/config-revision` and mounts `valkey-<node>-config`, so existing clusters roll once on upgrade, one node at a time. The `valkey.conf` key an older operator left in `valkey-<cluster>` is no longer updated, and pods that have rolled do not mount it.
 
 ## Init container
 

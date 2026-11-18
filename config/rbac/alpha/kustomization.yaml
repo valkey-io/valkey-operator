@@ -1,0 +1,11 @@
+# Viewer, editor and admin roles for the alpha APIs, left out of the default install.
+# Included by config/alpha, next to the alpha CRDs.
+namePrefix: valkey-operator-
+
+resources:
+- valkey_admin_role.yaml
+- valkey_editor_role.yaml
+- valkey_viewer_role.yaml
+- valkeysentinel_admin_role.yaml
+- valkeysentinel_editor_role.yaml
+- valkeysentinel_viewer_role.yaml

@@ -2,6 +2,7 @@
 resources:
 - ../default
 - ../crd/alpha
+- ../rbac/alpha
 
 patches:
 - target:

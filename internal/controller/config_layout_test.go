@@ -45,11 +45,11 @@ func withConfigRevision(node *valkeyiov1alpha1.ValkeyNode) *valkeyiov1alpha1.Val
 	return node
 }
 
-// The config layout POC scenarios. envtest runs no StatefulSet controller,
+// Config layout scenarios. envtest runs no StatefulSet controller,
 // kubelet or garbage collector, so the specs drive both reconcilers by hand,
 // mark nodes Ready the way the reconcileValkeyNodes specs do, and stand in
 // for CONFIG SET by writing status.appliedLiveConfig.
-var _ = Describe("config layout POC", func() {
+var _ = Describe("config layout", func() {
 	const ns = "default"
 
 	var (
@@ -174,17 +174,6 @@ var _ = Describe("config layout POC", func() {
 		return cm
 	}
 
-	revisionKeys := func(cm *corev1.ConfigMap) []string {
-		var out []string
-		for key := range cm.Data {
-			if _, ok := configRevisionFromKey(key); ok {
-				out = append(out, key)
-			}
-		}
-		slices.Sort(out)
-		return out
-	}
-
 	sts := func(name string) *appsv1.StatefulSet {
 		GinkgoHelper()
 		s := &appsv1.StatefulSet{}
@@ -251,12 +240,12 @@ var _ = Describe("config layout POC", func() {
 	}
 
 	It("RestartOnlyChangeRollsOneNodeAtATime", func() {
-		newCluster("poc-roll", 3, map[string]string{"appendfsync": "everysec"})
+		newCluster("cfg-roll", 3, map[string]string{"appendfsync": "everysec"})
 		settle()
 		before := revisions()
 		Expect(before).To(HaveLen(3))
 		for name, rev := range before {
-			Expect(revisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(rev)}))
+			Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(rev)}))
 			Expect(sts(name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, rev))
 		}
 
@@ -292,7 +281,7 @@ var _ = Describe("config layout POC", func() {
 	})
 
 	It("LiveChangeDoesNotRoll", func() {
-		newCluster("poc-live", 3, map[string]string{"maxmemory": "100mb"})
+		newCluster("cfg-live", 3, map[string]string{"maxmemory": "100mb"})
 		settle()
 		for _, n := range listNodes() {
 			setApplied(n.Name, map[string]string{"maxmemory": "100mb"})
@@ -351,7 +340,7 @@ var _ = Describe("config layout POC", func() {
 	})
 
 	It("AllowlistGrowthDoesNotRoll", func() {
-		newCluster("poc-grow", 3, map[string]string{"appendfsync": "everysec"})
+		newCluster("cfg-grow", 3, map[string]string{"appendfsync": "everysec"})
 		settle()
 		before := revisions()
 		templates := map[string]string{}
@@ -370,13 +359,13 @@ var _ = Describe("config layout POC", func() {
 		for name, rev := range revisions() {
 			Expect(rev).To(Equal(before[name]), "allowlist growth must not change the config revision")
 			Expect(podTemplateRollHash(sts(name).Spec.Template)).To(Equal(templates[name]))
-			Expect(revisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(rev)}))
+			Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(rev)}))
 			Expect(liveConf(name)).To(Equal("appendfsync everysec\n"))
 		}
 	})
 
 	It("ScaleOutAndIn", func() {
-		newCluster("poc-scale", 3, nil)
+		newCluster("cfg-scale", 3, nil)
 		settle()
 		Expect(listNodes()).To(HaveLen(3))
 
@@ -385,7 +374,7 @@ var _ = Describe("config layout POC", func() {
 		Expect(listNodes()).To(HaveLen(4))
 		added := getNode(valkeyNodeName(cluster.Name, 3, 0))
 		cm := nodeCM(added.Name)
-		Expect(revisionKeys(cm)).To(Equal([]string{configRevisionFileKey(added.Spec.ConfigRevision)}))
+		Expect(configRevisionKeys(cm)).To(Equal([]string{configRevisionFileKey(added.Spec.ConfigRevision)}))
 		Expect(cm.Labels).To(HaveKeyWithValue(LabelCluster, cluster.Name), "the parent's ConfigMap watch maps by this label")
 
 		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Shards = 3 })
@@ -406,7 +395,7 @@ var _ = Describe("config layout POC", func() {
 	})
 
 	It("OldRevisionCleanup", func() {
-		newCluster("poc-cleanup", 1, map[string]string{"appendfsync": "everysec"})
+		newCluster("cfg-cleanup", 1, map[string]string{"appendfsync": "everysec"})
 		settle()
 		name := valkeyNodeName(cluster.Name, 0, 0)
 		oldRev := getNode(name).Spec.ConfigRevision
@@ -433,7 +422,7 @@ var _ = Describe("config layout POC", func() {
 		newKey := configRevisionFileKey(newRev)
 		nodesRound()
 		Expect(sts(name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, newRev))
-		Expect(revisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "the roll has not finished")
+		Expect(configRevisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "the roll has not finished")
 
 		By("finishing the roll while the pod still mounts the old revision")
 		s := sts(name)
@@ -443,14 +432,14 @@ var _ = Describe("config layout POC", func() {
 		s.Status.UpdateRevision = "rev-2"
 		Expect(k8sClient.Status().Update(ctx, s)).To(Succeed())
 		reconcileNode(name)
-		Expect(revisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "a pod still mounts the old revision")
+		Expect(configRevisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "a pod still mounts the old revision")
 
 		By("deleting the pod, which stays terminating")
 		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 		Expect(pod.DeletionTimestamp).NotTo(BeNil())
 		reconcileNode(name)
-		Expect(revisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "a terminating pod still mounts the old revision")
+		Expect(configRevisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "a terminating pod still mounts the old revision")
 
 		By("letting the pod go")
 		pod.Finalizers = nil
@@ -460,14 +449,22 @@ var _ = Describe("config layout POC", func() {
 		}).Should(BeTrue())
 		reconcileNode(name)
 		cm := nodeCM(name)
-		Expect(revisionKeys(cm)).To(Equal([]string{newKey}))
+		Expect(configRevisionKeys(cm)).To(Equal([]string{newKey}))
 		Expect(cm.Data).To(HaveKey(liveConfigFileKey))
 	})
 
 	It("LiveWriteCount", func() {
 		const nodes = 10
-		newCluster("poc-count", nodes, map[string]string{"maxmemory": "100mb"})
+		newCluster("cfg-count", nodes, map[string]string{"maxmemory": "100mb"})
 		settle()
+		Expect(pr.upsertConfigMap(ctx, cluster)).To(Succeed())
+		serverCM := func() *corev1.ConfigMap {
+			GinkgoHelper()
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: ns}, cm)).To(Succeed())
+			return cm
+		}
+		serverRV := serverCM().ResourceVersion
 		for _, n := range listNodes() {
 			setApplied(n.Name, map[string]string{"maxmemory": "100mb"})
 		}
@@ -476,6 +473,7 @@ var _ = Describe("config layout POC", func() {
 		nodeWrites.Reset()
 
 		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["maxmemory"] = "200mb" })
+		Expect(pr.upsertConfigMap(ctx, cluster)).To(Succeed())
 		settle()
 		for _, n := range listNodes() {
 			setApplied(n.Name, map[string]string{"maxmemory": "200mb"})
@@ -488,26 +486,22 @@ var _ = Describe("config layout POC", func() {
 			Expect(liveConf(n.Name)).To(Equal("maxmemory 200mb\n"))
 		}
 
-		verbs := []string{verbCreate, verbUpdate, verbPatch, verbDelete}
-		count := func(c *writeCountingClient) string {
-			out := ""
-			for _, v := range verbs {
-				out += fmt.Sprintf(" %s=%d", v, c.Count("ConfigMap", v))
+		configMapWrites := func(c *writeCountingClient) map[string]int {
+			out := map[string]int{}
+			for k, n := range c.Counts() {
+				if k.Kind == "ConfigMap" {
+					out[k.Verb] = n
+				}
 			}
 			return out
 		}
-		total := 0
-		for _, v := range verbs {
-			total += parentWrites.Count("ConfigMap", v) + nodeWrites.Count("ConfigMap", v)
-		}
-		GinkgoWriter.Printf("POC-COUNT design=D nodes=%d configmap_writes=%d parent:%s node:%s\n",
-			nodes, total, count(parentWrites), count(nodeWrites))
-		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(nodes), "one live.conf write per node")
-		Expect(total).To(Equal(nodes))
+		Expect(configMapWrites(nodeWrites)).To(Equal(map[string]int{verbPatch: nodes}), "one live.conf patch per node")
+		Expect(configMapWrites(parentWrites)).To(BeEmpty(), "the parent writes no ConfigMap for a live change")
+		Expect(serverCM().ResourceVersion).To(Equal(serverRV), "valkey-<cluster> is not updated")
 	})
 
-	It("LiveWritesBlockedByACLError", func() {
-		newCluster("poc-acl", 3, map[string]string{"maxmemory": "100mb"})
+	It("LiveWritesNotBlockedByACLError", func() {
+		newCluster("cfg-acl", 3, map[string]string{"maxmemory": "100mb"})
 		settle()
 		for _, n := range listNodes() {
 			setApplied(n.Name, map[string]string{"maxmemory": "100mb"})
@@ -558,7 +552,7 @@ var _ = Describe("config layout POC", func() {
 	})
 
 	It("writes a missing revision only when the spec renders to it, and never rewrites one", func() {
-		newCluster("poc-hash", 1, map[string]string{"appendfsync": "everysec"})
+		newCluster("cfg-hash", 1, map[string]string{"appendfsync": "everysec"})
 		settle()
 		name := valkeyNodeName(cluster.Name, 0, 0)
 		rev := getNode(name).Spec.ConfigRevision
@@ -597,7 +591,7 @@ var _ = Describe("config layout POC", func() {
 	})
 
 	It("requeues the parent while its cache lacks the live revision", func() {
-		newCluster("poc-cache", 1, map[string]string{"appendfsync": "everysec"})
+		newCluster("cfg-cache", 1, map[string]string{"appendfsync": "everysec"})
 		settle()
 		name := valkeyNodeName(cluster.Name, 0, 0)
 		rev := getNode(name).Spec.ConfigRevision
@@ -644,7 +638,7 @@ var _ = Describe("config layout POC", func() {
 		}
 
 		settle()
-		Expect(revisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(desired)}))
+		Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(desired)}))
 		Expect(sts(name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, desired))
 		ready = meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 		Expect(ready).NotTo(HaveField("Reason", reasonConfigRevisionMismatch))

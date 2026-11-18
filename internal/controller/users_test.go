@@ -17,12 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOperatorUserPasswordSecret(t *testing.T) {
@@ -299,4 +306,56 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}}, //nolint:staticcheck // legacy spec.users
 	}))
+}
+
+// The API server requires the Secret's name, but a cluster stored before it
+// did keeps a user without one through validation ratcheting. The operator no
+// longer reads <cluster>-users for such a user, and names the missing field.
+func TestReconcileUsersAclNamesTheUnsetSecretNameField(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	newReconciler := func() *ValkeyClusterReconciler {
+		fallback := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-users", Namespace: "ns"},
+			Data:       map[string][]byte{"alice": []byte("alice-pw")},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fallback).Build()
+		return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(100)}
+	}
+	cluster := func(spec valkeyiov1alpha1.ValkeyClusterSpec) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "cluster-uid"}, Spec: spec}
+	}
+
+	for desc, tc := range map[string]struct {
+		spec valkeyiov1alpha1.ValkeyClusterSpec
+		want string
+	}{
+		"spec.acl.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+				Name:     "alice",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"alice"}}},
+			}}}},
+			want: "user alice: password.secret.name is not set",
+		},
+		"spec.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Users: []valkeyiov1alpha1.UserAclSpec{{Name: "alice", Enabled: true}}}, //nolint:staticcheck // legacy spec.users
+			want: "user alice: passwordSecret.name is not set",
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			err := newReconciler().reconcileUsersAcl(ctx, cluster(tc.spec))
+			var unresolved *userSecretUnresolvedError
+			require.ErrorAs(t, err, &unresolved, "kept on the last good aclfile like a missing Secret")
+			assert.EqualError(t, err, tc.want)
+		})
+	}
+
+	t.Run("not for a disabled user", func(t *testing.T) {
+		spec := valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+			Name: "alice", State: valkeyiov1alpha1.ACLUserStateDisabled,
+		}}}}
+		require.NoError(t, newReconciler().reconcileUsersAcl(ctx, cluster(spec)))
+	})
 }

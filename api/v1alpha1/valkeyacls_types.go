@@ -86,6 +86,7 @@ type ACLPermissions struct {
 }
 
 // ACLUserSpec defines a Valkey ACL user.
+// +kubebuilder:validation:XValidation:rule="(has(self.state) && self.state == 'Disabled') || (has(self.password) && has(self.password.type) && self.password.type != 'Secret') || (has(self.password) && has(self.password.secret) && has(self.password.secret.name) && size(self.password.secret.name) > 0)",message="password.secret.name is required for an enabled user whose password.type is Secret, the default",fieldPath=".password.secret.name",reason="FieldValueRequired"
 type ACLUserSpec struct {
 	// Username
 	// +required
@@ -100,7 +101,8 @@ type ACLUserSpec struct {
 	// +optional
 	State ACLUserState `json:"state,omitempty"`
 
-	// Password authentication; defaults to the passwords in the Secret <cluster>-users
+	// Password authentication. An enabled user whose type is Secret, the
+	// default, must name its Secret in secret.name.
 	// +kubebuilder:default={}
 	// +optional
 	Password *ACLUserPassword `json:"password,omitempty"`
@@ -118,6 +120,7 @@ func (u ACLUserSpec) PasswordType() ACLPasswordType {
 
 // An UserAclSpec contains user, authorization, and permissions-related configurations.
 // It is the legacy spec.users entry, replaced by ACLUserSpec and removed in v1beta1.
+// +kubebuilder:validation:XValidation:rule="(has(self.enabled) && !self.enabled) || (has(self.nopass) && self.nopass) || (has(self.resetpass) && self.resetpass) || (has(self.passwordSecret) && has(self.passwordSecret.name) && size(self.passwordSecret.name) > 0)",message="passwordSecret.name is required for an enabled user without nopass or resetpass",fieldPath=".passwordSecret.name",reason="FieldValueRequired"
 type UserAclSpec struct {
 
 	// Username
@@ -173,7 +176,8 @@ func (u UserAclSpec) ToACLUser() ACLUserSpec {
 
 type PasswordSecretSpec struct {
 
-	// Name of the referencing Secret; Defaults to clustername-users
+	// Name of the Secret, in the cluster's namespace, that holds the passwords.
+	// Required for an enabled user that authenticates with Secret passwords.
 	// +optional
 	Name string `json:"name,omitempty"`
 

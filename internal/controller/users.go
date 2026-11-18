@@ -103,10 +103,6 @@ func getInternalSecretName(clusterName string) string {
 	return resourcePrefix + clusterName + "-acl"
 }
 
-func getDefaultSecretName(clusterName string) string {
-	return clusterName + "-users"
-}
-
 func getSystemPasswordSecretName(clusterName string) string {
 	return resourcePrefix + clusterName + "-system-passwords"
 }
@@ -226,10 +222,11 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
+	nameField := passwordSecretNameField(cluster)
 	for _, user := range users {
 
 		// Get passwords from Secret
-		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
+		passwords, err := fetchUserPasswords(ctx, user, nameField, r.APIReader, cluster.Namespace)
 		if err != nil {
 			if _, ok := errors.AsType[*userSecretUnresolvedError](err); ok {
 				return err // already names the user
@@ -347,24 +344,42 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 }
 
 // userSecretUnresolvedError reports a user whose password the operator cannot
-// read: the referenced Secret is missing, or it lacks a key listed in
-// password.secret.keys. The cluster controller keeps the last good aclfile and
-// reports the user on the Degraded condition; see reportUsersACLUnresolved.
+// read: the user names no Secret, the referenced Secret is missing, or it
+// lacks a key listed in password.secret.keys. The cluster controller keeps the
+// last good aclfile and reports the user on the Degraded condition; see
+// reportUsersACLUnresolved.
 type userSecretUnresolvedError struct {
 	User   string
 	Secret string
 	Key    string
+	// NameField is the unset field that names the Secret, when Secret is empty.
+	NameField string
 }
 
 func (e *userSecretUnresolvedError) Error() string {
-	if e.Key == "" {
+	switch {
+	case e.Secret == "":
+		return fmt.Sprintf("user %s: %s is not set", e.User, e.NameField)
+	case e.Key == "":
 		return fmt.Sprintf("user %s: Secret %s not found", e.User, e.Secret)
+	default:
+		return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
 	}
-	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
 }
 
-// Fetches a Secret, and looks for referenced passwords
-func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
+// passwordSecretNameField is the field that names a user's password Secret:
+// password.secret.name, or passwordSecret.name in the deprecated spec.users.
+func passwordSecretNameField(cluster *valkeyiov1alpha1.ValkeyCluster) string {
+	if cluster.Spec.ACL == nil || len(cluster.Spec.ACL.Users) == 0 {
+		return "passwordSecret.name"
+	}
+	return "password.secret.name"
+}
+
+// Fetches a Secret, and looks for referenced passwords. The API server
+// requires the Secret's name, but a cluster stored before it did may lack it;
+// nameField is the field the error names then.
+func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, nameField string, apiClient client.Reader, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)
 
@@ -373,15 +388,11 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 	if !enabled || user.PasswordType() != valkeyiov1alpha1.ACLPasswordTypeSecret {
 		return []string{}, nil
 	}
-	passwordSecret := valkeyiov1alpha1.PasswordSecretSpec{}
-	if user.Password != nil && user.Password.Secret != nil {
-		passwordSecret = *user.Password.Secret
+	if user.Password == nil || user.Password.Secret == nil || user.Password.Secret.Name == "" {
+		return []string{}, &userSecretUnresolvedError{User: user.Name, NameField: nameField}
 	}
-	// Look for a Secret matching the user-provided name, or clusterName-users
-	userSecretName := getDefaultSecretName(clusterName)
-	if passwordSecret.Name != "" {
-		userSecretName = passwordSecret.Name
-	}
+	passwordSecret := *user.Password.Secret
+	userSecretName := passwordSecret.Name
 
 	// Query API for the referenced Secret
 	userSecret := &corev1.Secret{}

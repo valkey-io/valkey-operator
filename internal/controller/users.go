@@ -176,7 +176,7 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 		userAcl := valkeyiov1alpha1.ACLUserSpec{
 			Name: user,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-				RawAcl: systemUserAcl(user, cluster.Spec.Image),
+				RawAcl: systemUserAcl(user, effectiveServerImage(cluster.Spec.Image, cluster.Spec.Containers)),
 			},
 		}
 		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes))

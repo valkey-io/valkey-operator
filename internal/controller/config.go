@@ -194,12 +194,14 @@ func liveConfigToApply(config map[string]string) map[string]string {
 // features are not supported by the detected Valkey version. It reports exactly
 // the settings the renderer drops.
 func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-
-	image := effectiveImage(cluster.Spec.Image)
+	image := effectiveServerImage(cluster.Spec.Image, cluster.Spec.Containers)
+	droppedKeys := gatedUserKeysToSuppress(image, cluster.Spec.Config)
 	imageSource := "spec.image"
 	if cluster.Spec.Image == "" {
 		imageSource = "default image"
+	}
+	if image != effectiveImage(cluster.Spec.Image) {
+		imageSource = "spec.containers[server].image"
 	}
 
 	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)

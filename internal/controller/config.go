@@ -290,19 +290,6 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
-// nodeServerConfigRollHash derives the config roll hash from the node spec:
-// the rendered server config minus live-settable keys. Parents copy Config and
-// TLS verbatim onto the node spec, so this hash is byte-identical to the hash
-// the ValkeyCluster controller computes from its own spec — a hard requirement,
-// since a divergence would change every pod template on operator upgrade and
-// roll every pod (see config_rollhash_test.go).
-func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
-	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
-}
-
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {

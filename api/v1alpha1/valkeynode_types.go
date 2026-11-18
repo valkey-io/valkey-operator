@@ -153,6 +153,15 @@ type ValkeyNodeSpec struct {
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
 
+	// ConfigRevision names the pinned config revision the pod template
+	// references: the first 12 hex characters of the SHA-256 of the rendered
+	// restart-only config. The parent sets it. It stays at the live workload's
+	// revision while only live-settable keys differ, so those changes roll
+	// nothing.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
+	ConfigRevision string `json:"configRevision,omitempty"`
+
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
 	// flags and managed config to hostname mode. Empty means IP announce.

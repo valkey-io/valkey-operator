@@ -232,8 +232,15 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 
 		latest := current()
 		latest.Spec.TLS.Certificates.TrustBundle = nil
+		Expect(setDesiredWorkloadRevision(latest)).To(Succeed())
 		Expect(k8sClient.Update(ctx, latest)).To(Succeed())
 		_, _ = r.Reconcile(ctx, req) // updates the StatefulSet template
+		sts := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: valkeyNodeResourceName(node)}, sts)).To(Succeed())
+		Expect(sts.Spec.Template.Spec.Volumes).To(ContainElement(SatisfyAll(
+			HaveField("Name", tlsVolumeName),
+			HaveField("Projected", BeNil()),
+		)))
 		markRolledOut()
 		delete(cfg.params, "tls-ca-cert-file")
 		_, err = r.Reconcile(ctx, req)

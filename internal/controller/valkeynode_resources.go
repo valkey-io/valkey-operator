@@ -587,16 +587,27 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 						LocalObjectReference: corev1.LocalObjectReference{
 							Name: node.Spec.SharedConfigMapName,
 						},
+						Items: []corev1.KeyToPath{
+							{Key: readinessScriptKey, Path: readinessScriptKey},
+							{Key: livenessScriptKey, Path: livenessScriptKey},
+							{Key: initScriptKey, Path: initScriptKey},
+							{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+						},
 						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
 			},
 			{
+				// One volume, so kubelet swaps both files in one atomic write.
 				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: node.Spec.SharedConfigMapName,
+							Name: nodeConfigMapName(node.Name),
+						},
+						Items: []corev1.KeyToPath{
+							{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: configFileKey},
+							{Key: liveConfigFileKey, Path: liveConfigFileKey},
 						},
 					},
 				},

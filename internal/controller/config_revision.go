@@ -18,7 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -47,13 +53,40 @@ func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context, 
 	return nil
 }
 
+// errLiveConfigRevisionNotCached means the parent's cache does not hold the
+// content of a node's live config revision yet. The parent requeues rather
+// than treat it as unknown, which would roll the node to the desired revision.
+var errLiveConfigRevisionNotCached = errors.New("live config revision not in cache")
+
 // liveRevisionContent returns the content of the pinned config revision rev
-// that node's live workload references. found is false when the content is
-// not known, and the parent then uses the desired revision.
-//
-// Each config layout replaces this with a read from where it stores pinned
-// revisions.
-func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster,
+// that node's live workload references, from key valkey-<rev>.conf of the
+// node's ConfigMap. The node controller writes that key before any template
+// references it, so a miss means the cache trails the workload, and it
+// returns errLiveConfigRevisionNotCached.
+func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, _ *valkeyiov1alpha1.ValkeyCluster,
 	node *valkeyiov1alpha1.ValkeyNode, rev string) (content string, found bool, err error) {
-	return "", false, nil
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, errLiveConfigRevisionNotCached
+		}
+		return "", false, err
+	}
+	content, ok := cm.Data[configRevisionFileKey(rev)]
+	if !ok {
+		return "", false, errLiveConfigRevisionNotCached
+	}
+	return content, true, nil
+}
+
+// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
+func configRevisionKeys(cm *corev1.ConfigMap) []string {
+	var out []string
+	for key := range cm.Data {
+		if _, ok := configRevisionFromKey(key); ok {
+			out = append(out, key)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

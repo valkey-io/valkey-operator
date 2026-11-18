@@ -1708,6 +1708,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			node := newTestValkeyNode("mycluster-0-0", "test-ns")
 			node.Labels = map[string]string{LabelCluster: "mycluster"}
 			node.Spec.WorkloadType = workloadType
+			node.Spec.ConfigRevision = "aaaaaaaaaaaa"
 			node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{
 				Labels: map[string]valkeyv1.LabelValue{
 					"team":       "data",
@@ -1715,7 +1716,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 				},
 				Annotations: map[string]string{
 					"example.com/scrape": "true",
-					configHashKey:        "spoofed",
+					configRevisionKey:    "spoofed",
 				},
 			}
 
@@ -1725,7 +1726,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			assert.Equal(t, "data", tmpl.Labels["team"])
 			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
 			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
-			assert.Equal(t, nodeServerConfigRollHash(node), tmpl.Annotations[configHashKey], "operator annotations win over podMetadata")
+			assert.Equal(t, "aaaaaaaaaaaa", tmpl.Annotations[configRevisionKey], "operator annotations win over podMetadata")
 
 			var selector map[string]string
 			if workloadType == valkeyv1.WorkloadTypeDeployment {

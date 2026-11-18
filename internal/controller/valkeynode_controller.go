@@ -664,22 +664,19 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
 // template, and therefore the ones that feed the WorkloadRevision roll hash:
-// the user's spec.podMetadata.annotations plus the server-config hash. The
-// config hash is needed because a config change that is not
-// live-settable still needs a rolling restart to take effect, and the config
-// itself lives in a ConfigMap whose content changes never alter the pod
-// template. The hash is derived from the node spec (Config minus live-settable
-// keys, plus TLS), gated on ServerConfigMapName — the spec marker that a parent
-// manages this node's config. The gate must be a spec field, not ownership:
-// the cluster controller computes WorkloadRevision on a freshly built node
-// that has no owner references yet, and both sides must hash identically.
-// The ACL hash is deliberately absent. ACL edits are applied to the running
+// the user's spec.podMetadata.annotations plus the pinned config revision.
+// The revision names the restart-only config the pod boots on, so a new one
+// rolls the pod. The parent sets spec.configRevision, and both controllers
+// build the template from the node spec alone, so they hash identically.
+// The ACL is deliberately absent. ACL edits are applied to the running
 // server live by the ValkeyNode reconciler (see applyLiveACL), so they must
 // not enter the WorkloadRevision and roll the pods.
 func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	annotations := map[string]string{}
-	if node.Spec.ServerConfigMapName != "" {
-		annotations[configHashKey] = nodeServerConfigRollHash(node)
+	// The field is required, but a node stored before it existed has none
+	// until its parent sets one.
+	if node.Spec.ConfigRevision != "" {
+		annotations[configRevisionKey] = node.Spec.ConfigRevision
 	}
 	if node.Spec.PodMetadata != nil {
 		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)

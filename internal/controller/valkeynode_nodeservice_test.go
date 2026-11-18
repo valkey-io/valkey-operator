@@ -387,6 +387,7 @@ func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
 			},
 			OwnerReferences: testParentRefs(),
 		},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision},
 	}
 }
 

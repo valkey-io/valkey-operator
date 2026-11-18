@@ -54,6 +54,7 @@ metadata:
   name: %s
 spec:
   workloadType: StatefulSet
+  configRevision: "000000000000"
 `, nodeName))
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply ValkeyNode %s", nodeName)

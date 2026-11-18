@@ -229,8 +229,10 @@ func (r *ValkeyClusterReconciler) nodesBehindAppliedACL(ctx context.Context, clu
 	return pending, nil
 }
 
-// podMountsSecret reports whether a pod spec has a volume sourcing the Secret.
-func podMountsSecret(spec *corev1.PodSpec, name string) bool {
+// podReferencesSecret reports whether a pod spec needs the Secret to start a
+// container: as a volume, as a projected volume source, or through env or
+// envFrom in a container or init container.
+func podReferencesSecret(spec *corev1.PodSpec, name string) bool {
 	for i := range spec.Volumes {
 		volume := &spec.Volumes[i]
 		if volume.Secret != nil && volume.Secret.SecretName == name {
@@ -245,49 +247,93 @@ func podMountsSecret(spec *corev1.PodSpec, name string) bool {
 			}
 		}
 	}
+	for _, containers := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for i := range containers {
+			for _, env := range containers[i].Env {
+				if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil && env.ValueFrom.SecretKeyRef.Name == name {
+					return true
+				}
+			}
+			for _, from := range containers[i].EnvFrom {
+				if from.SecretRef != nil && from.SecretRef.Name == name {
+					return true
+				}
+			}
+		}
+	}
 	return false
 }
 
-// trustBundleInUse reports whether anything could still need the named trust
-// bundle Secret. A ValkeyNode's spec is not enough: it drops the reference as
-// soon as the cluster stops asking for it, while its workload keeps the old
-// template until its roll is authorised and its pod runs until replaced. A pod
-// created from that template would never start without the Secret. Pods that
-// have finished are not counted, since they never start again. Everything is
-// read through the APIReader, because the answer decides a deletion.
-func (r *ValkeyClusterReconciler) trustBundleInUse(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
+// nodeSpecReferencesSecret reports whether a ValkeyNode's spec names the
+// Secret as its users ACL or its trust bundle.
+func nodeSpecReferencesSecret(node *valkeyiov1alpha1.ValkeyNode, name string) bool {
+	if node.Spec.UsersACLSecretName == name {
+		return true
+	}
+	tls := node.Spec.TLS
+	return tls != nil && tls.Certificates.TrustBundle != nil && tls.Certificates.TrustBundle.SecretName == name
+}
+
+// secretsInUse reports which of the named Secrets anything of the cluster could
+// still need. A ValkeyNode's spec is not enough: it drops the reference as soon
+// as the cluster stops asking for it, while its workload keeps the old template
+// until its roll is authorised and its pod runs until replaced. A pod created
+// from that template, or a container that restarts in place, would not start
+// without the Secret. Pods that have finished are not counted, since they never
+// start again. Everything is read through the APIReader, because the answer
+// decides a deletion.
+func (r *ValkeyClusterReconciler) secretsInUse(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, names ...string) (map[string]bool, error) {
+	inUse := make(map[string]bool, len(names))
+	// mark records the names refers matches and reports whether every name is
+	// in use, so the reads can stop early.
+	mark := func(refers func(name string) bool) bool {
+		for _, name := range names {
+			if !inUse[name] && refers(name) {
+				inUse[name] = true
+			}
+		}
+		return len(inUse) == len(names)
+	}
+
 	inCluster := []client.ListOption{client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}}
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := r.APIReader.List(ctx, nodes, inCluster...); err != nil {
-		return false, err
+		return nil, err
 	}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		if tls := node.Spec.TLS; tls != nil && tls.Certificates.TrustBundle != nil && tls.Certificates.TrustBundle.SecretName == name {
-			return true, nil
+		if mark(func(name string) bool { return nodeSpecReferencesSecret(node, name) }) {
+			return inUse, nil
 		}
 		template, err := livePodTemplate(ctx, r.APIReader, node)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if template != nil && podMountsSecret(&template.Spec, name) {
-			return true, nil
+		if template != nil && mark(func(name string) bool { return podReferencesSecret(&template.Spec, name) }) {
+			return inUse, nil
 		}
 	}
 	pods := &corev1.PodList{}
 	if err := r.APIReader.List(ctx, pods, inCluster...); err != nil {
-		return false, err
+		return nil, err
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
-		if podMountsSecret(&pod.Spec, name) {
-			return true, nil
+		if mark(func(name string) bool { return podReferencesSecret(&pod.Spec, name) }) {
+			return inUse, nil
 		}
 	}
-	return false, nil
+	return inUse, nil
+}
+
+// trustBundleInUse reports whether anything could still need the named trust
+// bundle Secret; see secretsInUse.
+func (r *ValkeyClusterReconciler) trustBundleInUse(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string) (bool, error) {
+	inUse, err := r.secretsInUse(ctx, cluster, name)
+	return inUse[name], err
 }
 
 // isWriteRefused reports whether the API server refused a write in a way that

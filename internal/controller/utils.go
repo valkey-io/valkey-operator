@@ -149,6 +149,20 @@ func effectiveImage(image string) string {
 	return image
 }
 
+// effectiveServerImage follows mergePatchContainers: the last server patch wins,
+// and an empty image is omitted by the strategic merge, preserving the base.
+func effectiveServerImage(image string, patches []corev1.Container) string {
+	for _, patch := range slices.Backward(patches) {
+		if patch.Name == serverContainerName {
+			if patch.Image != "" {
+				return patch.Image
+			}
+			break
+		}
+	}
+	return effectiveImage(image)
+}
+
 // This function takes a K8S object reference (eg: pod, secret, configmap, etc),
 // and a key, and value to add to, or replace an existing, annotation within the object.
 // Returns true if the annotation was added, or updated

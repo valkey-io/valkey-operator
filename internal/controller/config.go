@@ -143,7 +143,7 @@ func renderConfig(config map[string]string) string {
 
 func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
 	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, node.Spec.Image))
+	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, effectiveServerImage(node.Spec.Image, node.Spec.Containers)))
 }
 
 // Return a base config of parameters that users shouldn't be able to override.
@@ -200,12 +200,14 @@ func liveConfigToApply(config map[string]string) map[string]string {
 // features are not supported by the detected Valkey version. It reports exactly
 // the settings the renderer drops.
 func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-
-	image := effectiveImage(cluster.Spec.Image)
+	image := effectiveServerImage(cluster.Spec.Image, cluster.Spec.Containers)
+	droppedKeys := gatedUserKeysToSuppress(image, cluster.Spec.Config)
 	imageSource := "spec.image"
 	if cluster.Spec.Image == "" {
 		imageSource = "default image"
+	}
+	if image != effectiveImage(cluster.Spec.Image) {
+		imageSource = "spec.containers[server].image"
 	}
 
 	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
@@ -294,8 +296,9 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 
 // buildServerConfig renders the full config written to the shared ConfigMap.
 func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
+	image := effectiveServerImage(cluster.Spec.Image, cluster.Spec.Containers)
+	excludeKeys := gatedUserKeysToSuppress(image, cluster.Spec.Config)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), image), excludeKeys)
 }
 
 // nodeServerConfigRollHash derives the config roll hash from the node spec:
@@ -305,9 +308,10 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 // since a divergence would change every pod template on operator upgrade and
 // roll every pod (see config_rollhash_test.go).
 func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
+	image := effectiveServerImage(node.Spec.Image, node.Spec.Containers)
 	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
+	maps.Copy(excludedKeys, gatedUserKeysToSuppress(image, node.Spec.Config))
+	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, image), excludedKeys)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
 }
 

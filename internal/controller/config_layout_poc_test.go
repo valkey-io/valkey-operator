@@ -322,6 +322,34 @@ var _ = Describe("config layout POC", func() {
 		}
 	})
 
+	It("rewrites live.conf in the reconcile that records the applied value", func() {
+		newCluster("cfg-live-lag", 1, map[string]string{"maxmemory": "100mb"})
+		settle()
+		name := valkeyNodeName(cluster.Name, 0, 0)
+		setApplied(name, map[string]string{"maxmemory": "100mb"})
+		reconcileNode(name)
+		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["maxmemory"] = "200mb" })
+		settle()
+		Expect(liveConf(name)).To(Equal("maxmemory 100mb\n"))
+
+		fake := &fakeConfigClient{}
+		nr.newConfigClient = func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+			return fake, nil
+		}
+		nodeWrites.Reset()
+		_, _, err := nr.applyLiveSettings(ctx, getNode(name))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory": "200mb"}))
+		Expect(getNode(name).Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.ConfigEntry{{Name: "maxmemory", Value: "200mb"}}))
+		Expect(liveConf(name)).To(Equal("maxmemory 200mb\n"))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+
+		By("writing nothing when live.conf already matches")
+		_, _, err = nr.applyLiveSettings(ctx, getNode(name))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+	})
+
 	It("AllowlistGrowthDoesNotRoll", func() {
 		newCluster("poc-grow", 3, map[string]string{"appendfsync": "everysec"})
 		settle()

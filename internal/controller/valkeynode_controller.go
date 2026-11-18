@@ -374,8 +374,10 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		result, err = liveApplyResult(reason, err)
 		return true, result, err
 	}
+	var current *valkeyiov1alpha1.ValkeyNode
 	if len(applied) > 0 {
-		if condErr := r.setLiveConfigApplied(ctx, node, applied); condErr != nil {
+		var condErr error
+		if current, condErr = r.setLiveConfigApplied(ctx, node, applied); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 			return true, ctrl.Result{}, condErr
 		}
@@ -385,10 +387,17 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		// controller treats the same as True. Without this, a prior False
 		// (e.g. from a CONFIG SET failure) would persist after the offending
 		// key is removed and block cluster progress indefinitely.
-		if condErr := r.clearLiveConfigApplied(ctx, node); condErr != nil {
+		var condErr error
+		if current, condErr = r.clearLiveConfigApplied(ctx, node); condErr != nil {
 			log.Error(condErr, "failed to clear LiveConfigApplied condition")
 			return true, ctrl.Result{}, condErr
 		}
+	}
+	// live.conf renders from status.appliedLiveConfig, so it follows the
+	// status write now instead of on the next reconcile.
+	if err := r.ensureNodeConfig(ctx, current); err != nil {
+		log.Error(err, "failed to write live.conf")
+		return true, ctrl.Result{}, err
 	}
 
 	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
@@ -556,10 +565,12 @@ func (r *ValkeyNodeReconciler) clearTrustBundleCondition(ctx context.Context, no
 }
 
 // setLiveConfigApplied sets LiveConfigApplied=True and records applied as
-// status.appliedLiveConfig in the same write, so the two cannot disagree.
-func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, applied map[string]string) error {
+// status.appliedLiveConfig in the same write, so the two cannot disagree. It
+// returns the node as written.
+func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode,
+	applied map[string]string) (*valkeyiov1alpha1.ValkeyNode, error) {
 	entries := configEntries(applied)
-	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+	written, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
 		changed := false
 		if !shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
 			metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, liveConfigAppliedMessage, current.Generation) {
@@ -578,15 +589,17 @@ func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *v
 		return changed
 	})
 	if err != nil {
-		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
+		return nil, fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
-	return nil
+	return written, nil
 }
 
 // clearLiveConfigApplied removes the LiveConfigApplied condition and prunes
-// status.appliedLiveConfig of keys no longer in spec.config, in one write.
-func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+// status.appliedLiveConfig of keys no longer in spec.config, in one write. It
+// returns the node as written.
+func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context,
+	node *valkeyiov1alpha1.ValkeyNode) (*valkeyiov1alpha1.ValkeyNode, error) {
+	written, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
 		changed := meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
 		kept := slices.DeleteFunc(slices.Clone(current.Status.AppliedLiveConfig), func(e valkeyiov1alpha1.ConfigEntry) bool {
 			_, inSpec := node.Spec.Config[e.Name]
@@ -602,9 +615,9 @@ func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context, node 
 		return changed
 	})
 	if err != nil {
-		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
+		return nil, fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
-	return nil
+	return written, nil
 }
 
 // clearLiveConfigCondition removes the LiveConfigApplied condition if present.

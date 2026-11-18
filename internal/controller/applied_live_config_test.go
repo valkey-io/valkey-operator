@@ -68,7 +68,7 @@ var _ = Describe("status.appliedLiveConfig", func() {
 	}
 
 	It("records the applied values with LiveConfigApplied=True in one write", func() {
-		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).Error().NotTo(HaveOccurred())
 
 		got := read()
 		Expect(got.Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.ConfigEntry{
@@ -79,21 +79,21 @@ var _ = Describe("status.appliedLiveConfig", func() {
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(1))
 
 		By("writing nothing when neither changed")
-		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).Error().NotTo(HaveOccurred())
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(1))
 
 		By("replacing the values when the applied set changes")
-		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "200mb"})).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "200mb"})).Error().NotTo(HaveOccurred())
 		Expect(read().Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.ConfigEntry{{Name: "maxmemory", Value: "200mb"}}))
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(2))
 	})
 
 	It("prunes keys no longer in spec when there is nothing to apply", func() {
-		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).Error().NotTo(HaveOccurred())
 		counter.Reset()
 
 		node.Spec.Config = map[string]string{"maxclients": "500"}
-		Expect(r.clearLiveConfigApplied(ctx, node)).To(Succeed())
+		Expect(r.clearLiveConfigApplied(ctx, node)).Error().NotTo(HaveOccurred())
 
 		got := read()
 		Expect(got.Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.ConfigEntry{{Name: "maxclients", Value: "500"}}))
@@ -102,12 +102,12 @@ var _ = Describe("status.appliedLiveConfig", func() {
 
 		By("clearing the field once no key is left")
 		node.Spec.Config = nil
-		Expect(r.clearLiveConfigApplied(ctx, node)).To(Succeed())
+		Expect(r.clearLiveConfigApplied(ctx, node)).Error().NotTo(HaveOccurred())
 		Expect(read().Status.AppliedLiveConfig).To(BeEmpty())
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(2))
 
 		By("writing nothing when there is nothing to prune")
-		Expect(r.clearLiveConfigApplied(ctx, node)).To(Succeed())
+		Expect(r.clearLiveConfigApplied(ctx, node)).Error().NotTo(HaveOccurred())
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(2))
 	})
 })

@@ -28,7 +28,7 @@ import (
 func TestOperatorUserPasswordSecret(t *testing.T) {
 	sel := operatorUserPasswordSecret("c1")
 	assert.NotNil(t, sel)
-	assert.Equal(t, "internal-c1-system-passwords", sel.Name)
+	assert.Equal(t, "valkey-c1-system-passwords", sel.Name)
 	assert.Equal(t, "_operator", sel.Key)
 	assert.NotNil(t, sel.Optional)
 	assert.True(t, *sel.Optional)

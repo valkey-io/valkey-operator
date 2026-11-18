@@ -107,6 +107,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure the headless Service exists (upsertService).
 //   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
+//   - Keep each Secret left under its legacy name equal to its replacement
+//     while the cluster's workloads still read it, then delete it
+//     (retireLegacySecrets).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
 //   - Build the Valkey cluster state by connecting to each node and scraping
@@ -206,6 +209,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, aclErr
 	}
 	r.reportUsersACLUnresolved(ctx, cluster, aclErr)
+
+	// Reported, not returned: a failure here must not stop the reconcile,
+	// since that would also stop the nodes rolling off the legacy Secrets. It
+	// is tried again on the next reconcile.
+	if err := r.retireLegacySecrets(ctx, cluster); err != nil {
+		log.Error(err, "failed to retire the legacy Secrets")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "LegacySecretRetireFailed", "RetireLegacySecrets", "Failed to retire the legacy Secrets: %v", err)
+	}
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
@@ -2164,13 +2175,16 @@ const aclNotAppliedSeparator = "; ACL not applied on "
 // internalAclSecretExists reports whether the cluster already has an aclfile
 // in its internal ACL Secret, which is what the nodes keep running while a
 // rebuild fails. A Secret whose aclfile entry is missing or empty is no
-// fallback: the nodes have nothing to keep.
+// fallback: the nodes have nothing to keep. A cluster that has only the legacy
+// ACL Secret gets it copied first, since that is the aclfile its nodes run and
+// the one they mount once they roll onto the new name.
 func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
+	secret, err := r.operatorSecret(ctx, cluster, getInternalSecretName(cluster.Name), legacyInternalSecretName(cluster.Name))
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to read the internal ACL Secret")
 		return false
 	}
-	return len(secret.Data[aclFilename]) > 0
+	return secret != nil && len(secret.Data[aclFilename]) > 0
 }
 
 // reportUsersACLUnresolved carries the result of the ACL step on the Degraded

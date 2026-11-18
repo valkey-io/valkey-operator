@@ -375,7 +375,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 
 	aclAt := func(revision string) *corev1.Secret {
 		return &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "internal-c-acl", Namespace: "ns"},
+			ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-acl", Namespace: "ns"},
 			Data:       map[string][]byte{aclFilename: []byte("user " + aclRevisionUser + " off resetchannels -@all #" + revision + "\n")},
 		}
 	}

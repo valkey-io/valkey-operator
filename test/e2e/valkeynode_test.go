@@ -68,9 +68,9 @@ var _ = Describe("ValkeyNode", Label("valkeynode"), func() {
 
 	// applySystemUsersSecrets provisions the operator-managed credentials that the
 	// ValkeyCluster controller normally creates for cluster-owned nodes:
-	//   - internal-<name>-system-passwords: the raw "_operator" password, read by
+	//   - valkey-<name>-system-passwords: the raw "_operator" password, read by
 	//     the probe (VALKEYCLI_AUTH) and by the operator's role lookup.
-	//   - internal-<name>-acl (users.acl): defines "_operator" and a password-
+	//   - valkey-<name>-acl (users.acl): defines "_operator" and a password-
 	//     protected "default" user, so a Ready node proves the probe authenticated
 	//     as "_operator" rather than silently passing via a nopass "default".
 	applySystemUsersSecrets := func(name string) {
@@ -78,7 +78,7 @@ var _ = Describe("ValkeyNode", Label("valkeynode"), func() {
 kind: Secret
 type: valkey.io/acl
 metadata:
-  name: internal-%s-system-passwords
+  name: valkey-%s-system-passwords
   labels:
     app.kubernetes.io/managed-by: valkey-operator
 stringData:
@@ -90,7 +90,7 @@ stringData:
 kind: Secret
 type: valkey.io/acl
 metadata:
-  name: internal-%s-acl
+  name: valkey-%s-acl
   labels:
     app.kubernetes.io/managed-by: valkey-operator
 stringData:
@@ -102,8 +102,8 @@ stringData:
 	}
 
 	deleteSystemUsersSecrets := func(name string) {
-		deleteResource("secret", "internal-"+name+"-acl")
-		deleteResource("secret", "internal-"+name+"-system-passwords")
+		deleteResource("secret", "valkey-"+name+"-acl")
+		deleteResource("secret", "valkey-"+name+"-system-passwords")
 	}
 
 	// createStandaloneValkeyNode provisions operator-managed credentials, applies a
@@ -120,7 +120,7 @@ metadata:
     valkey.io/cluster: %s
 spec:
   workloadType: %s
-  usersACLSecretName: internal-%s-acl
+  usersACLSecretName: valkey-%s-acl
 `, name, name, workloadType, name)
 		applyManifest(manifest, "ValkeyNode "+name)
 
@@ -443,7 +443,7 @@ spec:
 kind: Secret
 type: valkey.io/acl
 metadata:
-  name: internal-%s-acl
+  name: valkey-%s-acl
   labels:
     app.kubernetes.io/managed-by: valkey-operator
 stringData:
@@ -460,7 +460,7 @@ metadata:
   labels:
     valkey.io/cluster: %[1]s
 spec:
-  usersACLSecretName: internal-%[1]s-acl
+  usersACLSecretName: valkey-%[1]s-acl
   tls:
     serverName: localhost
     certificates:
@@ -561,7 +561,7 @@ metadata:
     valkey.io/cluster: %s
 spec:
   serverConfigMapName: %s
-  usersACLSecretName: internal-%s-acl
+  usersACLSecretName: valkey-%s-acl
 `, nodeName, nodeName, cmName, nodeName)
 
 			applyManifest(nodeManifest, "ValkeyNode with external ConfigMap")

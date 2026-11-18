@@ -89,7 +89,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 			By("validating the system user ACLs")
 			verifySystemUserAcls := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secret",
-					"internal-"+valkeyClusterName+"-system-passwords",
+					"valkey-"+valkeyClusterName+"-system-passwords",
 					"-o", "jsonpath={.data}",
 				)
 				output, err := utils.Run(cmd)
@@ -538,11 +538,11 @@ spec:
 
 			By("validating internal secrets were created")
 			verifyInternalSecretExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
+				cmd := exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-acl")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords")
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords")
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -610,7 +610,7 @@ spec:
 			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords",
 					"-o", "jsonpath={.data._operator}",
 				)
 
@@ -669,7 +669,7 @@ EOF`,
 			verifyDeniedPermissionsOfOperatorUser := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords",
 					"-o", "jsonpath={.data._operator}",
 				)
 
@@ -2781,7 +2781,7 @@ spec:
 
 			By("promoting the replica with CLUSTER FAILOVER")
 			b64Password, err := utils.Run(exec.Command("kubectl", "get", "secret",
-				"internal-"+clusterName+"-system-passwords", "-o", "jsonpath={.data._operator}"))
+				"valkey-"+clusterName+"-system-passwords", "-o", "jsonpath={.data._operator}"))
 			Expect(err).NotTo(HaveOccurred())
 			decoded, err := base64.StdEncoding.DecodeString(b64Password)
 			Expect(err).NotTo(HaveOccurred())

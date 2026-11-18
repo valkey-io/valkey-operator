@@ -100,7 +100,7 @@ var (
 )
 
 func getInternalSecretName(clusterName string) string {
-	return "internal-" + clusterName + "-acl"
+	return resourcePrefix + clusterName + "-acl"
 }
 
 func getDefaultSecretName(clusterName string) string {
@@ -108,7 +108,7 @@ func getDefaultSecretName(clusterName string) string {
 }
 
 func getSystemPasswordSecretName(clusterName string) string {
-	return "internal-" + clusterName + "-system-passwords"
+	return resourcePrefix + clusterName + "-system-passwords"
 }
 
 // operatorUserPasswordSecret returns a SecretKeySelector for the operator-managed
@@ -129,16 +129,12 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 	log := logf.FromContext(ctx)
 	log.V(1).Info("getting system users secret: " + cluster.Name)
 	var systemsAcls strings.Builder
-	systemUserSecret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: cluster.Namespace,
-		Name:      getSystemPasswordSecretName(cluster.Name),
-	}, systemUserSecret)
+	systemUserSecret, err := r.operatorSecret(ctx, cluster, getSystemPasswordSecretName(cluster.Name), legacySystemPasswordSecretName(cluster.Name))
 	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch system users secret")
-			return "", err
-		}
+		log.Error(err, "failed to fetch system users secret")
+		return "", err
+	}
+	if systemUserSecret == nil {
 		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
 		if err != nil {
 			log.Error(err, "failed to create system user secret")
@@ -442,6 +438,17 @@ func fetchSystemUserPassword(ctx context.Context, username string, apiClient cli
 		Namespace: clusterNamespace,
 		Name:      getSystemPasswordSecretName(clusterName),
 	}, systemSecret)
+	if apierrors.IsNotFound(err) {
+		// The ValkeyNode controller and the role poller dial an upgraded
+		// cluster before its cluster reconcile has copied the legacy Secret.
+		legacyErr := apiClient.Get(ctx, types.NamespacedName{
+			Namespace: clusterNamespace,
+			Name:      legacySystemPasswordSecretName(clusterName),
+		}, systemSecret)
+		if !apierrors.IsNotFound(legacyErr) {
+			err = legacyErr
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -499,25 +506,21 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	log := logf.FromContext(ctx)
 	var createSecret bool
 	secretName := getSystemPasswordSecretName(cluster.Name)
-	systemUsersSecret := &corev1.Secret{}
-
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      secretName,
-		Namespace: cluster.Namespace,
-	}, systemUsersSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch system users secret")
-			return nil, err
-		}
+	systemUsersSecret, err := r.operatorSecret(ctx, cluster, secretName, legacySystemPasswordSecretName(cluster.Name))
+	if err != nil {
+		log.Error(err, "failed to fetch system users secret")
+		return nil, err
+	}
+	if systemUsersSecret == nil {
 		log.V(2).Info("creating internal secret", "secretName", secretName)
 
+		systemUsersSecret = &corev1.Secret{}
 		systemUsersSecret.Type = AclSecretType
 		systemUsersSecret.ObjectMeta = metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		}
-		systemUsersSecret.Data = make(map[string][]byte)
 		// Register ownership of the new internal Secret
 		if err := controllerutil.SetControllerReference(cluster, systemUsersSecret, r.Scheme); err != nil {
 			log.Error(err, "Failed to grab ownership of system users secret")
@@ -525,6 +528,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			return systemUsersSecret, err
 		}
 		createSecret = true
+	}
+	if systemUsersSecret.Data == nil {
+		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
 	for _, user := range systemUsers {
@@ -543,7 +549,6 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data[user] = password
 	}
 
-	var err error
 	if createSecret {
 		err = r.Create(ctx, systemUsersSecret)
 	} else {
@@ -557,20 +562,17 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 	aclHash := fmt.Sprintf("%x", sha256.Sum256(aclBytes))
 	// An "internal" secrets object is used for synchronization
 	internalSecretName := getInternalSecretName(cluster.Name)
-	internalAclSecret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      internalSecretName,
-		Namespace: cluster.Namespace,
-	}, internalAclSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch internal acl secret")
-			return err
-		}
-
+	internalAclSecret, err := r.operatorSecret(ctx, cluster, internalSecretName, legacyInternalSecretName(cluster.Name))
+	if err != nil {
+		log.Error(err, "failed to fetch internal acl secret")
+		return err
+	}
+	if internalAclSecret == nil {
 		// Internal secret was not found.
 		// Init, and add metadata to the new Secret object
 		log.V(2).Info("creating internal secret", "secretName", internalSecretName)
 
+		internalAclSecret = &corev1.Secret{}
 		internalAclSecret.ObjectMeta = metav1.ObjectMeta{
 			Name:      internalSecretName,
 			Namespace: cluster.Namespace,
@@ -612,6 +614,9 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		return nil
 	}
 	// Hashes are different; Update the acl contents of the internal secret
+	if internalAclSecret.Data == nil {
+		internalAclSecret.Data = map[string][]byte{}
+	}
 	internalAclSecret.Data[aclFilename] = aclBytes
 
 	// Update secret

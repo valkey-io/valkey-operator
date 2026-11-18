@@ -43,6 +43,8 @@ maxmemory         # There are no safeguards, ensure you do not exceed your conta
 maxmemory-policy
 ```
 
+Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. Changing any other key rolls the pods one at a time.
+
 #### Failover tuning
 
 `cluster-node-timeout` controls how long a node may be unreachable before the cluster marks it failed and starts a failover. The operator does not set it, so the Valkey default of 15 seconds applies. Set it in `spec.config` to tune failover for your network.

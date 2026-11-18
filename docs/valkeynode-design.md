@@ -48,6 +48,8 @@ cluster-sample-2-0   true    primary   valkey-cluster-sample-2-0-0   130m
 cluster-sample-2-1   true    replica   valkey-cluster-sample-2-1-0   130m
 ```
 
+`kubectl get valkeynode -o wide` adds the pod IP and `spec.configRevision` in the `CONFIG` column.
+
 This also makes it straightforward to build admin console tooling that queries the Kubernetes API for cluster state.
 
 ## Why Not Direct Pod Management?
@@ -76,6 +78,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
     - `affinity`
 - `persistence` — storage mode and size
 - `config` — all Valkey configuration values (e.g. `cluster-enabled`, `maxmemory`); ValkeyNode applies these as-is without interpretation
+- `configRevision`: the pinned config revision the pod boots on. See [Config files](#config-files)
 
 **Parents read from status:**
 
@@ -89,11 +92,24 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 
+## Config files
+
+Each ValkeyNode owns a ConfigMap named `valkey-<name>-config` that holds its server config in two kinds of key:
+
+- `valkey-<rev>.conf`: a pinned file with the restart-only config. `<rev>` is the first 12 hex characters of the SHA-256 of its content. A key is written once and never rewritten.
+- `live.conf`: the live-settable keys, rendered from `status.appliedLiveConfig`. The pinned file ends with `include /config/live.conf`.
+
+The pod mounts `valkey-<spec.configRevision>.conf` as `/config/valkey.conf` and `live.conf` as `/config/live.conf`, both from one ConfigMap volume, and the pod template carries `spec.configRevision` in the `valkey.io/config-revision` annotation.
+
+The parent decides the revision. It keeps the revision the live workload references while only live-settable keys differ, so a live change rolls nothing. ValkeyNode writes the ConfigMap. It writes a missing `valkey-<rev>.conf` only when the file it renders from its own spec hashes to `spec.configRevision`, so a parent cannot make it mount config its spec does not describe. On a mismatch it reports `Ready=False` with reason `ConfigRevisionMismatch` and leaves the workload alone. A node with no `spec.configRevision` reports `MissingConfigRevision` and builds no workload.
+
+A revision key is deleted once it is not `spec.configRevision`, the workload template does not reference it, no pod of the node mounts it, and the workload has finished its roll. See [Config revisions](architecture.md#config-revisions) for the details.
+
 ## TLS Trust Bundle
 
 `spec.tls.certificates.trustBundle` names a Secret whose `ca.crt` replaces the server secret's `ca.crt` as the root Valkey verifies clients and peers against (`tls-ca-cert-file`). It lets clients present certificates from CAs other than the one that issued the server certificate. The bundle must still include the server's own root, since peers present the server certificate to each other.
 
-- **Mounting.** The `tls-certs` volume becomes a projection: `tls.crt` and `tls.key` from the server secret, `ca.crt` from the bundle, and the server secret's `ca.crt` at `server-ca.crt`. Every path in `valkey.conf` stays the same, so setting a bundle changes the pod template but not the config or its roll hash. Probes and the metrics exporter verify the server against `server-ca.crt`.
+- **Mounting.** The `tls-certs` volume becomes a projection: `tls.crt` and `tls.key` from the server secret, `ca.crt` from the bundle, and the server secret's `ca.crt` at `server-ca.crt`. Every path in `valkey.conf` stays the same, so setting a bundle changes the pod template but not the pinned config or its revision. Probes and the metrics exporter verify the server against `server-ca.crt`.
 - **Live reload.** Valkey reads `tls-ca-cert-file` only at startup or when its TLS config is set, and `tls-auto-reload-interval` was not observed to reload the CA. So on every reconcile the node controller sets `tls-ca-cert-file` to its unchanged path, which rebuilds the TLS context with the current file. A changed bundle therefore takes effect within the kubelet's volume refresh plus one requeue, without a pod restart, for new connections.
 - **ACL first.** The reload runs only once the node's ACL is confirmed live, and the node records that ACL's revision in `status.appliedACLRevision`. The ACL and the bundle are separate mounts that the kubelet refreshes independently. A parent that widens the bundle can wait for every node to report the current revision, so a new root is never trusted under a stale ACL, even by a container that restarts mid-update.
 - **Status.** The node reports the reload as the `TrustBundleApplied` condition. A failed reload, for example of a malformed `ca.crt`, leaves the server on the roots it last loaded; the node reports `False` and retries every 10 seconds rather than with error backoff, so a fixed bundle is picked up promptly.
@@ -105,12 +121,14 @@ Child resources created by ValkeyNode have `valkey-` prepended to the ValkeyNode
 | Resource               | Pattern                         | Example                      |
 | ---------------------- | ------------------------------- | ---------------------------- |
 | Deployment/StatefulSet | `valkey-<name>`                 | `valkey-cluster-sample-0-0`  |
+| Config ConfigMap       | `valkey-<name>-config`          | `valkey-cluster-sample-0-0-config` |
 | PVC                    | `valkey-<name>-data`            | `valkey-cluster-sample-0-0-data` |
 | Pod                    | Managed by workload controller  | `valkey-cluster-sample-0-0-0` (StatefulSet) |
 
 ## Lifecycle and Deletion Behaviour
 
 - **Workload**: Deleted via cascading owner references when the ValkeyNode is deleted.
+- The config ConfigMap is deleted with the ValkeyNode the same way. Unused revision keys inside it are deleted earlier, as described in [Config files](#config-files).
 - **PVC**: `persistence.reclaimPolicy` decides what happens to the managed PVC when the ValkeyNode is deleted. `Retain` (the default) keeps it, as StatefulSets do, so data survives the node. `Delete` removes it through the node's finalizer.
 - **Orphaned ValkeyNodes**: If a parent controller (e.g. ValkeyCluster) is deleted with background or foreground cascading deletion, its ValkeyNodes are garbage collected via owner references, and each managed PVC follows the node's reclaim policy. With `--cascade=orphan` the ValkeyNodes lose their ownerReference and stay. They report `Ready=False` with reason `NoParent`, their pods keep running, and the operator no longer reconciles them.
 

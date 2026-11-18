@@ -271,6 +271,8 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 ### Graceful shutdown
 
+> **Upgrade note:** Adding the default preStop hook changes the server pod template. Upgrading the operator rolls existing Valkey pods once, unless their `server` container already overrides the hook.
+
 When a primary's pod is deleted outside the operator (a node drain, an eviction, a preemption or `kubectl delete pod`), the primary hands its slots to a replica before it exits, so the shard is not left without a writer.
 
 A preStop hook does the handoff first. It sends the online replica with the highest replication offset a plain `CLUSTER FAILOVER` and waits for the primary to become a replica. The hook runs for at most `cluster-manual-failover-timeout` plus a second, counted from its start. The primary is still up at that point and votes for its replica. The replica still needs a majority of the slot-owning primaries, so in a 2-shard cluster the other primary has to be up as well. The hook does nothing on a replica, on a primary without an online replica, or on a primary the operator has already failed over before a roll. A preStop hook you set on the `server` container through `spec.containers` replaces this one.

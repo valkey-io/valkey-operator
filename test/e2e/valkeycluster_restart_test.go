@@ -35,16 +35,13 @@ import (
 // Covers https://github.com/valkey-io/valkey-operator/issues/275: a
 // persistent cluster whose pods all restart at once comes back with every
 // pod IP changed while each node's persisted nodes.conf still holds the
-// peers' old addresses. No node is isolated (all IDs are known), so only
-// the stale-address heal phase can re-form the cluster - without it, the
-// cluster stays in Reconciling with cluster_state:fail until a manual
-// CLUSTER MEET.
+// peers' old addresses. The abrupt case requires stale-address healing.
+// The graceful case also allows shutdown handoffs and gossip to restore
+// connectivity; both cases must recover their persisted data.
 var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCluster", "Persistence", "RestartRecovery"), func() {
-	const clusterName = "cluster-persistent-restart"
+	const clusterPrefix = "cluster-persistent-restart"
 	const canaryKey = "restart-canary"
 	const canaryValue = "survives-full-restart"
-
-	podSelector := fmt.Sprintf("valkey.io/cluster=%s", clusterName)
 
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
@@ -53,7 +50,24 @@ var _ = Describe("ValkeyCluster full restart recovery", Ordered, Label("ValkeyCl
 		}
 	})
 
-	It("re-forms the cluster after all pods restart simultaneously", func() {
+	DescribeTable("re-forms the cluster after all pods restart simultaneously", func(abrupt bool) {
+		clusterName := clusterPrefix + "-graceful"
+		if abrupt {
+			clusterName = clusterPrefix + "-abrupt"
+		}
+		podSelector := fmt.Sprintf("valkey.io/cluster=%s", clusterName)
+		DeferCleanup(func() {
+			// Waited and checked so an incomplete teardown fails loudly here
+			// instead of silently polluting a later run with retained PVCs.
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName,
+				"--ignore-not-found=true", "--wait=true", "--timeout=120s")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ValkeyCluster during teardown")
+			cmd = exec.Command("kubectl", "delete", "pvc",
+				"-l", podSelector, "--ignore-not-found=true", "--wait=true", "--timeout=120s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's PVCs during teardown")
+		})
 		By("creating the persistent cluster")
 		manifest := fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
 kind: ValkeyCluster
@@ -160,8 +174,12 @@ spec:
 		}
 
 		By("deleting all pods at once so every pod IP changes")
-		cmd = exec.Command("kubectl", "delete", "pod",
-			"-l", podSelector, "--wait=false")
+		args := []string{"delete", "pod", "-l", podSelector, "--wait=false"}
+		if abrupt {
+			// Skip preStop and SIGTERM handoffs to exercise stale-address recovery.
+			args = append(args, "--grace-period=0", "--force")
+		}
+		cmd = exec.Command("kubectl", args...)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's pods")
 
@@ -179,14 +197,16 @@ spec:
 		}
 		Eventually(verifyAllPodsReplaced, 3*time.Minute).Should(Succeed())
 
-		By("waiting for the stale-address heal to re-introduce the moved members")
-		verifyHealEvent := func(g Gomega) {
-			count, err := countEvents("StaleAddressesHealed")
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(count).To(BeNumerically(">", healEventsBefore),
-				"expected a new StaleAddressesHealed event after the full restart")
+		if abrupt {
+			By("waiting for the stale-address heal to re-introduce the moved members")
+			verifyHealEvent := func(g Gomega) {
+				count, err := countEvents("StaleAddressesHealed")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(count).To(BeNumerically(">", healEventsBefore),
+					"expected a new StaleAddressesHealed event after the full restart")
+			}
+			Eventually(verifyHealEvent, 5*time.Minute).Should(Succeed())
 		}
-		Eventually(verifyHealEvent, 5*time.Minute).Should(Succeed())
 
 		By("waiting for the cluster to return to Ready without manual intervention")
 		verifyClusterRecovered := func(g Gomega) {
@@ -215,18 +235,9 @@ spec:
 		// the node from rejoining for 60s and fight the recovery.
 		Expect(mustCountEvents("StaleNodeForgotten")).To(Equal(forgottenEventsBefore),
 			"no member should be forgotten while recovering from an all-pods restart")
-	})
+	},
+		Entry("after an abrupt restart without shutdown hooks", true),
+		Entry("after a graceful restart with the default shutdown hooks", false),
+	)
 
-	AfterAll(func() {
-		// Waited and checked so an incomplete teardown fails loudly here
-		// instead of silently polluting a later run with retained PVCs.
-		cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName,
-			"--ignore-not-found=true", "--wait=true", "--timeout=120s")
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to delete the ValkeyCluster during teardown")
-		cmd = exec.Command("kubectl", "delete", "pvc",
-			"-l", podSelector, "--ignore-not-found=true", "--wait=true", "--timeout=120s")
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to delete the cluster's PVCs during teardown")
-	})
 })

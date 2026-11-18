@@ -247,17 +247,21 @@ func podReferencesSecret(spec *corev1.PodSpec, name string) bool {
 			}
 		}
 	}
-	for _, containers := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
-		for i := range containers {
-			for _, env := range containers[i].Env {
-				if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil && env.ValueFrom.SecretKeyRef.Name == name {
-					return true
-				}
+	return containersReferenceSecret(spec.InitContainers, name) || containersReferenceSecret(spec.Containers, name)
+}
+
+// containersReferenceSecret reports whether any of the containers reads the
+// Secret through env or envFrom.
+func containersReferenceSecret(containers []corev1.Container, name string) bool {
+	for i := range containers {
+		for _, env := range containers[i].Env {
+			if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil && env.ValueFrom.SecretKeyRef.Name == name {
+				return true
 			}
-			for _, from := range containers[i].EnvFrom {
-				if from.SecretRef != nil && from.SecretRef.Name == name {
-					return true
-				}
+		}
+		for _, from := range containers[i].EnvFrom {
+			if from.SecretRef != nil && from.SecretRef.Name == name {
+				return true
 			}
 		}
 	}
@@ -265,9 +269,11 @@ func podReferencesSecret(spec *corev1.PodSpec, name string) bool {
 }
 
 // nodeSpecReferencesSecret reports whether a ValkeyNode's spec names the
-// Secret as its users ACL or its trust bundle.
+// Secret as its users ACL or its trust bundle, or whether one of the containers
+// it declares reads it. The declared containers count even while the node has
+// no workload or pod, since they are copied into the workload it gets next.
 func nodeSpecReferencesSecret(node *valkeyiov1alpha1.ValkeyNode, name string) bool {
-	if node.Spec.UsersACLSecretName == name {
+	if node.Spec.UsersACLSecretName == name || containersReferenceSecret(node.Spec.Containers, name) {
 		return true
 	}
 	tls := node.Spec.TLS

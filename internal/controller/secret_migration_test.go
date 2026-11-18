@@ -352,6 +352,14 @@ func TestRetireLegacySecrets(t *testing.T) {
 			objs: []client.Object{node(valkeyiov1alpha1.WorkloadTypeStatefulSet, "internal-c-acl")},
 			kept: []string{"internal-c-acl"},
 		},
+		"a sidecar the node spec declares reads the passwords while its workload and pod are gone": {
+			objs: []client.Object{func() client.Object {
+				n := node(valkeyiov1alpha1.WorkloadTypeStatefulSet, "valkey-c-acl")
+				n.Spec.Containers = []corev1.Container{{Name: "sidecar", Env: secretEnv("internal-c-system-passwords")}}
+				return n
+			}()},
+			kept: []string{"internal-c-system-passwords"},
+		},
 		"a StatefulSet template reads the passwords through env": {
 			objs: []client.Object{rolled, nodeStatefulSet(corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Env: secretEnv("internal-c-system-passwords")}}})},
 			kept: []string{"internal-c-system-passwords"},

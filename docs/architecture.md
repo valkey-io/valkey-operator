@@ -11,7 +11,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 `internal/controller/valkeycluster_controller.go` — owns top-level orchestration. Each reconcile loop:
 
 1. Upserts a headless Service and PodDisruptionBudget
-2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
+2. Reconciles ACL users (writes the `valkey-<cluster>-acl` and `valkey-<cluster>-system-passwords` Secrets, with type `valkey.io/acl`)
 3. Upserts a ConfigMap containing `valkey.conf`, the health-check scripts and the init container script. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
 5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover)
@@ -60,7 +60,8 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 
 - `internal/valkey/` — pure Valkey protocol layer: `ClusterState` / `NodeState` types, CLUSTER NODES parsing, slot range arithmetic, slot migration and rebalancing logic
 - `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the ConfigMap
-- `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
+- `internal/controller/users.go` — manages the system passwords Secret and the ACL Secret built from the user-defined password Secrets
+- `internal/controller/secret_migration.go` — moves Secrets that earlier releases created under `internal-` names to their `valkey-` names
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
 - `internal/controller/status.go` — condition helpers (`setCondition`)
@@ -68,6 +69,8 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 ## Naming convention
 
 ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-index 0 is the *initial* primary; 1+ are replicas. After a failover, Valkey may promote a replica — the labels are not updated; the live role is always read from CLUSTER NODES. Labels `valkey.io/shard-index` and `valkey.io/node-index` are used by the reconciler to determine slot assignment vs. replication.
+
+Every other child of a ValkeyCluster takes the `valkey-` prefix, so it cannot collide with an unrelated object in the namespace: the headless Service, PodDisruptionBudget and server ConfigMap are `valkey-<cluster>`, each node's StatefulSet or Deployment is `valkey-<cluster>-<shardIndex>-<nodeIndex>`, and the Secrets are `valkey-<cluster>-<purpose>` (`acl`, `system-passwords`, `tls-trust`), with no kind suffix. A Secret the user creates, such as a user password Secret, does not take the prefix. See [Operator-managed Secrets](valkeycluster.md#operator-managed-secrets).
 
 ## Config hash propagation
 

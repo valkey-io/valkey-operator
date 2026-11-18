@@ -14,6 +14,7 @@
 - [Containers](#containers)
 - [Default images](#default-images)
 - [Metrics](#metrics)
+- [Operator-managed Secrets](#operator-managed-secrets)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
@@ -728,6 +729,38 @@ Move the list under `spec.acl.users`, replace the booleans and nest `passwordSec
 | `passwordSecret: {name, keys}` | `password.secret: {name, keys}` |
 
 Drop `passwordSecret` from users whose `password.type` is not `Secret`. The permission fields (`commands`, `keys`, `channels`, `permissions`) keep their names. The generated ACL is the same for both fields, so moving users changes nothing on the running nodes.
+
+### Operator-managed Secrets
+
+The operator creates these Secrets in the cluster's namespace. The ValkeyCluster controls them, so they are deleted with it.
+
+| Secret | Holds | Read by |
+|---|---|---|
+| `valkey-<cluster>-acl` | The aclfile: the users in `acl.users` and the operator's system users | Every node, which mounts it at `/config/users` and loads it with `ACL LOAD` |
+| `valkey-<cluster>-system-passwords` | The passwords of the `_operator`, `_replication` and `_exporter` system users | The operator, and each pod through the `PRIMARY_AUTH`, `VALKEYCLI_AUTH` and exporter `REDIS_PASSWORD` environment variables |
+| `valkey-<cluster>-tls-trust` | The server root and the `clientAuth.ca` roots, only while `networking.tls.clientAuth.ca` is set | Every node, as `tls-ca-cert-file`. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca) |
+
+The `valkey-` prefix marks objects the operator owns, so do not give your own Secrets these names.
+
+#### Upgrading from the `internal-` names
+
+Releases up to v0.9.0 named the first two Secrets `internal-<cluster>-acl` and `internal-<cluster>-system-passwords`. On upgrade:
+
+1. The operator copies each old Secret to its new name, with every key, annotation and label. It never generates system passwords while the old Secret exists, so the nodes keep accepting the operator.
+2. Every node rolls once, one at a time, because its pod template names both Secrets.
+3. While any ValkeyNode, workload template or pod of the cluster still references an old Secret, the operator keeps it equal to the new one. A node that has not rolled yet keeps receiving ACL changes, and a container that restarts in place reads the current passwords. Then the operator deletes the old Secret.
+
+An old Secret the cluster does not control, for example one restored from a backup without its owner reference, is copied but never changed or deleted. Delete it yourself once every node has rolled. If one of the new names is already taken by a Secret the cluster does not control while it still controls the old one, the operator stops with `Ready=False` and reason `UsersACLError`, naming both. Delete or rename that Secret.
+
+Read the system passwords from `valkey-<cluster>-system-passwords` after the upgrade. A sidecar in `containers` that references an old name keeps that Secret in use, so it stays, kept equal to the new one, until you change the reference. Standalone ValkeyNodes are not migrated: their pods now read `valkey-<label>-system-passwords`, where `<label>` is the node's `valkey.io/cluster` label, and you create that Secret.
+
+Rolling back to a release that uses the old names after the old Secrets are deleted makes it generate new system passwords, which the nodes reject. Before such a rollback, copy the Secret back under its old name, keeping its labels:
+
+```sh
+kubectl get secret valkey-<cluster>-system-passwords -o json \
+  | jq '.metadata.name = "internal-<cluster>-system-passwords" | del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp, .metadata.ownerReferences, .metadata.managedFields)' \
+  | kubectl create -f -
+```
 
 ### Workload type
 

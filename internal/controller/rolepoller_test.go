@@ -458,6 +458,7 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
+		withParentFields(node)
 		// The pod below may exist before the StatefulSet, so creating it needs a
 		// matching Spec.WorkloadRevision.
 		Expect(setDesiredWorkloadRevision(node)).To(Succeed())

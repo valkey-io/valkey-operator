@@ -92,8 +92,7 @@ type ValkeyNodeSpec struct {
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
 	// SharedConfigMapName names the ConfigMap the parent shares with its
-	// nodes. It holds the probe, init and primary handoff scripts and
-	// valkey.conf.
+	// nodes. It holds the probe, init and primary handoff scripts.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`

@@ -240,6 +240,22 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !hasKnownParent(node) {
 		return r.reconcileNoParent(ctx, node)
 	}
+	// The pinned file and live.conf go in before the workload that mounts them.
+	if err := r.ensureNodeConfig(ctx, node); err != nil {
+		var mismatch *configRevisionMismatchError
+		switch {
+		case errors.Is(err, errMissingConfigRevision):
+			// A spec update from the parent wakes the node.
+			r.setReadyCondition(ctx, node, reasonMissingConfigRevision, err.Error())
+			return ctrl.Result{}, nil
+		case errors.As(err, &mismatch):
+			log.Info("not writing config revision the spec does not render", "want", mismatch.want, "rendered", mismatch.rendered)
+			r.setReadyCondition(ctx, node, reasonConfigRevisionMismatch, err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
+		return ctrl.Result{}, err
+	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
 		return ctrl.Result{}, err
@@ -262,6 +278,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		r.setReadyCondition(ctx, node, workloadReason, err.Error())
 		return ctrl.Result{}, err
+	}
+	if err := r.pruneConfigRevisions(ctx, node); err != nil {
+		log.Error(err, "failed to delete unused config revisions")
 	}
 
 	roleResolveFailed, err := r.updateStatus(ctx, node, serviceErr)

@@ -3292,8 +3292,7 @@ spec:
               sharedConfigMapName:
                 description: |-
                   SharedConfigMapName names the ConfigMap the parent shares with its
-                  nodes. It holds the probe, init and primary handoff scripts and
-                  valkey.conf.
+                  nodes. It holds the probe, init and primary handoff scripts.
                 minLength: 1
                 type: string
               terminationGracePeriodSeconds:

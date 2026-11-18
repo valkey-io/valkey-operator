@@ -124,8 +124,9 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		}))).To(Succeed())
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "trust-order-",
-				Namespace:    "default",
+				GenerateName:    "trust-order-",
+				Namespace:       "default",
+				OwnerReferences: testParentRefs(),
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,

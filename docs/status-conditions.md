@@ -204,6 +204,8 @@ Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
+- `MissingConfigRevision` – `spec.configRevision` is empty, so there is no pinned config file to mount. The node builds no workload until its parent sets the field.
+- `ConfigRevisionMismatch` – the node's ConfigMap has no `valkey-<rev>.conf` key for `spec.configRevision`, and the pinned file the node renders from its own spec hashes to a different revision. The node writes nothing and leaves the workload alone. The parent clears it by naming the revision the spec renders, which it does once it finds the key it expected is gone, and the node then rolls through the usual one-at-a-time gate. See [Config revisions](architecture.md#config-revisions).
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.

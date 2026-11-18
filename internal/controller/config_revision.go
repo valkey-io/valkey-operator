@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -31,7 +30,8 @@ import (
 // setDesiredConfigRevision sets desired.Spec.ConfigRevision. current is the
 // existing node, nil when the node is new, and liveRev is the revision its
 // live workload template references. A new node, a node without a workload,
-// or a live revision whose content is unknown gets the desired revision.
+// or a live revision whose key is gone from the node's ConfigMap gets the
+// desired revision.
 func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster,
 	desired, current *valkeyiov1alpha1.ValkeyNode, liveRev string) error {
 	pinned := renderPinnedConfig(desired)
@@ -53,27 +53,40 @@ func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context, 
 }
 
 // errLiveConfigRevisionNotCached means the parent's cache does not hold the
-// content of a node's live config revision yet. The parent requeues rather
-// than treat it as unknown, which would roll the node to the desired revision.
+// content of a node's live config revision yet, while the API server does.
+// The parent requeues rather than treat it as unknown, which would roll the
+// node to the desired revision.
 var errLiveConfigRevisionNotCached = errors.New("live config revision not in cache")
 
 // liveRevisionContent returns the content of the pinned config revision rev
 // that node's live workload references, from key valkey-<rev>.conf of the
-// node's ConfigMap. The node controller writes that key before any template
-// references it, so a miss means the cache trails the workload, and it
-// returns errLiveConfigRevisionNotCached.
+// node's ConfigMap. A cache miss is confirmed through the APIReader. If the
+// API server has the key, the cache trails it and errLiveConfigRevisionNotCached
+// is returned. If the ConfigMap or the key is gone, found is false and the
+// caller uses the desired revision, so the node rolls through the usual gate.
 func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, _ *valkeyiov1alpha1.ValkeyCluster,
 	node *valkeyiov1alpha1.ValkeyNode, rev string) (content string, found bool, err error) {
-	cm := &corev1.ConfigMap{}
-	if err := r.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "", false, errLiveConfigRevisionNotCached
-		}
+	content, found, err = readConfigRevision(ctx, r.Client, node, rev)
+	if err != nil || found {
+		return content, found, err
+	}
+	if _, found, err = readConfigRevision(ctx, r.uncachedReader(), node, rev); err != nil {
 		return "", false, err
 	}
-	content, ok := cm.Data[configRevisionFileKey(rev)]
-	if !ok {
+	if found {
 		return "", false, errLiveConfigRevisionNotCached
 	}
-	return content, true, nil
+	return "", false, nil
+}
+
+// readConfigRevision reads key valkey-<rev>.conf of the node's ConfigMap.
+// A missing ConfigMap or key is not an error.
+func readConfigRevision(ctx context.Context, reader client.Reader, node *valkeyiov1alpha1.ValkeyNode,
+	rev string) (string, bool, error) {
+	cm := &corev1.ConfigMap{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
+		return "", false, client.IgnoreNotFound(err)
+	}
+	content, ok := cm.Data[configRevisionFileKey(rev)]
+	return content, ok, nil
 }

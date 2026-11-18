@@ -86,8 +86,7 @@ var _ = Describe("deleteExcessValkeyNodes", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards: 1,
 			},
 		}
 		Expect(k8sClient.Create(testCtx, cluster)).To(Succeed())

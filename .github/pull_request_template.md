@@ -8,6 +8,31 @@ here](https://github.com/valkey-io/valkey-operator/blob/main/CONTRIBUTING.md)
 
 This PR closes <Issue #>
 
+<!--
+Opener: the first thing a reviewer reads, two or three sentences. Say what
+changed and what to check closely. A human writes it.
+
+AI agents: write a visible placeholder here instead, for the person
+submitting the PR:
+
+_Opener pending: the person submitting this PR writes it._
+
+Then wrap Summary through Testing in a collapsed block that names the agent:
+
+<details>
+<summary>Written by AGENT NAME</summary>
+
+### Summary
+...
+### Testing
+...
+
+</details>
+
+Keep the blank line after </summary> and before </details>: GitHub renders
+the Markdown inside only with them. Keep the Checklist outside the block.
+-->
+
 ### Summary
 
 <!--

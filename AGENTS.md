@@ -17,3 +17,5 @@ Reference these docs in PR descriptions rather than duplicating their content.
 ## Workflow
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branching, PR, and coding standards guidance.
+
+When you open a PR, write its description from [`.github/pull_request_template.md`](.github/pull_request_template.md), also when you pass the body to `gh pr create`. The template's comments say which parts an AI agent writes.

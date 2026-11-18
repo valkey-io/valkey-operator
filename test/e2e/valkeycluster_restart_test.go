@@ -176,7 +176,7 @@ spec:
 		By("deleting all pods at once so every pod IP changes")
 		args := []string{"delete", "pod", "-l", podSelector, "--wait=false"}
 		if abrupt {
-			// Skip preStop and SIGTERM handoffs to exercise stale-address recovery.
+			// Skip preStop; the runtime may still deliver SIGTERM before killing the container.
 			args = append(args, "--grace-period=0", "--force")
 		}
 		cmd = exec.Command("kubectl", args...)
@@ -236,7 +236,7 @@ spec:
 		Expect(mustCountEvents("StaleNodeForgotten")).To(Equal(forgottenEventsBefore),
 			"no member should be forgotten while recovering from an all-pods restart")
 	},
-		Entry("after an abrupt restart without shutdown hooks", true),
+		Entry("after zero-grace deletion without preStop", true),
 		Entry("after a graceful restart with the default shutdown hooks", false),
 	)
 

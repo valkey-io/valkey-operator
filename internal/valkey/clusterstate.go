@@ -685,40 +685,17 @@ func infoStringToMap(s string) map[string]string {
 	return m
 }
 
-// parseSlotsRange parses strings to find multiple SlotsRange's
-func parseSlotsRanges(s []string) ([]SlotsRange, error) {
-	ranges := []SlotsRange{}
-
-	for _, part := range s {
-		// During active slot migration, CLUSTER NODES appends entries like
-		// "[5461->-abc123]" (migrating) or "[5461-<-abc123]" (importing) to the
-		// slot fields. parseClusterNodesLine splits well-formed markers off
-		// before calling this, so a "[" field here is a malformed marker. Skip
-		// it rather than fail the whole line.
-		if strings.HasPrefix(part, "[") {
-			continue
-		}
-		r, err := parseSlotsRange(part)
-		if err != nil {
-			return nil, err
-		}
-		ranges = append(ranges, r)
-	}
-	return ranges, nil
-}
-
 // parseSlotsRange parses a string to find a single SlotsRange
 func parseSlotsRange(s string) (SlotsRange, error) {
-	if strings.Contains(s, "-") {
-		parts := strings.Split(s, "-")
-		if len(parts) != 2 {
+	if startText, endText, isRange := strings.Cut(s, "-"); isRange {
+		if strings.Contains(endText, "-") {
 			return SlotsRange{}, fmt.Errorf("invalid range: %s", s)
 		}
-		start, err := strconv.Atoi(parts[0])
+		start, err := strconv.Atoi(startText)
 		if err != nil {
 			return SlotsRange{}, err
 		}
-		end, err := strconv.Atoi(parts[1])
+		end, err := strconv.Atoi(endText)
 		if err != nil {
 			return SlotsRange{}, err
 		}

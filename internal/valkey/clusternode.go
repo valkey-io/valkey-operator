@@ -135,37 +135,77 @@ func ParseClusterNodes(raw string) []ClusterNode {
 // parseClusterNodesLine parses a single CLUSTER NODES line. The bool is false
 // when the line is too short to describe a node.
 func parseClusterNodesLine(line string) (ClusterNode, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < clusterNodesMinFields {
-		return ClusterNode{}, false
+	// The leading fields are read in place; the slot fields that follow are
+	// handled one at a time, so no slice of fields is built.
+	var head [clusterNodesMinFields]string
+	rest := line
+	for i := range head {
+		head[i], rest = nextField(rest)
+		if head[i] == "" {
+			return ClusterNode{}, false
+		}
 	}
 
 	node := ClusterNode{
-		Id:        fields[0],
-		Host:      hostFromClusterNodesEndpoint(fields[1]),
-		Flags:     strings.Split(fields[2], ","),
-		PrimaryId: fields[3],
+		Id:        head[0],
+		Host:      hostFromClusterNodesEndpoint(head[1]),
+		Flags:     strings.Split(head[2], ","),
+		PrimaryId: head[3],
 	}
 
 	// Owned ranges and migration markers are interleaved in the same trailing
-	// fields, so split them before parsing the ranges.
-	var owned []string
-	for _, field := range fields[clusterNodesMinFields:] {
+	// fields. A range that does not parse drops the owned ranges of the line
+	// and keeps the markers. A "[" field that is not a well-formed marker is
+	// skipped.
+	ranges := []SlotsRange{}
+	rangesOK := true
+	for {
+		var field string
+		field, rest = nextField(rest)
+		if field == "" {
+			break
+		}
 		migration, direction, ok := parseSlotMigration(field)
 		switch {
 		case !ok:
-			owned = append(owned, field)
+			if !rangesOK || strings.HasPrefix(field, "[") {
+				continue
+			}
+			r, err := parseSlotsRange(field)
+			if err != nil {
+				rangesOK = false
+				continue
+			}
+			ranges = append(ranges, r)
 		case direction == slotMigrating:
 			node.Migrating = append(node.Migrating, migration)
 		default:
 			node.Importing = append(node.Importing, migration)
 		}
 	}
-	if ranges, err := parseSlotsRanges(owned); err == nil {
+	if rangesOK {
 		node.Slots = ranges
 	}
 
 	return node, true
+}
+
+// nextField returns the first field of s, which is delimited by ASCII
+// whitespace, and the text after it. The field is empty when s has none left.
+func nextField(s string) (field, rest string) {
+	start := 0
+	for start < len(s) && isASCIISpace(s[start]) {
+		start++
+	}
+	end := start
+	for end < len(s) && !isASCIISpace(s[end]) {
+		end++
+	}
+	return s[start:end], s[end:]
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 type slotMigrationDirection int

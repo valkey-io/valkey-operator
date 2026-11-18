@@ -379,6 +379,7 @@ var _ = Describe("config layout", func() {
 		added := getNode(valkeyNodeName(cluster.Name, 3, 0))
 		cm := nodeCM(added.Name)
 		Expect(configRevisionKeys(cm)).To(Equal([]string{configRevisionFileKey(added.Spec.ConfigRevision)}))
+		Expect(cm.Labels).To(HaveKeyWithValue(LabelCluster, cluster.Name), "the parent's ConfigMap watch maps by this label")
 
 		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Shards = 3 })
 		// handleScaleIn deletes the node once its slots are gone, which needs
@@ -685,15 +686,3 @@ var _ = Describe("config layout", func() {
 		Expect(ready).NotTo(HaveField("Reason", valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
 	})
 })
-
-// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
-func configRevisionKeys(cm *corev1.ConfigMap) []string {
-	var out []string
-	for key := range cm.Data {
-		if _, ok := configRevisionFromKey(key); ok {
-			out = append(out, key)
-		}
-	}
-	slices.Sort(out)
-	return out
-}

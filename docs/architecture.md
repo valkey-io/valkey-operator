@@ -99,6 +99,8 @@ The ValkeyNode controller owns `valkey-<node>` through a controller reference an
 
 The node controller writes `status.appliedLiveConfig` in the same status update that sets `LiveConfigApplied=True`, after CONFIG SET succeeds. When `spec.config` holds no allowlisted key, the update that clears the condition also clears `status.appliedLiveConfig`. After either write it rewrites `live.conf` in the same reconcile, again only when the content differs.
 
+The ValkeyCluster controller watches ConfigMaps and maps them to the cluster in their `valkey.io/cluster` label. Its predicate passes creates, deletes and updates that change the set of `valkey-<rev>.conf` keys, so a `live.conf` write does not wake it.
+
 ### Pods
 
 The config volume of the pod template mounts the `valkey-<rev>.conf` key for `spec.configRevision`, so a new revision changes the template and rolls the pod. The parent reads the live revision from the same volume item. The template stays a pure function of the node spec, so the ValkeyCluster controller and the ValkeyNode controller compute the same `spec.workloadRevision`, and the roll is authorized one node at a time.

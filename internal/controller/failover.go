@@ -38,16 +38,24 @@ const (
 	eventReasonFailoverTimeout   = "FailoverTimeout"
 	eventReasonFailoverCompleted = "FailoverCompleted"
 	eventActionProactiveFailover = "ProactiveFailover"
+
+	eventReasonFailbackInitiated = "FailbackInitiated"
+	eventReasonFailbackFailed    = "FailbackFailed"
+	eventReasonFailbackTimeout   = "FailbackTimeout"
+	eventReasonFailbackCompleted = "FailbackCompleted"
+	eventActionFailback          = "Failback"
 )
 
 type FailoverType string
 
 const (
 	FailoverProactive FailoverType = "proactive"
+	FailoverFailback  FailoverType = "failback"
 )
 
 var FailoverTypes = []FailoverType{
 	FailoverProactive,
+	FailoverFailback,
 }
 
 func (ft FailoverType) String() string {
@@ -77,27 +85,51 @@ func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.Shar
 // way nodeInfoFunc stands in for INFO in the node controller.
 var proactiveFailoverFn = proactiveFailover
 
+// handoff names the events and metric of one kind of graceful handoff.
+type handoff struct {
+	kind                                   FailoverType
+	action                                 string
+	initiated, failed, timedOut, completed string
+}
+
+var (
+	proactiveHandoff = handoff{FailoverProactive, eventActionProactiveFailover,
+		eventReasonFailoverInitiated, eventReasonFailoverFailed, eventReasonFailoverTimeout, eventReasonFailoverCompleted}
+	failbackHandoff = handoff{FailoverFailback, eventActionFailback,
+		eventReasonFailbackInitiated, eventReasonFailbackFailed, eventReasonFailbackTimeout, eventReasonFailbackCompleted}
+)
+
 // proactiveFailover issues CLUSTER FAILOVER to the best synced replica in shard,
 // then polls until the replica reports role:master or the timeout is reached.
 // shard must be non-nil; replicas must be non-empty.
 func proactiveFailover(ctx context.Context, recorder events.EventRecorder, cluster *valkeyiov1alpha1.ValkeyCluster, shard *valkey.ShardState, replicas []*valkey.NodeState) error {
-	log := logf.FromContext(ctx)
-	primaryAddress := shard.GetPrimaryNode().Address
-
 	// Fail over to the most caught-up replica (highest replication offset). A
 	// graceful CLUSTER FAILOVER holds writes on the primary until the target
 	// replica catches up, so promoting the furthest-ahead one minimises that
 	// write pause and the exposure if the primary dies mid-failover.
-	target := valkey.HighestOffsetReplica(replicas)
-	log.Info("initiating proactive failover", "shard", shard.Id, "target", target.Address)
+	return handOver(ctx, recorder, cluster, shard, valkey.HighestOffsetReplica(replicas), proactiveHandoff)
+}
 
-	// Emit FailoverInitiated before the command so observers see the event at
+// failbackFn is what failback calls; tests swap it for a stub.
+var failbackFn = func(ctx context.Context, recorder events.EventRecorder, cluster *valkeyiov1alpha1.ValkeyCluster, shard *valkey.ShardState, target *valkey.NodeState) error {
+	return handOver(ctx, recorder, cluster, shard, target, failbackHandoff)
+}
+
+// handOver issues CLUSTER FAILOVER to target, a synced replica in shard, then
+// polls until it reports role:master or the timeout is reached.
+func handOver(ctx context.Context, recorder events.EventRecorder, cluster *valkeyiov1alpha1.ValkeyCluster, shard *valkey.ShardState, target *valkey.NodeState, h handoff) error {
+	log := logf.FromContext(ctx)
+	primaryAddress := shard.GetPrimaryNode().Address
+
+	log.Info("initiating graceful failover", "type", h.kind, "shard", shard.Id, "target", target.Address)
+
+	// Emit the initiated event before the command so observers see the event at
 	// the moment the failover begins, not after.
-	recorder.Eventf(cluster, nil, corev1.EventTypeNormal, eventReasonFailoverInitiated, eventActionProactiveFailover, "Initiated failover from %s to %s in shard %s", primaryAddress, target.Address, shard.Id)
+	recorder.Eventf(cluster, nil, corev1.EventTypeNormal, h.initiated, h.action, "Initiated failover from %s to %s in shard %s", primaryAddress, target.Address, shard.Id)
 
 	err := target.Client.Do(ctx, target.Client.B().ClusterFailover().Build()).Error()
 	if err != nil {
-		recorder.Eventf(cluster, nil, corev1.EventTypeWarning, eventReasonFailoverFailed, eventActionProactiveFailover, "CLUSTER FAILOVER command failed on %s: %v", target.Address, err)
+		recorder.Eventf(cluster, nil, corev1.EventTypeWarning, h.failed, h.action, "CLUSTER FAILOVER command failed on %s: %v", target.Address, err)
 		return fmt.Errorf("CLUSTER FAILOVER failed on %s: %w", target.Address, err)
 	}
 
@@ -109,7 +141,7 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 	for {
 		select {
 		case <-timer.C:
-			recorder.Eventf(cluster, nil, corev1.EventTypeWarning, eventReasonFailoverTimeout, eventActionProactiveFailover, "Failover to %s in shard %s did not complete within %s", target.Address, shard.Id, proactiveFailoverTimeout)
+			recorder.Eventf(cluster, nil, corev1.EventTypeWarning, h.timedOut, h.action, "Failover to %s in shard %s did not complete within %s", target.Address, shard.Id, proactiveFailoverTimeout)
 			return fmt.Errorf("failover to %s timed out after %s", target.Address, proactiveFailoverTimeout)
 		case <-ctx.Done():
 			return ctx.Err()
@@ -121,9 +153,9 @@ func proactiveFailover(ctx context.Context, recorder events.EventRecorder, clust
 			}
 			role := parseValkeyRole(info)
 			if role == RolePrimary {
-				recorder.Eventf(cluster, nil, corev1.EventTypeNormal, eventReasonFailoverCompleted, eventActionProactiveFailover, "Failover completed: %s is now primary in shard %s", target.Address, shard.Id)
-				log.Info("proactive failover completed", "newPrimary", target.Address, "shard", shard.Id)
-				failoversTotal.WithLabelValues(cluster.Name, cluster.Namespace, FailoverProactive.String()).Inc()
+				recorder.Eventf(cluster, nil, corev1.EventTypeNormal, h.completed, h.action, "Failover completed: %s is now primary in shard %s", target.Address, shard.Id)
+				log.Info("graceful failover completed", "type", h.kind, "newPrimary", target.Address, "shard", shard.Id)
+				failoversTotal.WithLabelValues(cluster.Name, cluster.Namespace, h.kind.String()).Inc()
 				return nil
 			}
 		}

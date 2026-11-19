@@ -30,10 +30,11 @@ func TestSystemPasswordRotationInterval(t *testing.T) {
 	day := 24 * time.Hour
 	assert.Zero(t, ValkeyClusterSpec{}.SystemPasswordRotationInterval())
 	assert.Zero(t, ValkeyClusterSpec{ACL: &ACLSpec{}}.SystemPasswordRotationInterval())
+	assert.Zero(t, ValkeyClusterSpec{ACL: &ACLSpec{SystemUsers: &SystemUsersSpec{}}}.SystemPasswordRotationInterval())
 	assert.Equal(t, DefaultSystemPasswordRotationDays*day,
-		ValkeyClusterSpec{ACL: &ACLSpec{SystemPasswordRotation: &SystemPasswordRotationSpec{}}}.SystemPasswordRotationInterval())
+		ValkeyClusterSpec{ACL: &ACLSpec{SystemUsers: &SystemUsersSpec{PasswordRotation: &SystemPasswordRotationSpec{}}}}.SystemPasswordRotationInterval())
 	assert.Equal(t, 7*day,
-		ValkeyClusterSpec{ACL: &ACLSpec{SystemPasswordRotation: &SystemPasswordRotationSpec{IntervalDays: 7}}}.SystemPasswordRotationInterval())
+		ValkeyClusterSpec{ACL: &ACLSpec{SystemUsers: &SystemUsersSpec{PasswordRotation: &SystemPasswordRotationSpec{IntervalDays: 7}}}}.SystemPasswordRotationInterval())
 }
 
 func TestUserAclSpecToACLUser(t *testing.T) {

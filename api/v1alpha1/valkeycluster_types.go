@@ -815,12 +815,12 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 }
 
 // SystemPasswordRotationInterval returns how long an internal user's password
-// stays current, or zero when spec.acl.systemPasswordRotation is unset.
+// stays current, or zero when spec.acl.systemUsers.passwordRotation is unset.
 func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
-	if s.ACL == nil || s.ACL.SystemPasswordRotation == nil {
+	if s.ACL == nil || s.ACL.SystemUsers == nil || s.ACL.SystemUsers.PasswordRotation == nil {
 		return 0
 	}
-	days := s.ACL.SystemPasswordRotation.IntervalDays
+	days := s.ACL.SystemUsers.PasswordRotation.IntervalDays
 	if days < 1 {
 		days = DefaultSystemPasswordRotationDays
 	}

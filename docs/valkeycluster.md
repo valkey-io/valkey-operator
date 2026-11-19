@@ -735,11 +735,12 @@ The operator connects to Valkey as three internal users: `_operator` (the operat
 
 ```yaml
 acl:
-  systemPasswordRotation:
-    intervalDays: 30
+  systemUsers:
+    passwordRotation:
+      intervalDays: 30
 ```
 
-`acl.systemPasswordRotation` turns on rotation. `intervalDays` (1 to 3650, default 30) is how long a password stays current, and the first rotation happens one interval after the field is set. A rotation never removes a password a client still uses:
+`acl.systemUsers.passwordRotation` turns on rotation. `intervalDays` (1 to 3650, default 30) is how long a password stays current, and the first rotation happens one interval after the field is set. A rotation never removes a password a client still uses:
 
 1. The operator generates the next password and loads it on every node next to the current one.
 2. Once every node accepts both, the new password becomes the one clients read. The operator reads the Secret on each connection, the probes and a restarting server read the mounted password files, and running replicas get the new password with `CONFIG SET primaryauth`.
@@ -747,7 +748,9 @@ acl:
 
 The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. The other users keep rotating.
 
-Removing `acl.systemPasswordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
+Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
+
+A rotation step that fails, for example because the operator cannot list the pods it checks, leaves the rotation where it was and records a `SystemPasswordRotationHeld` warning event. Users and ACLs keep reconciling, and the step is tried again on the next reconcile.
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
 

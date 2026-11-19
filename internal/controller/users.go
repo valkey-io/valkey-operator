@@ -28,6 +28,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -528,20 +529,23 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		filled[user] = true
 	}
 
+	beforeRotation := systemUsersSecret.DeepCopy()
 	signals, err := r.systemPasswordSignals(ctx, cluster, systemUsersSecret)
-	if err != nil {
-		log.Error(err, "failed to read system password rotation state")
-		return nil, err
+	if err == nil {
+		signals.SkipNext = filled
+		err = advanceSystemPasswordRotation(systemUsersSecret, cluster.Spec.ExporterEnabled(), signals)
 	}
-	signals.SkipNext = filled
-	rotationEvent, err := advanceSystemPasswordRotation(systemUsersSecret, cluster.Spec.ExporterEnabled(), signals)
 	if err != nil {
-		log.Error(err, "failed to rotate system passwords")
-		return nil, err
+		// The users and ACLs do not depend on a rotation step, so a failed
+		// step holds the rotation where it was instead of failing them.
+		log.Error(err, "system password rotation held")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordRotationHeld", "ReconcileUsers",
+			"System password rotation is held: %v", err)
+		systemUsersSecret = beforeRotation.DeepCopy()
 	}
 	// A steady Secret is not written again. An Update on every reconcile
 	// would change its resourceVersion and requeue the cluster forever.
-	if !createSecret && len(filled) == 0 && rotationEvent == "" {
+	if !createSecret && len(filled) == 0 && equality.Semantic.DeepEqual(beforeRotation, systemUsersSecret) {
 		r.syncExporterPasswordHold(cluster, systemUsersSecret)
 		return systemUsersSecret, nil
 	}
@@ -556,7 +560,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	}
 	// Only after a successful write, so the condition matches the stored Secret.
 	r.syncExporterPasswordHold(cluster, systemUsersSecret)
-	r.recordSystemPasswordRotation(cluster, rotationEvent)
+	r.recordSystemPasswordRotation(cluster, beforeRotation, systemUsersSecret)
 	return systemUsersSecret, nil
 }
 

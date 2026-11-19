@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -36,7 +37,7 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
-// testRotationInterval matches the default spec.acl.systemPasswordRotation.intervalDays.
+// testRotationInterval matches the default spec.acl.systemUsers.passwordRotation.intervalDays.
 const testRotationInterval = valkeyiov1alpha1.DefaultSystemPasswordRotationDays * 24 * time.Hour
 
 func TestReplicationAuthShellIsNotExpandedByKubelet(t *testing.T) {
@@ -82,6 +83,23 @@ func TestSystemPasswordVolumeFollowsClusterLabel(t *testing.T) {
 	require.Contains(t, pts.Spec.InitContainers[0].VolumeMounts, *mount)
 }
 
+func TestTurningRotationOnDoesNotRollPods(t *testing.T) {
+	off := pinTestCluster(nil, false)
+	on := off.DeepCopy()
+	on.Spec.ACL = &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
+		PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30},
+	}}
+	nodeOff, nodeOn := buildClusterValkeyNode(off, 0, 0), buildClusterValkeyNode(on, 0, 0)
+	require.Equal(t, nodeOff.Spec, nodeOn.Spec)
+	stsOff, err := buildValkeyNodeStatefulSet(nodeOff)
+	require.NoError(t, err)
+	stsOn, err := buildValkeyNodeStatefulSet(nodeOn)
+	require.NoError(t, err)
+	require.Equal(t, stsOff.Spec.Template, stsOn.Spec.Template, "turning rotation on changes only the Secret")
+	require.True(t, containerMounts(stsOff.Spec.Template.Spec.Containers[0], systemPasswordMountPath),
+		"the password files are mounted with rotation off too")
+}
+
 func TestValidateSystemUserPasswordSecretAllowsRotationKeys(t *testing.T) {
 	enabled := false
 	cluster := &valkeyiov1alpha1.ValkeyCluster{Spec: valkeyiov1alpha1.ValkeyClusterSpec{
@@ -100,6 +118,15 @@ func TestValidateSystemUserPasswordSecretAllowsRotationKeys(t *testing.T) {
 	require.ErrorIs(t, err, errUnknownSystemUser)
 }
 
+// rotate runs one rotation step and returns the event it records.
+func rotate(t *testing.T, secret *corev1.Secret, exporterEnabled bool, signals systemPasswordSignals) string {
+	t.Helper()
+	before := secret.DeepCopy()
+	require.NoError(t, advanceSystemPasswordRotation(secret, exporterEnabled, signals))
+	reason, _ := systemPasswordRotationEvent(before, secret)
+	return reason
+}
+
 func TestAdvanceSystemPasswordRotationKeepsTheOldPasswordUntilClientsSwitch(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	secret := &corev1.Secret{Data: map[string][]byte{
@@ -108,20 +135,16 @@ func TestAdvanceSystemPasswordRotationKeepsTheOldPasswordUntilClientsSwitch(t *t
 		exporterUser:    []byte("ex-old"),
 	}}
 
-	event, err := advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{
 		Now:      now,
 		Interval: testRotationInterval,
 		SkipNext: map[string]bool{operatorUser: true, replicationUser: true, exporterUser: true},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "clock", event)
+	}))
 	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
-	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordRotatedAt])
+	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordsCurrentSince])
 
-	secret.Annotations[annotationSystemPasswordRotatedAt] = now.Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now, Interval: testRotationInterval})
-	require.NoError(t, err)
-	require.Equal(t, "started", event)
+	secret.Annotations[annotationSystemPasswordsCurrentSince] = now.Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
+	require.Equal(t, "SystemPasswordRotationStarted", rotate(t, secret, true, systemPasswordSignals{Now: now, Interval: testRotationInterval}))
 	require.Equal(t, []byte("op-old"), secret.Data[operatorUser], "clients keep sending the current password")
 	require.Equal(t, []byte("re-old"), secret.Data[replicationUser])
 	require.Equal(t, []byte("ex-old"), secret.Data[exporterUser])
@@ -130,16 +153,12 @@ func TestAdvanceSystemPasswordRotationKeepsTheOldPasswordUntilClientsSwitch(t *t
 	nextExporter := append([]byte(nil), secret.Data[systemPasswordNextKey(exporterUser)]...)
 	require.NotEmpty(t, nextOperator)
 	require.NotEqual(t, []byte("op-old"), nextOperator)
-	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordPhase])
+	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordsRotationPhase])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now})
-	require.NoError(t, err)
-	require.Empty(t, event)
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{Now: now}))
 	require.Equal(t, []byte("op-old"), secret.Data[operatorUser], "a new password is not installed before the nodes load it")
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now, PasswordsLive: true})
-	require.NoError(t, err)
-	require.Equal(t, "cutover", event)
+	require.Equal(t, "SystemPasswordRotationCutover", rotate(t, secret, true, systemPasswordSignals{Now: now, PasswordsLive: true}))
 	require.Equal(t, nextOperator, secret.Data[operatorUser])
 	require.Equal(t, nextReplication, secret.Data[replicationUser])
 	require.Equal(t, nextExporter, secret.Data[exporterUser])
@@ -148,36 +167,28 @@ func TestAdvanceSystemPasswordRotationKeepsTheOldPasswordUntilClientsSwitch(t *t
 	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
 	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{
 		Now: now.Add(time.Minute), ExporterCaughtUp: true, ReplicationCaughtUp: true,
-	})
-	require.NoError(t, err)
-	require.Empty(t, event)
+	}))
 	require.Equal(t, []byte("op-old"), secret.Data[systemPasswordPreviousKey(operatorUser)])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{
 		Now: now.Add(systemPasswordCutoverGrace + time.Second),
-	})
-	require.NoError(t, err)
-	require.Empty(t, event)
+	}))
 	require.Equal(t, []byte("op-old"), secret.Data[systemPasswordPreviousKey(operatorUser)], "probes on a pod without the mount still send the old password")
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Equal(t, "SystemPasswordRotationHolding", rotate(t, secret, true, systemPasswordSignals{
 		Now: now.Add(systemPasswordCutoverGrace + time.Second), OperatorCaughtUp: true, ExporterCaughtUp: false, ReplicationCaughtUp: false,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "holding", event)
+	}))
 	require.Empty(t, secret.Data[systemPasswordPreviousKey(operatorUser)])
 	require.Equal(t, []byte("re-old"), secret.Data[systemPasswordPreviousKey(replicationUser)])
 	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Equal(t, "SystemPasswordRotationFinished", rotate(t, secret, true, systemPasswordSignals{
 		Now: now.Add(systemPasswordCutoverGrace + time.Second), ExporterCaughtUp: true, ReplicationCaughtUp: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "complete", event)
+	}))
 	require.False(t, systemPasswordHasSuffix(secret.Data, systemPasswordPreviousSuffix))
-	require.Empty(t, secret.Annotations[annotationSystemPasswordPhase])
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsRotationPhase])
 	require.Equal(t, nextOperator, secret.Data[operatorUser])
 }
 
@@ -187,41 +198,31 @@ func TestSystemPasswordRotationStartsOnlyWhenTurnedOn(t *testing.T) {
 		operatorUser:    []byte("op-old"),
 		replicationUser: []byte("re-old"),
 	}}
-	event, err := advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now})
-	require.NoError(t, err)
-	require.Empty(t, event)
-	require.Empty(t, secret.Annotations[annotationSystemPasswordRotatedAt], "rotation off starts no clock")
+	require.Empty(t, rotate(t, secret, false, systemPasswordSignals{Now: now}))
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsCurrentSince], "rotation off starts no clock")
 
 	// A clock left by an earlier rotation is dropped while rotation is off.
-	secret.Annotations[annotationSystemPasswordRotatedAt] = now.Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now})
-	require.NoError(t, err)
-	require.Equal(t, "clock", event)
-	require.Empty(t, secret.Annotations[annotationSystemPasswordRotatedAt])
+	secret.Annotations[annotationSystemPasswordsCurrentSince] = now.Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
+	require.Empty(t, rotate(t, secret, false, systemPasswordSignals{Now: now}))
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsCurrentSince])
 	require.False(t, systemPasswordHasSuffix(secret.Data, systemPasswordNextSuffix))
 
 	// Turning it on again waits the configured interval.
 	week := 7 * 24 * time.Hour
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now, Interval: week})
-	require.NoError(t, err)
-	require.Equal(t, "clock", event)
-	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordRotatedAt])
+	require.Empty(t, rotate(t, secret, false, systemPasswordSignals{Now: now, Interval: week}))
+	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordsCurrentSince])
 
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now.Add(week - time.Hour), Interval: week})
-	require.NoError(t, err)
-	require.Empty(t, event)
+	require.Empty(t, rotate(t, secret, false, systemPasswordSignals{Now: now.Add(week - time.Hour), Interval: week}))
 
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now.Add(week + time.Second), Interval: week})
-	require.NoError(t, err)
-	require.Equal(t, "started", event)
+	require.Equal(t, "SystemPasswordRotationStarted", rotate(t, secret, false, systemPasswordSignals{Now: now.Add(week + time.Second), Interval: week}))
 }
 
 func TestSystemPasswordRotationUnderWayFinishesAfterItIsTurnedOff(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			annotationSystemPasswordPhase:     systemPasswordPhasePending,
-			annotationSystemPasswordRotatedAt: now.Format(time.RFC3339Nano),
+			annotationSystemPasswordsRotationPhase: systemPasswordPhasePending,
+			annotationSystemPasswordsCurrentSince:  now.Format(time.RFC3339Nano),
 		}},
 		Data: map[string][]byte{
 			operatorUser:                           []byte("op-old"),
@@ -230,16 +231,12 @@ func TestSystemPasswordRotationUnderWayFinishesAfterItIsTurnedOff(t *testing.T) 
 			systemPasswordNextKey(replicationUser): []byte("re-new"),
 		},
 	}
-	event, err := advanceSystemPasswordRotation(secret, false, systemPasswordSignals{Now: now, PasswordsLive: true})
-	require.NoError(t, err)
-	require.Equal(t, "cutover", event)
+	require.Equal(t, "SystemPasswordRotationCutover", rotate(t, secret, false, systemPasswordSignals{Now: now, PasswordsLive: true}))
 	require.Equal(t, []byte("op-new"), secret.Data[operatorUser])
 
-	event, err = advanceSystemPasswordRotation(secret, false, systemPasswordSignals{
+	require.Equal(t, "SystemPasswordRotationFinished", rotate(t, secret, false, systemPasswordSignals{
 		Now: now.Add(systemPasswordCutoverGrace + time.Second), OperatorCaughtUp: true, ReplicationCaughtUp: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "complete", event)
+	}))
 	require.False(t, systemPasswordHasSuffix(secret.Data, systemPasswordPreviousSuffix))
 }
 
@@ -257,7 +254,7 @@ func TestUpsertLeavesSystemPasswordsAloneWhileRotationIsOff(t *testing.T) {
 	secret, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
 	require.NotEmpty(t, secret.Data[operatorUser])
-	require.Empty(t, secret.Annotations[annotationSystemPasswordRotatedAt])
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsCurrentSince])
 
 	stored := &corev1.Secret{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), stored))
@@ -274,15 +271,11 @@ func TestExistingSecretStartsTheClockInsteadOfRotating(t *testing.T) {
 		replicationUser: []byte("re-old"),
 		exporterUser:    []byte("ex-old"),
 	}}
-	event, err := advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now, Interval: testRotationInterval})
-	require.NoError(t, err)
-	require.Equal(t, "clock", event)
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{Now: now, Interval: testRotationInterval}))
 	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
-	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordRotatedAt])
+	require.Equal(t, now.Format(time.RFC3339Nano), secret.Annotations[annotationSystemPasswordsCurrentSince])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: now.Add(time.Hour), Interval: testRotationInterval})
-	require.NoError(t, err)
-	require.Empty(t, event)
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{Now: now.Add(time.Hour), Interval: testRotationInterval}))
 	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
 }
 
@@ -298,34 +291,28 @@ func TestExporterHoldDoesNotBlockTheNextRotation(t *testing.T) {
 			systemPasswordPreviousKey(exporterUser):    []byte("ex-old"),
 		},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			annotationSystemPasswordPhase:     systemPasswordPhaseCutover,
-			annotationSystemPasswordCutoverAt: now.Format(time.RFC3339Nano),
-			annotationSystemPasswordRotatedAt: now.Format(time.RFC3339Nano),
+			annotationSystemPasswordsRotationPhase: systemPasswordPhaseCutover,
+			annotationSystemPasswordsCutoverAt:     now.Format(time.RFC3339Nano),
+			annotationSystemPasswordsCurrentSince:  now.Format(time.RFC3339Nano),
 		}},
 	}
 	after := now.Add(systemPasswordCutoverGrace + time.Second)
-	event, err := advanceSystemPasswordRotation(secret, true, systemPasswordSignals{
+	require.Equal(t, "SystemPasswordRotationHolding", rotate(t, secret, true, systemPasswordSignals{
 		Now: after, OperatorCaughtUp: true, ReplicationCaughtUp: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "holding", event)
-	require.Empty(t, secret.Annotations[annotationSystemPasswordPhase])
+	}))
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsRotationPhase])
 	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
 	require.Empty(t, secret.Data[systemPasswordPreviousKey(operatorUser)])
 	require.Empty(t, secret.Data[systemPasswordPreviousKey(replicationUser)])
 
 	later := after.Add(testRotationInterval + time.Second)
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: later, Interval: testRotationInterval})
-	require.NoError(t, err)
-	require.Equal(t, "started", event)
+	require.Equal(t, "SystemPasswordRotationStarted", rotate(t, secret, true, systemPasswordSignals{Now: later, Interval: testRotationInterval}))
 	require.Equal(t, []byte("op-new"), secret.Data[operatorUser])
 	require.NotEmpty(t, secret.Data[systemPasswordNextKey(operatorUser)])
 	require.Empty(t, secret.Data[systemPasswordNextKey(exporterUser)], "the held exporter password must not be promoted over")
 	require.Equal(t, []byte("ex-old"), secret.Data[systemPasswordPreviousKey(exporterUser)])
 
-	event, err = advanceSystemPasswordRotation(secret, true, systemPasswordSignals{Now: later, ExporterCaughtUp: true})
-	require.NoError(t, err)
-	require.Equal(t, "exporter-released", event)
+	require.Empty(t, rotate(t, secret, true, systemPasswordSignals{Now: later, ExporterCaughtUp: true}))
 	require.Empty(t, secret.Data[systemPasswordPreviousKey(exporterUser)])
 }
 
@@ -378,13 +365,11 @@ func TestExporterAndReplicationCaughtUp(t *testing.T) {
 
 	current := []byte("re-new")
 	setAt := time.Date(2026, 10, 30, 12, 5, 0, 0, time.UTC)
-	node := valkeyiov1alpha1.ValkeyNode{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			annotationPrimaryAuthHash:  systemPasswordDigest(current),
-			annotationPrimaryAuthSetAt: setAt.Format(time.RFC3339Nano),
-		}},
-		Status: valkeyiov1alpha1.ValkeyNodeStatus{PodName: "p"},
-	}
+	node := valkeyiov1alpha1.ValkeyNode{Status: valkeyiov1alpha1.ValkeyNodeStatus{
+		PodName:                        "p",
+		AppliedReplicationPasswordHash: systemPasswordDigest(current),
+		ReplicationPasswordAppliedTime: &metav1.Time{Time: setAt},
+	}}
 	oldPod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 		Name: serverContainerName, Command: []string{"valkey-server", "--primaryauth", "$(PRIMARY_AUTH)"},
 	}}}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
@@ -403,14 +388,14 @@ func TestExporterAndReplicationCaughtUp(t *testing.T) {
 	require.True(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{node}, []corev1.Pod{newPod}, current))
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{node}, []corev1.Pod{*restarted}, current))
 	sameSecond := node.DeepCopy()
-	sameSecond.Annotations[annotationPrimaryAuthSetAt] = setAt.Add(500 * time.Millisecond).Format(time.RFC3339Nano)
+	sameSecond.Status.ReplicationPasswordAppliedTime = &metav1.Time{Time: setAt.Add(500 * time.Millisecond)}
 	samePod := newPod.DeepCopy()
 	samePod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(setAt)
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{*sameSecond}, []corev1.Pod{*samePod}, current))
 	require.True(t, serverStartedBeforeConfigSet(setAt.Add(-time.Second), setAt.Add(500*time.Millisecond)))
 	require.False(t, serverStartedBeforeConfigSet(setAt, setAt.Add(500*time.Millisecond)))
 	unstamped := node.DeepCopy()
-	delete(unstamped.Annotations, annotationPrimaryAuthSetAt)
+	unstamped.Status.ReplicationPasswordAppliedTime = nil
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{*unstamped}, []corev1.Pod{newPod}, current))
 	require.False(t, replicationPasswordCaughtUp([]valkeyiov1alpha1.ValkeyNode{{}}, []corev1.Pod{newPod}, current))
 	require.True(t, replicationPasswordCaughtUp(nil, nil, current))
@@ -429,7 +414,7 @@ func TestApplyReplicationPasswordSetsPrimaryAuthDuringCutover(t *testing.T) {
 		replicationUser: []byte("re-new"),
 		systemPasswordPreviousKey(replicationUser): []byte("re-old"),
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(node, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}, &valkeyiov1alpha1.ValkeyNode{}).WithObjects(node, secret).Build()
 	valkeyClient := &fakeConfigClient{}
 	r := &ValkeyNodeReconciler{
 		Client:    c,
@@ -443,16 +428,18 @@ func TestApplyReplicationPasswordSetsPrimaryAuthDuringCutover(t *testing.T) {
 
 	got := &valkeyiov1alpha1.ValkeyNode{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(node), got))
-	require.Equal(t, systemPasswordDigest([]byte("re-new")), got.Annotations[annotationPrimaryAuthHash])
+	require.Equal(t, systemPasswordDigest([]byte("re-new")), got.Status.AppliedReplicationPasswordHash)
+	require.NotNil(t, got.Status.ReplicationPasswordAppliedTime)
+	require.Empty(t, got.Annotations, "the record is status, not metadata")
 
 	valkeyClient.params = nil
 	require.NoError(t, r.applyReplicationPassword(context.Background(), got))
 	require.Nil(t, valkeyClient.params, "a node already on the current password must not CONFIG SET again")
 
-	setAt := time.Now().Add(-time.Minute)
-	got.Annotations[annotationPrimaryAuthSetAt] = setAt.UTC().Format(time.RFC3339Nano)
+	setAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	got.Status.ReplicationPasswordAppliedTime = &metav1.Time{Time: setAt}
 	got.Status.PodName = "n0-pod"
-	require.NoError(t, c.Update(context.Background(), got))
+	require.NoError(t, c.Status().Update(context.Background(), got))
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "n0-pod", Namespace: "ns"}}
 	require.NoError(t, c.Create(context.Background(), pod))
 	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
@@ -473,7 +460,9 @@ func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {
 	enabled := false
 	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
-		ACL:      &valkeyiov1alpha1.ACLSpec{SystemPasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30}},
+		ACL: &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
+			PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30},
+		}},
 	}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster).Build()
 	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme}
@@ -483,11 +472,11 @@ func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {
 	require.NotEmpty(t, secret.Data[operatorUser])
 	require.NotEmpty(t, secret.Data[replicationUser])
 	require.Empty(t, secret.Data[systemPasswordNextKey(operatorUser)])
-	require.Empty(t, secret.Annotations[annotationSystemPasswordPhase])
-	require.NotEmpty(t, secret.Annotations[annotationSystemPasswordRotatedAt])
+	require.Empty(t, secret.Annotations[annotationSystemPasswordsRotationPhase])
+	require.NotEmpty(t, secret.Annotations[annotationSystemPasswordsCurrentSince])
 
 	aged := secret.DeepCopy()
-	aged.Annotations[annotationSystemPasswordRotatedAt] = time.Now().Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
+	aged.Annotations[annotationSystemPasswordsCurrentSince] = time.Now().Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano)
 	require.NoError(t, c.Update(context.Background(), aged))
 	current := append([]byte(nil), aged.Data[operatorUser]...)
 
@@ -496,9 +485,42 @@ func TestUpsertStagesTheNextPasswordWithoutReplacingTheCurrent(t *testing.T) {
 	require.Equal(t, current, secret.Data[operatorUser])
 	require.NotEmpty(t, secret.Data[systemPasswordNextKey(operatorUser)])
 	require.NotEqual(t, current, secret.Data[systemPasswordNextKey(operatorUser)])
-	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordPhase])
+	require.Equal(t, systemPasswordPhasePending, secret.Annotations[annotationSystemPasswordsRotationPhase])
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(current))
 	require.Contains(t, systemUserPasswordHashes(secret.Data, operatorUser), systemPasswordDigest(secret.Data[systemPasswordNextKey(operatorUser)]))
+}
+
+func TestUpsertHoldsTheRotationWhenAStepFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	enabled := false
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
+		ACL: &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
+			PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30},
+		}},
+	}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
+		Annotations: map[string]string{annotationSystemPasswordsRotationPhase: "bogus"},
+	}, Data: map[string][]byte{operatorUser: []byte("op-current")}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster, secret).Build()
+	recorder := events.NewFakeRecorder(10)
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, Recorder: recorder}
+
+	got, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err, "a failed rotation step does not fail the system users")
+	require.Contains(t, <-recorder.Events, "Warning SystemPasswordRotationHeld")
+	require.NotEmpty(t, got.Data[replicationUser], "a missing password is still filled")
+	require.Equal(t, []byte("op-current"), got.Data[operatorUser])
+	require.Equal(t, "bogus", got.Annotations[annotationSystemPasswordsRotationPhase], "the rotation stays where it was")
+	require.False(t, systemPasswordHasSuffix(got.Data, systemPasswordNextSuffix))
+
+	again, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	require.Contains(t, <-recorder.Events, "Warning SystemPasswordRotationHeld")
+	require.Equal(t, got.ResourceVersion, again.ResourceVersion, "a held rotation does not write the Secret")
 }
 
 func TestExporterHoldConditionFollowsTheStoredSecret(t *testing.T) {
@@ -513,8 +535,8 @@ func TestExporterHoldConditionFollowsTheStoredSecret(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
 		Annotations: map[string]string{
-			annotationSystemPasswordRotatedAt: now.Format(time.RFC3339Nano),
-			annotationExporterHoldSince:       now.Add(-systemPasswordCutoverGrace - time.Minute).Format(time.RFC3339Nano),
+			annotationSystemPasswordsCurrentSince: now.Format(time.RFC3339Nano),
+			annotationExporterPasswordHeldSince:   now.Add(-systemPasswordCutoverGrace - time.Minute).Format(time.RFC3339Nano),
 		},
 	}, Data: map[string][]byte{
 		operatorUser:                            []byte("op-current"),
@@ -558,13 +580,15 @@ func TestCreateSystemUsersAclRotatesAnExistingSecret(t *testing.T) {
 	enabled := false
 	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
-		ACL:      &valkeyiov1alpha1.ACLSpec{SystemPasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30}},
+		ACL: &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
+			PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30},
+		}},
 	}}
 	current := []byte("op-current")
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
 		Annotations: map[string]string{
-			annotationSystemPasswordRotatedAt: time.Now().Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano),
+			annotationSystemPasswordsCurrentSince: time.Now().Add(-testRotationInterval - time.Second).Format(time.RFC3339Nano),
 		},
 	}, Data: map[string][]byte{
 		operatorUser:    current,
@@ -582,7 +606,7 @@ func TestCreateSystemUsersAclRotatesAnExistingSecret(t *testing.T) {
 	require.Equal(t, current, got.Data[operatorUser])
 	require.NotEmpty(t, got.Data[systemPasswordNextKey(operatorUser)])
 	require.NotEqual(t, current, got.Data[systemPasswordNextKey(operatorUser)])
-	require.Equal(t, systemPasswordPhasePending, got.Annotations[annotationSystemPasswordPhase])
+	require.Equal(t, systemPasswordPhasePending, got.Annotations[annotationSystemPasswordsRotationPhase])
 }
 
 func TestApplyReplicationPasswordSkipsASteadySecret(t *testing.T) {

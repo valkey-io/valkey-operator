@@ -516,6 +516,7 @@ These events are emitted during ACL user management.
 | `SystemPasswordRotationCutover` | Normal | Every node accepts both passwords; clients are moving to the new ones |
 | `SystemPasswordRotationHolding` | Normal | A client still uses a previous system password, which stays accepted |
 | `SystemPasswordRotationFinished` | Normal | Every client uses the new passwords and the old ones were removed |
+| `SystemPasswordRotationHeld` | Warning | A rotation step failed; the rotation stays where it was and is tried again on the next reconcile, while users and ACLs keep reconciling |
 
 ### Viewing events
 

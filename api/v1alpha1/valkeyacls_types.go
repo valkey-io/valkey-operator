@@ -24,15 +24,23 @@ type ACLSpec struct {
 	// +optional
 	Users []ACLUserSpec `json:"users,omitempty"`
 
-	// SystemPasswordRotation turns on rotation of the passwords the operator
-	// generates for its internal users (_operator, _replication, _exporter).
-	// Unset leaves those passwords unchanged.
+	// SystemUsers configures the operator's internal users (_operator,
+	// _replication, _exporter).
 	// +optional
-	SystemPasswordRotation *SystemPasswordRotationSpec `json:"systemPasswordRotation,omitempty"`
+	SystemUsers *SystemUsersSpec `json:"systemUsers,omitempty"`
+}
+
+// SystemUsersSpec configures the operator's internal users.
+type SystemUsersSpec struct {
+	// PasswordRotation turns on rotation of the passwords the operator
+	// generates for its internal users. Unset leaves those passwords
+	// unchanged.
+	// +optional
+	PasswordRotation *SystemPasswordRotationSpec `json:"passwordRotation,omitempty"`
 }
 
 // DefaultSystemPasswordRotationDays is the rotation interval when
-// systemPasswordRotation is set without intervalDays.
+// systemUsers.passwordRotation is set without intervalDays.
 const DefaultSystemPasswordRotationDays = 30
 
 // SystemPasswordRotationSpec configures rotation of the internal users'

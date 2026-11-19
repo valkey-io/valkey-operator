@@ -34,6 +34,7 @@ conf=$1
 data_dir=${VALKEY_DATA_DIR:-/data}
 nodes_conf="$data_dir/nodes.conf"
 role_timeout=3 # seconds one ROLE call may take, connection and reply included
+operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
 
 case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
 
@@ -116,12 +117,33 @@ promotable_replicas() {
         }' "$nodes_conf"
 }
 
+# load_operator_auth sets the password for the next ROLE call. As in the probe
+# scripts, the mounted file is the current _operator password and updates when
+# the Secret rotates. It is read before every call, so a rotation during the
+# wait is picked up. VALKEYCLI_AUTH from the environment is fixed at container
+# start and is the fallback when the file is not mounted.
+load_operator_auth() {
+    if [ -f "$operator_password_file" ]; then
+        # An unreadable file must not end the script; set -e would exit here.
+        pw=$(cat "$operator_password_file" 2>/dev/null) || true
+        if [ -n "$pw" ]; then
+            VALKEYCLI_AUTH=$pw
+            export VALKEYCLI_AUTH
+        fi
+    fi
+    auth_args=""
+    if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
+        auth_args="--user $VALKEY_USER"
+    fi
+}
+
 # replica_moved_on IP PORT succeeds once the replica reports itself a primary
 # or a replica of another node. The reply goes through a file under the data
 # dir: the root filesystem may be read-only, and a call cut short by the
 # timeout must not hold a pipe open.
 replica_moved_on() {
     reply="$data_dir/.role-reply"
+    load_operator_auth
     if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
         rm -f "$reply"
         return 1
@@ -159,10 +181,6 @@ if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
         address=$(own_address)
         my_ip=${address%% *}
         my_hostname=${address#* }
-        auth_args=""
-        if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-            auth_args="--user $VALKEY_USER"
-        fi
         # Six cluster-node-timeouts, at most 300s, which the startup probe of
         # the container allows for (startupFailureThreshold).
         cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))

@@ -323,11 +323,17 @@ func TestSystemUserPasswordHashesCoverEveryAcceptedPassword(t *testing.T) {
 		systemPasswordPreviousKey(operatorUser): []byte("previous"),
 	}
 	hashes := systemUserPasswordHashes(data, operatorUser)
-	require.Equal(t, []string{
+	require.ElementsMatch(t, []string{
 		systemPasswordDigest([]byte("current")),
 		systemPasswordDigest([]byte("next")),
 		systemPasswordDigest([]byte("previous")),
 	}, hashes)
+
+	// Cutover moves the next password to current and the current one to
+	// previous. The hashes, and so the aclfile, stay the same.
+	pending := map[string][]byte{operatorUser: []byte("a"), systemPasswordNextKey(operatorUser): []byte("b")}
+	cutover := map[string][]byte{operatorUser: []byte("b"), systemPasswordPreviousKey(operatorUser): []byte("a")}
+	require.Equal(t, systemUserPasswordHashes(pending, operatorUser), systemUserPasswordHashes(cutover, operatorUser))
 }
 
 func TestSystemPasswordACLReadyRequiresEveryNode(t *testing.T) {
@@ -554,7 +560,7 @@ func TestExporterHoldConditionFollowsTheStoredSecret(t *testing.T) {
 		},
 	}).Build()
 	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, APIReader: c}
-	r.syncExporterPasswordHold(cluster, secret)
+	r.syncExporterPasswordHold(cluster, secret, systemPasswordSignals{Now: now, ExporterPodsOnOldPassword: []string{"c1-0-0"}})
 	require.True(t, meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
 
 	// No exporter is running, so the release is due, but the write fails.
@@ -571,6 +577,97 @@ func TestExporterHoldConditionFollowsTheStoredSecret(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), stored))
 	require.Empty(t, stored.Data[systemPasswordPreviousKey(exporterUser)])
 	require.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
+}
+
+func TestExporterHoldConditionWaitsOutTheGrace(t *testing.T) {
+	cutover := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			annotationSystemPasswordsRotationPhase: systemPasswordPhaseCutover,
+			annotationSystemPasswordsCutoverAt:     cutover.Format(time.RFC3339Nano),
+		}},
+		Data: map[string][]byte{
+			exporterUser:                            []byte("ex-new"),
+			systemPasswordPreviousKey(exporterUser): []byte("ex-old"),
+		},
+	}
+	held := func(now time.Time, pods ...string) *metav1.Condition {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{}
+		r := &ValkeyClusterReconciler{}
+		r.syncExporterPasswordHold(cluster, secret, systemPasswordSignals{Now: now, ExporterPodsOnOldPassword: pods})
+		return meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld)
+	}
+	require.Nil(t, held(cutover.Add(time.Minute), "c1-0-0"), "within the grace every rotation holds the exporter")
+	cond := held(cutover.Add(systemPasswordCutoverGrace), "c1-0-0", "c1-1-0")
+	require.NotNil(t, cond)
+	require.Equal(t, metav1.ConditionTrue, cond.Status)
+	require.True(t, strings.HasSuffix(cond.Message, "to finish its rotation: c1-0-0, c1-1-0"), cond.Message)
+	require.Nil(t, held(cutover.Add(systemPasswordCutoverGrace)), "no exporter is left on the old password")
+
+	running := func(name string, started time.Time) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  metricsExporterContainerName,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(started)}},
+		}}}}
+	}
+	pods := []corev1.Pod{
+		running("c1-1-0", cutover.Add(-time.Hour)),
+		running("c1-0-1", cutover.Add(systemPasswordCutoverGrace)),
+		running("c1-0-0", cutover.Add(time.Minute)),
+		{ObjectMeta: metav1.ObjectMeta{Name: "c1-2-0"}},
+	}
+	require.Equal(t, []string{"c1-0-0", "c1-1-0"}, exporterPodsOnOldPassword(pods, cutover))
+}
+
+func TestExporterHoldIsReportedWithRotationOffUntilThePodsRestart(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	enabled := true
+	cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}, Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+		Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: &enabled},
+	}}
+	heldAt := time.Now().Add(-systemPasswordCutoverGrace - time.Minute)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: getSystemPasswordSecretName("c1"), Namespace: "ns",
+		Annotations: map[string]string{annotationExporterPasswordHeldSince: heldAt.Format(time.RFC3339Nano)},
+	}, Data: map[string][]byte{
+		operatorUser:                            []byte("op-current"),
+		replicationUser:                         []byte("re-current"),
+		exporterUser:                            []byte("ex-current"),
+		systemPasswordPreviousKey(exporterUser): []byte("ex-old"),
+	}}
+	exporterPod := func(name string, started time.Time) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{LabelCluster: "c1"}},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  metricsExporterContainerName,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(started)}},
+			}}},
+		}
+	}
+	early := exporterPod("c1-0-0", heldAt.Add(-time.Hour))
+	restarted := exporterPod("c1-0-1", heldAt.Add(systemPasswordCutoverGrace+time.Second))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).
+		WithObjects(cluster, secret, early, restarted).Build()
+	r := &ValkeyClusterReconciler{Client: c, Scheme: scheme, APIReader: c}
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld)
+	require.NotNil(t, cond, "the previous exporter password is still accepted with rotation off")
+	require.True(t, strings.HasSuffix(cond.Message, ": c1-0-0"), cond.Message)
+
+	pod := &corev1.Pod{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(early), pod))
+	pod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(time.Now())
+	require.NoError(t, c.Status().Update(context.Background(), pod))
+	_, err = r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	require.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionExporterPasswordHeld))
+	stored := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), stored))
+	require.Empty(t, stored.Data[systemPasswordPreviousKey(exporterUser)])
 }
 
 func TestCreateSystemUsersAclRotatesAnExistingSecret(t *testing.T) {

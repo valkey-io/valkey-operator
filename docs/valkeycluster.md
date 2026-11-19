@@ -746,7 +746,7 @@ acl:
 2. Once every node accepts both, the new password becomes the one clients read. The operator reads the Secret on each connection, the probes and a restarting server read the mounted password files, and running replicas get the new password with `CONFIG SET primaryauth`.
 3. The old password is removed once the probes and replicas have switched, and no sooner than five minutes after the switch.
 
-The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. The other users keep rotating.
+The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. `_operator` and `_replication` keep rotating, but later rotations skip `_exporter` until then, so its password changes only when the pod restarts. To finish the exporter's rotation, restart the Valkey pods one at a time.
 
 Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
 

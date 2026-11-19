@@ -820,11 +820,7 @@ func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
 	if s.ACL == nil || s.ACL.SystemUsers == nil || s.ACL.SystemUsers.PasswordRotation == nil {
 		return 0
 	}
-	days := s.ACL.SystemUsers.PasswordRotation.IntervalDays
-	if days < 1 {
-		days = DefaultSystemPasswordRotationDays
-	}
-	return time.Duration(days) * 24 * time.Hour
+	return time.Duration(s.ACL.SystemUsers.PasswordRotation.IntervalDays) * 24 * time.Hour
 }
 
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
@@ -880,7 +876,8 @@ const (
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
 	// ConditionExporterPasswordHeld is set while _exporter.previous is still
-	// accepted. Non-blocking: the other system passwords keep rotating.
+	// accepted more than five minutes after the switch, and names the pods to
+	// restart. Non-blocking: the other system passwords keep rotating.
 	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 	// ConditionTLSConfigured reports whether the operator-managed TLS trust
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is

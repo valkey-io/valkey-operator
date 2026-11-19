@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -119,9 +120,10 @@ func systemPasswordDigest(password []byte) string {
 }
 
 // systemUserPasswordHashes returns the sha256 hex of every password the ACL
-// must accept for user, in stable order: the current password, then the next
-// one, then the previous one. A missing key is skipped. The server accepts a
-// login that matches any of them.
+// must accept for user: the current, next and previous keys, skipping a
+// missing one. The server accepts a login that matches any of them. They are
+// sorted, so a cutover that only moves passwords between keys renders the same
+// aclfile and does not cause an ACL LOAD.
 func systemUserPasswordHashes(data map[string][]byte, user string) []string {
 	var hashes []string
 	for _, key := range []string{user, systemPasswordNextKey(user), systemPasswordPreviousKey(user)} {
@@ -131,7 +133,7 @@ func systemUserPasswordHashes(data map[string][]byte, user string) []string {
 		}
 		hashes = append(hashes, systemPasswordDigest(password))
 	}
-	return hashes
+	return normalizeHashes(hashes)
 }
 
 // systemPasswordACLReady reports whether every node's running ACL is the
@@ -144,7 +146,7 @@ func systemPasswordACLReady(aclFile string, data map[string][]byte, users []stri
 	}
 	desired := desiredUserPasswordHashes(aclFile)
 	for _, user := range users {
-		want := normalizeHashes(systemUserPasswordHashes(data, user))
+		want := systemUserPasswordHashes(data, user)
 		if len(want) == 0 || !equalHashes(desired[user], want) {
 			return false
 		}
@@ -186,6 +188,9 @@ type systemPasswordSignals struct {
 	ExporterCaughtUp    bool
 	ReplicationCaughtUp bool
 	SkipNext            map[string]bool
+	// ExporterPodsOnOldPassword are the pods whose exporter started too early
+	// to read the current password, while _exporter.previous is held.
+	ExporterPodsOnOldPassword []string
 }
 
 // advanceSystemPasswordRotation moves the system-password Secret one step.
@@ -353,16 +358,33 @@ func releaseHeldExporter(secret *corev1.Secret, signals systemPasswordSignals) {
 		delete(secret.Annotations, annotationExporterPasswordHeldSince)
 		return
 	}
+	if !exporterHeldPastGrace(secret, signals.Now) || !signals.ExporterCaughtUp {
+		return
+	}
+	delete(secret.Data, systemPasswordPreviousKey(exporterUser))
+	delete(secret.Annotations, annotationExporterPasswordHeldSince)
+}
+
+// exporterHeldSince is when _exporter.previous was left behind: the hold
+// annotation, or the cutover while the rotation is still in that phase.
+func exporterHeldSince(secret *corev1.Secret) (time.Time, bool) {
 	since := secret.Annotations[annotationExporterPasswordHeldSince]
 	if since == "" {
 		since = secret.Annotations[annotationSystemPasswordsCutoverAt]
 	}
 	heldAt, err := time.Parse(time.RFC3339Nano, since)
-	if err != nil || signals.Now.Sub(heldAt) < systemPasswordCutoverGrace || !signals.ExporterCaughtUp {
-		return
+	return heldAt, err == nil
+}
+
+// exporterHeldPastGrace reports whether _exporter.previous is still accepted
+// more than systemPasswordCutoverGrace after it was left behind. Within the
+// grace, holding it is the normal end of a rotation.
+func exporterHeldPastGrace(secret *corev1.Secret, now time.Time) bool {
+	if !exporterPasswordHeld(secret) {
+		return false
 	}
-	delete(secret.Data, systemPasswordPreviousKey(exporterUser))
-	delete(secret.Annotations, annotationExporterPasswordHeldSince)
+	heldAt, ok := exporterHeldSince(secret)
+	return ok && now.Sub(heldAt) >= systemPasswordCutoverGrace
 }
 
 func systemPasswordHasSuffix(data map[string][]byte, suffix string) bool {
@@ -375,25 +397,31 @@ func systemPasswordHasSuffix(data map[string][]byte, suffix string) bool {
 }
 
 // exporterPasswordCaughtUp reports whether every running exporter container
-// started at least systemPasswordCutoverGrace after cutover. redis_exporter
-// reads REDIS_PASSWORD once, at process start, and its image has no shell, so
-// a container that is already running keeps the old password until it starts
-// again. The kubelet fills that variable from its Secret cache, so a start
-// shortly after cutover can still get the old password. A container that is
-// not running reads the current key when it starts.
+// started at least systemPasswordCutoverGrace after cutover.
 func exporterPasswordCaughtUp(pods []corev1.Pod, cutover time.Time) bool {
+	return len(exporterPodsOnOldPassword(pods, cutover)) == 0
+}
+
+// exporterPodsOnOldPassword returns, sorted, the pods whose running exporter
+// container started less than systemPasswordCutoverGrace after cutover.
+// redis_exporter reads REDIS_PASSWORD once, at process start, and its image
+// has no shell, so a container that is already running keeps the old password
+// until it starts again. The kubelet fills that variable from its Secret
+// cache, so a start shortly after cutover can still get the old password. A
+// container that is not running reads the current key when it starts.
+func exporterPodsOnOldPassword(pods []corev1.Pod, cutover time.Time) []string {
 	readsCurrent := cutover.Add(systemPasswordCutoverGrace)
+	var names []string
 	for i := range pods {
 		for _, status := range pods[i].Status.ContainerStatuses {
-			if status.Name != metricsExporterContainerName || status.State.Running == nil {
-				continue
-			}
-			if status.State.Running.StartedAt.Time.Before(readsCurrent) {
-				return false
+			if status.Name == metricsExporterContainerName && status.State.Running != nil &&
+				status.State.Running.StartedAt.Time.Before(readsCurrent) {
+				names = append(names, pods[i].Name)
 			}
 		}
 	}
-	return true
+	slices.Sort(names)
+	return names
 }
 
 // podsMountSystemPasswords reports whether every server container has the
@@ -526,7 +554,8 @@ func (r *ValkeyClusterReconciler) systemPasswordSignals(ctx context.Context, clu
 			if err := fetch(); err != nil {
 				return signals, err
 			}
-			signals.ExporterCaughtUp = exporterPasswordCaughtUp(pods, heldAt)
+			signals.ExporterPodsOnOldPassword = exporterPodsOnOldPassword(pods, heldAt)
+			signals.ExporterCaughtUp = len(signals.ExporterPodsOnOldPassword) == 0
 		}
 	}
 	if phase == "" {
@@ -603,11 +632,7 @@ func (r *ValkeyNodeReconciler) applyReplicationPassword(ctx context.Context, nod
 	}
 	secret := &corev1.Secret{}
 	secretKey := types.NamespacedName{Name: getSystemPasswordSecretName(clusterName), Namespace: node.Namespace}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-	if err := reader.Get(ctx, secretKey, secret); err != nil {
+	if err := r.Get(ctx, secretKey, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -672,13 +697,15 @@ func (r *ValkeyNodeReconciler) serverRestartedSincePrimaryAuth(ctx context.Conte
 	return false
 }
 
-// syncExporterPasswordHold keeps ExporterPasswordHeld set for as long as
-// _exporter.previous remains. One event is not enough: the hold can last
-// until some other change restarts the exporter.
-func (r *ValkeyClusterReconciler) syncExporterPasswordHold(cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) {
-	if secret != nil && exporterPasswordHeld(secret) {
+// syncExporterPasswordHold keeps ExporterPasswordHeld set while
+// _exporter.previous is held past the grace, naming the pods whose exporter
+// still started too early to read the current password. One event is not
+// enough: the hold lasts until those pods restart, with rotation on or off.
+func (r *ValkeyClusterReconciler) syncExporterPasswordHold(cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret, signals systemPasswordSignals) {
+	if secret != nil && exporterHeldPastGrace(secret, signals.Now) && len(signals.ExporterPodsOnOldPassword) > 0 {
 		setCondition(cluster, valkeyiov1alpha1.ConditionExporterPasswordHeld, valkeyiov1alpha1.ReasonExporterNotRestarted,
-			"The metrics-exporter keeps the previous password until that container starts again more than five minutes after the switch. The other system passwords keep rotating.",
+			"The metrics-exporter has not restarted since the system passwords changed, so its previous password is still accepted. "+
+				"Restart these Valkey pods one at a time to finish its rotation: "+strings.Join(signals.ExporterPodsOnOldPassword, ", "),
 			metav1.ConditionTrue)
 		return
 	}

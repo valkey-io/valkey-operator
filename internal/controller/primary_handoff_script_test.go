@@ -88,8 +88,13 @@ func primaryHandoffTestCommand(t *testing.T, nodesConf, valkeyConf string, cli s
 	if primaryHost == "" {
 		primaryHost = "10.0.0.1"
 	}
+	// The stub logs the password and arguments of each call to calls.auth.
+	// With ROTATE_TO set it rewrites the password file after the first call,
+	// as the kubelet does when the Secret rotates.
 	script := "#!/bin/sh\n" +
-		"n=$(cat " + calls + " 2>/dev/null || echo 0); n=$((n+1)); echo $n > " + calls + "\n"
+		"n=$(cat " + calls + " 2>/dev/null || echo 0); n=$((n+1)); echo $n > " + calls + "\n" +
+		"echo \"${VALKEYCLI_AUTH:-} $*\" >> " + calls + ".auth\n" +
+		"if [ $n -eq 1 ] && [ -n \"${ROTATE_TO:-}\" ]; then echo \"$ROTATE_TO\" > \"$VALKEY_OPERATOR_PASSWORD_FILE\"; fi\n"
 	if cli.hang {
 		script += "sleep 30\n"
 	}
@@ -295,4 +300,42 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		assert.Contains(t, r.out, serverLine)
 		assert.True(t, r.nodeKept)
 	})
+
+	t.Run("ROLE calls send the mounted operator password and pick up a rotation", func(t *testing.T) {
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
+		passwordFile := filepath.Join(filepath.Dir(calls), operatorUser)
+		require.NoError(t, os.WriteFile(passwordFile, []byte("op-mounted\n"), 0o644))
+		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+			"VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile, "ROTATE_TO=op-rotated")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		auth, err := os.ReadFile(calls + ".auth")
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
+		require.Len(t, lines, 3)
+		for i, want := range []string{"op-mounted", "op-rotated", "op-rotated"} {
+			assert.True(t, strings.HasPrefix(lines[i], want+" "), lines[i])
+			assert.Contains(t, lines[i], "--user "+operatorUser)
+		}
+	})
+
+	t.Run("ROLE calls fall back to the environment password without the mount", func(t *testing.T) {
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
+		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		auth, err := os.ReadFile(calls + ".auth")
+		require.NoError(t, err)
+		assert.True(t, strings.HasPrefix(string(auth), "op-env "), string(auth))
+		assert.Contains(t, string(auth), "--user "+operatorUser)
+	})
+}
+
+func TestScriptsReadTheMountedOperatorPassword(t *testing.T) {
+	for _, name := range []string{"liveness-check.sh", "readiness-check.sh", primaryHandoffScriptKey} {
+		body, err := scripts.ReadFile("scripts/" + name)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), systemPasswordMountPath+"/"+operatorUser, name)
+	}
 }

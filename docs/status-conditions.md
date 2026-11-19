@@ -187,12 +187,12 @@ Common reasons:
 - `PauseAnnotationSet` – the pause annotation is set to `"true"`.
 
 #### `ExporterPasswordHeld`
-Non-blocking. Set during [system password rotation](valkeycluster.md#system-password-rotation) while the metrics exporter's previous password is still accepted. `Ready` is not affected, and the other system passwords keep rotating.
+Non-blocking. Set when the metrics exporter's previous password is still accepted more than five minutes after a [system password rotation](valkeycluster.md#system-password-rotation) switched to the new one, whether or not rotation is still turned on. `Ready` is not affected, and the other system passwords keep rotating.
 
 | Status | Meaning |
 |---|---|
-| `True` | A running metrics exporter started before the switch, or within five minutes after it, so it may still send the previous password. That password stays accepted until the container starts again. |
-| (absent) | No previous exporter password is held. |
+| `True` | The metrics exporter in the pods named in the message started before the switch, or within five minutes after it, so it may still send the previous password. That password stays accepted until those pods restart; restart them one at a time to finish the exporter's rotation. |
+| (absent) | No previous exporter password is held, or the switch was less than five minutes ago. |
 
 Common reasons:
 - `ExporterNotRestarted` – the exporter container has not started again since the switch.

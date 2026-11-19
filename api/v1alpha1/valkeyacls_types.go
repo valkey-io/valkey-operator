@@ -39,8 +39,9 @@ type SystemUsersSpec struct {
 	PasswordRotation *SystemPasswordRotationSpec `json:"passwordRotation,omitempty"`
 }
 
-// DefaultSystemPasswordRotationDays is the rotation interval when
-// systemUsers.passwordRotation is set without intervalDays.
+// DefaultSystemPasswordRotationDays is the intervalDays the API server fills
+// in when systemUsers.passwordRotation is set without it. It must match the
+// +kubebuilder:default on IntervalDays.
 const DefaultSystemPasswordRotationDays = 30
 
 // SystemPasswordRotationSpec configures rotation of the internal users'

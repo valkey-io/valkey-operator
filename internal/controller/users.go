@@ -535,7 +535,10 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		signals.SkipNext = filled
 		err = advanceSystemPasswordRotation(systemUsersSecret, cluster.Spec.ExporterEnabled(), signals)
 	}
-	if err != nil {
+	// A held rotation has no pod state to go on, so it leaves
+	// ExporterPasswordHeld as it was.
+	rotationHeld := err != nil
+	if rotationHeld {
 		// The users and ACLs do not depend on a rotation step, so a failed
 		// step holds the rotation where it was instead of failing them.
 		log.Error(err, "system password rotation held")
@@ -546,7 +549,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	// A steady Secret is not written again. An Update on every reconcile
 	// would change its resourceVersion and requeue the cluster forever.
 	if !createSecret && len(filled) == 0 && equality.Semantic.DeepEqual(beforeRotation, systemUsersSecret) {
-		r.syncExporterPasswordHold(cluster, systemUsersSecret)
+		if !rotationHeld {
+			r.syncExporterPasswordHold(cluster, systemUsersSecret, signals)
+		}
 		return systemUsersSecret, nil
 	}
 
@@ -559,7 +564,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		return systemUsersSecret, err
 	}
 	// Only after a successful write, so the condition matches the stored Secret.
-	r.syncExporterPasswordHold(cluster, systemUsersSecret)
+	if !rotationHeld {
+		r.syncExporterPasswordHold(cluster, systemUsersSecret, signals)
+	}
 	r.recordSystemPasswordRotation(cluster, beforeRotation, systemUsersSecret)
 	return systemUsersSecret, nil
 }

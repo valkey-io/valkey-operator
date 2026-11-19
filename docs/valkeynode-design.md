@@ -99,7 +99,7 @@ Each ValkeyNode owns a ConfigMap named `valkey-<name>` that holds its server con
 - `valkey-<rev>.conf`: a pinned file with the restart-only config. `<rev>` is the first 12 hex characters of the SHA-256 of its content. A key is written once and never rewritten.
 - `live.conf`: the live-settable keys, rendered from `status.appliedLiveConfig`. The pinned file ends with `include /config/live.conf`.
 
-The pod mounts `valkey-<spec.configRevision>.conf` as `/config/valkey.conf` and `live.conf` as `/config/live.conf`, both from one ConfigMap volume, and the pod template carries `spec.configRevision` in the `valkey.io/config-revision` annotation.
+The pod mounts `valkey-<spec.configRevision>.conf` as `/config/valkey.conf` and `live.conf` as `/config/live.conf`, both from one ConfigMap volume, so a new `spec.configRevision` changes the pod template.
 
 The parent decides the revision. It keeps the revision the live workload references while only live-settable keys differ, so a live change rolls nothing. ValkeyNode writes the ConfigMap. It writes a missing `valkey-<rev>.conf` only when the file it renders from its own spec hashes to `spec.configRevision`, so a parent cannot make it mount config its spec does not describe. On a mismatch it reports `Ready=False` with reason `ConfigRevisionMismatch` and leaves the workload alone. A node with no `spec.configRevision` reports `MissingConfigRevision` and builds no workload.
 

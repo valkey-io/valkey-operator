@@ -1017,7 +1017,7 @@ func (r *ValkeyClusterReconciler) liveWorkloadTemplates(ctx context.Context, nod
 		}
 		out[n.Name] = liveWorkloadTemplate{
 			hash:           podTemplateRollHash(*template),
-			configRevision: template.Annotations[configRevisionKey],
+			configRevision: mountedConfigRevision(&template.Spec),
 		}
 	}
 	return out, nil

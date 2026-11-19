@@ -2362,15 +2362,14 @@ spec:
                       type: string
                     description: |-
                       Annotations added to the object. Values have no format rule, but keys and
-                      values together are limited to 256 KiB less the operator's own annotation.
+                      values together are limited to 256 KiB.
                       Keys under valkey.io/ are reserved for the operator.
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
-                    - message: 'annotations must total at most 262107 characters (keys
-                        plus values): 256 KiB less the operator''s valkey.io/config-revision
-                        annotation'
-                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262107
+                    - message: annotations must total at most 262144 characters (keys
+                        plus values)
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262144
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending

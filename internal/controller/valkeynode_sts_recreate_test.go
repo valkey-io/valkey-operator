@@ -136,7 +136,7 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 		live := desired.DeepCopy()
 		live.Spec.ServiceName = legacyServiceName
 		if templateChanged {
-			live.Spec.Template.Annotations = map[string]string{configRevisionKey: "old"}
+			live.Spec.Template.Annotations = map[string]string{"example.com/changed": "old"}
 		}
 
 		c := fake.NewClientBuilder().
@@ -166,7 +166,7 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 
 		sts := stored(t, c, desired)
 		assert.Equal(t, legacyServiceName, sts.Spec.ServiceName)
-		assert.Equal(t, map[string]string{configRevisionKey: "old"}, sts.Spec.Template.Annotations)
+		assert.Equal(t, map[string]string{"example.com/changed": "old"}, sts.Spec.Template.Annotations)
 
 		got := &valkeyiov1alpha1.ValkeyNode{}
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(node), got))

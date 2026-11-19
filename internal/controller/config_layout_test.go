@@ -250,7 +250,7 @@ var _ = Describe("config layout", func() {
 		Expect(before).To(HaveLen(3))
 		for name, rev := range before {
 			Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(rev)}))
-			Expect(sts(name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, rev))
+			Expect(mountedConfigRevision(&sts(name).Spec.Template.Spec)).To(Equal(rev))
 		}
 
 		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["appendfsync"] = "always" })
@@ -275,7 +275,7 @@ var _ = Describe("config layout", func() {
 			nodesRound()
 			rolled := getNode(now[0])
 			Expect(nodeCM(rolled.Name).Data).To(HaveKey(configRevisionFileKey(rolled.Spec.ConfigRevision)))
-			Expect(sts(rolled.Name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, rolled.Spec.ConfigRevision))
+			Expect(mountedConfigRevision(&sts(rolled.Name).Spec.Template.Spec)).To(Equal(rolled.Spec.ConfigRevision))
 		}
 		Expect(parentPass()).To(BeFalse())
 		for name, rev := range revisions() {
@@ -396,7 +396,7 @@ var _ = Describe("config layout", func() {
 		Expect(newRev).NotTo(Equal(oldRev))
 		newKey := configRevisionFileKey(newRev)
 		nodesRound()
-		Expect(sts(name).Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, newRev))
+		Expect(mountedConfigRevision(&sts(name).Spec.Template.Spec)).To(Equal(newRev))
 		Expect(configRevisionKeys(nodeCM(name))).To(ConsistOf(oldKey, newKey), "the roll has not finished")
 
 		By("finishing the roll while the pod still mounts the old revision")

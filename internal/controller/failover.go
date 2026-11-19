@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,8 +57,10 @@ func (ft FailoverType) String() string {
 
 // findFailoverShard returns the shard and its synced replicas if the node at
 // address is a primary that should be gracefully failed over before being
-// updated, or nil if no failover is needed.
-func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.ShardState, []*valkey.NodeState) {
+// updated, or nil if no failover is needed. A replica answering at a
+// terminating pod of one of nodes is not a target: it exits soon, and its
+// replacement may not have synced yet.
+func findFailoverShard(state *valkey.ClusterState, address string, nodes []valkeyiov1alpha1.ValkeyNode) (*valkey.ShardState, []*valkey.NodeState) {
 	shard := state.FindShardForAddress(address)
 	if shard == nil {
 		return nil, nil
@@ -66,7 +69,9 @@ func findFailoverShard(state *valkey.ClusterState, address string) (*valkey.Shar
 	if primary == nil || primary.Address != address {
 		return nil, nil
 	}
-	replicas := shard.GetSyncedReplicas(state)
+	replicas := slices.DeleteFunc(shard.GetSyncedReplicas(state), func(n *valkey.NodeState) bool {
+		return hasNodeWithTerminatingPodIP(nodes, n.Address)
+	})
 	if len(replicas) == 0 {
 		return nil, nil
 	}

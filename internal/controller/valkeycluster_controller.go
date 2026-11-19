@@ -1229,7 +1229,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TopologySpreadConstraints:     topologySpreadConstraints,
 			Exporter:                      exporter,
 			Containers:                    cluster.Spec.Containers,
-			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
+			SharedConfigMapName:           GetSharedConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
 			TLS:                           nodeTLSFromCluster(cluster),
 			Config:                        cluster.Spec.Config,

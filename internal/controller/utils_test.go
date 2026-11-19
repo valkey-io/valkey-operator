@@ -76,7 +76,7 @@ func TestAnnotations(t *testing.T) {
 
 func TestConfigMapName(t *testing.T) {
 	testMapName := "valkey-test-resource"
-	result := GetServerConfigMapName("test-resource")
+	result := GetSharedConfigMapName("test-resource")
 	if result != testMapName {
 		t.Errorf("Expected '%v', got '%v'", testMapName, result)
 	}

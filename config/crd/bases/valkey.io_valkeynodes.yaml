@@ -3275,11 +3275,6 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              serverConfigMapName:
-                description: |-
-                  ServerConfigMapName specifies the name of the ConfigMap that contains the
-                  scripts, and Valkey config for the ValkeyNode.
-                type: string
               service:
                 description: |-
                   Service is set by the ValkeyCluster controller from
@@ -3293,6 +3288,13 @@ spec:
                 maxLength: 253
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+              sharedConfigMapName:
+                description: |-
+                  SharedConfigMapName names the ConfigMap the parent shares with its
+                  nodes. It holds the probe, init and primary handoff scripts and
+                  valkey.conf.
+                minLength: 1
                 type: string
               terminationGracePeriodSeconds:
                 description: |-
@@ -3644,6 +3646,7 @@ spec:
                   rule: self == oldSelf
             required:
             - configRevision
+            - sharedConfigMapName
             type: object
             x-kubernetes-validations:
             - fieldPath: .persistence

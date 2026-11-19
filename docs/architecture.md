@@ -22,10 +22,9 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 
 `internal/controller/valkeynode_controller.go` — manages the workload for a single node:
 
-1. Ensures a ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
-2. Ensures a PVC (if persistence is configured)
-3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
-4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+1. Ensures a PVC (if persistence is configured)
+2. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
+3. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
 
 #### Role resolution
 
@@ -82,7 +81,7 @@ The ValkeyNode pod-template builders set the `valkey.io/config-revision` annotat
 
 ## Init container
 
-Every ValkeyNode pod runs a `server-init` init container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap, or logs and exits 0 when the ConfigMap has no `init.sh` (an external ConfigMap set through `serverConfigMapName` may omit it), and can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
+Every ValkeyNode pod runs a `server-init` init container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap. A `valkey-<cluster>` written by v0.8.0 or earlier has no `init.sh` until the operator updates it, and the init container then logs and exits 0. The script can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
 
 The init container copies the server container's image, pull policy, resources, security context, env and volume mounts after `spec.containers` patches. Matching resources and security context keep the pod's QoS class and pass the same Pod Security admission checks as the server. Matching env and mounts give `init.sh` the same view as the server, including `/data`, TLS certificates and the operator credentials, so a script that needs them does not change the pod template.
 

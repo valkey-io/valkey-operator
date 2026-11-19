@@ -198,7 +198,7 @@ var _ = Describe("exporter enabled defaulting", func() {
 	It("does not stamp enabled onto a standalone ValkeyNode", func() {
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-standalone", Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {

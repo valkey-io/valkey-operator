@@ -755,7 +755,7 @@ Releases up to v0.9.0 named the first two Secrets `internal-<cluster>-acl` and `
 
 An old Secret the cluster does not control, for example one restored from a backup without its owner reference, is copied but never changed or deleted. Delete it yourself once every node has rolled. If one of the new names is already taken by a Secret the cluster does not control while it still controls the old one, the operator stops with `Ready=False` and reason `UsersACLError`, naming both. Delete or rename that Secret.
 
-Read the system passwords from `valkey-<cluster>-system-passwords` after the upgrade. A sidecar in `containers` that references an old name keeps that Secret in use, so it stays, kept equal to the new one, until you change the reference. Standalone ValkeyNodes are not migrated: their pods now read `valkey-<label>-system-passwords`, where `<label>` is the node's `valkey.io/cluster` label, and you create that Secret.
+Read the system passwords from `valkey-<cluster>-system-passwords` after the upgrade. A sidecar in `containers` that references an old name keeps that Secret in use, so it stays, kept equal to the new one, until you change the reference. A ValkeyNode without a `ValkeyCluster` parent is not migrated, since the operator does not reconcile it (reason `NoParent`).
 
 Rolling back to a release that uses the old names after the old Secrets are deleted makes it generate new system passwords, which the nodes reject. Before such a rollback, copy the Secret back under its old name, keeping its labels:
 

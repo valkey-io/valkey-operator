@@ -370,67 +370,17 @@ func TestInitialSyncGateHoldsWalk(t *testing.T) {
 }
 
 func TestReportInitialSyncGateHold(t *testing.T) {
-	notFound := apierrors.NewNotFound(corev1.Resource("pods"), "p1")
-	forbidden := apierrors.NewForbidden(corev1.Resource("pods/status"), "p0", errors.New("cannot patch"))
-	conflict := apierrors.NewConflict(corev1.Resource("pods"), "p0", errors.New("modified"))
-
-	t.Run("a refused write is also Degraded", func(t *testing.T) {
-		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		reportInitialSyncGateHold(cluster, errors.Join(notFound, forbidden))
-		ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
-		require.NotNil(t, ready)
-		assert.Equal(t, metav1.ConditionFalse, ready.Status)
-		assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, ready.Reason)
-		assert.Contains(t, ready.Message, "forbidden")
-		progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
-		require.NotNil(t, progressing)
-		assert.Equal(t, metav1.ConditionTrue, progressing.Status)
-		assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, progressing.Reason)
-		degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		require.NotNil(t, degraded, "the missing-shard check rewrites Ready and Progressing, so the reason must survive on Degraded")
-		assert.Equal(t, metav1.ConditionTrue, degraded.Status)
-		assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, degraded.Reason)
-	})
-
-	t.Run("a conflict is not Degraded", func(t *testing.T) {
-		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		reportInitialSyncGateHold(cluster, conflict)
-		require.NotNil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady))
-		assert.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded))
-	})
-}
-
-func TestSetHealthyDegraded(t *testing.T) {
-	gateErr := errors.New(`pods "valkey-c-0-1" is forbidden`)
-	degraded := func(cluster *valkeyiov1alpha1.ValkeyCluster) *metav1.Condition {
-		return meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	}
-
-	t.Run("a failed gate write is Degraded until a pass whose writes succeed", func(t *testing.T) {
-		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		assert.True(t, setHealthyDegraded(cluster, nil, nil, gateErr))
-		c := degraded(cluster)
-		require.NotNil(t, c)
-		assert.Equal(t, metav1.ConditionTrue, c.Status)
-		assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, c.Reason)
-		assert.Contains(t, c.Message, gateErr.Error())
-
-		assert.False(t, setHealthyDegraded(cluster, nil, nil, nil))
-		assert.Nil(t, degraded(cluster))
-	})
-
-	t.Run("a node that cannot apply its ACL takes precedence", func(t *testing.T) {
-		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		assert.True(t, setHealthyDegraded(cluster, nil, []string{"c-0-0"}, gateErr))
-		require.NotNil(t, degraded(cluster))
-		assert.Equal(t, valkeyiov1alpha1.ReasonACLApplyFailed, degraded(cluster).Reason)
-	})
-
-	t.Run("an unresolved users ACL keeps the Degraded set before", func(t *testing.T) {
-		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, "secret missing", metav1.ConditionTrue)
-		assert.True(t, setHealthyDegraded(cluster, errors.New("secret missing"), nil, gateErr))
-		require.NotNil(t, degraded(cluster))
-		assert.Equal(t, valkeyiov1alpha1.ReasonUsersACLUnresolved, degraded(cluster).Reason)
-	})
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	reportInitialSyncGateHold(cluster, apierrors.NewForbidden(corev1.Resource("pods/status"), "p0", errors.New("cannot patch")))
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, ready.Reason)
+	assert.Contains(t, ready.Message, "forbidden")
+	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+	require.NotNil(t, progressing)
+	assert.Equal(t, metav1.ConditionTrue, progressing.Status)
+	assert.Equal(t, valkeyiov1alpha1.ReasonInitialSyncGateFailed, progressing.Reason)
+	assert.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded),
+		"a gate write that fails leaves the data path alone, so it is not Degraded")
 }

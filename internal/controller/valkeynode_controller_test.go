@@ -43,6 +43,19 @@ import (
 	testutils "github.com/valkey-io/valkey-operator/test/utils"
 )
 
+// testParentRefs returns a ValkeyCluster controller ownerReference, so the
+// ValkeyNode controller reconciles the node. envtest has no garbage collector,
+// so the owner does not have to exist.
+func testParentRefs() []metav1.OwnerReference {
+	return []metav1.OwnerReference{{
+		APIVersion: valkeyiov1alpha1.GroupVersion.String(),
+		Kind:       "ValkeyCluster",
+		Name:       "parent-cluster",
+		UID:        "parent-uid",
+		Controller: new(true),
+	}}
+}
+
 var _ = Describe("ValkeyNode Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-valkeynode"
@@ -97,6 +110,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 					Labels: map[string]string{
 						LabelCluster: resourceName,
 					},
+					OwnerReferences: testParentRefs(),
 				},
 				Spec: spec,
 			})).To(Succeed())
@@ -114,6 +128,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						Labels: map[string]string{
 							LabelCluster: resourceName,
 						},
+						OwnerReferences: testParentRefs(),
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
@@ -227,6 +242,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			node.Spec.PodMetadata.Labels["team"] = "platform"
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
@@ -363,6 +379,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			// The pod exists before the StatefulSet, so creating it needs a matching Spec.WorkloadRevision.
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName + "-pod",
@@ -434,6 +453,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			// The pod exists before the StatefulSet, so creating it needs a matching Spec.WorkloadRevision.
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName + "-acl-retry-pod",
@@ -988,6 +1010,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			By("changing a non-live-settable config key")
 			node.Spec.Config["appendfsync"] = "always"
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			By("reconciling after the config change")
@@ -1005,8 +1028,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 				"updated config hash must be propagated to trigger pod restart")
 		})
 
-		It("does not add a config hash annotation for standalone nodes without ServerConfigMapName", func() {
-			By("recreating a standalone ValkeyNode with Config but no ServerConfigMapName")
+		It("does not add a config hash annotation for nodes without ServerConfigMapName", func() {
+			By("recreating a ValkeyNode with Config but no ServerConfigMapName")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Config:       map[string]string{"appendfsync": "everysec"},
@@ -1022,7 +1045,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the pod template has no config hash annotation (pre-existing standalone behavior)")
+			By("verifying the pod template has no config hash annotation")
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
@@ -1030,7 +1053,6 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should defer rolling template updates for cluster-owned nodes until Spec.WorkloadRevision matches", func() {
 			By("recreating a cluster-owned ValkeyNode with matching WorkloadRevision")
-			ctrl := true
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Image:        "valkey/valkey:9.0.0",
@@ -1040,13 +1062,6 @@ var _ = Describe("ValkeyNode Controller", func() {
 			rev, err := computeWorkloadRevision(node)
 			Expect(err).NotTo(HaveOccurred())
 			node.Spec.WorkloadRevision = rev
-			node.OwnerReferences = []metav1.OwnerReference{{
-				APIVersion: "valkey.io/v1alpha1",
-				Kind:       "ValkeyCluster",
-				Name:       "parent-cluster",
-				UID:        "parent-uid",
-				Controller: &ctrl,
-			}}
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			r := &ValkeyNodeReconciler{
@@ -1135,6 +1150,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 						Labels: map[string]string{
 							LabelCluster: resourceName,
 						},
+						OwnerReferences: testParentRefs(),
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
@@ -1209,10 +1225,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(initialDeploy.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(initialDeploy.Spec.Template.Spec.Containers[0].Image).NotTo(Equal("valkey/valkey:8.0.0"))
 
-			By("updating the ValkeyNode image")
+			By("updating the ValkeyNode image and Spec.WorkloadRevision, as ValkeyCluster does")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			node.Spec.Image = "valkey/valkey:8.0.0"
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
 			By("second reconcile should propagate the image change")
@@ -1243,6 +1260,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 					Labels: map[string]string{
 						LabelCluster: resourceName,
 					},
+					OwnerReferences: testParentRefs(),
 				},
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
@@ -1274,6 +1292,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			updated := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
 			updated.Spec.Config["appendfsync"] = "always"
+			Expect(setDesiredWorkloadRevision(updated)).To(Succeed())
 			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
 			By("reconciling after the config change")

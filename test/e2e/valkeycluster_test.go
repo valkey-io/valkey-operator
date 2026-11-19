@@ -80,7 +80,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 
 			By("validating the ConfigMap")
 			verifyConfigMapExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName))
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(valkeyClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -1041,7 +1041,7 @@ spec:
 
 			By("validating that the ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(sampleClusterName))
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(sampleClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}

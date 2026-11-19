@@ -80,12 +80,12 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 var scripts embed.FS
 var scriptsHash string
 
-func GetServerConfigMapName(clusterName string) string {
+func GetSharedConfigMapName(clusterName string) string {
 	return resourcePrefix + clusterName
 }
 
-// buildManagedConfig returns the operator-managed directives shared by the
-// cluster and standalone ValkeyNode config paths.
+// buildManagedConfig returns the operator-managed directives of the node
+// config.
 //
 //nolint:goconst
 func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, image string) map[string]string {
@@ -139,11 +139,6 @@ func renderConfig(config map[string]string) string {
 	builder.Grow(len(config) * averageParameterLength)
 	writeSortedConfig(&builder, config)
 	return builder.String()
-}
-
-func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
-	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, node.Spec.Image))
 }
 
 // Return a base config of parameters that users shouldn't be able to override.
@@ -326,10 +321,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
 
 	// Look for, and fetch existing configMap for this cluster
-	serverConfigMapName := GetServerConfigMapName(cluster.Name)
+	sharedConfigMapName := GetSharedConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      serverConfigMapName,
+		Name:      sharedConfigMapName,
 		Namespace: cluster.Namespace,
 	}, serverConfigMap); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -338,11 +333,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		}
 
 		// ConfigMap not found; This happens on cluster init
-		log.V(2).Info("creating server configMap", "name", serverConfigMapName)
+		log.V(2).Info("creating shared configMap", "name", sharedConfigMapName)
 
 		// Create configMap object with contents
 		serverConfigMap.ObjectMeta = metav1.ObjectMeta{
-			Name:      serverConfigMapName,
+			Name:      sharedConfigMapName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{

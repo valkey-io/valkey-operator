@@ -121,7 +121,8 @@ var _ = Describe("TLS client auth admission rules", Label("tls", "cel"), func() 
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "cel-node-disabled-cn", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				ConfigRevision: testConfigRevision,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
 				TLS: &valkeyiov1alpha1.NodeTLSSpec{
 					Certificates: valkeyiov1alpha1.NodeTLSCertificates{Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "tls-secret"}},
 					ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
@@ -245,7 +246,7 @@ var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
 var _ = Describe("Live config", Label("liveconfig"), func() {
 	newNode := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, Config: cfg},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, Config: cfg},
 		}
 	}
 

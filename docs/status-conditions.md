@@ -217,7 +217,6 @@ Common reasons when `Ready=False`:
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
 - `NoParent` – the node has no controller ownerReference to a `valkey.io` `ValkeyCluster`. The operator creates or updates no workload, Service or ConfigMap for the node and leaves the existing ones and the pod as they are. It still manages the persistence finalizer, and deleting the node still runs its finalizers. A ValkeyNode created by hand, or left behind by `kubectl delete valkeycluster <name> --cascade=orphan`, gets this reason. If the cluster was paused when it was deleted, its nodes keep the `valkey.io/pause-reconciliation` annotation and stay paused. They report `NoParent` after someone removes the annotation.
-- `MissingConfigRevision` – `spec.configRevision` is empty, so there is no pinned config file to mount. The node builds no workload until its parent sets the field.
 - `ConfigRevisionMismatch` – the node's ConfigMap has no `valkey-<rev>.conf` key for `spec.configRevision`, and the pinned file the node renders from its own spec hashes to a different revision. The node writes nothing and leaves the workload alone. See [Config revisions](architecture.md#config-revisions).
 
 Common reasons when `Ready=True`:

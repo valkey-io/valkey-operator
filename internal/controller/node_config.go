@@ -36,8 +36,7 @@ import (
 )
 
 const (
-	// Ready reasons for a node whose config cannot be written.
-	reasonMissingConfigRevision  = "MissingConfigRevision"
+	// Ready reason for a node whose config revision cannot be written.
 	reasonConfigRevisionMismatch = "ConfigRevisionMismatch"
 
 	configRevisionKeyPrefix = "valkey-"

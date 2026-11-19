@@ -101,7 +101,7 @@ Each ValkeyNode owns a ConfigMap named `valkey-<name>` that holds its server con
 
 The pod mounts `valkey-<spec.configRevision>.conf` as `/config/valkey.conf` and `live.conf` as `/config/live.conf`, both from one ConfigMap volume, so a new `spec.configRevision` changes the pod template.
 
-The parent decides the revision. It keeps the revision the live workload references while only live-settable keys differ, so a live change rolls nothing. ValkeyNode writes the ConfigMap. It writes a missing `valkey-<rev>.conf` only when the file it renders from its own spec hashes to `spec.configRevision`, so a parent cannot make it mount config its spec does not describe. On a mismatch it reports `Ready=False` with reason `ConfigRevisionMismatch` and leaves the workload alone. A node with no `spec.configRevision` reports `MissingConfigRevision` and builds no workload.
+The parent decides the revision. It keeps the revision the live workload references while only live-settable keys differ, so a live change rolls nothing. ValkeyNode writes the ConfigMap. It writes a missing `valkey-<rev>.conf` only when the file it renders from its own spec hashes to `spec.configRevision`, so a parent cannot make it mount config its spec does not describe. On a mismatch it reports `Ready=False` with reason `ConfigRevisionMismatch` and leaves the workload alone. A node stored before `spec.configRevision` existed keeps its workload as it is until the parent sets the field.
 
 A revision key is deleted once it is not `spec.configRevision`, the workload template does not reference it, no pod of the node mounts it, and the workload has finished its roll. See [Config revisions](architecture.md#config-revisions) for the details.
 

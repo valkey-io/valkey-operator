@@ -192,11 +192,11 @@ Non-blocking. Set when this pass could not scrape a pod, or when it keeps a prim
 | Status | Meaning |
 |---|---|
 | `True` | A pod returned no usable identity or topology this pass, or a primary the scrape missed still owns slots in a peer's `CLUSTER NODES` table. |
-| (absent) | Every pod was scraped and no slots are held for a missing primary. |
+| (absent) | The pass scraped every pod and held no slots for a missing primary, or it did not scrape the pods, for example while reconciliation is paused or after an early error. |
 
 Common reasons:
 - `NodeScrapeIncomplete` – a pod this pass set out to scrape did not return a usable topology, for example because a cluster command failed.
-- `SlotsHeldForMissingPrimary` – a scraped replica still follows a primary this pass did not reach, so that primary's slots stay assigned and unserved until a manual failover.
+- `SlotsHeldForMissingPrimary` – a scraped replica still follows a primary this pass did not reach, so that primary's slots stay assigned to it. A primary that only failed a command keeps serving them; one that is down leaves them unserved until a manual failover.
 
 ---
 

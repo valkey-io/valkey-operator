@@ -955,7 +955,8 @@ const (
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
 	// ReasonSlotsHeldForMissingPrimary is used with ConditionIncompleteScrape
 	// when a scraped replica still follows a primary this pass did not reach,
-	// so its slots stay unserved until a manual failover.
+	// so its slots stay assigned to it. If that primary is down, they stay
+	// unserved until a manual failover.
 	ReasonSlotsHeldForMissingPrimary = "SlotsHeldForMissingPrimary"
 	// ReasonNodeScrapeIncomplete is used with ConditionIncompleteScrape when a
 	// pod this pass set out to scrape did not return a usable topology.

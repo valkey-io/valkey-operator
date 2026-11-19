@@ -112,10 +112,18 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 		}
 		data[revKey] = pinned
 	}
-	if live := renderLiveConfig(node); !exists || cm.Data[liveConfigFileKey] != live {
+	if live := renderLiveConfig(node); !hasValue(cm.Data, liveConfigFileKey, live) {
 		data[liveConfigFileKey] = live
 	}
-	if len(data) == 0 {
+	// The node controller is the ConfigMap's only writer, so any other key is
+	// left over, for example from an older operator that used the same name.
+	var stale []string
+	for k := range cm.Data {
+		if _, ok := configRevisionFromKey(k); !ok && k != liveConfigFileKey {
+			stale = append(stale, k)
+		}
+	}
+	if len(data) == 0 && len(stale) == 0 {
 		return nil
 	}
 
@@ -141,11 +149,21 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 		cm.Data = map[string]string{}
 	}
 	maps.Copy(cm.Data, data)
+	for _, k := range stale {
+		delete(cm.Data, k)
+	}
 	if err := r.Patch(ctx, cm, client.MergeFrom(base)); err != nil {
 		return err
 	}
-	log.V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", slices.Sorted(maps.Keys(data)))
+	log.V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", slices.Sorted(maps.Keys(data)), "removed", slices.Sorted(slices.Values(stale)))
 	return nil
+}
+
+// hasValue reports whether data holds key with value want. A missing key is
+// not the same as an empty one: a pod cannot mount a key that is not there.
+func hasValue(data map[string]string, key, want string) bool {
+	got, ok := data[key]
+	return ok && got == want
 }
 
 // pruneConfigRevisions deletes the node's pinned revision keys that nothing

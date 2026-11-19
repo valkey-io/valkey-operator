@@ -532,23 +532,31 @@ var _ = Describe("config layout", func() {
 		name := valkeyNodeName(cluster.Name, 0, 0)
 		rev := getNode(name).Spec.ConfigRevision
 
-		By("leaving an existing revision key and other keys alone")
+		By("leaving an existing revision key alone and removing keys it does not own")
 		cm := nodeCM(name)
 		cm.Data[configRevisionFileKey(rev)] = "edited\n"
-		cm.Data["unrelated"] = "kept"
+		cm.Data["liveness-check.sh"] = "left by an older operator"
 		cm.Data[liveConfigFileKey] = "maxclients 1\n"
 		Expect(k8sClient.Update(ctx, cm)).To(Succeed())
 		nodeWrites.Reset()
 		reconcileNode(name)
 		cm = nodeCM(name)
 		Expect(cm.Data).To(HaveKeyWithValue(configRevisionFileKey(rev), "edited\n"))
-		Expect(cm.Data).To(HaveKeyWithValue("unrelated", "kept"))
+		Expect(cm.Data).NotTo(HaveKey("liveness-check.sh"))
 		Expect(cm.Data).To(HaveKeyWithValue(liveConfigFileKey, ""), "live.conf is rewritten from the node")
 		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
 
+		By("writing live.conf when the key is missing, even though it renders empty")
+		cm = nodeCM(name)
+		delete(cm.Data, liveConfigFileKey)
+		Expect(k8sClient.Update(ctx, cm)).To(Succeed())
+		reconcileNode(name)
+		Expect(nodeCM(name).Data).To(HaveKeyWithValue(liveConfigFileKey, ""))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(2))
+
 		By("skipping the write when nothing changed")
 		reconcileNode(name)
-		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(2))
 
 		By("refusing a revision the spec does not render")
 		n := getNode(name)
@@ -562,7 +570,7 @@ var _ = Describe("config layout", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(reasonConfigRevisionMismatch))
-		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(2))
 	})
 
 	It("requeues the parent while its cache lacks the live revision", func() {

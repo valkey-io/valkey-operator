@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -659,6 +660,77 @@ func TestReconcileTrustBundle(t *testing.T) {
 		t.Helper()
 		node.Spec.TLS = nodeOnTrustBundle(node.Name).Spec.TLS
 		require.NoError(t, c.Update(ctx, node))
+	}
+
+	for _, missingKey := range []bool{false, true} {
+		for _, mounting := range []bool{false, true} {
+			t.Run(fmt.Sprintf("holds roots with unresolved users missingKey=%t mounting=%t", missingKey, mounting), func(t *testing.T) {
+				cluster := trustTestCluster("client-ca")
+				node := nodeAt("c-0-0", "")
+				r, c, _ := newTrustReconciler(t, caSecret("server-tls", serverCA), caSecret("client-ca", clientCA), node)
+				require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
+				acl := &corev1.Secret{}
+				key := client.ObjectKey{Namespace: "ns", Name: getInternalSecretName("c")}
+				require.NoError(t, c.Get(ctx, key, acl))
+				oldACL := string(acl.Data[aclFilename])
+				node.Status.AppliedACLRevision = aclRevision(desiredUserPasswordHashes(oldACL))
+				require.NoError(t, c.Update(ctx, node))
+				_, err := r.reconcileTrustBundle(ctx, cluster)
+				require.NoError(t, err)
+				if mounting {
+					mountBundle(t, c, node)
+				}
+
+				cluster.Spec.ACL = &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name:     "app",
+					Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "password", Keys: []string{"current"}}},
+				}}}
+				if missingKey {
+					require.NoError(t, c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "password", Namespace: "ns"}}))
+				}
+				aclErr := r.reconcileUsersAcl(ctx, cluster)
+				var unresolved *userSecretUnresolvedError
+				require.ErrorAs(t, aclErr, &unresolved)
+				r.reportUsersACLUnresolved(ctx, cluster, aclErr)
+				require.NoError(t, c.Get(ctx, key, acl))
+				assert.Equal(t, oldACL, string(acl.Data[aclFilename]))
+
+				// Revoke the old client root and renew the server CA in the same
+				// pass: those changes must still apply while the new root waits.
+				added, renewed := selfSignedCAPEM(t), selfSignedCAPEM(t)
+				require.NoError(t, c.Update(ctx, caSecret("client-ca", added)))
+				require.NoError(t, c.Update(ctx, caSecret("server-tls", renewed)))
+				_, err = r.reconcileTrustBundle(ctx, cluster)
+				require.NoError(t, err)
+				held, _ := trustSecret(t, c)
+				assert.Equal(t, [][]byte{derOf(t, renewed)}, bundleDERs(t, held.Data[tlsSecretKeyCA]))
+				assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundlePending, tlsConfigured(cluster).Reason)
+				assert.Contains(t, tlsConfigured(cluster).Message, "UsersACLUnresolved")
+
+				password := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "password", Namespace: "ns"}, Data: map[string][]byte{"current": []byte("test-password")}}
+				if missingKey {
+					require.NoError(t, c.Update(ctx, password))
+				} else {
+					require.NoError(t, c.Create(ctx, password))
+				}
+				require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
+				r.reportUsersACLUnresolved(ctx, cluster, nil)
+				_, err = r.reconcileTrustBundle(ctx, cluster)
+				require.NoError(t, err)
+				if mounting {
+					held, _ = trustSecret(t, c)
+					assert.Equal(t, [][]byte{derOf(t, renewed)}, bundleDERs(t, held.Data[tlsSecretKeyCA]), "resolving the Secret is not enough until nodes apply the new ACL")
+					require.NoError(t, c.Get(ctx, key, acl))
+					node.Status.AppliedACLRevision = aclRevision(desiredUserPasswordHashes(string(acl.Data[aclFilename])))
+					require.NoError(t, c.Update(ctx, node))
+					_, err = r.reconcileTrustBundle(ctx, cluster)
+					require.NoError(t, err)
+				}
+				ready, _ := trustSecret(t, c)
+				assert.Equal(t, [][]byte{derOf(t, renewed), derOf(t, added)}, bundleDERs(t, ready.Data[tlsSecretKeyCA]))
+				assert.Equal(t, valkeyiov1alpha1.ReasonTrustBundleReady, tlsConfigured(cluster).Reason)
+			})
+		}
 	}
 
 	t.Run("holds new roots until every node confirms the current ACL", func(t *testing.T) {

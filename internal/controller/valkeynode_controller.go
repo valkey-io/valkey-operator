@@ -677,26 +677,18 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 	}
 }
 
-// buildPodTemplateAnnotations assembles the annotations stamped on the pod
+// buildPodTemplateAnnotations returns the annotations stamped on the pod
 // template, and therefore the ones that feed the WorkloadRevision roll hash:
-// the user's spec.podMetadata.annotations plus the pinned config revision.
-// The revision names the restart-only config the pod boots on, so a new one
-// rolls the pod. The parent sets spec.configRevision, and both controllers
-// build the template from the node spec alone, so they hash identically.
+// the user's spec.podMetadata.annotations. The pinned config revision reaches
+// the template through the config volume's items, so a new one rolls the pod.
 // The ACL is deliberately absent. ACL edits are applied to the running
 // server live by the ValkeyNode reconciler (see applyLiveACL), so they must
 // not enter the WorkloadRevision and roll the pods.
 func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
-	annotations := map[string]string{}
-	// The field is required, but a node stored before it existed has none
-	// until its parent sets one.
-	if node.Spec.ConfigRevision != "" {
-		annotations[configRevisionKey] = node.Spec.ConfigRevision
-	}
 	if node.Spec.PodMetadata != nil {
-		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)
+		return withUserMetadata(node.Spec.PodMetadata.Annotations, nil)
 	}
-	return annotations
+	return nil
 }
 
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.

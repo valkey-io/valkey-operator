@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -182,20 +181,16 @@ var _ = Describe("podMetadata CEL validation", func() {
 			true, "")
 	})
 
-	// The pod also carries the operator's config-revision annotation, so the
-	// limit is checked against the final map, as the API server will see it.
-	operatorAnnotations := map[string]string{configRevisionKey: strings.Repeat("0", pinnedConfigRevisionLength)}
-	operatorSize := len(configRevisionKey) + pinnedConfigRevisionLength
+	// The operator adds no annotation of its own, so the limit is the API
+	// server's.
 	for _, total := range []int{apivalidation.TotalAnnotationSizeLimitB, apivalidation.TotalAnnotationSizeLimitB + 1} {
 		annotations := map[string]string{"example.com/a": "x"}
-		annotations["example.com/b"] = strings.Repeat("x", total-operatorSize-len("example.com/a")-len("x")-len("example.com/b"))
-		final := maps.Clone(annotations)
-		maps.Copy(final, operatorAnnotations)
-		accepted := len(apivalidation.ValidateAnnotations(final, field.NewPath("annotations"))) == 0
+		annotations["example.com/b"] = strings.Repeat("x", total-len("example.com/a")-len("x")-len("example.com/b"))
+		accepted := len(apivalidation.ValidateAnnotations(annotations, field.NewPath("annotations"))) == 0
 		It(fmt.Sprintf("annotations totalling %d bytes on the pod: accepted=%t, like the API server", total, accepted), func() {
 			expectAdmission(fmt.Sprintf("pm-as-%d", total),
 				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: annotations},
-				accepted, "annotations must total at most 262107 characters")
+				accepted, "annotations must total at most 262144 characters")
 		})
 	}
 })

@@ -623,7 +623,7 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		Expect(cm.Data).To(HaveKey(initScriptKey))
 
-		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
+		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a mounted config revision")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
@@ -633,8 +633,8 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			tmpl, err := buildNodePodTemplate(n)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(n.Spec.ConfigRevision).NotTo(BeEmpty())
-			Expect(tmpl.Annotations[configRevisionKey]).To(Equal(n.Spec.ConfigRevision),
-				"ValkeyNode %s pod template must carry the config-revision annotation even when the ConfigMap is not yet visible in the cache", n.Name)
+			Expect(mountedConfigRevision(&tmpl.Spec)).To(Equal(n.Spec.ConfigRevision),
+				"ValkeyNode %s pod template must mount its config revision even when the ConfigMap is not yet visible in the cache", n.Name)
 		}
 	})
 })

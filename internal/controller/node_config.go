@@ -253,6 +253,16 @@ func (r *ValkeyNodeReconciler) workloadRollState(ctx context.Context, reader cli
 	}
 }
 
+// mountedConfigRevision returns the pinned revision a pod spec's config volume
+// mounts, or "" when it mounts none.
+func mountedConfigRevision(spec *corev1.PodSpec) string {
+	for _, key := range mountedConfigRevisionKeys(spec) {
+		rev, _ := configRevisionFromKey(key)
+		return rev
+	}
+	return ""
+}
+
 // mountedConfigRevisionKeys returns the pinned revision keys a pod spec's
 // config volume mounts.
 func mountedConfigRevisionKeys(spec *corev1.PodSpec) []string {

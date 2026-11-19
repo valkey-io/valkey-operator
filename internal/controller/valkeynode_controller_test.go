@@ -1037,7 +1037,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			By("verifying the StatefulSet pod template carries the config revision")
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA))
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revA))
 			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
 
 			By("changing a restart-only key without a new config revision")
@@ -1048,7 +1048,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA),
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revA),
 				"only the parent's config revision moves the template")
 
 			By("setting a new config revision")
@@ -1060,7 +1060,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revB),
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revB),
 				"a new config revision must reach the template to roll the pod")
 		})
 
@@ -1329,7 +1329,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
-			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revA))
+			Expect(mountedConfigRevision(&dep.Spec.Template.Spec)).To(Equal(revA))
 
 			By("setting a new config revision")
 			updated := &valkeyiov1alpha1.ValkeyNode{}
@@ -1346,7 +1346,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			By("verifying the annotation moved to the new revision, causing a rolling update")
 			dep2 := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
-			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configRevisionKey, revB),
+			Expect(mountedConfigRevision(&dep2.Spec.Template.Spec)).To(Equal(revB),
 				"a new config revision must reach the template to roll the pod")
 		})
 	})

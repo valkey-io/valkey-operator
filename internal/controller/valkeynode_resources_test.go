@@ -1691,7 +1691,6 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 				},
 				Annotations: map[string]string{
 					"example.com/scrape": "true",
-					configRevisionKey:    "spoofed",
 				},
 			}
 
@@ -1701,7 +1700,6 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			assert.Equal(t, "data", tmpl.Labels["team"])
 			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
 			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
-			assert.Equal(t, "aaaaaaaaaaaa", tmpl.Annotations[configRevisionKey], "operator annotations win over podMetadata")
 
 			var selector map[string]string
 			if workloadType == valkeyv1.WorkloadTypeDeployment {

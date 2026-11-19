@@ -96,7 +96,7 @@ The node controller writes `status.appliedLiveConfig` in the same status update 
 
 ### Pods
 
-The pod template carries the `valkey.io/config-revision` annotation set to `spec.configRevision`, so a new revision changes the template and rolls the pod. The template stays a pure function of the node spec, so the ValkeyCluster controller and the ValkeyNode controller compute the same `spec.workloadRevision`, and the roll is authorized one node at a time.
+The config volume of the pod template mounts the `valkey-<rev>.conf` key for `spec.configRevision`, so a new revision changes the template and rolls the pod. The parent reads the live revision from the same volume item. The template stays a pure function of the node spec, so the ValkeyCluster controller and the ValkeyNode controller compute the same `spec.workloadRevision`, and the roll is authorized one node at a time.
 
 The `valkey-conf` volume is one ConfigMap volume on `valkey-<node>` with two items: `valkey-<rev>.conf` mounted as `/config/valkey.conf` and `live.conf` as `/config/live.conf`. One volume means the kubelet swaps both files in one atomic write. The server command is `valkey-server /config/valkey.conf`. The `scripts` volume mounts only the script keys of `valkey-<cluster>`.
 
@@ -113,7 +113,7 @@ Pods and the workload are read only when the ConfigMap holds more than one revis
 
 ### Upgrading
 
-Older operators wrote the full `valkey.conf` into `valkey-<cluster>` and stamped a `valkey.io/config-hash` annotation on the pod template. The new template drops that annotation, carries `valkey.io/config-revision` and mounts the node ConfigMap `valkey-<node>`, so existing clusters roll once on upgrade, one node at a time. The `valkey.conf` key an older operator left in `valkey-<cluster>` is no longer updated, and pods that have rolled do not mount it.
+Older operators wrote the full `valkey.conf` into `valkey-<cluster>` and stamped a `valkey.io/config-hash` annotation on the pod template. The new template drops that annotation and mounts the node ConfigMap `valkey-<node>`, so existing clusters roll once on upgrade, one node at a time. The `valkey.conf` key an older operator left in `valkey-<cluster>` is no longer updated, and pods that have rolled do not mount it.
 
 ## Init container
 

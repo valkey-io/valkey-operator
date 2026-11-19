@@ -167,10 +167,10 @@ The operator requires the `--default-valkey-image` and `--default-exporter-image
 flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
 `spec.exporter.image` is empty.
 
-- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster or
-  standalone ValkeyNode that omits `spec.image`.
+- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster that
+  omits `spec.image`.
 - Changing `--default-exporter-image` rolls pods with an enabled exporter whose
-  ValkeyCluster or standalone ValkeyNode omits `spec.exporter.image`.
+  ValkeyCluster omits `spec.exporter.image`.
 
 When upgrading a deployment that supplies its own manager arguments, add both
 flags. To keep the previous image defaults, use
@@ -760,8 +760,6 @@ The `Paused` column in `kubectl get valkeyclusters` shows `True` while the `Reco
 While the cluster is paused the operator creates, updates and deletes nothing that belongs to it, sends no commands to its Valkey nodes, not even the reads of the role poller, and leaves `spec` changes for later. It sets the `ReconciliationPaused` condition and records a `ReconciliationPaused` event, and looks at the cluster again every 30 seconds. Persistence finalizer metadata is still maintained on paused ValkeyNodes. Deleting a paused cluster still works, and a ValkeyNode that is being deleted still goes through its deletion handler, so with the `Delete` reclaim policy its workload and PVC are removed.
 
 The operator otherwise does not change objects it does not render itself, and the pause is the exception: it copies the annotation onto every ValkeyNode the cluster owns, and the ValkeyNode controller skips a node that carries it, so the StatefulSet or Deployment, `CONFIG SET` and `ACL LOAD` stay as they are as well. When the cluster resumes, the operator removes the annotation from all of its ValkeyNodes, including one you set on a node by hand. On resume, the cluster controller defers its normal work for one second to give node controllers a turn to refresh Pod IPs and readiness that stayed frozen during the pause. To pause a single node of a running cluster, pause the whole cluster.
-
-A standalone ValkeyNode, one with no ValkeyCluster, takes the same annotation on itself.
 
 ## Architecture
 

@@ -385,6 +385,7 @@ func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
 				LabelShardIndex: "0",
 				LabelNodeIndex:  "1",
 			},
+			OwnerReferences: testParentRefs(),
 		},
 	}
 }

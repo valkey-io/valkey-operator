@@ -209,6 +209,15 @@ func (r *ValkeyClusterReconciler) patchNodeAnnotations(ctx context.Context, node
 	return client.IgnoreNotFound(r.Patch(ctx, node, patch))
 }
 
+// topologyIndexes returns the shard index and node index from the node's
+// labels. ok is false when either label is missing, not an integer, or
+// negative.
+func topologyIndexes(node *valkeyv1.ValkeyNode) (shardIndex, nodeIndex int, ok bool) {
+	shardIndex, shardErr := strconv.Atoi(node.Labels[LabelShardIndex])
+	nodeIndex, nodeErr := strconv.Atoi(node.Labels[LabelNodeIndex])
+	return shardIndex, nodeIndex, shardErr == nil && nodeErr == nil && shardIndex >= 0 && nodeIndex >= 0
+}
+
 // nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address
 // and returns its node index from the LabelNodeIndex label.
 // Returns -1 if the node is not found or the label is missing or invalid.

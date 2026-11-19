@@ -186,6 +186,18 @@ Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annot
 Common reasons:
 - `PauseAnnotationSet` – the pause annotation is set to `"true"`.
 
+#### `IncompleteScrape`
+Non-blocking. Set when this pass could not scrape a pod, or when it keeps a primary's slots assigned because the scrape did not reach that primary. `Ready` is not affected. The message names the address and the node id.
+
+| Status | Meaning |
+|---|---|
+| `True` | A pod returned no usable identity or topology this pass, or a primary the scrape missed still owns slots in a peer's `CLUSTER NODES` table. |
+| (absent) | Every pod was scraped and no slots are held for a missing primary. |
+
+Common reasons:
+- `NodeScrapeIncomplete` – a pod this pass set out to scrape did not return a usable topology, for example because a cluster command failed.
+- `SlotsHeldForMissingPrimary` – a scraped replica still follows a primary this pass did not reach, so that primary's slots stay assigned and unserved until a manual failover.
+
 ---
 
 ### ValkeyNode conditions
@@ -477,6 +489,8 @@ These events provide high-level status information about the cluster.
 | `WaitingForReplicas` | Normal | Waiting for replicas in a shard |
 | `ClusterReady` | Normal | Cluster is fully ready and healthy |
 | `OperatorAuthenticationFailed` | Warning | One or more nodes reject the operator's `_operator` password; emitted when the lockout starts |
+| `NodeScrapeIncomplete` | Warning | A pod returned no usable topology this pass; emitted when the `IncompleteScrape` message changes |
+| `SlotsHeldForMissingPrimary` | Warning | A primary the scrape missed still owns slots that a replica follows; emitted when the `IncompleteScrape` message changes |
 
 ### Live config events
 

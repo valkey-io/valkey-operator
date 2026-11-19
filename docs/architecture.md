@@ -88,7 +88,7 @@ The ValkeyCluster controller sets `spec.configRevision` on each node, and nothin
 
 The ValkeyNode controller owns `valkey-<node>` through a controller reference and is its only writer. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
 
-- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. With an empty `spec.configRevision` it sets `Ready=False` with reason `MissingConfigRevision` and builds no workload.
+- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. The field is required. A node stored before it existed has none until the parent reaches it in the upgrade roll; until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
 - never rewrites an existing revision key, and merge-patches the keys it changes, so other revision keys are kept.
 - writes `live.conf` when the key is missing or its content differs from the render.
 - removes any key that is neither a revision key nor `live.conf`, such as scripts an older operator left under the same name.

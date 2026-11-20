@@ -117,6 +117,22 @@ func FindMyself(nodes []ClusterNode) *ClusterNode {
 	return nil
 }
 
+// ParseClusterNodesMyself returns the entry flagged "myself" in CLUSTER NODES
+// output, or nil when none carries it. Only lines containing "myself" are
+// parsed, so a caller that needs the viewer alone does not pay for the table.
+func ParseClusterNodesMyself(raw string) *ClusterNode {
+	for line := range strings.SplitSeq(raw, "\n") {
+		if !strings.Contains(line, "myself") {
+			continue
+		}
+		// The substring can also sit in an id or hostname; the flag decides.
+		if node, ok := parseClusterNodesLine(line); ok && node.IsMyself() {
+			return &node
+		}
+	}
+	return nil
+}
+
 // ParseClusterNodes parses CLUSTER NODES output into one entry per node.
 // Lines with fewer than clusterNodesMinFields fields are skipped, which covers
 // the trailing empty line and any partial output.

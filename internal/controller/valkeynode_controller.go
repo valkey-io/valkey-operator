@@ -1516,7 +1516,7 @@ func parseClusterEnabled(info string) bool {
 // (see ClusterNode.HasSlotAssignment), which is the same answer GetClusterState
 // gives.
 func parseClusterNodesRole(clusterNodes string) string {
-	myself := valkey.FindMyself(valkey.ParseClusterNodes(clusterNodes))
+	myself := valkey.ParseClusterNodesMyself(clusterNodes)
 	if myself == nil {
 		return ""
 	}

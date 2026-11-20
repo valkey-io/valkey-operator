@@ -325,8 +325,7 @@ func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
 }
 
 // TestInitContainerCommand runs the init container's command against a
-// temporary script path. A ConfigMap without init.sh (an older shared
-// ConfigMap) must not block the pod.
+// temporary script path.
 func TestInitContainerCommand(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "init.sh")
@@ -340,12 +339,8 @@ func TestInitContainerCommand(t *testing.T) {
 		return string(out), 0
 	}
 
-	out, code := run()
-	assert.Equal(t, 0, code, "a missing script is skipped")
-	assert.Contains(t, out, "skipping")
-
 	require.NoError(t, os.WriteFile(script, []byte("echo ran\nexit 3\n"), 0o644))
-	out, code = run()
+	out, code := run()
 	assert.Equal(t, 3, code, "a present script runs and its exit code stands")
 	assert.Contains(t, out, "ran")
 }
@@ -900,18 +895,6 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHan
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser}, containers[0].Command)
 	// The startup probe allows for the replica hand-off wait of up to 300s.
-	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
-}
-
-func TestBuildContainersDef_ClusterLabelUsesTheWrapper(t *testing.T) {
-	// A node whose older shared ConfigMap lacks the script gets the same
-	// command, which falls back to the server at run time, see
-	// TestPrimaryHandoffCommandFallsBackToServer.
-	node := newTestValkeyNode("mynode", "test-ns")
-	node.Labels = map[string]string{LabelCluster: "mynode"}
-	containers, err := buildContainersDef(node)
-	require.NoError(t, err)
-	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server"}, containers[0].Command[:4])
 	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 

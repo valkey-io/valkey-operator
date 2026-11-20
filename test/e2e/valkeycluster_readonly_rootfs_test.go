@@ -29,7 +29,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
@@ -97,12 +96,9 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 
 		// /data must be wired up even without persistence, otherwise the server
 		// can't write nodes.conf to a read-only rootfs.
-		By("verifying the ConfigMap sets dir and cluster-config-file under /data")
+		By("verifying the node's pinned config sets dir and cluster-config-file under /data")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(noPersistClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}",
-				"-n", pssRestrictedNamespace)
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(noPersistClusterName+"-0-0", pssRestrictedNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("dir /data"))
 			g.Expect(output).To(ContainSubstring("cluster-config-file /data/nodes.conf"))

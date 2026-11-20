@@ -654,7 +654,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	results := client.DoMulti(ctx,
 		client.B().ClusterMyid().Build(),
 		client.B().ClusterMyshardid().Build(),
-		client.B().Info().Build(),
+		client.B().Info().Section("persistence", "replication").Build(),
 		client.B().ClusterInfo().Build(),
 		client.B().ClusterNodes().Build(),
 	)

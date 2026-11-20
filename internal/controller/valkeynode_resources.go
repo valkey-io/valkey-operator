@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
@@ -834,7 +835,9 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			Template: tmpl,
 			// API-server defaults, set explicitly so the desired spec equals
 			// the stored one and ensureStatefulSet's wholesale spec assignment
-			// stops producing an Update on every reconcile (#315).
+			// does not send an Update on every reconcile. maxUnavailable is not
+			// set here since only some server versions default it; see
+			// matchServerDefaultedMaxUnavailable.
 			PodManagementPolicy: appsv1.OrderedReadyPodManagement,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
@@ -849,6 +852,18 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			},
 		},
 	}, nil
+}
+
+// matchServerDefaultedMaxUnavailable sets the desired maxUnavailable to its
+// default, 1, only when the live StatefulSet has it: Kubernetes 1.35+ defaults
+// it and older servers drop it.
+func matchServerDefaultedMaxUnavailable(desired, live *appsv1.StatefulSetSpec) {
+	want, have := desired.UpdateStrategy.RollingUpdate, live.UpdateStrategy.RollingUpdate
+	if want == nil || want.MaxUnavailable != nil || have == nil || have.MaxUnavailable == nil {
+		return
+	}
+	one := intstr.FromInt32(1)
+	want.MaxUnavailable = &one
 }
 
 // tlsVolume is the volume mounted at tlsCertMountPath. Without a trust bundle

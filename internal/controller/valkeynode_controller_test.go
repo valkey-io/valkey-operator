@@ -259,14 +259,25 @@ var _ = Describe("ValkeyNode Controller", func() {
 		})
 
 		It("should not update the StatefulSet on reconciles when nothing changed", func() {
+			// Count StatefulSet Updates since a no-op Update does not bump resourceVersion.
+			withWatch, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			stsUpdates := 0
 			r := &ValkeyNodeReconciler{
-				Client:   k8sClient,
+				Client: interceptor.NewClient(withWatch, interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*appsv1.StatefulSet); ok {
+							stsUpdates++
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				}),
 				Scheme:   k8sClient.Scheme(),
 				Recorder: events.NewFakeRecorder(100),
 			}
 
 			By("creating the StatefulSet on first reconcile")
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
 			sts := &appsv1.StatefulSet{}
@@ -275,15 +286,15 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 			// The API server fills in defaults (podManagementPolicy,
 			// updateStrategy, imagePullPolicy, ...) when the StatefulSet is
-			// stored. The desired object built on the next pass must already
-			// carry those values, otherwise CreateOrUpdate sees a diff and
-			// issues an Update on every reconcile (#315).
+			// stored. The desired spec must carry the same values, or every
+			// reconcile sees a difference and sends an Update.
 			By("reconciling again without any spec change")
 			for range 3 {
 				_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				Expect(err).NotTo(HaveOccurred())
 			}
 
+			Expect(stsUpdates).To(BeZero(), "a reconcile with no changes must not send a StatefulSet Update")
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(sts.ResourceVersion).To(Equal(createdResourceVersion),
 				"a reconcile with no changes must not write the StatefulSet")

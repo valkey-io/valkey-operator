@@ -76,7 +76,7 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, key, secret)
 	if apierrors.IsNotFound(err) {
-		err = r.APIReader.Get(ctx, key, secret)
+		err = r.uncachedReader().Get(ctx, key, secret)
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
@@ -101,7 +101,7 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 		return secret, nil
 	}
 
-	if err := r.APIReader.Get(ctx, legacyKey, legacy); err != nil {
+	if err := r.uncachedReader().Get(ctx, legacyKey, legacy); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 	return r.copyLegacySecret(ctx, cluster, legacy, name)
@@ -177,7 +177,7 @@ func (r *ValkeyClusterReconciler) retireLegacySecrets(ctx context.Context, clust
 	for _, s := range found {
 		old := s.old
 		current := &corev1.Secret{}
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: s.name}, current); err != nil {
+		if err := r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: s.name}, current); err != nil {
 			if !apierrors.IsNotFound(err) {
 				errs = append(errs, err)
 			}

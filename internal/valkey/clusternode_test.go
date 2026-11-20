@@ -367,3 +367,58 @@ func TestFindMyself(t *testing.T) {
 		}
 	})
 }
+
+// ParseClusterNodesMyself must agree with FindMyself over the full table.
+func TestParseClusterNodesMyself(t *testing.T) {
+	const (
+		primary = "def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-5460 [5461->-ghi789]\n"
+		replica = "ghi789 10.0.0.3:6379@16379 slave def456 0 0 1 connected\n"
+		viewer  = "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 5461-10922\n"
+		// "myself" in the hostname must not match on its own.
+		decoy = "jkl012 10.0.0.4:6379@16379,myself-1.example slave def456 0 0 1 connected\n"
+	)
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"myself first", viewer + primary + replica},
+		{"myself in the middle", primary + viewer + replica},
+		{"myself last without a newline", primary + replica + strings.TrimSuffix(viewer, "\n")},
+		{"hostname containing myself before the viewer", decoy + viewer},
+		{"hostname containing myself and no viewer", primary + decoy},
+		{"no myself line", primary + replica},
+		{"truncated myself line", primary + "abc123 10.0.0.1:6379@16379 myself,master -\n"},
+		{"empty output", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseClusterNodesMyself(tc.raw)
+			want := FindMyself(ParseClusterNodes(tc.raw))
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("expected %+v, got %+v", want, got)
+			}
+		})
+	}
+}
+
+func BenchmarkParseClusterNodesMyself(b *testing.B) {
+	var raw strings.Builder
+	for i := range 200 {
+		flags := "slave"
+		if i == 100 {
+			flags = "myself,master"
+		}
+		fmt.Fprintf(&raw, "%040d 10.0.%d.%d:6379@16379,valkey-%d.example %s - 0 0 1 connected\n", i, i/250, i%250, i, flags)
+	}
+	b.Run("full table", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = FindMyself(ParseClusterNodes(raw.String()))
+		}
+	})
+	b.Run("myself only", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = ParseClusterNodesMyself(raw.String())
+		}
+	})
+}

@@ -148,32 +148,32 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 	// The one primary owning slots reports cluster_size 1, so its own
 	// report is the whole quorum.
 	primary := &NodeState{
-		Id:              "primary-id",
-		Address:         "10.0.0.1",
-		Flags:           []string{"myself", "master"},
-		ReplicationInfo: map[string]string{"role": "master"},
-		ClusterInfo:     map[string]string{"cluster_size": "1"},
+		Id:          "primary-id",
+		Address:     "10.0.0.1",
+		Flags:       []string{"myself", "master"},
+		Info:        map[string]string{"role": "master"},
+		ClusterInfo: map[string]string{"cluster_size": "1"},
 	}
 	syncedReplica := &NodeState{
-		Id:              "replica-1-id",
-		Address:         "10.0.0.2",
-		Flags:           []string{"slave"},
-		ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "up"},
+		Id:      "replica-1-id",
+		Address: "10.0.0.2",
+		Flags:   []string{"slave"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
 	unsyncedReplica := &NodeState{
-		Id:              "replica-2-id",
-		Address:         "10.0.0.3",
-		Flags:           []string{"slave"},
-		ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "down"},
+		Id:      "replica-2-id",
+		Address: "10.0.0.3",
+		Flags:   []string{"slave"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "down"},
 	}
 	// A replica whose own scrape looks healthy: its link is up and its own
 	// CLUSTER NODES entry, like every node's own entry, carries no failure
 	// flag. Only the primary's view of the cluster says it is failing.
 	partitionedReplica := &NodeState{
-		Id:              "replica-3-id",
-		Address:         "10.0.0.4",
-		Flags:           []string{"slave"},
-		ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "up"},
+		Id:      "replica-3-id",
+		Address: "10.0.0.4",
+		Flags:   []string{"slave"},
+		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
 	primary.nodes = ParseClusterNodes("primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
 		"replica-1-id 10.0.0.2:6379@16379 slave primary-id 0 0 1 connected\n" +
@@ -199,10 +199,10 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 
 func TestShardState_GetSyncedReplicas_Empty(t *testing.T) {
 	primary := &NodeState{
-		Id:              "primary-id",
-		Address:         "10.0.0.1",
-		Flags:           []string{"myself", "master"},
-		ReplicationInfo: map[string]string{"role": "master"},
+		Id:      "primary-id",
+		Address: "10.0.0.1",
+		Flags:   []string{"myself", "master"},
+		Info:    map[string]string{"role": "master"},
 	}
 	shard := &ShardState{
 		Id:        "shard-0",
@@ -422,9 +422,9 @@ func TestClusterState_BestReplicaOf(t *testing.T) {
 				PrimaryId: "primary1",
 				Nodes: []*NodeState{
 					{Id: "primary1", Flags: []string{"master"}, nodes: ParseClusterNodes("primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n")},
-					{Id: "r1", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
-					{Id: "r2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
-					{Id: "r3", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
 				},
 			},
 		},
@@ -451,7 +451,7 @@ func TestHighestOffsetReplica(t *testing.T) {
 		if offset != "" {
 			info["slave_repl_offset"] = offset
 		}
-		return &NodeState{Id: id, ReplicationInfo: info}
+		return &NodeState{Id: id, Info: info}
 	}
 
 	t.Run("nil for no replicas", func(t *testing.T) {
@@ -1014,10 +1014,10 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 // A node cut off from the cluster bus marks every peer fail? in its own
 // table. That one opinion must not empty the failover target list.
 func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *testing.T) {
-	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, ReplicationInfo: map[string]string{"role": "master"},
+	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"},
 		ClusterInfo: map[string]string{"cluster_size": "1"}}
-	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "up"}}
-	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, ReplicationInfo: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
 	primary.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
 	r1.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 myself,slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
 	// r2 is cut off and sees everyone as fail?.
@@ -1233,7 +1233,7 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	stale.EXPECT().
 		DoMulti(gomock.Any(),
 			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
-			vmock.Match("INFO", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
 			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
 
@@ -1245,5 +1245,46 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 
 	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
 		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := vmock.NewClient(ctrl)
+	// A Valkey 9 replica reply, trimmed. Valkey orders the sections itself.
+	info := "# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
+		"# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nslave_repl_offset:3108\r\n"
+	client.EXPECT().
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
+		Return([]vclient.ValkeyResult{
+			vmock.Result(vmock.ValkeyString("r1")),
+			vmock.Result(vmock.ValkeyString("s1")),
+			vmock.Result(vmock.ValkeyBlobString(info)),
+			vmock.Result(vmock.ValkeyString("")),
+			vmock.Result(vmock.ValkeyString("r1 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n")),
+		})
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return client, nil
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
+
+	if len(state.Shards) != 1 || len(state.Shards[0].Nodes) != 1 {
+		t.Fatalf("expected one shard with one node, got %+v", state.Shards)
+	}
+	got := state.Shards[0].Nodes[0].Info
+	want := map[string]string{
+		"loading":                 "1",
+		"master_link_status":      "down",
+		"master_sync_in_progress": "0",
+		"slave_repl_offset":       "3108",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("Info[%q] = %q, want %q", key, got[key], value)
+		}
 	}
 }

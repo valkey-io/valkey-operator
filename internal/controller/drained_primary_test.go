@@ -30,7 +30,7 @@ import (
 func TestDrainedPrimaryShardIsNotServing(t *testing.T) {
 	primary := &valkey.NodeState{Id: "p1", Address: "10.0.1.1", Flags: []string{"master"}}
 	replica := &valkey.NodeState{Id: "r1", Address: "10.0.1.2", Flags: []string{"slave"},
-		ReplicationInfo: map[string]string{"master_link_status": "up"}}
+		Info: map[string]string{"master_link_status": "up"}}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Id: "s1", PrimaryId: "p1", Nodes: []*valkey.NodeState{primary, replica}}}}
 
 	r := &ValkeyClusterReconciler{}

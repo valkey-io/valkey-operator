@@ -40,14 +40,14 @@ type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
 type NodeState struct {
 	// Client is for commands only. It belongs to whoever supplies the
 	// DialFunc; never call Close on it.
-	Client          vclient.Client
-	Address         string
-	Port            int
-	Id              string
-	Flags           []string
-	ShardId         string
-	ReplicationInfo map[string]string
-	ClusterInfo     map[string]string
+	Client      vclient.Client
+	Address     string
+	Port        int
+	Id          string
+	Flags       []string
+	ShardId     string
+	Info        map[string]string
+	ClusterInfo map[string]string
 
 	// nodes is this node's peer table, parsed once from CLUSTER NODES by the
 	// scrape.
@@ -71,7 +71,7 @@ func (n *NodeState) KnowsNode(id string) bool {
 // INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
 // value means the replica is more caught up with its primary.
 func (n *NodeState) ReplicationOffset() int64 {
-	v, ok := n.ReplicationInfo["slave_repl_offset"]
+	v, ok := n.Info["slave_repl_offset"]
 	if !ok {
 		return -1
 	}
@@ -311,7 +311,7 @@ func (s *ShardState) GetSyncedReplicas(state *ClusterState) []*NodeState {
 		if state.IsNodeFailedByMajority(node.Id) {
 			continue
 		}
-		if node.ReplicationInfo["master_link_status"] != "up" {
+		if node.Info["master_link_status"] != "up" {
 			continue
 		}
 		replicas = append(replicas, node)
@@ -377,7 +377,7 @@ func (n *NodeState) IsReplicationInSync() bool {
 	if n.IsPrimary() {
 		return true
 	}
-	return n.ReplicationInfo["master_link_status"] == "up"
+	return n.Info["master_link_status"] == "up"
 }
 
 // HasReplicaOf returns true if any live node in the cluster state reports
@@ -654,7 +654,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	results := client.DoMulti(ctx,
 		client.B().ClusterMyid().Build(),
 		client.B().ClusterMyshardid().Build(),
-		client.B().Info().Section("replication").Build(),
+		client.B().Info().Section("persistence", "replication").Build(),
 		client.B().ClusterInfo().Build(),
 		client.B().ClusterNodes().Build(),
 	)
@@ -686,7 +686,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		if err != nil {
 			log.Error(err, "command failed: INFO")
 		}
-		node.ReplicationInfo = infoStringToMap(info)
+		node.Info = infoStringToMap(info)
 
 		cinfo, err := results[3].ToString()
 		if err != nil {

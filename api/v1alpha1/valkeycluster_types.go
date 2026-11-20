@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -266,6 +267,35 @@ type ZonePinning struct {
 	Zones []string `json:"zones"`
 }
 
+// ReservedConfigKeys are the directives the operator sets itself.
+// A user value for one of these in spec.config is refused rather than silently dropped.
+//
+// The list also has to match the CEL rule on ValkeyClusterSpec.Config, which cannot reference a Go value.
+var ReservedConfigKeys = []string{
+	"aclfile",
+	"cluster-allow-replica-migration",
+	"cluster-announce-hostname",
+	"cluster-announce-ip",
+	"cluster-config-file",
+	"cluster-enabled",
+	"cluster-preferred-endpoint-type",
+	"cluster-replica-validity-factor",
+	"dir",
+	"port",
+	"primaryauth",
+	"primaryuser",
+	"protected-mode",
+	"shutdown-on-sigterm",
+	"tls-auth-clients",
+	"tls-auth-clients-user",
+	"tls-ca-cert-file",
+	"tls-cert-file",
+	"tls-cluster",
+	"tls-key-file",
+	"tls-port",
+	"tls-replication",
+}
+
 // ValkeyClusterSpec defines the desired state of ValkeyCluster.
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
@@ -379,7 +409,20 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
-	// Additional Valkey configuration parameters
+	// The operator sets the reserved keys itself.
+	// A user value would be overridden, and the user would get no signal.
+	// Keys are compared in lowercase, because Valkey ignores key case.
+	// Valkey trims and unquotes keys, so the format rule stops " port" from bypassing the reserved list.
+	// MaxProperties is high on purpose.
+	// The API server costs the rules below against the largest map the schema allows, so they need a bound.
+	// Raising a bound later is compatible. Lowering it is not.
+
+	// Config holds additional Valkey configuration parameters.
+	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
+	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -771,6 +814,15 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 	return users
 }
 
+// SystemPasswordRotationInterval returns how long an internal user's password
+// stays current, or zero when spec.acl.systemUsers.passwordRotation is unset.
+func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
+	if s.ACL == nil || s.ACL.SystemUsers == nil || s.ACL.SystemUsers.PasswordRotation == nil {
+		return 0
+	}
+	return time.Duration(s.ACL.SystemUsers.PasswordRotation.IntervalDays) * 24 * time.Hour
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -823,10 +875,17 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionExporterPasswordHeld is set while _exporter.previous is still
+	// accepted more than five minutes after the switch, and names the pods to
+	// restart. Non-blocking: the other system passwords keep rotating.
+	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 	// ConditionTLSConfigured reports whether the operator-managed TLS trust
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
 	ConditionTLSConfigured = "TLSConfigured"
+	// ConditionReconciliationPaused is True while the cluster carries the
+	// AnnotationPauseReconciliation annotation and the operator leaves it alone.
+	ConditionReconciliationPaused = "ReconciliationPaused"
 )
 
 const (
@@ -856,17 +915,27 @@ const (
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster while
+// its value is exactly "true". The operator copies it onto the ValkeyNodes of a
+// paused cluster and removes it from them when the cluster resumes.
+const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
+
+// ReasonPauseAnnotationSet is the reason of ConditionReconciliationPaused.
+const ReasonPauseAnnotationSet = "PauseAnnotationSet"
+
 const (
 	// Common reasons for conditions
-	ReasonInitializing                  = "Initializing"
-	ReasonReconciling                   = "Reconciling"
-	ReasonClusterHealthy                = "ClusterHealthy"
-	ReasonServiceError                  = "ServiceError"
-	ReasonConfigMapError                = "ConfigMapError"
-	ReasonValkeyNodeError               = "ValkeyNodeError"
-	ReasonValkeyNodeListError           = "ValkeyNodeListError"
-	ReasonAddingNodes                   = "AddingNodes"
-	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	// ReasonExporterNotRestarted is used with ConditionExporterPasswordHeld.
+	ReasonExporterNotRestarted          = "ExporterNotRestarted"
 	ReasonMissingShards                 = "MissingShards"
 	ReasonMissingReplicas               = "MissingReplicas"
 	ReasonReconcileComplete             = "ReconcileComplete"
@@ -940,6 +1009,7 @@ const (
 // ValkeyCluster is the Schema for the valkeyclusters API
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state",description="Current state of the cluster"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.reason",description="Reason for current state"
+// +kubebuilder:printcolumn:name="Paused",type="string",JSONPath=".status.conditions[?(@.type==\"ReconciliationPaused\")].status",description="True while reconciliation is paused"
 // +kubebuilder:printcolumn:name="ReadyShards",type="integer",JSONPath=".status.readyShards",description="Ready shards",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.workloadType) && self.spec.workloadType == 'Deployment') || size(self.metadata.name) + size(string(self.spec.shards - 1)) + size(string(has(self.spec.replicasPerShard) ? self.spec.replicasPerShard : (has(self.spec.replicas) ? self.spec.replicas : 0))) <= 43",message="metadata.name is too long: the StatefulSet name valkey-<name>-<shard>-<node> must stay within 52 characters, because Kubernetes appends an 11-character controller-revision-hash to it in a pod label limited to 63 characters"

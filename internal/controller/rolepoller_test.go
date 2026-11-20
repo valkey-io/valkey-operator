@@ -204,8 +204,9 @@ var _ = Describe("RolePoller", func() {
 		Expect(names()).To(BeEmpty(), "a node with no pod IP has nothing to compare against")
 	})
 
-	// Scrapes dial serially with a 5s timeout each, so without a deadline a
-	// partitioned cluster would stretch the interval for every other cluster.
+	// An unreachable node costs a scrape a 5s dial timeout, so without a
+	// deadline a partitioned cluster would stretch the interval for every other
+	// cluster.
 	It("bounds each pass with a deadline", func() {
 		var deadline time.Time
 		var bounded bool
@@ -257,6 +258,23 @@ var _ = Describe("RolePoller", func() {
 
 		poller.pollOnce(ctx, nowStamp)
 		Expect(scrapes).To(BeZero(), "a cluster being torn down must not be dialled")
+		Expect(names()).To(BeEmpty())
+	})
+
+	It("does not scrape a paused cluster", func() {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)).To(Succeed())
+		cluster.Annotations = map[string]string{valkeyiov1alpha1.AnnotationPauseReconciliation: "true"}
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		By("swapping both recorded roles, so only the pause guard can keep it quiet")
+		for node, role := range map[*valkeyiov1alpha1.ValkeyNode]string{primary: RoleReplica, replica: RolePrimary} {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			node.Status.Role = role
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		}
+
+		poller.pollOnce(ctx, nowStamp)
+		Expect(scrapes).To(BeZero(), "a paused cluster must not be dialled")
 		Expect(names()).To(BeEmpty())
 	})
 
@@ -433,12 +451,16 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "wiring-node",
-				Namespace: namespace,
-				Labels:    map[string]string{LabelCluster: "wiring-cluster"},
+				Name:            "wiring-node",
+				Namespace:       namespace,
+				Labels:          map[string]string{LabelCluster: "wiring-cluster"},
+				OwnerReferences: testParentRefs(),
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
+		// The pod below may exist before the StatefulSet, so creating it needs a
+		// matching Spec.WorkloadRevision.
+		Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
 		podLabels := valkeyNodeLabels(node)

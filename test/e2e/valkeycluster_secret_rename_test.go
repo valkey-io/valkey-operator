@@ -162,12 +162,14 @@ spec:
 				}
 				kubectl(g, manifest, "replace", "-f", "-")
 			}).Should(Succeed())
-			kubectl(Default, "", "rollout", "status", "statefulset/valkey-"+node.Name, "--timeout=5m")
+			// The cluster is paused, so nothing sets the initial-sync readiness
+			// gate on the replacement pod: its containers become ready, the pod
+			// does not.
 			Eventually(func(g Gomega) {
 				p := pod(g, node.Name)
 				g.Expect(readsLegacyNames(g, p.Spec)).To(BeTrue())
 				g.Expect(p.Status.Conditions).To(ContainElement(SatisfyAll(
-					HaveField("Type", corev1.PodReady), HaveField("Status", corev1.ConditionTrue))))
+					HaveField("Type", corev1.ContainersReady), HaveField("Status", corev1.ConditionTrue))))
 			}, 5*time.Minute, 2*time.Second).Should(Succeed())
 		}
 

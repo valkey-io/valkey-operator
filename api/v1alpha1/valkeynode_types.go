@@ -92,7 +92,8 @@ type ValkeyNodeSpec struct {
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
 	// SharedConfigMapName names the ConfigMap the parent shares with its
-	// nodes. It holds the probe, init and primary handoff scripts.
+	// nodes. It holds the probe, init and primary handoff scripts. A pod does
+	// not start until all four script keys are present.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`
@@ -161,7 +162,9 @@ type ValkeyNodeSpec struct {
 	// references: the first 12 hex characters of the SHA-256 of the rendered
 	// restart-only config. The parent sets it. It stays at the live workload's
 	// revision while only live-settable keys differ, so those changes roll
-	// nothing.
+	// nothing. The node writes the key valkey-<rev>.conf in its ConfigMap
+	// valkey-<node> only when its own spec renders to this revision. A node
+	// stored before the field existed has none until its parent sets it.
 	// +required
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
 	ConfigRevision string `json:"configRevision,omitempty"`

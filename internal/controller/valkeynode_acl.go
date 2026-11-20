@@ -23,6 +23,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -113,11 +114,16 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 	return true, nil
 }
 
+// Equal endpoint digests can miss an edit that restores the pre-load rules
+// mid-check. Periodically reload even on a match so that drift cannot persist.
+const aclDigestMaxAge = 2 * time.Minute
+
 // checkedACLDigest is a baseline bracketed by equal digests around LOAD and a full check.
 // The revision user remains the proof that the desired file was loaded.
 type checkedACLDigest struct {
 	uid                     types.UID
 	image, revision, digest string
+	checkedAt               time.Time
 }
 
 func supportsACLDigest(image string) bool {
@@ -191,7 +197,8 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	if cached, ok := r.aclDigests.LoadAndDelete(cacheKey); ok && useDigest {
 		baseline := cached.(checkedACLDigest)
 		if baseline.uid == node.UID && baseline.image == image && baseline.revision == revision &&
-			node.Status.AppliedACLRevision == revision && readACLDigest(ctx, c) == baseline.digest {
+			node.Status.AppliedACLRevision == revision && time.Since(baseline.checkedAt) < aclDigestMaxAge &&
+			readACLDigest(ctx, c) == baseline.digest {
 			// A pending default-session close survives failed status writes and
 			// must be retried even when the ACL itself has not changed.
 			if err := r.closeDefaultUserSessions(ctx, node, c, false); err != nil {
@@ -239,7 +246,7 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 		// revision check still stands, but the next pass must check in full
 		// again before it can cache a baseline that survived a reload.
 		if after == before {
-			r.aclDigests.Store(cacheKey, checkedACLDigest{uid: node.UID, image: image, revision: revision, digest: after})
+			r.aclDigests.Store(cacheKey, checkedACLDigest{uid: node.UID, image: image, revision: revision, digest: after, checkedAt: time.Now()})
 		}
 	}
 	return true, revision, nil

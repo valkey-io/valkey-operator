@@ -230,6 +230,16 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else if requeue {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	// Paused through its own annotation, which the cluster controller sets on
+	// the nodes of a paused cluster: no workload update, no CONFIG SET, no ACL
+	// LOAD and no status write until it is removed.
+	if reconciliationPaused(node) {
+		log.V(1).Info("ValkeyNode reconciliation paused", "annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)
+		return ctrl.Result{RequeueAfter: pausedRequeue}, nil
+	}
+	if !hasKnownParent(node) {
+		return r.reconcileNoParent(ctx, node)
+	}
 	if err := r.ensureConfigMap(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
 		return ctrl.Result{}, err
@@ -404,6 +414,16 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		return true, ctrl.Result{}, err
 	}
 
+	// While a previous replication password is still accepted, point the
+	// running server at the current one. A restart reads the mounted file.
+	// This runs only after the ACL is live, so the primary already accepts
+	// the password CONFIG SET installs.
+	if err := r.applyReplicationPassword(ctx, node); err != nil {
+		log.Error(err, "failed to set the replication password")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "ReplicationPasswordApplyFailed", "ApplyReplicationPassword", "Failed to set the replication password: %v", err)
+		return true, ctrl.Result{}, err
+	}
+
 	// Reload the trust bundle live as well: a changed bundle never rolls the
 	// pod, and Valkey reads tls-ca-cert-file only when it starts or the TLS
 	// config is set. This runs only once the ACL is confirmed live (the
@@ -558,6 +578,39 @@ func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valk
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to patch ValkeyNode Ready condition")
 	}
+}
+
+// reconcileNoParent reports Ready=False with reason NoParent and changes
+// nothing else. Without a parent nothing sets Spec.WorkloadRevision, so the
+// node would never apply a pod template change.
+func (r *ValkeyNodeReconciler) reconcileNoParent(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (ctrl.Result, error) {
+	var alreadyNoParent bool
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		ready := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		alreadyNoParent = ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == valkeyiov1alpha1.ValkeyNodeReasonNoParent
+		changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status: metav1.ConditionFalse,
+			Reason: valkeyiov1alpha1.ValkeyNodeReasonNoParent,
+			Message: fmt.Sprintf("No controller ownerReference of a known kind (%s); the operator does not create or update resources for this ValkeyNode",
+				strings.Join(knownParentKinds, ", ")),
+			ObservedGeneration: current.Generation,
+		})
+		if current.Status.Ready || current.Status.ObservedGeneration != current.Generation {
+			current.Status.Ready = false
+			current.Status.ObservedGeneration = current.Generation
+			changed = true
+		}
+		return changed
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("patch NoParent condition: %w", err)
+	}
+	if !alreadyNoParent {
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ValkeyNodeReasonNoParent, "CheckParent",
+			"ValkeyNode has no controller ownerReference of a known kind (%s); not reconciling it", strings.Join(knownParentKinds, ", "))
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -814,16 +867,13 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 }
 
 // gateRollingWorkloadUpdate decides whether a rolling pod-template update may be
-// applied. Standalone nodes always apply. Cluster-owned nodes apply only when
-// Spec.WorkloadRevision matches the desired template hash (set by ValkeyCluster).
+// applied. It applies only when Spec.WorkloadRevision matches the desired
+// template hash, which the parent controller sets.
 func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
 	ctx context.Context,
 	node *valkeyiov1alpha1.ValkeyNode,
 	desiredHash string,
 ) (bool, error) {
-	if !isClusterOwned(node) {
-		return true, nil
-	}
 	// Fresh read: cluster may have advanced Spec.WorkloadRevision after this reconcile started.
 	fresh := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), fresh); err != nil {
@@ -1466,7 +1516,7 @@ func parseClusterEnabled(info string) bool {
 // (see ClusterNode.HasSlotAssignment), which is the same answer GetClusterState
 // gives.
 func parseClusterNodesRole(clusterNodes string) string {
-	myself := valkey.FindMyself(valkey.ParseClusterNodes(clusterNodes))
+	myself := valkey.ParseClusterNodesMyself(clusterNodes)
 	if myself == nil {
 		return ""
 	}

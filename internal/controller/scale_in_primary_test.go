@@ -464,3 +464,68 @@ func TestDeleteExcessValkeyNodesPrimaryOnNodeOneToZeroReplicas(t *testing.T) {
 	assert.Len(t, targets, 1, "no second failover")
 	assert.False(t, nodeExists(t, r.Client, n01))
 }
+
+// shard0WithPrimaryAt returns shard 0 of scaleInFixture without node-index 2,
+// with primaryID as its primary.
+func shard0WithPrimaryAt(primaryID string) *valkey.ShardState {
+	return &valkey.ShardState{Id: "shard-0", PrimaryId: primaryID, Nodes: []*valkey.NodeState{
+		{Address: "10.0.0.1", Id: "node-0-0", Info: map[string]string{"master_link_status": "up"}},
+		{Address: "10.0.0.2", Id: "node-0-1", Info: map[string]string{"master_link_status": "up"}},
+	}}
+}
+
+func TestDeleteExcessValkeyNodesKeepsUnscrapedPrimary(t *testing.T) {
+	// The dial to wedge-0-2 failed and no other node of shard 0 is a
+	// visible primary: it may still be the primary, so it is kept.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+	r, cluster, state, nodes := scaleInFixture(t, nil)
+	state.Shards[0] = shard0WithPrimaryAt("")
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.Zero(t, *failoverCalls)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+
+	state.Shards[0] = shard0WithPrimaryAt("node-0-0")
+	deleted, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deleted, "deleted once another node of its shard is the primary")
+	assert.False(t, deferred)
+	assert.False(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}
+
+func TestDeleteExcessValkeyNodesKeepsPodlessNodeWithoutOtherPrimary(t *testing.T) {
+	// wedge-0-2 has no pod IP while its pod is recreated, and shard 0 is
+	// missing from the scrape: kept until another primary is visible.
+	r, cluster, state, nodes := scaleInFixture(t, nil)
+	nodes.Items[2].Status.PodIP = ""
+	state.Shards = state.Shards[1:]
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+	assert.Contains(t, drainEvents(r.Recorder.(*events.FakeRecorder)),
+		"Normal ScaleInDeferred Deferring deletion of wedge-0-2: this scrape cannot tell whether it is the primary of shard 0")
+
+	state.Shards = append(state.Shards, shard0WithPrimaryAt("node-0-0"))
+	deleted, _, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}
+
+func TestDeleteExcessValkeyNodesKeepsNodeWithEmptyFlags(t *testing.T) {
+	// wedge-0-2 answered but its CLUSTER NODES did not parse, so no node
+	// of shard 0 is known to be the primary.
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
+	state.Shards[0].PrimaryId = ""
+	state.Shards[0].Nodes[2].Flags = nil
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}

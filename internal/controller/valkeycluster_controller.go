@@ -2065,7 +2065,13 @@ func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, clust
 		primary = shard.GetPrimaryNode()
 	}
 	if primary == nil {
-		return true
+		// The scrape cannot show this node's role. Another visible primary
+		// for the shard means it is not the primary.
+		if shardHasOtherPrimary(state, nodes, shardIndex, node.Status.PodIP) {
+			return true
+		}
+		r.deferExcessNodeDeletion(cluster, node, fmt.Sprintf("this scrape cannot tell whether it is the primary of shard %d", shardIndex))
+		return false
 	}
 	if primary.Address != node.Status.PodIP {
 		return true
@@ -2090,6 +2096,21 @@ func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, clust
 		return false
 	}
 	// This pass's scrape predates the failover.
+	return false
+}
+
+// shardHasOtherPrimary reports whether the scrape shows a primary at an address
+// other than address whose ValkeyNode has shard-index shardIndex.
+func shardHasOtherPrimary(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, shardIndex int, address string) bool {
+	for _, shard := range state.Shards {
+		p := shard.GetPrimaryNode()
+		if p == nil || p.Address == address {
+			continue
+		}
+		if _, idx := nodeRoleAndShard(p.Address, nodes); idx == shardIndex {
+			return true
+		}
+	}
 	return false
 }
 

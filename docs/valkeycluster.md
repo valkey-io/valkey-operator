@@ -754,6 +754,33 @@ A rotation step that fails, for example because the operator cannot list the pod
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
 
+#### `valkey-cli` in a node's pod
+
+The server container sets `VALKEYCLI_USER` to `_operator` and `VALKEYCLI_AUTH` to its password. On Valkey 9.2 and later, `valkey-cli` reads both, so `kubectl exec <pod> -c server -- valkey-cli` logs in as `_operator`. Older versions ignore `VALKEYCLI_USER` and send the password as `default`, so pass `--user _operator` there.
+
+`_operator` can run only the cluster, config and ACL commands the operator needs and has no key access. To log in as your own user instead, set both variables on the server container:
+
+```yaml
+containers:
+  - name: server
+    env:
+      - name: VALKEYCLI_USER
+        value: admin
+      - name: VALKEYCLI_AUTH
+        valueFrom:
+          secretKeyRef:
+            name: my-users-secret
+            key: admin
+```
+
+The probes and the startup script read the `_operator` password from the mounted file and ignore both variables, so this override does not affect them. Changing it rolls the pods.
+
+Environment variables are read when the container starts. After a [system password rotation](#system-password-rotation), the default `VALKEYCLI_AUTH` holds the old `_operator` password, which stops working when the rotation removes it. Read the current one from the mounted file:
+
+```sh
+VALKEYCLI_AUTH=$(cat /etc/valkey/system-passwords/_operator) valkey-cli
+```
+
 ### Workload type
 
 ```yaml

@@ -117,23 +117,23 @@ promotable_replicas() {
         }' "$nodes_conf"
 }
 
-# load_operator_auth sets the password for the next ROLE call. As in the probe
-# scripts, the mounted file is the current _operator password and updates when
-# the Secret rotates. It is read before every call, so a rotation during the
-# wait is picked up. VALKEYCLI_AUTH from the environment is fixed at container
-# start and is the fallback when the file is not mounted.
+# load_operator_auth sets the _operator credentials for the next ROLE call. As
+# in the probe scripts, the mounted file is the current password and updates
+# when the Secret rotates. It is read before every call, so a rotation during
+# the wait is picked up. VALKEYCLI_USER and VALKEYCLI_AUTH in the environment
+# are for valkey-cli run in the pod and may name another user, so they are
+# never used here.
 load_operator_auth() {
+    unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+    auth_args=""
     if [ -f "$operator_password_file" ]; then
         # An unreadable file must not end the script; set -e would exit here.
         pw=$(cat "$operator_password_file" 2>/dev/null) || true
         if [ -n "$pw" ]; then
             VALKEYCLI_AUTH=$pw
             export VALKEYCLI_AUTH
+            auth_args="--user _operator"
         fi
-    fi
-    auth_args=""
-    if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-        auth_args="--user $VALKEY_USER"
     fi
 }
 

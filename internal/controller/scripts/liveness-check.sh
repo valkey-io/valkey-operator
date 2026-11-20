@@ -42,24 +42,22 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
-# The mounted file is the current _operator password. It updates when the
-# Secret rotates, without a container restart. The environment variable is
-# fixed at container start and is the fallback when the file is not mounted.
-pwfile="/etc/valkey/system-passwords/_operator"
+# Authenticate as _operator with the mounted password file, which updates when
+# the Secret rotates without a container restart. VALKEYCLI_USER and
+# VALKEYCLI_AUTH in the environment are for valkey-cli run in the pod and a user
+# may point them at another user, so the check never uses them. --user covers
+# valkey-cli before 9.2, which ignores VALKEYCLI_USER.
+unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+auth_args=""
+pwfile=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
 if [ -f "$pwfile" ]; then
-    # A file the process cannot read must not fail the probe. set -e would
-    # exit here and drop the password from the environment.
+    # A file the process cannot read must not end the script under set -e.
     pw=$(cat "$pwfile" 2>/dev/null) || true
     if [ -n "$pw" ]; then
         VALKEYCLI_AUTH=$pw
         export VALKEYCLI_AUTH
+        auth_args="--user _operator"
     fi
-fi
-
-# Authenticate as the custom user when user and password are set.
-auth_args=""
-if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-    auth_args="--user $VALKEY_USER"
 fi
 
 # Perform check

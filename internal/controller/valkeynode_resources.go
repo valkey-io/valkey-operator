@@ -415,12 +415,14 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 		)
 	}
 
-	// Use operator-managed custom user for probes
+	// Log valkey-cli run in the pod in as _operator by default (VALKEYCLI_USER
+	// needs valkey-cli 9.2+). Users may point both at their own user through
+	// spec.containers: the scripts read the mounted password file instead.
 	clusterName := node.Labels[LabelCluster]
 	probeUserSecret := operatorUserPasswordSecret(clusterName)
 	if probeUserSecret != nil && probeUserSecret.Name != "" {
 		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "VALKEY_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "VALKEYCLI_USER", Value: operatorUser},
 			corev1.EnvVar{Name: "VALKEYCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: probeUserSecret}},
 		)
 	}

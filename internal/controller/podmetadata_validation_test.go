@@ -93,7 +93,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 			},
 			&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-n", Namespace: "default"},
-				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, PodMetadata: pm},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, PodMetadata: pm},
 			},
 		}
 	}

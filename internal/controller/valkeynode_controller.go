@@ -240,10 +240,6 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !hasKnownParent(node) {
 		return r.reconcileNoParent(ctx, node)
 	}
-	if err := r.ensureConfigMap(ctx, node); err != nil {
-		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
-		return ctrl.Result{}, err
-	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
 		return ctrl.Result{}, err
@@ -1005,37 +1001,6 @@ func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
 		return err
 	}
 	log.V(1).Info("synced "+kind+" without pod template roll", "name", name)
-	return nil
-}
-
-// ensureConfigMap creates or updates the ConfigMap for the ValkeyNode.
-// If ServerConfigMapName is set, the ConfigMap is assumed to
-// be managed externally and this step is skipped.
-func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	log := logf.FromContext(ctx)
-	if node.Spec.ServerConfigMapName != "" {
-		// ConfigMap is provided externally (e.g. by ValkeyCluster), skip creation.
-		return nil
-	}
-	desired, err := buildValkeyNodeConfigMap(node)
-	if err != nil {
-		return err
-	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      desired.Name,
-			Namespace: desired.Namespace,
-		},
-	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Labels = desired.Labels
-		cm.Data = desired.Data
-		return controllerutil.SetControllerReference(node, cm, r.Scheme)
-	})
-	if err != nil {
-		return err
-	}
-	log.V(1).Info("reconciled ConfigMap", "result", result, "name", cm.Name)
 	return nil
 }
 

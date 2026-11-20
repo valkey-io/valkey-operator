@@ -489,7 +489,7 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 			}
 			_ = k8sClient.Delete(ctx, cluster)
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
 				_ = k8sClient.Delete(ctx, cm)
 			}
 			secret := &corev1.Secret{}
@@ -512,7 +512,7 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 
 		By("reading the config hash from the cluster ConfigMap")
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		initialCMHash := cm.Annotations[configHashKey]
 		Expect(initialCMHash).NotTo(BeEmpty())
 
@@ -545,7 +545,7 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 
 		By("verifying the ConfigMap has a new full hash (all keys changed)")
 		updatedCM := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
 		newCMHash := updatedCM.Annotations[configHashKey]
 		Expect(newCMHash).NotTo(BeEmpty())
 		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
@@ -604,7 +604,7 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			}
 			_ = k8sClient.Delete(ctx, cluster)
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
 				_ = k8sClient.Delete(ctx, cm)
 			}
 			secret := &corev1.Secret{}
@@ -627,7 +627,7 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 
 		By("reading the config hash the operator persisted to the ConfigMap")
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
 
 		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
@@ -1273,7 +1273,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		}
 		_ = k8sClient.Delete(ctx, cluster)
 		_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: headlessServiceName(cluster.Name), Namespace: "default"}})
-		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(cluster.Name), Namespace: "default"}})
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetSharedConfigMapName(cluster.Name), Namespace: "default"}})
 		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(cluster.Name), Namespace: "default"}})
 	}
 
@@ -1670,7 +1670,7 @@ var _ = Describe("EventRecorder", func() {
 
 			Expect(r.upsertConfigMap(ctx, cluster)).To(Succeed())
 			cm := &corev1.ConfigMap{}
-			cmKey := types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}
+			cmKey := types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}
 			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
 			Expect(cm.Data).To(HaveKey(initScriptKey))
 

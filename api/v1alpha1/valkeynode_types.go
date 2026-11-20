@@ -91,10 +91,12 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// ServerConfigMapName specifies the name of the ConfigMap that contains the
-	// scripts, and Valkey config for the ValkeyNode.
-	// +optional
-	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
+	// SharedConfigMapName names the ConfigMap the parent shares with its
+	// nodes. It holds the probe, init and primary handoff scripts and
+	// valkey.conf.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`
 
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the

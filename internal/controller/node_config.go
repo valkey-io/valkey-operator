@@ -180,6 +180,34 @@ func hasValue(data map[string]string, key, want string) bool {
 	return ok && got == want
 }
 
+// ensureLiveConfig patches live.conf in the node's ConfigMap when it differs
+// from the node's status. It writes nothing else. A missing ConfigMap or one
+// the node does not control is left to ensureNodeConfig, which runs earlier
+// in the reconcile and again on the requeue.
+func (r *ValkeyNodeReconciler) ensureLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(cm, node) {
+		return nil
+	}
+	live := renderLiveConfig(node)
+	if hasValue(cm.Data, liveConfigFileKey, live) {
+		return nil
+	}
+	base := cm.DeepCopy()
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[liveConfigFileKey] = live
+	if err := r.Patch(ctx, cm, client.MergeFrom(base)); err != nil {
+		return err
+	}
+	logf.FromContext(ctx).V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", []string{liveConfigFileKey})
+	return nil
+}
+
 // pruneConfigRevisions deletes the node's pinned revision keys that nothing
 // uses: not spec.configRevision, not referenced by the workload template, not
 // mounted by any pod of the node (terminating pods included), and only once

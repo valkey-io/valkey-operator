@@ -315,6 +315,34 @@ var _ = Describe("config layout", func() {
 		}
 	})
 
+	It("rewrites live.conf in the reconcile that records the applied value", func() {
+		newCluster("cfg-live-lag", 1, map[string]string{"maxmemory": "100mb"})
+		settle()
+		name := valkeyNodeName(cluster.Name, 0, 0)
+		setApplied(name, map[string]string{"maxmemory": "100mb"})
+		reconcileNode(name)
+		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["maxmemory"] = "200mb" })
+		settle()
+		Expect(liveConf(name)).To(Equal("maxmemory 100mb\n"))
+
+		fake := &fakeConfigClient{}
+		nr.newConfigClient = func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+			return fake, nil
+		}
+		nodeWrites.Reset()
+		_, _, err := nr.applyLiveSettings(ctx, getNode(name))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.params).To(Equal(map[string]string{"maxmemory": "200mb"}))
+		Expect(getNode(name).Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.AppliedLiveConfigEntry{{Name: "maxmemory", Value: "200mb"}}))
+		Expect(liveConf(name)).To(Equal("maxmemory 200mb\n"))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+
+		By("writing nothing when live.conf already matches")
+		_, _, err = nr.applyLiveSettings(ctx, getNode(name))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(1))
+	})
+
 	It("AllowlistGrowthDoesNotRoll", func() {
 		newCluster("cfg-grow", 3, map[string]string{"appendfsync": "everysec"})
 		settle()
@@ -351,6 +379,7 @@ var _ = Describe("config layout", func() {
 		added := getNode(valkeyNodeName(cluster.Name, 3, 0))
 		cm := nodeCM(added.Name)
 		Expect(configRevisionKeys(cm)).To(Equal([]string{configRevisionFileKey(added.Spec.ConfigRevision)}))
+		Expect(cm.Labels).To(HaveKeyWithValue(LabelCluster, cluster.Name), "the parent's ConfigMap watch maps by this label")
 
 		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Shards = 3 })
 		// handleScaleIn deletes the node once its slots are gone, which needs
@@ -616,16 +645,42 @@ var _ = Describe("config layout", func() {
 		Expect(parentPass()).To(BeTrue())
 		Expect(getNode(name).Spec.ConfigRevision).NotTo(Equal(rev))
 	})
-})
 
-// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
-func configRevisionKeys(cm *corev1.ConfigMap) []string {
-	var out []string
-	for key := range cm.Data {
-		if _, ok := configRevisionFromKey(key); ok {
-			out = append(out, key)
+	It("rolls a node to the desired revision when its live revision's key is gone", func() {
+		newCluster("cfg-gone", 3, map[string]string{"appendfsync": "everysec"})
+		settle()
+		before := revisions()
+
+		By("growing the allowlist, so each node keeps a live revision that differs from the desired one")
+		liveConfigAllowlist["appendfsync"] = struct{}{}
+		DeferCleanup(func() { delete(liveConfigAllowlist, "appendfsync") })
+		settle()
+		Expect(revisions()).To(Equal(before))
+
+		By("deleting one node's ConfigMap")
+		name := valkeyNodeName(cluster.Name, 1, 0)
+		Expect(k8sClient.Delete(ctx, nodeCM(name))).To(Succeed())
+		reconcileNode(name)
+		ready := meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).To(HaveField("Reason", valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
+		markReady(name)
+
+		By("the parent naming the desired revision for that node only")
+		Expect(parentPass()).To(BeTrue())
+		desired := pinnedConfigRevision(renderPinnedConfig(getNode(name)))
+		Expect(desired).NotTo(Equal(before[name]))
+		for n, rev := range revisions() {
+			if n == name {
+				Expect(rev).To(Equal(desired))
+			} else {
+				Expect(rev).To(Equal(before[n]), "%s keeps its live revision", n)
+			}
 		}
-	}
-	slices.Sort(out)
-	return out
-}
+
+		settle()
+		Expect(configRevisionKeys(nodeCM(name))).To(Equal([]string{configRevisionFileKey(desired)}))
+		Expect(mountedConfigRevision(&sts(name).Spec.Template.Spec)).To(Equal(desired))
+		ready = meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).NotTo(HaveField("Reason", valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
+	})
+})

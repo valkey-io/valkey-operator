@@ -23,6 +23,7 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -85,12 +86,16 @@ func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, _ *va
 }
 
 // readConfigRevision reads key valkey-<rev>.conf of the node's ConfigMap.
-// A missing ConfigMap or key is not an error.
+// A missing ConfigMap or key is not an error. A ConfigMap the node does not
+// control counts as missing.
 func readConfigRevision(ctx context.Context, reader client.Reader, node *valkeyiov1alpha1.ValkeyNode,
 	rev string) (string, bool, error) {
 	cm := &corev1.ConfigMap{}
 	if err := reader.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
 		return "", false, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(cm, node) {
+		return "", false, nil
 	}
 	content, ok := cm.Data[configRevisionFileKey(rev)]
 	return content, ok, nil

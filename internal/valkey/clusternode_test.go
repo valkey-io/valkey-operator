@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestParseClusterNodes(t *testing.T) {
@@ -66,7 +67,8 @@ func TestParseClusterNodes(t *testing.T) {
 	})
 
 	t.Run("skips short and empty lines", func(t *testing.T) {
-		raw := "\nabc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\ntruncated line\n\n"
+		raw := "\nabc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\ntruncated line\n" +
+			"def456 10.0.0.2:6379@16379 master - 0 0 1\n\n"
 		if nodes := ParseClusterNodes(raw); len(nodes) != 1 {
 			t.Fatalf("expected 1 node, got %d", len(nodes))
 		}
@@ -141,6 +143,75 @@ func TestParseClusterNodes(t *testing.T) {
 	})
 }
 
+// The result must not cost more memory than its entries need: sized once, bounded
+// for a reply that is not a table, and not pointing into the reply.
+func TestParseClusterNodes_Memory(t *testing.T) {
+	t.Run("result slice is sized once", func(t *testing.T) {
+		var raw strings.Builder
+		for i := range 200 {
+			fmt.Fprintf(&raw, "id%03d 10.0.0.%d:6379@16379 slave p1 0 0 1 connected\n", i, i)
+		}
+		nodes := ParseClusterNodes(raw.String())
+		if len(nodes) != 200 {
+			t.Fatalf("expected 200 nodes, got %d", len(nodes))
+		}
+		// The trailing newline can leave one spare entry; growth by append ends
+		// with dozens.
+		if cap(nodes) > len(nodes)+1 {
+			t.Errorf("expected capacity close to %d, got %d", len(nodes), cap(nodes))
+		}
+	})
+
+	// The reserve comes from the number of newlines, so a reply that is mostly
+	// newlines must not size it.
+	t.Run("reserve is bounded for a reply that is not a table", func(t *testing.T) {
+		nodes := ParseClusterNodes(strings.Repeat("\n", 1<<20))
+		if len(nodes) != 0 {
+			t.Fatalf("expected no nodes, got %d", len(nodes))
+		}
+		if cap(nodes) > clusterNodesPreallocMax {
+			t.Errorf("expected capacity at most %d, got %d", clusterNodesPreallocMax, cap(nodes))
+		}
+	})
+
+	t.Run("a table larger than the reserve still parses", func(t *testing.T) {
+		var raw strings.Builder
+		for i := range clusterNodesPreallocMax + 10 {
+			fmt.Fprintf(&raw, "id%05d 10.0.0.1:6379@16379 slave p1 0 0 1 connected\n", i)
+		}
+		if got := len(ParseClusterNodes(raw.String())); got != clusterNodesPreallocMax+10 {
+			t.Errorf("expected %d nodes, got %d", clusterNodesPreallocMax+10, got)
+		}
+	})
+
+	// A node keeps its table for the whole scrape, so an entry that points into
+	// the reply would keep the reply alive too.
+	t.Run("entries do not point into the reply", func(t *testing.T) {
+		raw := strings.Clone("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-9 [5461->-def456] [5462-<-ghi789]\n" +
+			"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
+		start := uintptr(unsafe.Pointer(unsafe.StringData(raw)))
+		end := start + uintptr(len(raw))
+		inReply := func(s string) bool {
+			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+			return s != "" && p >= start && p < end
+		}
+		for _, node := range ParseClusterNodes(raw) {
+			texts := append([]string{node.Id, node.Host, node.PrimaryId}, node.Flags...)
+			for _, m := range node.Migrating {
+				texts = append(texts, m.Peer)
+			}
+			for _, m := range node.Importing {
+				texts = append(texts, m.Peer)
+			}
+			for _, s := range texts {
+				if inReply(s) {
+					t.Errorf("%q points into the reply", s)
+				}
+			}
+		}
+	})
+}
+
 // Owned slots and in-flight markers must stay in separate fields: conflating
 // them is the ambiguity this parser exists to remove.
 func TestParseClusterNodes_MigrationMarkers(t *testing.T) {
@@ -186,16 +257,51 @@ func TestParseClusterNodes_MigrationMarkers(t *testing.T) {
 	})
 
 	t.Run("malformed markers are not treated as slots", func(t *testing.T) {
-		raw := "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected [notaslot->-def456] [5461->-]\n"
+		raw := "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 [notaslot->-def456] [5461->-]\n"
 		node := ParseClusterNodes(raw)[0]
 
-		if len(node.Slots) != 0 {
-			t.Errorf("expected no owned slots, got %v", node.Slots)
+		if want := []SlotsRange{{0, 5460}}; !reflect.DeepEqual(node.Slots, want) {
+			t.Errorf("expected owned slots %v, got %v", want, node.Slots)
 		}
 		if len(node.Migrating) != 0 || len(node.Importing) != 0 {
 			t.Errorf("expected no markers, got migrating=%v importing=%v", node.Migrating, node.Importing)
 		}
 	})
+
+	// A range that does not parse drops the owned ranges of its line only; the
+	// markers on it and the other lines stay.
+	t.Run("unparsable range drops the owned slots and keeps the markers", func(t *testing.T) {
+		raw := "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460 1-2-3 [5461->-def456]\n" +
+			"def456 10.0.0.2:6379@16379 master - 0 0 1 connected 6000-7000\n"
+		nodes := ParseClusterNodes(raw)
+
+		if nodes[0].Slots != nil {
+			t.Errorf("expected no owned slots, got %v", nodes[0].Slots)
+		}
+		if want := []SlotMigration{{Slot: 5461, Peer: "def456"}}; !reflect.DeepEqual(nodes[0].Migrating, want) {
+			t.Errorf("expected migrating %v, got %v", want, nodes[0].Migrating)
+		}
+		if want := []SlotsRange{{6000, 7000}}; !reflect.DeepEqual(nodes[1].Slots, want) {
+			t.Errorf("expected the next line's slots %v, got %v", want, nodes[1].Slots)
+		}
+	})
+}
+
+func TestParseClusterNodes_Whitespace(t *testing.T) {
+	raw := "  abc123\t10.0.0.1:6379@16379  myself,master -  0 0 1 connected   0-9 \t10-19\r\n" +
+		"short line\n" +
+		"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n"
+	nodes := ParseClusterNodes(raw)
+
+	if len(nodes) != 2 {
+		t.Fatalf("expected the short line to be skipped, got %d nodes", len(nodes))
+	}
+	if nodes[0].Id != "abc123" || nodes[0].PrimaryId != "-" {
+		t.Errorf("unexpected fields: id %q, primary %q", nodes[0].Id, nodes[0].PrimaryId)
+	}
+	if want := []SlotsRange{{0, 9}, {10, 19}}; !reflect.DeepEqual(nodes[0].Slots, want) {
+		t.Errorf("expected slots %v, got %v", want, nodes[0].Slots)
+	}
 }
 
 // The same member is described differently by each viewer. This is the property

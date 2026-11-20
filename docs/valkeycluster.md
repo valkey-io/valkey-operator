@@ -59,6 +59,8 @@ Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clu
 
 #### Version-gated config
 
+Version gates use the final server image: a non-empty `server` container image in `spec.containers` overrides `spec.image`, which otherwise falls back to the operator default. The same image determines the config, system ACL rules and config roll hash. Correcting the version selected for an existing server image override can roll those pods once.
+
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
 
 Version gating applies only to keys the user sets in `spec.config`. Operator-managed directives rendered through the base config (for example `cluster-enabled`, TLS ports) are not filtered by `versionGatedConfig`; any future operator-owned directive that requires a newer Valkey minor must be gated explicitly where it is added.
@@ -271,7 +273,7 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 ### Graceful shutdown
 
-On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+.
+On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+. With an image tagged below 9.0 the operator leaves the directive out, since an older server refuses to start on it.
 
 The handoff runs inside the pod's termination grace period. With defaults there is comfortable margin: the Kubernetes default `terminationGracePeriodSeconds` is 30s and the Valkey default `cluster-manual-failover-timeout` is 5s, so the failover completes well before `SIGKILL`. If you raise `cluster-manual-failover-timeout`, the operator raises the derived `terminationGracePeriodSeconds` to match; see [Termination grace period](#termination-grace-period).
 

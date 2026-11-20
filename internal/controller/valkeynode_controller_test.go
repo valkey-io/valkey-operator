@@ -2033,9 +2033,14 @@ type fakeConfigClient struct {
 	// aclOnLoad is what an ACL LOAD converges the server to. Leaving it nil
 	// models a mounted aclfile that has not caught up yet, so the LOAD is a
 	// no-op.
-	aclOnLoad map[string][]string
-	aclLoads  int
-	aclErr    error
+	aclOnLoad   map[string][]string
+	digest      string
+	digestErr   error
+	digestCalls int
+	digests     []string
+	aclChecks   int
+	aclLoads    int
+	aclErr      error
 
 	// enabled is each user's on/off state, as ACL GETUSER flags report it.
 	// enabledOnLoad, when set, replaces it on ACL LOAD.
@@ -2080,7 +2085,18 @@ func (f *fakeConfigClient) LoadACL(_ context.Context) error {
 	return nil
 }
 
+func (f *fakeConfigClient) ACLDigest(context.Context) (string, error) {
+	f.digestCalls++
+	if len(f.digests) > 0 {
+		digest := f.digests[0]
+		f.digests = f.digests[1:]
+		return digest, f.digestErr
+	}
+	return f.digest, f.digestErr
+}
+
 func (f *fakeConfigClient) UserNames(_ context.Context) ([]string, error) {
+	f.aclChecks++
 	if f.aclErr != nil {
 		return nil, f.aclErr
 	}

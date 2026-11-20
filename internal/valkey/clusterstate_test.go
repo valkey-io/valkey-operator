@@ -1231,7 +1231,10 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	stale := vmock.NewClient(ctrl)
 	stale.EXPECT().
-		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
 
 	dial := func(_ context.Context, _ string) (vclient.Client, error) {
@@ -1242,5 +1245,46 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 
 	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
 		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := vmock.NewClient(ctrl)
+	// A Valkey 9 replica reply, trimmed. Valkey orders the sections itself.
+	info := "# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
+		"# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nslave_repl_offset:3108\r\n"
+	client.EXPECT().
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
+		Return([]vclient.ValkeyResult{
+			vmock.Result(vmock.ValkeyString("r1")),
+			vmock.Result(vmock.ValkeyString("s1")),
+			vmock.Result(vmock.ValkeyBlobString(info)),
+			vmock.Result(vmock.ValkeyString("")),
+			vmock.Result(vmock.ValkeyString("r1 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n")),
+		})
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return client, nil
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
+
+	if len(state.Shards) != 1 || len(state.Shards[0].Nodes) != 1 {
+		t.Fatalf("expected one shard with one node, got %+v", state.Shards)
+	}
+	got := state.Shards[0].Nodes[0].Info
+	want := map[string]string{
+		"loading":                 "1",
+		"master_link_status":      "down",
+		"master_sync_in_progress": "0",
+		"slave_repl_offset":       "3108",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("Info[%q] = %q, want %q", key, got[key], value)
+		}
 	}
 }

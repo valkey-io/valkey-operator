@@ -932,6 +932,7 @@ func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, nod
 // template would not roll.
 func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
 	before := sts.DeepCopy()
+	matchServerDefaultedMaxUnavailable(&desired.Spec, &sts.Spec)
 	sts.Labels = desired.Labels
 	sts.Spec = desired.Spec
 	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {

@@ -109,7 +109,16 @@ Each predicate names the question it answers, because the distinction is easy to
 wrong. `HasFlag` remains available for the one caller that wants `fail` but not
 `fail?`.
 
+## INFO sections
+
+The scrape sends `INFO persistence replication`, not a full `INFO`, and keeps
+both sections in `Info`. The keys read are `loading` (persistence) and
+`master_link_status`, `master_sync_in_progress` and `slave_repl_offset`
+(replication). A key from any other section reads as `""`, so a new reader
+must add its section to the command. On a Valkey 9 replica the reply is about
+1.5 KiB, against about 6.4 KiB for a full `INFO`.
+
 ## Known limitations
 
-**`Info` keeps the whole INFO map.** Only `slave_repl_offset` and
-`master_link_status` are read, so the rest is retained per node for nothing.
+**`Info` keeps every key of both sections.** Only four are read, so the rest
+is retained per node for nothing.

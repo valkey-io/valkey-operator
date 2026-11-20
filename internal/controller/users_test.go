@@ -17,12 +17,18 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOperatorUserPasswordSecret(t *testing.T) {
@@ -299,4 +305,27 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}}, //nolint:staticcheck // legacy spec.users
 	}))
+}
+
+func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "cache-users", Namespace: "default"},
+				Data:       map[string][]byte{"alice": tt.value},
+			}
+			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+			hashes, err := fetchUserPasswords(context.Background(), valkeyiov1alpha1.ACLUserSpec{Name: "alice"}, reader, "cache", "default")
+			require.NoError(t, err)
+			assert.Equal(t, []string{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, hashes)
+		})
+	}
 }

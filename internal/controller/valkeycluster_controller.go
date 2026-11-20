@@ -734,8 +734,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// If rolls are in progress but the primary of an active shard cannot be
 		// identified from cluster state, skip it rather than roll in an unknown order.
 		// New shards (not yet in the topology) are exempt — they need creation, not rolling.
+		// A primary on an excess node-index is identified: every in-spec node is a
+		// replica, and scale-in needs one of them synced before it can fail over.
 		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
-			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 {
+			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 &&
+			!shardPrimaryOnExcessNode(shardIndex, nodesPerShard, nodes, clusterState) {
 			// Skip this shard only, never the whole reconcile: the later phases
 			// (MEET/ADDSLOTSRANGE/REPLICATE, forgetStaleNodes, handleScaleIn,
 			// rebalance) are what make an unidentifiable primary identifiable

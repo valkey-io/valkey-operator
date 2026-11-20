@@ -562,15 +562,43 @@ var _ = Describe("config layout", func() {
 		n := getNode(name)
 		n.Spec.ConfigRevision = "0123456789ab"
 		Expect(k8sClient.Update(ctx, n)).To(Succeed())
+		n = getNode(name)
+		n.Status.Role = RolePrimary
+		Expect(k8sClient.Status().Update(ctx, n)).To(Succeed())
 		generation := sts(name).Generation
 		reconcileNode(name)
 		Expect(nodeCM(name).Data).NotTo(HaveKey(configRevisionFileKey("0123456789ab")))
 		Expect(sts(name).Generation).To(Equal(generation), "no template may reference a key that is not there")
-		ready := meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		n = getNode(name)
+		ready := meta.FindStatusCondition(n.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-		Expect(ready.Reason).To(Equal(reasonConfigRevisionMismatch))
+		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch))
+		Expect(n.Status.Role).To(BeEmpty(), "the status still follows the pod, which is not running")
 		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(Equal(2))
+	})
+
+	It("leaves a ConfigMap of the same name that the node does not own", func() {
+		newCluster("cfg-owner", 1, map[string]string{"appendfsync": "everysec"})
+		settle()
+		name := valkeyNodeName(cluster.Name, 0, 0)
+
+		By("replacing the node's ConfigMap with one it does not own, such as another cluster's shared ConfigMap")
+		Expect(k8sClient.Delete(ctx, nodeCM(name))).To(Succeed())
+		foreign := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeConfigMapName(name), Namespace: ns},
+			Data:       map[string]string{"readiness-check.sh": "echo ok"},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		nodeWrites.Reset()
+
+		_, err := nr.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+		Expect(err).To(MatchError(ContainSubstring("not owned by ValkeyNode")))
+		Expect(nodeCM(name).Data).To(Equal(map[string]string{"readiness-check.sh": "echo ok"}))
+		Expect(nodeWrites.Count("ConfigMap", verbPatch)).To(BeZero())
+		ready := meta.FindStatusCondition(getNode(name).Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonConfigMapError))
 	})
 
 	It("requeues the parent while its cache lacks the live revision", func() {

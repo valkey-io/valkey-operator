@@ -451,6 +451,12 @@ const (
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
 	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
 	ValkeyNodeReasonServiceError = "ServiceError"
+	// ValkeyNodeReasonConfigMapError indicates the node's config ConfigMap
+	// could not be written, or exists and is not owned by the node.
+	ValkeyNodeReasonConfigMapError = "ConfigMapError"
+	// ValkeyNodeReasonConfigRevisionMismatch indicates spec.configRevision is
+	// not in the node's ConfigMap and the node's spec does not render to it.
+	ValkeyNodeReasonConfigRevisionMismatch = "ConfigRevisionMismatch"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

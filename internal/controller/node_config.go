@@ -36,16 +36,9 @@ import (
 )
 
 const (
-	// Ready reason for a node whose config revision cannot be written.
-	reasonConfigRevisionMismatch = "ConfigRevisionMismatch"
-
 	configRevisionKeyPrefix = "valkey-"
 	configRevisionKeySuffix = ".conf"
 )
-
-// errMissingConfigRevision means the node has no spec.configRevision, so
-// there is no pinned file to mount.
-var errMissingConfigRevision = errors.New("spec.configRevision is empty; the parent sets it")
 
 // configRevisionMismatchError means the pinned file the node renders from its
 // spec does not hash to spec.configRevision, and the key is not there yet.
@@ -82,15 +75,28 @@ func configRevisionFromKey(key string) (string, bool) {
 	return rev, true
 }
 
+// ensureNodeConfigReady runs ensureNodeConfig and returns its error with the
+// Ready reason to report, or nil.
+func (r *ValkeyNodeReconciler) ensureNodeConfigReady(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) *readyError {
+	err := r.ensureNodeConfig(ctx, node)
+	if err == nil {
+		return nil
+	}
+	if mismatch, ok := errors.AsType[*configRevisionMismatchError](err); ok {
+		logf.FromContext(ctx).Info("not writing config revision the spec does not render", "want", mismatch.want, "rendered", mismatch.rendered)
+		return &readyError{reason: valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch, err: err}
+	}
+	return &readyError{reason: valkeyiov1alpha1.ValkeyNodeReasonConfigMapError, err: err}
+}
+
 // ensureNodeConfig writes the node's ConfigMap before the workload: the
 // pinned file for spec.configRevision when it is missing, and live.conf. A
 // revision key is written once and never rewritten. A missing one is written
-// only when the spec renders to that revision. Other keys are left alone.
+// only when the spec renders to that revision. A ConfigMap of the same name
+// that the node does not control, such as another cluster's shared ConfigMap,
+// is left alone and reported.
 func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	rev := node.Spec.ConfigRevision
-	if rev == "" {
-		return errMissingConfigRevision
-	}
 	revKey := configRevisionFileKey(rev)
 
 	cm := &corev1.ConfigMap{}
@@ -101,6 +107,10 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 			return err
 		}
 		exists = false
+	}
+	notOwned := fmt.Errorf("configmap %s/%s exists and is not owned by ValkeyNode %s", key.Namespace, key.Name, node.Name)
+	if exists && !metav1.IsControlledBy(cm, node) {
+		return notOwned
 	}
 
 	data := map[string]string{}
@@ -114,8 +124,9 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 	if live := renderLiveConfig(node); !hasValue(cm.Data, liveConfigFileKey, live) {
 		data[liveConfigFileKey] = live
 	}
-	// The node controller is the ConfigMap's only writer, so any other key is
-	// left over, for example from an older operator that used the same name.
+	// The node controller is the only writer of the ConfigMap it controls, so
+	// any other key is left over, for example from an older operator that used
+	// the same name.
 	var stale []string
 	for k := range cm.Data {
 		if _, ok := configRevisionFromKey(k); !ok && k != liveConfigFileKey {
@@ -136,6 +147,10 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 			return err
 		}
 		if err := r.Create(ctx, cm); err != nil {
+			// The cache holds only ConfigMaps with the operator labels.
+			if apierrors.IsAlreadyExists(err) {
+				return notOwned
+			}
 			return err
 		}
 		log.V(1).Info("created node ConfigMap", "name", cm.Name, "revision", rev)
@@ -174,6 +189,9 @@ func (r *ValkeyNodeReconciler) pruneConfigRevisions(ctx context.Context, node *v
 	cm := &corev1.ConfigMap{}
 	if err := r.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
 		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(cm, node) {
+		return nil
 	}
 	var stale []string
 	revisions := 0

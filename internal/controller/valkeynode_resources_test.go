@@ -30,9 +30,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
@@ -421,6 +423,40 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	// Verify the template has the right container
 	require.Len(t, ss.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
+}
+
+// maxUnavailable is defaulted by Kubernetes 1.35 and later and dropped by
+// servers without the feature, so the desired spec follows the live one.
+func TestMatchServerDefaultedMaxUnavailable(t *testing.T) {
+	one, two := intstr.FromInt32(1), intstr.FromInt32(2)
+	withMaxUnavailable := func(v *intstr.IntOrString) *appsv1.StatefulSetSpec {
+		return &appsv1.StatefulSetSpec{UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+			Type:          appsv1.RollingUpdateStatefulSetStrategyType,
+			RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{MaxUnavailable: v},
+		}}
+	}
+	for _, tt := range []struct {
+		name          string
+		live, desired *appsv1.StatefulSetSpec
+		want          *intstr.IntOrString
+	}{
+		{"a server that defaults it gets the default", withMaxUnavailable(&one), withMaxUnavailable(nil), &one},
+		{"a value changed on the live object is set back to the default", withMaxUnavailable(&two), withMaxUnavailable(nil), &one},
+		{"a server without the feature leaves it unset", withMaxUnavailable(nil), withMaxUnavailable(nil), nil},
+		{"a live object without rollingUpdate leaves it unset", &appsv1.StatefulSetSpec{}, withMaxUnavailable(nil), nil},
+		{"a value the desired spec sets is kept", withMaxUnavailable(&one), withMaxUnavailable(&two), &two},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			matchServerDefaultedMaxUnavailable(tt.desired, tt.live)
+			assert.Equal(t, tt.want, tt.desired.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		})
+	}
+
+	// The built StatefulSet leaves it unset, for servers without the feature.
+	ss, err := buildValkeyNodeStatefulSet(newTestValkeyNode("mynode", "test-ns"))
+	require.NoError(t, err)
+	require.NotNil(t, ss.Spec.UpdateStrategy.RollingUpdate)
+	assert.Nil(t, ss.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable)
 }
 
 func TestBuildValkeyNodeStatefulSet_ClusterOwnedUsesHeadlessServiceName(t *testing.T) {

@@ -359,16 +359,14 @@ func (r *ValkeyClusterReconciler) retireTrustBundle(ctx context.Context, cluster
 // through the mount, so it holds only the server root until the ACL has caught up.
 //
 // It also returns how many roots wait and the nodes they wait for.
-func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
+func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, current, bundle, serverRoot []byte, usingLastGoodACL bool) ([]byte, int, []string, error) {
 	kept, held := withoutNewRoots(current, bundle, serverRoot)
 	if held == 0 {
 		return bundle, 0, nil, nil
 	}
-	// reportUsersACLUnresolved is refreshed before trust reconciliation. Matching
-	// the last written revision says nothing about the desired ACL in this case.
-	// Hold even an unused bundle: new pods would mount the old aclfile too.
-	if condition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); condition != nil &&
-		condition.Status == metav1.ConditionTrue && condition.Reason == valkeyiov1alpha1.ReasonUsersACLUnresolved {
+	// Hold even an unused bundle while using the last good ACL: new pods
+	// would mount the old aclfile too.
+	if usingLastGoodACL {
 		return kept, held, nil, nil
 	}
 	inUse, err := r.trustBundleInUse(ctx, cluster, name)
@@ -446,7 +444,7 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 // written: one created by anyone else under the same name is never trusted.
 //
 // When clientAuth.ca is emptied, see retireTrustBundle.
-func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
+func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, usingLastGoodACL bool) (string, error) {
 	if len(cluster.GetTLS().ClientAuthCA()) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
 		// Reported, not returned: a failure here must not stop the reconcile,
@@ -515,7 +513,7 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 	if err != nil {
 		return "", err
 	}
-	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem)
+	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem, usingLastGoodACL)
 	if err != nil {
 		return "", err
 	}

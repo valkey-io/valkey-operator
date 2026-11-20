@@ -875,6 +875,10 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionIncompleteScrape names a pod this pass could not scrape, or a
+	// primary whose slots stay held because the scrape did not reach it.
+	// Non-blocking: Ready may stay True. The message names the address and id.
+	ConditionIncompleteScrape = "IncompleteScrape"
 	// ConditionExporterPasswordHeld is set while _exporter.previous is still
 	// accepted more than five minutes after the switch, and names the pods to
 	// restart. Non-blocking: the other system passwords keep rotating.
@@ -964,6 +968,14 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonSlotsHeldForMissingPrimary is used with ConditionIncompleteScrape
+	// when a scraped replica still follows a primary this pass did not reach,
+	// so its slots stay assigned to it. If that primary is down, they stay
+	// unserved until a manual failover.
+	ReasonSlotsHeldForMissingPrimary = "SlotsHeldForMissingPrimary"
+	// ReasonNodeScrapeIncomplete is used with ConditionIncompleteScrape when a
+	// pod this pass set out to scrape did not return a usable topology.
+	ReasonNodeScrapeIncomplete = "NodeScrapeIncomplete"
 	// ReasonTrustBundleError is used with ConditionReady when the operator
 	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"

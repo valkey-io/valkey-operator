@@ -39,6 +39,8 @@ func TestPatchedServerImageGates(t *testing.T) {
 		{"patch overrides default", "", "valkey/valkey:8.0.12", []corev1.Container{server("valkey/valkey:8.0.12")}},
 		{"patch downgrades spec", "valkey/valkey:9.1.0", "valkey/valkey:8.0.12", []corev1.Container{server("valkey/valkey:8.0.12")}},
 		{"patch upgrades spec", "valkey/valkey:8.0.12", "valkey/valkey:9.1.0", []corev1.Container{server("valkey/valkey:9.1.0")}},
+		{"patch enables digest", "valkey/valkey:9.0.0", "valkey/valkey:9.2.0", []corev1.Container{server("valkey/valkey:9.2.0")}},
+		{"patch disables digest", "valkey/valkey:9.2.0", "valkey/valkey:9.0.0", []corev1.Container{server("valkey/valkey:9.0.0")}},
 		{"sidecar does not override server", "valkey/valkey:8.1.11", "valkey/valkey:8.1.11", []corev1.Container{{Name: "sidecar", Image: "valkey/valkey:8.0.12"}}},
 		{"empty image keeps spec", "valkey/valkey:8.1.11", "valkey/valkey:8.1.11", []corev1.Container{server("")}},
 		{"last patch wins", "valkey/valkey:9.1.0", "valkey/valkey:8.0.12", []corev1.Container{server("valkey/valkey:8.1.11"), server("valkey/valkey:8.0.12")}},

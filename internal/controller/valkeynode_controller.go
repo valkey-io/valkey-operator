@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	vclient "github.com/valkey-io/valkey-go"
@@ -68,6 +69,8 @@ type valkeyConfigClient interface {
 	SetConfig(ctx context.Context, params map[string]string) error
 	// LoadACL reloads the mounted aclfile into the running server.
 	LoadACL(ctx context.Context) error
+	// ACLDigest fingerprints the complete running ACL.
+	ACLDigest(ctx context.Context) (string, error)
 	// UserNames returns the names of the users the server currently has.
 	UserNames(ctx context.Context) ([]string, error)
 	// UserPasswordHashes returns the user's currently configured password
@@ -104,6 +107,14 @@ func (rc *realValkeyConfigClient) LoadACL(ctx context.Context) error {
 		return fmt.Errorf("ACL LOAD: %w", err)
 	}
 	return nil
+}
+
+func (rc *realValkeyConfigClient) ACLDigest(ctx context.Context) (string, error) {
+	digest, err := rc.client.Do(ctx, rc.client.B().Arbitrary("ACL", "DIGEST").Build()).ToString()
+	if err != nil {
+		return "", fmt.Errorf("ACL DIGEST: %w", err)
+	}
+	return digest, nil
 }
 
 func (rc *realValkeyConfigClient) UserNames(ctx context.Context) ([]string, error) {
@@ -173,6 +184,10 @@ func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkey
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
 type ValkeyNodeReconciler struct {
+	// aclDigests caches fully checked ACLs for this controller process only.
+	// A restart deliberately falls back to the full revision check.
+	aclDigests sync.Map // client.ObjectKey -> checkedACLDigest
+
 	client.Client
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
@@ -220,9 +235,13 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	node := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.aclDigests.Delete(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !node.DeletionTimestamp.IsZero() {
+		r.aclDigests.Delete(req.NamespacedName)
 		return r.reconcileDeletion(ctx, node)
 	}
 	if requeue, err := r.reconcilePersistenceFinalizer(ctx, node); err != nil {

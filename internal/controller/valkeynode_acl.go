@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 // desiredUserPasswordHashes parses the aclfile the ValkeyCluster controller
@@ -111,6 +113,29 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 	return true, nil
 }
 
+// checkedACLDigest is a baseline bracketed by equal digests around LOAD and a full check.
+// The revision user remains the proof that the desired file was loaded.
+type checkedACLDigest struct {
+	uid                     types.UID
+	image, revision, digest string
+}
+
+func supportsACLDigest(image string) bool {
+	version, known := valkey.VersionFromImage(effectiveImage(image))
+	return known && !version.LessThan(aclDigestMinVersion)
+}
+
+func readACLDigest(ctx context.Context, c valkeyConfigClient) string {
+	digest, err := c.ACLDigest(ctx)
+	if err != nil || len(digest) != 64 {
+		return ""
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return ""
+	}
+	return digest
+}
+
 // applyLiveACL reloads the mounted aclfile into the running server so ACL
 // changes take effect without a pod roll, and reports whether the desired
 // passwords are live yet.
@@ -121,8 +146,8 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 // The projected volume is refreshed lazily by kubelet, so a LOAD fired right
 // after the Secret changes can read the pre-update file and silently no-op.
 //
-// The reload is therefore unconditional: the operator cannot read the pod's copy
-// of the file, so before a LOAD it has no way to know whether the mounted file
+// Without a verified digest baseline the reload is unconditional: the operator
+// cannot read the pod's copy of the file, so before a LOAD it cannot know whether it
 // is current. A repeated LOAD is idempotent and cheap, and it is what makes
 // every kind of change converge, including permission edits and removed users,
 // once the volume catches up.
@@ -134,7 +159,9 @@ func aclObservablyInSync(ctx context.Context, c valkeyConfigClient, desired map[
 // match. With it comes that revision, which the node publishes so the cluster
 // controller knows which ACL every node is running.
 func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, string, error) {
+	cacheKey := client.ObjectKeyFromObject(node)
 	if node.Spec.UsersACLSecretName == "" {
+		r.aclDigests.Delete(cacheKey)
 		return true, "", nil
 	}
 
@@ -156,6 +183,28 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	c, err := r.newConfigClient(ctx, r, node)
 	if err != nil {
 		return false, "", err
+	}
+
+	revision := aclRevision(desired)
+	image := effectiveServerImage(node.Spec.Image, node.Spec.Containers)
+	useDigest := revision != "" && supportsACLDigest(image)
+	if cached, ok := r.aclDigests.LoadAndDelete(cacheKey); ok && useDigest {
+		baseline := cached.(checkedACLDigest)
+		if baseline.uid == node.UID && baseline.image == image && baseline.revision == revision &&
+			node.Status.AppliedACLRevision == revision && readACLDigest(ctx, c) == baseline.digest {
+			// A pending default-session close survives failed status writes and
+			// must be retried even when the ACL itself has not changed.
+			if err := r.closeDefaultUserSessions(ctx, node, c, false); err != nil {
+				return false, "", err
+			}
+			r.aclDigests.Store(cacheKey, baseline)
+			return true, revision, nil
+		}
+	}
+
+	before := ""
+	if useDigest {
+		before = readACLDigest(ctx, c)
 	}
 
 	// Mark the node before the load while default is on: if the load turns
@@ -184,7 +233,16 @@ func (r *ValkeyNodeReconciler) applyLiveACL(ctx context.Context, node *valkeyiov
 	if err != nil || !synced {
 		return false, "", err
 	}
-	return true, aclRevision(desired), nil
+	if useDigest && before != "" {
+		after := readACLDigest(ctx, c)
+		// If LOAD changed the ACL, or a concurrent edit moved it, the full
+		// revision check still stands, but the next pass must check in full
+		// again before it can cache a baseline that survived a reload.
+		if after == before {
+			r.aclDigests.Store(cacheKey, checkedACLDigest{uid: node.UID, image: image, revision: revision, digest: after})
+		}
+	}
+	return true, revision, nil
 }
 
 // closeDefaultUserSessions closes the connections still logged in as default

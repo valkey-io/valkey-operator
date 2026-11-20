@@ -45,14 +45,17 @@ func TestSystemUserAclGatesRulesByVersion(t *testing.T) {
 		"+cluster|getslotmigrations": operatorUser,
 		"+cluster|migrateslots":      operatorUser,
 		"+cluster|syncslots":         replicationUser,
+		"+acl|digest":                operatorUser,
 		"+commandlog|len":            exporterUser,
 	}
 	assert.Len(t, owner, len(versionGatedAclRules))
 	cases := map[string][]string{ // image -> rules that must be absent
-		"valkey/valkey:9.0.0":  nil,
-		"valkey/valkey:latest": nil,
-		"valkey/valkey:8.1.11": {"+cluster|migrateslots", "+cluster|getslotmigrations", "+cluster|syncslots"},
-		"valkey/valkey:8.0.12": {"+cluster|migrateslots", "+cluster|getslotmigrations", "+cluster|syncslots", "+commandlog|len"},
+		"valkey/valkey:9.2.0":     nil,
+		"valkey/valkey:9.2.0-rc2": {"+acl|digest"},
+		"valkey/valkey:9.0.0":     {"+acl|digest"},
+		"valkey/valkey:latest":    {"+acl|digest"},
+		"valkey/valkey:8.1.11":    {"+acl|digest", "+cluster|migrateslots", "+cluster|getslotmigrations", "+cluster|syncslots"},
+		"valkey/valkey:8.0.12":    {"+acl|digest", "+cluster|migrateslots", "+cluster|getslotmigrations", "+cluster|syncslots", "+commandlog|len"},
 	}
 	for image, absent := range cases {
 		for rule, user := range owner {

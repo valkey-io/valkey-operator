@@ -53,6 +53,7 @@ const (
 	// unchanged. It is disabled (off), so its content-hash password is never a
 	// usable credential.
 	aclRevisionUser = "_operator_acl_revision"
+	aclDigestRule   = "+acl|digest"
 )
 
 var (
@@ -79,6 +80,7 @@ var (
 			"+config|get",                // verify applied config / audit current state
 			"+acl|load",                  // reload the aclfile live to apply ACL changes without a pod roll
 			"+acl|getuser",               // read back a user's password hashes to verify the reload landed
+			aclDigestRule,                // skip repeated ACL checks once a revision is confirmed (Valkey 9.2+)
 			"+acl|users",                 // read the user set to verify membership after a reload
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
@@ -97,6 +99,8 @@ var (
 	}
 )
 
+var aclDigestMinVersion = semver.MustParse("9.2.0")
+
 // versionGatedAclRules maps rules in systemUsersAcls to the first Valkey
 // release that knows the command. An older server refuses to load an ACL file
 // that names an unknown command, so it would not start.
@@ -104,21 +108,20 @@ var versionGatedAclRules = map[string]*semver.Version{
 	"+cluster|getslotmigrations": semver.MustParse("9.0.0-rc1"),
 	"+cluster|migrateslots":      semver.MustParse("9.0.0-rc1"),
 	"+cluster|syncslots":         semver.MustParse("9.0.0-rc1"),
+	aclDigestRule:                aclDigestMinVersion,
 	"+commandlog|len":            semver.MustParse("8.1.0-rc1"),
 }
 
 // systemUserAcl returns the ACL rules of a system user for image, without the
 // rules its Valkey version does not know. A rule is kept when the version
-// cannot be read from the image tag.
+// cannot be read from the image tag, except ACL DIGEST: that optimization
+// is enabled only for a known 9.2.0+ image.
 func systemUserAcl(user, image string) string {
 	version, ok := valkey.VersionFromImage(effectiveImage(image))
-	if !ok {
-		return systemUsersAcls[user]
-	}
 	rules := strings.Fields(systemUsersAcls[user])
 	rules = slices.DeleteFunc(rules, func(rule string) bool {
 		minVersion, gated := versionGatedAclRules[rule]
-		return gated && version.LessThan(minVersion)
+		return gated && ((!ok && rule == aclDigestRule) || (ok && version.LessThan(minVersion)))
 	})
 	return strings.Join(rules, " ")
 }

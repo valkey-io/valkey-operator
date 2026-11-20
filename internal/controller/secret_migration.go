@@ -87,9 +87,9 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 		if metav1.IsControlledBy(secret, cluster) {
 			return secret, nil
 		}
-		// Only a legacy Secret the cluster controls matters here, and the
-		// operator labelled every one it created, so the cache can answer.
-		if err := r.Get(ctx, legacyKey, legacy); err != nil {
+		// Uncached: a legacy Secret the cluster still controls may have lost
+		// the managed-by label the cache selects on.
+		if err := r.uncachedReader().Get(ctx, legacyKey, legacy); err != nil {
 			if apierrors.IsNotFound(err) {
 				return secret, nil
 			}

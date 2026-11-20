@@ -305,6 +305,18 @@ func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
 		assert.False(t, aclExists, "no aclfile is built from its passwords")
 	})
 
+	t.Run("even when the legacy Secret it controls has lost the managed-by label", func(t *testing.T) {
+		cluster := migrationCluster()
+		legacy := operatorOwned(t, cluster, legacyPasswords())
+		delete(legacy.Labels, "app.kubernetes.io/managed-by")
+		r, c, _ := newMigrationReconciler(t, stranger(), legacy)
+		r.Client = labelFilteredClient{Client: c}
+
+		err := r.reconcileUsersAcl(ctx, cluster)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "valkey-c-system-passwords exists but this cluster does not control it")
+	})
+
 	t.Run("but uses it when the legacy Secret is not the cluster's either", func(t *testing.T) {
 		cluster := migrationCluster()
 		r, c, _ := newMigrationReconciler(t, stranger(), legacyPasswords())

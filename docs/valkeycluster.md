@@ -42,6 +42,8 @@ maxmemory         # There are no safeguards, ensure you do not exceed your conta
 maxmemory-policy
 ```
 
+Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. Changing any other key rolls the pods one at a time.
+
 #### Failover tuning
 
 `cluster-node-timeout` controls how long a node may be unreachable before the cluster marks it failed and starts a failover. The operator does not set it, so the Valkey default of 15 seconds applies. Set it in `spec.config` to tune failover for your network.
@@ -102,7 +104,7 @@ tls-replication
 
 Cluster directives the operator does not set, such as `cluster-require-full-coverage`, `cluster-migration-barrier` and `cluster-node-timeout`, stay available.
 
-Keys may contain only letters, digits, `.`, `_` and `-`. Valkey trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
+Keys may contain only lowercase letters, digits, `.`, `_` and `-`. Valkey matches keys in any case, but the operator picks out live-settable keys such as `maxmemory` by exact name, so it would not apply `MAXMEMORY` live. Valkey also trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
 
 #### Future plans
 
@@ -269,7 +271,7 @@ podMetadata:
 
 Keys the operator owns are rejected: any label or annotation key under `valkey.io/`, and the `app.kubernetes.io/` `name`, `instance`, `component`, `part-of` and `managed-by` labels. Other `app.kubernetes.io/` keys, such as `app.kubernetes.io/version`, are allowed.
 
-Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-revision` annotation (37 bytes). Each map holds at most 1024 entries.
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB. Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 

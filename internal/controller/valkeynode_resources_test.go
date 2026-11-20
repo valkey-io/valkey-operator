@@ -84,6 +84,7 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.ConfigRevision = "0123456789ab"
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
 	require.NoError(t, err)
@@ -169,8 +170,18 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: readinessScriptKey, Path: readinessScriptKey},
+		{Key: livenessScriptKey, Path: livenessScriptKey},
+		{Key: initScriptKey, Path: initScriptKey},
+		{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+	}, pts.Spec.Volumes[0].ConfigMap.Items, "scripts mount the script keys only")
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: "valkey.conf"},
+		{Key: "live.conf", Path: "live.conf"},
+	}, pts.Spec.Volumes[1].ConfigMap.Items)
 	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
 	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
@@ -312,8 +323,7 @@ func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
 }
 
 // TestInitContainerCommand runs the init container's command against a
-// temporary script path. A ConfigMap without init.sh (an older shared
-// ConfigMap) must not block the pod.
+// temporary script path.
 func TestInitContainerCommand(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "init.sh")
@@ -327,12 +337,8 @@ func TestInitContainerCommand(t *testing.T) {
 		return string(out), 0
 	}
 
-	out, code := run()
-	assert.Equal(t, 0, code, "a missing script is skipped")
-	assert.Contains(t, out, "skipping")
-
 	require.NoError(t, os.WriteFile(script, []byte("echo ran\nexit 3\n"), 0o644))
-	out, code = run()
+	out, code := run()
 	assert.Equal(t, 3, code, "a present script runs and its exit code stands")
 	assert.Contains(t, out, "ran")
 }
@@ -804,7 +810,7 @@ func TestBuildValkeyNodePodTemplateSpec_ConfigMapNames(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
-	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
@@ -853,18 +859,6 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHan
 		"--cluster-announce-ip", "$(POD_IP)",
 		"--primaryuser", replicationUser}, containers[0].Command)
 	// The startup probe allows for the replica hand-off wait of up to 300s.
-	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
-}
-
-func TestBuildContainersDef_ClusterLabelUsesTheWrapper(t *testing.T) {
-	// A node whose older shared ConfigMap lacks the script gets the same
-	// command, which falls back to the server at run time, see
-	// TestPrimaryHandoffCommandFallsBackToServer.
-	node := newTestValkeyNode("mynode", "test-ns")
-	node.Labels = map[string]string{LabelCluster: "mynode"}
-	containers, err := buildContainersDef(node)
-	require.NoError(t, err)
-	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server"}, containers[0].Command[:4])
 	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 
@@ -1680,7 +1674,6 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 				},
 				Annotations: map[string]string{
 					"example.com/scrape": "true",
-					configRevisionKey:    "spoofed",
 				},
 			}
 
@@ -1690,7 +1683,6 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			assert.Equal(t, "data", tmpl.Labels["team"])
 			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
 			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
-			assert.Equal(t, "aaaaaaaaaaaa", tmpl.Annotations[configRevisionKey], "operator annotations win over podMetadata")
 
 			var selector map[string]string
 			if workloadType == valkeyv1.WorkloadTypeDeployment {

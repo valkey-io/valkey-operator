@@ -231,7 +231,7 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 Without `persistence`, `/data` is an `emptyDir`. It survives a server container restart within the same pod. If Valkey's `save` rules have written an RDB snapshot, Valkey can reload it on restart when the data directory is kept. Writes after the snapshot can be lost. Replacing the pod removes its `emptyDir`.
 
-When a primary crashes, the restarted container waits for its reachable replicas to stop following it. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
+When a primary crashes, the restarted container waits until each of its reachable replicas has a slot assignment as a primary or follows another node. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
 
 If there are no reachable replicas or the wait expires, the server keeps its node ID, slots, and local files. In this case, an RDB snapshot can restore data through the last save.
 

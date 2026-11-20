@@ -1605,10 +1605,12 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
 			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 			userEnv := []string{"VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw", "REDISCLI_AUTH=alice-pw"}
-			run := func(passwordFile string) string {
+			// A pod created before the system-password mount.
+			legacyEnv := []string{"VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw"}
+			run := func(passwordFile string, env []string) string {
 				cmd := exec.Command(scriptPath)
 				cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile)
-				cmd.Env = append(cmd.Env, userEnv...)
+				cmd.Env = append(cmd.Env, env...)
 				require.NoError(t, cmd.Run())
 				got, err := os.ReadFile(argsFile)
 				require.NoError(t, err)
@@ -1618,7 +1620,7 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			// With the mounted password: _operator and the file's password, never the user's.
 			passwordFile := filepath.Join(binDir, operatorUser)
 			require.NoError(t, os.WriteFile(passwordFile, []byte("s3cr3t\n"), 0o644))
-			got := run(passwordFile)
+			got := run(passwordFile, userEnv)
 			fields := strings.SplitN(got, "|", 3)
 			require.Len(t, fields, 3)
 			assert.Empty(t, fields[0], "VALKEYCLI_USER must not reach valkey-cli")
@@ -1627,15 +1629,26 @@ func TestProbeScriptOperatorUserArgs(t *testing.T) {
 			assert.NotContains(t, fields[2], "s3cr3t", "password must not be passed on the command line")
 			assert.NotContains(t, got, "alice")
 
-			// Without the file: no credentials at all.
-			got = run(filepath.Join(binDir, "missing"))
+			// The file wins over the legacy pair.
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|s3cr3t|"), got)
+
+			// Without the file, the legacy pair authenticates.
+			got = run(filepath.Join(binDir, "missing"), legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			assert.Contains(t, got, "--user _operator")
+
+			// Without the file or VALKEY_USER: no credentials at all.
+			got = run(filepath.Join(binDir, "missing"), userEnv)
 			assert.Equal(t, "||", got[:2])
 			assert.NotContains(t, got, "-user")
 			assert.NotContains(t, got, "alice")
 
-			// With an empty file: no credentials at all.
+			// With an empty file, the legacy pair authenticates, else nothing does.
 			require.NoError(t, os.WriteFile(passwordFile, nil, 0o644))
-			got = run(passwordFile)
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			got = run(passwordFile, userEnv)
 			assert.Equal(t, "||", got[:2])
 			assert.NotContains(t, got, "-user")
 		})

@@ -747,7 +747,7 @@ EOF`,
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(commands).NotTo(BeEmpty())
 
-				valkeyCli := []string{"valkey-cli", "-a", defaultPassword}
+				valkeyCli := []string{"env", "-u", "VALKEYCLI_USER", "valkey-cli", "-a", defaultPassword}
 				arities, err := utils.CommandArities(podName, valkeyCli, commands)
 				g.Expect(err).NotTo(HaveOccurred())
 

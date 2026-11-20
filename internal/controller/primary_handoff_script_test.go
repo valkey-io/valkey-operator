@@ -320,7 +320,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		}
 	})
 
-	t.Run("ROLE calls ignore the environment credentials without the mount", func(t *testing.T) {
+	t.Run("ROLE calls ignore VALKEYCLI_USER and VALKEYCLI_AUTH without the mount", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
 		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
@@ -330,6 +330,22 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, strings.HasPrefix(string(auth), " "), string(auth))
 		assert.NotContains(t, string(auth), "--user")
+	})
+
+	t.Run("ROLE calls use VALKEY_USER and VALKEYCLI_AUTH in a pod without the mount", func(t *testing.T) {
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
+		cmd.Env = append(cmd.Env, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw",
+			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		auth, err := os.ReadFile(calls + ".auth")
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
+		require.Len(t, lines, 3)
+		for _, line := range lines {
+			assert.True(t, strings.HasPrefix(line, "env-pw "), line)
+			assert.Contains(t, line, "--user "+operatorUser)
+		}
 	})
 }
 

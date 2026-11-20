@@ -87,6 +87,13 @@ func (c *ClusterNode) HasNoAddress() bool {
 	return c.HasFlag("noaddr")
 }
 
+// IsAutomaticFailoverDisabled reports whether the node carries the nofailover
+// flag, set for example by cluster-replica-no-failover. Such a replica does not
+// promote itself, but still accepts CLUSTER FAILOVER TAKEOVER.
+func (c *ClusterNode) IsAutomaticFailoverDisabled() bool {
+	return c.HasFlag("nofailover")
+}
+
 // HasSlotAssignment reports whether the line carries any slot field, either an
 // owned range or an in-flight migration marker. A primary with no slot field at
 // all has not joined the slot map yet, whereas one holding only a marker is

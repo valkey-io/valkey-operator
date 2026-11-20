@@ -2573,6 +2573,11 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-validations:
+                - message: container name 'server-init' is reserved for the operator-managed
+                    init container
+                  reason: FieldValueForbidden
+                  rule: '!self.exists(c, c.name == ''server-init'')'
               exporter:
                 description: Exporter defines the metrics exporter sidecar configuration.
                 properties:
@@ -2899,6 +2904,63 @@ spec:
                 required:
                 - size
                 type: object
+              podMetadata:
+                description: PodMetadata adds labels and annotations to the ValkeyNode
+                  pod.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations added to the object. Values have no format rule, but keys and
+                      values together are limited to 256 KiB less the operator's own annotation.
+                      Keys under valkey.io/ are reserved for the operator.
+                    maxProperties: 1024
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'annotations must total at most 262059 characters (keys
+                        plus values): 256 KiB less the operator''s valkey.io/config-hash
+                        annotation'
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262059
+                    - message: annotation keys must be an optional DNS subdomain prefix
+                        (at most 253 characters) and '/', followed by a name of at
+                        most 63 alphanumerics, '-', '_' or '.', starting and ending
+                        with an alphanumeric
+                      rule: self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
+                    - message: annotation keys under valkey.io/ are reserved for the
+                        operator
+                      reason: FieldValueForbidden
+                      rule: self.all(k, !k.startsWith('valkey.io/'))
+                  labels:
+                    additionalProperties:
+                      description: |-
+                        LabelValue is a label value: at most 63 characters, empty or alphanumerics,
+                        '-', '_' and '.', starting and ending with an alphanumeric.
+                      maxLength: 63
+                      pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
+                      type: string
+                    description: |-
+                      Labels added to the object. Keys under valkey.io/ and the
+                      app.kubernetes.io/ name, instance, component, part-of and managed-by keys
+                      are reserved for the operator.
+                    maxProperties: 1024
+                    type: object
+                    x-kubernetes-validations:
+                    - message: label keys must be an optional DNS subdomain prefix
+                        (lowercase, at most 253 characters) and '/', followed by a
+                        name of at most 63 alphanumerics, '-', '_' or '.', starting
+                        and ending with an alphanumeric
+                      rule: self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$')
+                        && (!k.contains('/') || k.indexOf('/') <= 253))
+                    - message: label keys under valkey.io/ and app.kubernetes.io/
+                        name, instance, component, part-of and managed-by are reserved
+                        for the operator
+                      reason: FieldValueForbidden
+                      rule: self.all(k, !k.startsWith('valkey.io/') && !(k in ['app.kubernetes.io/name',
+                        'app.kubernetes.io/instance', 'app.kubernetes.io/component',
+                        'app.kubernetes.io/part-of', 'app.kubernetes.io/managed-by']))
+                type: object
               podSecurityContext:
                 description: |-
                   Override the PodSecurityContext applied to the ValkeyNode pod.
@@ -3210,6 +3272,12 @@ spec:
                   ServerConfigMapName specifies the name of the ConfigMap that contains the
                   scripts, and Valkey config for the ValkeyNode.
                 type: string
+              service:
+                description: |-
+                  Service is set by the ValkeyCluster controller from
+                  spec.networking.perNodeServices. When set, this node has one ClusterIP
+                  Service. Unset means no Service.
+                type: object
               serviceAccountName:
                 description: |-
                   ServiceAccountName is the name of the Kubernetes ServiceAccount used by
@@ -3247,6 +3315,23 @@ spec:
                         required:
                         - secretName
                         type: object
+                      trustBundle:
+                        description: |-
+                          TrustBundle, when set, replaces the server secret's `ca.crt` as the
+                          trust root Valkey verifies clients and peers against
+                          (`tls-ca-cert-file`). It must therefore include the root the server
+                          certificate chains to. The node reloads it live when its contents
+                          change, once its ACL is confirmed live. Probes and the metrics exporter
+                          keep verifying the server against the server secret's `ca.crt`.
+                        properties:
+                          secretName:
+                            description: SecretName is the name of the secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                     required:
                     - server
                     type: object
@@ -3261,10 +3346,8 @@ spec:
                         default: Disabled
                         description: |-
                           CertificateUser configures how Valkey maps an authenticated client
-                          certificate to an ACL user. Set to `CN` to use the certificate's Common Name
-                          (requires Valkey >= 9.0), or `URI` to use the first matching URI from the
-                          certificate's Subject Alternative Name (SAN) (requires Valkey >= 9.1).
-                          Defaults to `Disabled`, which leaves the directive unset.
+                          certificate to an ACL user. Maps to `tls-auth-clients-user`. Defaults to
+                          `Disabled`, which leaves the directive unset.
                         enum:
                         - CN
                         - URI
@@ -3274,10 +3357,7 @@ spec:
                         default: Optional
                         description: |-
                           Mode controls whether clients must authenticate with a TLS certificate.
-                          `Required` enforces mTLS, `Optional` allows both authenticated and
-                          unauthenticated clients, and `Disabled` turns client certificate processing
-                          off entirely.
-                          Defaults to `Optional`.
+                          Maps to `tls-auth-clients`. Defaults to `Optional`.
                         enum:
                         - Required
                         - Optional
@@ -3285,8 +3365,10 @@ spec:
                         type: string
                     type: object
                     x-kubernetes-validations:
-                    - message: 'certificateUser has no effect when mode=Disabled:
+                    - fieldPath: .certificateUser
+                      message: 'certificateUser has no effect when mode=Disabled:
                         Valkey ignores client certificates in that mode'
+                      reason: FieldValueForbidden
                       rule: '!(has(self.mode) && self.mode == ''Disabled'' && has(self.certificateUser)
                         && self.certificateUser != ''Disabled'')'
                   serverName:
@@ -3550,19 +3632,30 @@ spec:
                 type: string
                 x-kubernetes-validations:
                 - message: workloadType is immutable
+                  reason: FieldValueForbidden
                   rule: self == oldSelf
             type: object
             x-kubernetes-validations:
-            - message: persistence requires workloadType StatefulSet
+            - fieldPath: .persistence
+              message: persistence requires workloadType StatefulSet
+              reason: FieldValueForbidden
               rule: '!(has(self.persistence) && self.workloadType == ''Deployment'')'
-            - message: persistence cannot be removed once set
+            - fieldPath: .persistence
+              message: persistence cannot be removed once set
+              reason: FieldValueForbidden
               rule: '!has(oldSelf.persistence) || has(self.persistence)'
-            - message: persistence cannot be added after creation
+            - fieldPath: .persistence
+              message: persistence cannot be added after creation
+              reason: FieldValueForbidden
               rule: has(oldSelf.persistence) || !has(self.persistence)
-            - message: persistence.size may only be expanded
+            - fieldPath: .persistence.size
+              message: persistence.size may only be expanded
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size))
                 >= 0'
-            - message: persistence.storageClassName is immutable
+            - fieldPath: .persistence.storageClassName
+              message: persistence.storageClassName is immutable
+              reason: FieldValueForbidden
               rule: '!has(self.persistence) || !has(oldSelf.persistence) || ((!has(self.persistence.storageClassName)
                 && !has(oldSelf.persistence.storageClassName)) || (has(self.persistence.storageClassName)
                 && has(oldSelf.persistence.storageClassName) && self.persistence.storageClassName
@@ -3570,6 +3663,12 @@ spec:
           status:
             description: ValkeyNodeStatus defines the observed state of ValkeyNode.
             properties:
+              appliedACLRevision:
+                description: |-
+                  AppliedACLRevision is the revision of the operator-managed aclfile that
+                  the running server was last confirmed to hold, recorded as ACLApplied
+                  becomes True.
+                type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:

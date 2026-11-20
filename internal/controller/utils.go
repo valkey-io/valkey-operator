@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	appName        = "valkey"
-	resourcePrefix = "valkey-"
+	appName             = "valkey"
+	resourcePrefix      = "valkey-"
+	annotationTrueValue = "true"
 
 	// shellPath used in exec for running scripts
 	shellPath = "/bin/sh"
@@ -83,12 +84,24 @@ const (
 	// tlsVolumeName is the name of the volume that will be mounted in the Valkey container.
 	tlsVolumeName = "tls-certs"
 	// tlsCertMountPath is the path where the TLS certificates are mounted in the Valkey container.
-	tlsCertMountPath = "/tls"
-	dataVolumeName   = "data"
-	dataMountPath    = "/data"
+	tlsCertMountPath  = "/tls"
+	dataVolumeName    = "data"
+	dataMountPath     = "/data"
+	scriptsVolumeName = "scripts"
+	scriptsMountPath  = "/scripts"
+	configVolumeName  = "valkey-conf"
+	configMountPath   = "/config"
+	// initVolumeName is the emptyDir the init container writes to and the
+	// server container reads from.
+	initVolumeName   = "init-conf"
+	initMountPath    = "/init"
 	tlsSecretKeyCA   = "ca.crt"
 	tlsSecretKeyCert = "tls.crt"
 	tlsSecretKeyKey  = "tls.key"
+	// tlsSecretKeyServerCA is where the server secret's ca.crt is projected
+	// when a trust bundle takes over ca.crt. Probes and the exporter verify the
+	// server against it.
+	tlsSecretKeyServerCA = "server-ca.crt"
 )
 
 // Role label values.
@@ -156,6 +169,44 @@ func upsertAnnotation(o metav1.Object, key string, val string) bool {
 	o.SetAnnotations(annotations)
 
 	return true
+}
+
+// annotationTrue reports whether obj carries key with the exact value "true".
+func annotationTrue(obj metav1.Object, key string) bool {
+	return obj.GetAnnotations()[key] == annotationTrueValue
+}
+
+// ownedValkeyNodes returns the nodes in the list that the cluster controls.
+func ownedValkeyNodes(cluster *valkeyv1.ValkeyCluster, nodes *valkeyv1.ValkeyNodeList) []*valkeyv1.ValkeyNode {
+	owned := make([]*valkeyv1.ValkeyNode, 0, len(nodes.Items))
+	for i := range nodes.Items {
+		if metav1.IsControlledBy(&nodes.Items[i], cluster) {
+			owned = append(owned, &nodes.Items[i])
+		}
+	}
+	return owned
+}
+
+// patchNodeAnnotations sets and removes annotations on a ValkeyNode, and
+// patches only when something changed.
+func (r *ValkeyClusterReconciler) patchNodeAnnotations(ctx context.Context, node *valkeyv1.ValkeyNode, set map[string]string, remove []string) error {
+	patch := client.MergeFrom(node.DeepCopy())
+	changed := false
+	for key, value := range set {
+		if upsertAnnotation(node, key, value) {
+			changed = true
+		}
+	}
+	for _, key := range remove {
+		if _, ok := node.Annotations[key]; ok {
+			delete(node.Annotations, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Patch(ctx, node, patch))
 }
 
 // nodeIndexForAddress finds the ValkeyNode whose Status.PodIP matches address
@@ -363,23 +414,24 @@ func nodeTLSServerName(node *valkeyv1.ValkeyNode) string {
 	return tlsServerName(override, clusterName, node.Namespace, node.Spec.ClusterDomain)
 }
 
-// getTLSConfig returns the TLS configuration for a ValkeyCluster.
-func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, error) {
+// getTLSConfig returns the TLS configuration for a ValkeyCluster and the
+// resourceVersion of the secret it was built from.
+func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, namespace string, presentClientCert bool) (*tls.Config, string, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	caData, caOk := secret.Data[tlsSecretKeyCA]
 
 	if !caOk {
-		return nil, fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
+		return nil, "", fmt.Errorf("TLS secret is missing required key: ca=%v", caOk)
 	}
 
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caData) {
-		return nil, fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
+		return nil, "", fmt.Errorf("failed to parse CA certificates from secret key %q", "ca.crt")
 	}
 
 	tlsCfg := &tls.Config{
@@ -388,19 +440,19 @@ func getTLSConfig(ctx context.Context, c client.Reader, secretName, serverName, 
 		MinVersion: tls.VersionTLS12,
 	}
 	if !presentClientCert {
-		return tlsCfg, nil
+		return tlsCfg, secret.ResourceVersion, nil
 	}
 
 	certData, certOk := secret.Data[tlsSecretKeyCert]
 	keyData, keyOk := secret.Data[tlsSecretKeyKey]
 	if !certOk || !keyOk {
-		return nil, fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secretName, certOk, keyOk)
+		return nil, "", fmt.Errorf("TLS secret %q is missing required key: cert=%v, key=%v", secretName, certOk, keyOk)
 	}
 
 	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secretName, err)
+		return nil, "", fmt.Errorf("failed to parse TLS certificate/key from secret %q: %w", secretName, err)
 	}
 	tlsCfg.Certificates = []tls.Certificate{cert}
-	return tlsCfg, nil
+	return tlsCfg, secret.ResourceVersion, nil
 }

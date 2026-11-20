@@ -51,8 +51,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: true
     resources:
@@ -312,8 +318,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: false
 `, valkeyName)

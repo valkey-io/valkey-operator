@@ -54,7 +54,7 @@ const (
 type RolePoller struct {
 	// Client is cache-backed, so the per-tick List calls cost nothing.
 	Client client.Client
-	// ValkeyClients dials the nodes each pass scrapes.
+	// ValkeyClients returns the pooled client for each node a pass scrapes.
 	ValkeyClients ClientProvider
 	// Interval is how often live state is sampled. Zero means
 	// DefaultRolePollInterval.
@@ -181,6 +181,11 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	if !cluster.DeletionTimestamp.IsZero() {
 		return
 	}
+	// A paused cluster gets no commands from the operator, reads included, and
+	// the reconcile it would trigger does nothing until the pause is lifted.
+	if reconciliationPaused(cluster) {
+		return
+	}
 
 	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
 	if err := p.Client.List(ctx, nodes,
@@ -226,7 +231,6 @@ func (p *RolePoller) pollCluster(ctx context.Context, cluster *valkeyiov1alpha1.
 	if state == nil {
 		return
 	}
-	defer state.CloseClients()
 
 	for _, node := range candidates {
 		key := client.ObjectKeyFromObject(node)
@@ -321,14 +325,17 @@ func (p *RolePoller) recordFailure(key types.NamespacedName, now time.Time) {
 // This mirrors the slot-ownership rule the ValkeyNode controller applies in
 // parseClusterNodesRole: the shard's primary is the node that owns slots, so a
 // slot-less master (a node still being added, or one that has just given up its
-// slots) is not reported as a primary. Such a node sits in PendingNodes rather
-// than a shard, so it resolves to "" here and is simply not compared.
+// slots) is not reported as a primary. It either sits in PendingNodes or heads
+// a shard without slots, and resolves to "" here so it is simply not compared.
 func liveRoleForAddress(state *valkey.ClusterState, address string) string {
 	shard := state.FindShardForAddress(address)
 	if shard == nil {
 		return ""
 	}
 	if primary := shard.GetPrimaryNode(); primary != nil && primary.Address == address {
+		if len(shard.Slots) == 0 {
+			return ""
+		}
 		return RolePrimary
 	}
 	return RoleReplica

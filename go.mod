@@ -4,12 +4,15 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/moby/patternmatcher v0.6.1
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0
 	github.com/prometheus/client_golang v1.24.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
 	github.com/valkey-io/valkey-go v1.0.68
+	github.com/valkey-io/valkey-go/mock v1.0.68
+	go.uber.org/mock v0.5.0
 	go.uber.org/zap v1.27.1
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0

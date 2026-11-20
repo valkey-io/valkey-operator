@@ -163,6 +163,7 @@ git rebase --continue
 - Keep changes minimal; match the style of surrounding code rather than introducing new patterns
 - Avoid unrelated refactors in the same PR
 - Run `go fmt` before committing (or use `make fmt`)
+- Start new Go files with the header in `hack/boilerplate.go.txt`, using the current year. CI rejects new files with any other year
 - Add comments for exported functions and types
 - Write unit tests for new code
 - Update CRDs by modifying `api/v1alpha1/*_types.go` then run `make manifests generate`

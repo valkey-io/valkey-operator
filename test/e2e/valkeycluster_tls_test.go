@@ -40,7 +40,7 @@ const (
 	preGateImage = "valkey/valkey:9.0.0"
 )
 
-var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS"), func() {
+var _ = Describe("ValkeyCluster TLS", Ordered, Label("ValkeyCluster", "TLS", "security"), func() {
 	var valkeyClusterName string
 	var tlsSecretName string
 	var tmpDir string
@@ -108,9 +108,15 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -360,9 +366,15 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   image: %s
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -463,7 +475,7 @@ spec:
 	})
 })
 
-var _ = Describe("ValkeyCluster mTLS with CN-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS"), func() {
+var _ = Describe("ValkeyCluster mTLS with CN-based ACL mapping", Ordered, Label("ValkeyCluster", "TLS", "mTLS", "security"), func() {
 	const (
 		clusterName       = "cluster-mtls"
 		customIssuer      = "valkey-mtls-custom-issuer"
@@ -573,7 +585,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 1
+  replicasPerShard: 1
   networking:
     tls:
       certificates:
@@ -584,15 +596,20 @@ spec:
         certificateUser: CN
   exporter:
     enabled: true
-  users:
-    - name: alice
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~* &*"
-    - name: valkey-cluster-mtls.default.svc.cluster.local
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~* &*"
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+      - name: alice
+        password:
+          type: Disabled
+        permissions: "+@all ~* &*"
+      - name: valkey-cluster-mtls.default.svc.cluster.local
+        password:
+          type: Disabled
+        permissions: "+@all ~* &*"
 `, clusterName, serverCertSecret)
 		clusterFile := filepath.Join(tmpDir, "valkeycluster-mtls.yaml")
 		Expect(os.WriteFile(clusterFile, []byte(clusterManifest), 0644)).To(Succeed())

@@ -245,16 +245,11 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// booted with, so the ConfigMap and the workload are left alone.
 	pinned := node.Spec.ConfigRevision != ""
 	// The pinned file and live.conf go in before the workload that mounts them.
+	// A ConfigMap error leaves the workload alone but not the status: the pod
+	// may still serve, so its role and IP are kept current.
+	var configErr *readyError
 	if pinned {
-		if err := r.ensureNodeConfig(ctx, node); err != nil {
-			if mismatch, ok := errors.AsType[*configRevisionMismatchError](err); ok {
-				log.Info("not writing config revision the spec does not render", "want", mismatch.want, "rendered", mismatch.rendered)
-				r.setReadyCondition(ctx, node, reasonConfigRevisionMismatch, err.Error())
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
-			return ctrl.Result{}, err
-		}
+		configErr = r.ensureNodeConfigReady(ctx, node)
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
@@ -265,7 +260,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// as Ready=False, so the cluster stops copying spec to later nodes.
 	serviceErr := r.ensureNodeService(ctx, node)
 
-	if pinned {
+	if pinned && configErr == nil {
 		if err := r.ensureWorkload(ctx, node); err != nil {
 			if errors.Is(err, errTransientRequeue) {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -285,9 +280,16 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	roleResolveFailed, err := r.updateStatus(ctx, node, serviceErr)
+	notReady := serviceErr
+	if configErr != nil {
+		notReady = configErr
+	}
+	roleResolveFailed, err := r.updateStatus(ctx, node, notReady)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if configErr != nil {
+		return configErr.result()
 	}
 
 	// Re-read after ensureWorkload may have written WorkloadRollPending status.
@@ -614,8 +616,8 @@ func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context, node 
 }
 
 // setReadyCondition sets the Ready condition to False on the ValkeyNode status
-// so that errors from early reconcile stages (ConfigMap, PVC, workload creation)
-// are visible on the resource.
+// so that errors from early reconcile stages (PVC, workload creation) are
+// visible on the resource.
 func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) {
 	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
 		if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
@@ -1017,8 +1019,29 @@ func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
 	return nil
 }
 
+// readyError holds Ready at False with its reason while the pod may still
+// serve.
+type readyError struct {
+	reason string
+	err    error
+}
+
+func (e *readyError) Error() string { return e.err.Error() }
+func (e *readyError) Unwrap() error { return e.err }
+
+// result ends the reconcile after the status write. A config revision
+// mismatch waits for the parent; any other error retries with backoff.
+func (e *readyError) result() (ctrl.Result, error) {
+	if e.reason == valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	return ctrl.Result{}, e.err
+}
+
 // updateStatus updates the ValkeyNode status based on workload and Pod state.
-func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, serviceErr error) (roleResolveFailed bool, err error) {
+// A non-nil notReady holds Ready at False. A readyError reports its own
+// reason; any other error is a Service error.
+func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, notReady error) (roleResolveFailed bool, err error) {
 	log := logf.FromContext(ctx)
 
 	// Read the PVC, pod, rollout and role once. patchStatus may apply the
@@ -1130,15 +1153,19 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 				}
 			}
 		}
-		// One Ready write. ServiceError replaces the pod reason only when the
-		// pod would otherwise be ready. Writing True and then False would
-		// change LastTransitionTime on every reconcile.
-		if serviceErr != nil {
+		// One Ready write. A readyError replaces the pod reason. ServiceError
+		// replaces it only when the pod would otherwise be ready. Writing True
+		// and then False would change LastTransitionTime on every reconcile.
+		if notReady != nil {
 			current.Status.Ready = false
-			if readyStatus == metav1.ConditionTrue {
+			if re, ok := errors.AsType[*readyError](notReady); ok {
+				readyStatus = metav1.ConditionFalse
+				readyReason = re.reason
+				readyMessage = re.Error()
+			} else if readyStatus == metav1.ConditionTrue {
 				readyStatus = metav1.ConditionFalse
 				readyReason = valkeyiov1alpha1.ValkeyNodeReasonServiceError
-				readyMessage = serviceErr.Error()
+				readyMessage = notReady.Error()
 			}
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{

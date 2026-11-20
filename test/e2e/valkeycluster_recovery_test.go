@@ -164,6 +164,11 @@ spec:
 					"all three shards should scale down to two nodes")
 			}).Should(Succeed())
 
+			By("confirming the operator failed shard 0 over before deleting its node")
+			normalEvents, _, err := utils.GetEvents(clusterName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(normalEvents).To(HaveKey("FailoverCompleted"))
+
 			By("confirming shard 0 recovered a primary on a remaining node")
 			Eventually(func(g Gomega) {
 				role0, err := roleOf(clusterName, 0, 0)

@@ -437,7 +437,7 @@ These events are emitted during scale-in operations.
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain slots from excess shards |
 | `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, an excess ValkeyNode still owns slots, or an unreachable excess primary is kept while some slots are unassigned |
-| `ScaleInDeferred` | Normal | Deletion of an excess ValkeyNode waits until a kept replica is in sync and, if the node holds the shard's primary role, a failover to a kept replica has completed |
+| `ScaleInDeferred` | Normal | Deletion of an excess ValkeyNode waits for its shard's primary role to move to a node that stays |
 
 ### Proactive failover events
 

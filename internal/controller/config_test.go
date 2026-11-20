@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strings"
+
 	semver "github.com/Masterminds/semver/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -478,5 +481,140 @@ var _ = Describe("Discovery managed config", func() {
 			},
 		}
 		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
+	})
+})
+
+var _ = Describe("ACL databases version gate", Label("acl-databases"), func() {
+	newUsersCluster := func(image string, users ...valkeyiov1alpha1.ACLUserSpec) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Image: image,
+				ACL:   &valkeyiov1alpha1.ACLSpec{Users: users},
+			},
+		}
+	}
+
+	withDatabases := func(name string, databases valkeyiov1alpha1.DatabasesAclSpec) valkeyiov1alpha1.ACLUserSpec {
+		return valkeyiov1alpha1.ACLUserSpec{
+			Name:           name,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{Databases: databases},
+		}
+	}
+
+	gatedUser := func(name string) valkeyiov1alpha1.ACLUserSpec {
+		return withDatabases(name, valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}})
+	}
+
+	It("names the affected user, the required version, and the detected version", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].reason).To(Equal(valkeyiov1alpha1.ReasonUnsupportedAclDirective))
+		Expect(warnings[0].message).To(ContainSubstring("spec.acl.users[dbuser].databases"))
+		// "9.1.0" alone is a substring of the floor and would always match.
+		Expect(warnings[0].message).To(ContainSubstring("9.1.0-rc1"))
+		Expect(warnings[0].message).To(ContainSubstring("9.0.0"))
+	})
+
+	It("names spec.users when the deprecated field carries the users", func() {
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+				Image: "valkey/valkey:9.0.0",
+				Users: []valkeyiov1alpha1.UserAclSpec{{ //nolint:staticcheck // legacy spec.users
+					Name:           "dbuser",
+					Enabled:        true,
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0}}},
+				}},
+			},
+		}
+		warnings := aclVersionGateWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("spec.users[dbuser].databases"))
+		Expect(warnings[0].message).NotTo(ContainSubstring("spec.acl.users"))
+	})
+
+	It("says so when the detected version cannot be determined", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:latest", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("no version could be detected from spec.image \"valkey/valkey:latest\""))
+	})
+
+	It("names the default image when spec.image is empty", func() {
+		warnings := aclVersionGateWarnings(newUsersCluster("", gatedUser("dbuser")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("default image"))
+		Expect(warnings[0].message).To(ContainSubstring(DefaultImage))
+		Expect(warnings[0].message).NotTo(ContainSubstring("spec.image"))
+	})
+
+	It("stays silent when no user sets databases", func() {
+		plain := valkeyiov1alpha1.ACLUserSpec{Name: "alice"}
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", plain))).To(BeEmpty())
+	})
+
+	It("returns nothing when the image supports the directives", func() {
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.1.0", gatedUser("dbuser")))).To(BeEmpty())
+	})
+
+	It("accepts the 9.1 release candidate, matching the config gate's floor", func() {
+		Expect(aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.1.0-rc1", gatedUser("dbuser")))).To(BeEmpty())
+	})
+
+	It("names every affected user once, sorted and comma-joined", func() {
+		cluster := newUsersCluster("valkey/valkey:9.0.0",
+			gatedUser("zoe"),
+			valkeyiov1alpha1.ACLUserSpec{Name: "alice"},
+			gatedUser("bob"),
+		)
+
+		warnings := aclVersionGateWarnings(cluster)
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0].message).To(ContainSubstring("spec.acl.users[bob,zoe].databases"))
+		Expect(warnings[0].message).NotTo(ContainSubstring("alice"))
+	})
+
+	It("cuts a long user list short and counts the names it leaves out", func() {
+		users := make([]valkeyiov1alpha1.ACLUserSpec, 0, 300)
+		for i := range 300 {
+			users = append(users, gatedUser(fmt.Sprintf("%03d", i)+strings.Repeat("x", 125)))
+		}
+
+		warnings := aclVersionGateWarnings(newUsersCluster("valkey/valkey:9.0.0", users...))
+		Expect(warnings).To(HaveLen(1))
+		message := warnings[0].message
+		// Three names fit the budget.
+		Expect(message).To(ContainSubstring("spec.acl.users[000x"))
+		Expect(message).To(ContainSubstring("002" + strings.Repeat("x", 125) + ",+297 more].databases"))
+		Expect(message).NotTo(ContainSubstring("003x"))
+		// Event note limit.
+		Expect(len(message)).To(BeNumerically("<=", 1024))
+	})
+
+	It("joins user names up to the budget and counts the rest", func() {
+		names := []string{"a", "b", "c"}
+		Expect(joinUserNames(names, 5)).To(Equal("a,b,c"), "a list that fits exactly is not cut")
+		Expect(joinUserNames(names, 4)).To(Equal("a,b,+1 more"))
+		Expect(joinUserNames(names, 0)).To(Equal("+3 more"), "a first name over budget is counted, not listed")
+		Expect(joinUserNames(nil, 5)).To(BeEmpty())
+	})
+
+	It("warns exactly when the rendered ACL drops the directive", func() {
+		for _, image := range []string{"valkey/valkey:9.0.0", "valkey/valkey:9.1.0"} {
+			for _, databases := range []valkeyiov1alpha1.DatabasesAclSpec{
+				{IDs: []int32{0}},
+				{AllDbs: true},
+				{ResetDbs: true},
+				{IDs: []int32{}},
+			} {
+				user := withDatabases("dbuser", databases)
+				user.Password = &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny}
+				cluster := newUsersCluster(image, user)
+
+				full := buildUserAcl(user, nil, true)
+				gated := buildUserAcl(user, nil, databasesAclSupported(cluster.Spec.Image))
+				dropped := full != gated
+
+				Expect(aclVersionGateWarnings(cluster) != nil).To(Equal(dropped), "image %s, databases %+v", image, databases)
+			}
+		}
 	})
 })

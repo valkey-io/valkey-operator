@@ -98,7 +98,7 @@ type ACLUserPassword struct {
 	Secret *PasswordSecretSpec `json:"secret,omitempty"`
 }
 
-// ACLPermissions holds the command, key and channel rules of an ACL entry.
+// ACLPermissions holds the command, key, channel and database rules of an ACL entry.
 type ACLPermissions struct {
 	// Valkey command categories, commands, and subcommands restrictions for this user
 	// +optional
@@ -111,6 +111,13 @@ type ACLPermissions struct {
 	// Channel restrictions
 	// +optional
 	Channels ChannelsAclSpec `json:"channels,omitempty"`
+
+	// Database restrictions; requires Valkey 9.1+, dropped with a ConfigurationWarning on older images.
+	// The operator runs Valkey in cluster mode, which has only db 0 unless
+	// cluster-databases is raised in spec.config. Until then ids: [0] restricts
+	// nothing, and a selection without db 0 denies the user everything.
+	// +optional
+	Databases DatabasesAclSpec `json:"databases,omitempty"`
 
 	// Raw ACL for (additional) permissions. Appended to anything generated.
 	// +kubebuilder:validation:Pattern=`^[^\r\n]*\n?$`
@@ -256,4 +263,27 @@ type ChannelsAclSpec struct {
 	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
 	// +optional
 	Patterns []string `json:"patterns,omitempty"`
+}
+
+// DatabasesAclSpec scopes a user to logical databases.
+//
+// ids is optional, so the rules guard it with has().
+// +kubebuilder:validation:XValidation:message="databases.ids and databases.allDbs are mutually exclusive",rule="!(has(self.ids) && self.allDbs)"
+// +kubebuilder:validation:XValidation:message="databases.ids and databases.resetDbs are mutually exclusive",rule="!(has(self.ids) && self.resetDbs)"
+// +kubebuilder:validation:XValidation:message="databases.allDbs and databases.resetDbs are mutually exclusive",rule="!(self.allDbs && self.resetDbs)"
+type DatabasesAclSpec struct {
+
+	// Database IDs this user can access; maps to Valkey: db=0,1,2
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=0
+	IDs []int32 `json:"ids,omitempty"`
+
+	// Allow this user to access all databases, Valkey's default; maps to Valkey: alldbs
+	// +kubebuilder:default=false
+	AllDbs bool `json:"allDbs,omitempty"`
+
+	// Deny this user access to all databases; maps to Valkey: resetdbs
+	// +kubebuilder:default=false
+	ResetDbs bool `json:"resetDbs,omitempty"`
 }

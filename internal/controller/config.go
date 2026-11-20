@@ -56,6 +56,67 @@ var versionGatedConfig = map[string]*semver.Version{
 	"tls-auto-reload-interval": semver.MustParse("9.1.0-rc1"),
 }
 
+// -rc1 so that 9.1.0 release candidates pass, like tls-auto-reload-interval.
+var aclDatabasesMinVersion = semver.MustParse("9.1.0-rc1")
+
+func databasesAclSupported(image string) bool {
+	return valkey.MeetsMinVersion(effectiveImage(image), aclDatabasesMinVersion)
+}
+
+func hasDatabasesDirective(databases valkeyiov1alpha1.DatabasesAclSpec) bool {
+	return len(databases.IDs) > 0 || databases.AllDbs || databases.ResetDbs
+}
+
+func aclVersionGateWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
+	if databasesAclSupported(cluster.Spec.Image) {
+		return nil
+	}
+
+	var affected []string
+	for _, user := range cluster.Spec.ACLUsers() {
+		if hasDatabasesDirective(user.Databases) {
+			affected = append(affected, user.Name)
+		}
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	slices.Sort(affected)
+
+	// Same fallback as ACLUsers().
+	field := "spec.acl.users"
+	if cluster.Spec.ACL == nil || len(cluster.Spec.ACL.Users) == 0 {
+		field = "spec.users"
+	}
+
+	return []configWarning{{
+		reason: valkeyiov1alpha1.ReasonUnsupportedAclDirective,
+		message: fmt.Sprintf("%s[%s].databases requires Valkey %s+, %s",
+			field, joinUserNames(affected, aclWarningUserNamesBudget), aclDatabasesMinVersion, detectedVersionDetail(cluster.Spec.Image)),
+	}}
+}
+
+// aclWarningUserNamesBudget keeps the warning under the 1024-character event note limit.
+const aclWarningUserNamesBudget = 512
+
+// joinUserNames comma-joins names up to budget characters, e.g. "alice,bob,+3 more".
+func joinUserNames(names []string, budget int) string {
+	var b strings.Builder
+	for i, name := range names {
+		sep := ""
+		if i > 0 {
+			sep = ","
+		}
+		if b.Len()+len(sep)+len(name) > budget {
+			fmt.Fprintf(&b, "%s+%d more", sep, len(names)-i)
+			break
+		}
+		b.WriteString(sep)
+		b.WriteString(name)
+	}
+	return b.String()
+}
+
 // tlsAuthClientsUserMinVersion lists client certificate-to-user mappings that
 // need a newer Valkey release. Values absent from this map have no additional
 // version requirement.
@@ -195,15 +256,7 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
 
 	image := effectiveImage(cluster.Spec.Image)
-	imageSource := "spec.image"
-	if cluster.Spec.Image == "" {
-		imageSource = "default image"
-	}
-
-	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
-	if version, ok := valkey.VersionFromImage(image); ok {
-		versionDetail = fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
-	}
+	versionDetail := detectedVersionDetail(cluster.Spec.Image)
 
 	warnings := make([]configWarning, 0, len(droppedKeys)+1)
 	for _, key := range slices.Sorted(maps.Keys(droppedKeys)) {
@@ -226,6 +279,19 @@ func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []config
 	}
 
 	return warnings
+}
+
+func detectedVersionDetail(specImage string) string {
+	image := effectiveImage(specImage)
+	imageSource := "spec.image"
+	if specImage == "" {
+		imageSource = "default image"
+	}
+
+	if version, ok := valkey.VersionFromImage(image); ok {
+		return fmt.Sprintf("detected %s from %s %q", version, imageSource, image)
+	}
+	return fmt.Sprintf("no version could be detected from %s %q", imageSource, image)
 }
 
 // clientAuthUserSupported reports whether the selected certificate-to-user

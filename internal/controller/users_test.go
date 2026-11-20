@@ -50,12 +50,17 @@ var buildAclExpected = map[string]string{
 	"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
 	"edward":  "user edward on +@admin",
 	"frank":   "user frank on #9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 +@read",
+	"grace":   "user grace on nopass db=0,1 +@all",
+	"henry":   "user henry on nopass resetdbs +@all",
+	"ivan":    "user ivan on nopass alldbs +@all",
 }
 
 func TestBuildAclFileContents(t *testing.T) {
 	adminOnly := valkeyiov1alpha1.ACLPermissions{
 		Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@admin"}},
 	}
+	allCommands := valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}}
+	anyPassword := &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny}
 	users := []valkeyiov1alpha1.ACLUserSpec{
 		{
 			Name:  "alice",
@@ -96,10 +101,35 @@ func TestBuildAclFileContents(t *testing.T) {
 				Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@read"}},
 			},
 		},
+		{
+			// db= needs no reset; a stray resetdbs fails the exact match.
+			Name:     "grace",
+			Password: anyPassword,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0, 1}},
+				Commands:  allCommands,
+			},
+		},
+		{
+			Name:     "henry",
+			Password: anyPassword,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				Databases: valkeyiov1alpha1.DatabasesAclSpec{ResetDbs: true},
+				Commands:  allCommands,
+			},
+		},
+		{
+			Name:     "ivan",
+			Password: anyPassword,
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				Databases: valkeyiov1alpha1.DatabasesAclSpec{AllDbs: true},
+				Commands:  allCommands,
+			},
+		},
 	}
 
 	for _, user := range users {
-		acl := buildUserAcl(user, buildAclPasswords[user.Name])
+		acl := buildUserAcl(user, buildAclPasswords[user.Name], true)
 		assert.Equal(t, buildAclExpected[user.Name], strings.TrimSpace(acl), user.Name)
 	}
 }
@@ -108,7 +138,7 @@ func TestBuildAclFileContents(t *testing.T) {
 // spec.acl.users existed, so moving users between the fields changes nothing.
 func TestBuildUserAclLegacyParity(t *testing.T) {
 	for _, legacy := range legacyBuildAclUsers {
-		acl := buildUserAcl(legacy.ToACLUser(), buildAclPasswords[legacy.Name])
+		acl := buildUserAcl(legacy.ToACLUser(), buildAclPasswords[legacy.Name], true)
 		assert.Equal(t, buildAclExpected[legacy.Name], strings.TrimSpace(acl), legacy.Name)
 	}
 }
@@ -179,6 +209,53 @@ var legacyBuildAclUsers = []valkeyiov1alpha1.UserAclSpec{
 			},
 		},
 	},
+	{
+		// Checks that ToACLUser keeps Databases.
+		Name:       "grace",
+		Enabled:    true,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{0, 1}},
+			Commands:  valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
+		},
+	},
+}
+
+func TestBuildUserAcl_DatabasesVersionGate(t *testing.T) {
+	for name, databases := range map[string]valkeyiov1alpha1.DatabasesAclSpec{
+		"ids":      {IDs: []int32{0, 1}},
+		"allDbs":   {AllDbs: true},
+		"resetDbs": {ResetDbs: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			user := valkeyiov1alpha1.ACLUserSpec{
+				Name:     "frank",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+				ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+					Databases: databases,
+					Commands:  valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
+				},
+			}
+
+			acl := strings.TrimSpace(buildUserAcl(user, nil, false))
+
+			assert.Equal(t, "user frank on nopass +@all", acl)
+		})
+	}
+}
+
+func TestBuildUserAcl_EmptyDatabaseIDsRenderNoDirective(t *testing.T) {
+	user := valkeyiov1alpha1.ACLUserSpec{
+		Name:     "frank",
+		Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+			Databases: valkeyiov1alpha1.DatabasesAclSpec{IDs: []int32{}},
+			Commands:  valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@all"}},
+		},
+	}
+
+	// A bare db= would break ACL LOAD.
+	assert.Equal(t, "user frank on nopass +@all", strings.TrimSpace(buildUserAcl(user, nil, true)))
 }
 
 func TestValidateSystemUserPasswordSecret(t *testing.T) {
@@ -262,7 +339,7 @@ func TestBuildUserAclUnknownStateIsOff(t *testing.T) {
 		Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
 	}
 
-	assert.Equal(t, "user alice off nopass", strings.TrimSpace(buildUserAcl(user, nil)))
+	assert.Equal(t, "user alice off nopass", strings.TrimSpace(buildUserAcl(user, nil, true)))
 }
 
 func TestDeprecatedFieldConfigWarnings(t *testing.T) {

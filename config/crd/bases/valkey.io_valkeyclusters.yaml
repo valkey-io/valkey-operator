@@ -121,6 +121,43 @@ spec:
                                 type: string
                               type: array
                           type: object
+                        databases:
+                          description: |-
+                            Database restrictions; requires Valkey 9.1+, dropped with a ConfigurationWarning on older images.
+                            The operator runs Valkey in cluster mode, which has only db 0 unless
+                            cluster-databases is raised in spec.config. Until then ids: [0] restricts
+                            nothing, and a selection without db 0 denies the user everything.
+                          properties:
+                            allDbs:
+                              default: false
+                              description: 'Allow this user to access all databases,
+                                Valkey''s default; maps to Valkey: alldbs'
+                              type: boolean
+                            ids:
+                              description: 'Database IDs this user can access; maps
+                                to Valkey: db=0,1,2'
+                              items:
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              minItems: 1
+                              type: array
+                            resetDbs:
+                              default: false
+                              description: 'Deny this user access to all databases;
+                                maps to Valkey: resetdbs'
+                              type: boolean
+                          type: object
+                          x-kubernetes-validations:
+                          - message: databases.ids and databases.allDbs are mutually
+                              exclusive
+                            rule: '!(has(self.ids) && self.allDbs)'
+                          - message: databases.ids and databases.resetDbs are mutually
+                              exclusive
+                            rule: '!(has(self.ids) && self.resetDbs)'
+                          - message: databases.allDbs and databases.resetDbs are mutually
+                              exclusive
+                            rule: '!(self.allDbs && self.resetDbs)'
                         keys:
                           description: Key restrictions
                           properties:
@@ -4089,6 +4126,42 @@ spec:
                             type: string
                           type: array
                       type: object
+                    databases:
+                      description: |-
+                        Database restrictions; requires Valkey 9.1+, dropped with a ConfigurationWarning on older images.
+                        The operator runs Valkey in cluster mode, which has only db 0 unless
+                        cluster-databases is raised in spec.config. Until then ids: [0] restricts
+                        nothing, and a selection without db 0 denies the user everything.
+                      properties:
+                        allDbs:
+                          default: false
+                          description: 'Allow this user to access all databases, Valkey''s
+                            default; maps to Valkey: alldbs'
+                          type: boolean
+                        ids:
+                          description: 'Database IDs this user can access; maps to
+                            Valkey: db=0,1,2'
+                          items:
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          minItems: 1
+                          type: array
+                        resetDbs:
+                          default: false
+                          description: 'Deny this user access to all databases; maps
+                            to Valkey: resetdbs'
+                          type: boolean
+                      type: object
+                      x-kubernetes-validations:
+                      - message: databases.ids and databases.allDbs are mutually exclusive
+                        rule: '!(has(self.ids) && self.allDbs)'
+                      - message: databases.ids and databases.resetDbs are mutually
+                          exclusive
+                        rule: '!(has(self.ids) && self.resetDbs)'
+                      - message: databases.allDbs and databases.resetDbs are mutually
+                          exclusive
+                        rule: '!(self.allDbs && self.resetDbs)'
                     enabled:
                       default: true
                       description: If the user is enabled or not

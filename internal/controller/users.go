@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -155,7 +156,8 @@ func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, clus
 				RawAcl: systemUsersAcls[user],
 			},
 		}
-		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes))
+		// System users have no databases block, so the version check is skipped.
+		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes, false))
 	}
 
 	return systemsAcls.String(), nil
@@ -212,6 +214,8 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		return err
 	}
 
+	databasesSupported := databasesAclSupported(cluster.Spec.Image)
+
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
 	for _, user := range users {
@@ -226,7 +230,7 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 		}
 
 		// Build ACL string for this user with found password(s)
-		acl := buildUserAcl(user, passwords)
+		acl := buildUserAcl(user, passwords, databasesSupported)
 		fmt.Fprintf(&usersAcls, "%s\n", acl)
 	}
 	// append system users ACL
@@ -286,8 +290,28 @@ func appendAcl(acl *strings.Builder, permissions []string, prefix string) {
 	}
 }
 
+func appendDatabasesAcl(acl *strings.Builder, databases valkeyiov1alpha1.DatabasesAclSpec, databasesSupported bool) {
+	if !databasesSupported {
+		return
+	}
+
+	switch {
+	case databases.ResetDbs:
+		acl.WriteString(" resetdbs")
+	case databases.AllDbs:
+		acl.WriteString(" alldbs")
+	case len(databases.IDs) > 0:
+		// db= replaces alldbs itself, so no reset is needed. A bare db= breaks ACL LOAD.
+		ids := make([]string, len(databases.IDs))
+		for i, id := range databases.IDs {
+			ids[i] = strconv.Itoa(int(id))
+		}
+		fmt.Fprintf(acl, " db=%s", strings.Join(ids, ","))
+	}
+}
+
 // Builds a user ACL string
-func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string {
+func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string, databasesSupported bool) string {
 
 	// Holds the ACL as we build it
 	var acl strings.Builder
@@ -323,6 +347,8 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 		acl.WriteString(" resetchannels")
 		appendAcl(&acl, user.Channels.Patterns, "&")
 	}
+
+	appendDatabasesAcl(&acl, user.Databases, databasesSupported)
 
 	// Build command ACLs
 	appendAcl(&acl, user.Commands.Allow, "+")

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,6 +87,28 @@ func TestACLDigestFastPath(t *testing.T) {
 	f.digestErr = errors.New("NOPERM")
 	check()
 	assert.Equal(t, 5, f.aclLoads, "a failed digest read invalidates the cached shortcut")
+}
+
+func TestACLDigestExpiresEvenWhenDigestMatches(t *testing.T) {
+	ctx := context.Background()
+	r, node, f := digestFixture(t, "valkey/valkey:9.2.0")
+	// The fake reports the same digest at both endpoints, as it would if
+	// an external permission edit restored the pre-load ACL during checking.
+	ok, _, err := r.applyLiveACL(ctx, node)
+	require.NoError(t, err)
+	require.True(t, ok)
+	key := client.ObjectKeyFromObject(node)
+	entry, found := r.aclDigests.Load(key)
+	require.True(t, found)
+	baseline := entry.(checkedACLDigest)
+	baseline.checkedAt = time.Now().Add(-aclDigestMaxAge)
+	r.aclDigests.Store(key, baseline)
+
+	ok, _, err = r.applyLiveACL(ctx, node)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 2, f.aclLoads, "expiry forces a reload even if digest and revision still match")
+	assert.Equal(t, 2, f.aclChecks)
 }
 
 func TestACLDigestFallsBack(t *testing.T) {

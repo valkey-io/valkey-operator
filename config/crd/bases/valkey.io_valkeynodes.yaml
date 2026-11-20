@@ -987,8 +987,13 @@ spec:
                   Config is the user-facing Valkey configuration, copied verbatim from the
                   owning cluster's Spec.Config. The controller applies the subset of these
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
-                  the rest take effect on the next pod roll.
+                  the rest take effect on the next pod roll. Keys are lowercase, as the
+                  cluster's are.
+                maxProperties: 1000
                 type: object
+                x-kubernetes-validations:
+                - message: spec.config keys must be lowercase
+                  rule: self.all(key, key == key.lowerAscii())
               configRevision:
                 description: |-
                   ConfigRevision names the pinned config revision the pod template

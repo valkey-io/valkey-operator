@@ -117,7 +117,10 @@ type ValkeyNodeSpec struct {
 	// Config is the user-facing Valkey configuration, copied verbatim from the
 	// owning cluster's Spec.Config. The controller applies the subset of these
 	// keys that are live-settable (see the operator's allowlist) via CONFIG SET;
-	// the rest take effect on the next pod roll.
+	// the rest take effect on the next pod roll. Keys are lowercase, as the
+	// cluster's are.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key == key.lowerAscii())",message="spec.config keys must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

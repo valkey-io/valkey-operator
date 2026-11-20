@@ -104,7 +104,7 @@ tls-replication
 
 Cluster directives the operator does not set, such as `cluster-require-full-coverage`, `cluster-migration-barrier` and `cluster-node-timeout`, stay available.
 
-Keys may contain only letters, digits, `.`, `_` and `-`. Valkey trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
+Keys may contain only lowercase letters, digits, `.`, `_` and `-`. Valkey matches keys in any case, but the operator picks out live-settable keys such as `maxmemory` by exact name, so it would not apply `MAXMEMORY` live. Valkey also trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
 
 #### Future plans
 

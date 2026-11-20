@@ -74,15 +74,12 @@ const (
 // Kubelet expands $(VAR) in the pod command, which would freeze PRIMARY_AUTH
 // at container start, so this string must not contain "$(". The shell reads
 // the mounted file when it is there and otherwise uses the environment value.
-// With handoff it starts the server through primary-handoff.sh when the
-// mounted ConfigMap carries that script, and directly otherwise, so a node
-// whose older shared ConfigMap lacks the script still starts. $0 is the
-// server binary and $@ its arguments.
+// With handoff it starts the server through primary-handoff.sh, which execs
+// the server itself. $0 is the server binary and $@ its arguments.
 func replicationAuthShell(handoff bool) string {
 	start := `exec "$0" "$@" --primaryauth "$PRIMARY_AUTH"`
 	if handoff {
-		start = `if [ -f /scripts/` + primaryHandoffScriptKey + ` ]; then exec /bin/sh /scripts/` + primaryHandoffScriptKey +
-			` "$@" --primaryauth "$PRIMARY_AUTH"; fi` + "\n" + start
+		start = `exec /bin/sh /scripts/` + primaryHandoffScriptKey + ` "$@" --primaryauth "$PRIMARY_AUTH"`
 	}
 	return fmt.Sprintf(`pw="%s/%s"
 if [ -f "$pw" ]; then IFS= read -r PRIMARY_AUTH < "$pw" || true; fi

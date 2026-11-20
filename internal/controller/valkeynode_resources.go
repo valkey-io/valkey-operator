@@ -542,13 +542,10 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	return c[0]
 }
 
-// initContainerCommand runs script when it exists and exits 0 otherwise. An
-// older shared ConfigMap (spec.sharedConfigMapName) may lack init.sh, and its
-// absence must not block the pod.
+// initContainerCommand runs script. The scripts volume mounts every script
+// key, so a pod whose ConfigMap lacks one does not start.
 func initContainerCommand(script string) []string {
-	return []string{shellPath, "-c", fmt.Sprintf(
-		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
-		script, shellPath)}
+	return []string{shellPath, script}
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single

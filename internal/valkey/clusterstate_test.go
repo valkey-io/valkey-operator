@@ -1697,6 +1697,52 @@ func TestGetClusterStateHoldsTheOwnSlotsOfADroppedPrimary(t *testing.T) {
 	if got := state.IncompleteScrapes(); len(got) != 1 || got[0].Id != "ghi" || !got[0].OwnsSlots {
 		t.Fatalf("incomplete scrapes = %+v, want ghi owning slots", got)
 	}
+	// With its slots out of the free set, scale-in relies on this to keep it.
+	if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
+	}
+}
+
+// A scraped replica of that dropped primary carries the held ranges on its
+// shard, so scale-in does not treat the shard as drained.
+func TestGetClusterStateCopiesTheOwnSlotsOfADroppedPrimaryToItsReplica(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 100-16383\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected\n")
+	replica := healthyScrape()
+	replica[0] = blobResult("def")
+	replica[1] = blobResult("shard-2")
+	replica[2] = blobResult("role:slave\r\nmaster_link_status:up\r\n")
+	replica[4] = blobResult("def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 100-16383\n")
+	dropped := healthyScrape()
+	dropped[0] = blobResult("ghi")
+	dropped[1] = blobResult("shard-2")
+	dropped[3] = valkeyErrorResult("BUSY Valkey is busy running a script")
+	dropped[4] = blobResult("ghi 10.0.0.3:6379@16379 myself,master - 0 0 2 connected 0-99\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 100-16383\n")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.2:6379": replica,
+		"10.0.0.3:6379": dropped,
+	}))
+
+	idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == "shard-2" })
+	if idx < 0 {
+		t.Fatalf("no shard for the replica: %+v", state.Shards)
+	}
+	shard := state.Shards[idx]
+	if !reflect.DeepEqual(shard.Slots, []SlotsRange{{0, 99}}) {
+		t.Fatalf("replica shard slots = %v, want the dropped primary's 0-99", shard.Slots)
+	}
+	if !state.PrimaryUnscrapedButServing(shard) {
+		t.Fatal("the replica's shard reads as drained while its primary holds slots")
+	}
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("unassigned slots = %v, want none", got)
+	}
 }
 
 // Two peers can disagree after a migration: one still lists the old range and

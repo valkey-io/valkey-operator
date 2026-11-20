@@ -261,11 +261,22 @@ func (s *ClusterState) noteUnscrapedSlotOwnership() {
 	}
 	owners := make(map[string]*held)
 	// A dropped primary's own table can list ranges it just received before
-	// any peer has learned them.
+	// any peer has learned them. A scraped replica of it carries them on its
+	// shard, as for ranges a peer table reports.
 	for id, slots := range s.answeredSlots {
-		if _, found := scraped[id]; !found {
-			owners[id] = &held{slots: slots}
+		if _, found := scraped[id]; found {
+			continue
 		}
+		h := &held{slots: slots}
+		for _, node := range s.AllNodes() {
+			if node.PrimaryIdFromSelf() != id {
+				continue
+			}
+			if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
+				h.shard = shard
+			}
+		}
+		owners[id] = h
 	}
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
@@ -402,9 +413,10 @@ func slotCount(ranges []SlotsRange) int {
 }
 
 // unscrapedSlotOwners returns ids and addresses of primaries this pass did
-// not scrape that a peer table still shows owning slots. A restart can move
-// the process while peers still name the old address, so the address that
-// answered as that id is included too.
+// not scrape that a peer table, or their own table before they were dropped,
+// still shows owning slots. A restart can move the process while peers still
+// name the old address, so the address that answered as that id is included
+// too.
 func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 	ids := make(map[string]struct{})
 	var hosts []string
@@ -427,6 +439,11 @@ func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 			hosts = append(hosts, entry.Host)
 		}
 	}
+	for id := range s.answeredSlots {
+		if _, found := scraped[id]; !found {
+			ids[id] = struct{}{}
+		}
+	}
 	for _, inc := range s.incomplete {
 		if inc.Id == "" || inc.Address == "" {
 			continue
@@ -444,7 +461,8 @@ func (s *ClusterState) unscrapedSlotOwners() (map[string]struct{}, []string) {
 }
 
 // PrimaryUnscrapedButServing reports that shard has no scraped primary while
-// some peer table still assigns slots to the primary its members replicate.
+// a peer table, or that primary's own table before it was dropped, still
+// assigns slots to the primary its members replicate.
 // A primary that answered with an empty range is pending and is not included.
 func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
 	if shard == nil || shard.GetPrimaryNode() != nil {
@@ -463,8 +481,8 @@ func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
 }
 
 // UnscrapedSlotOwnerHosts returns addresses of primaries this pass did not
-// scrape whose peer-table lines still list owned slots, including the
-// address an answered id moved to.
+// scrape whose peer-table lines, or own table before they were dropped, still
+// list owned slots, including the address an answered id moved to.
 func (s *ClusterState) UnscrapedSlotOwnerHosts() []string {
 	_, hosts := s.unscrapedSlotOwners()
 	return hosts

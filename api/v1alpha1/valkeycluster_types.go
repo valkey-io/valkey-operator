@@ -975,6 +975,12 @@ const (
 	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
 	// while topology work continues.
 	ReasonUsersACLUnresolved = "UsersACLUnresolved"
+
+	// ReasonInitialSyncGateFailed names the Warning event when the operator
+	// cannot write the valkey.io/initial-sync-complete readiness gate on a pod,
+	// and is used with Ready and Progressing while such a failure holds the
+	// node walk.
+	ReasonInitialSyncGateFailed = "InitialSyncGateFailed"
 )
 
 // +kubebuilder:object:root=true

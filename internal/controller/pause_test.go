@@ -159,7 +159,7 @@ var _ = Describe("Pause reconciliation", func() {
 	It("skips a paused ValkeyNode without creating its workload", func() {
 		key := types.NamespacedName{Name: "paused-node", Namespace: "default"}
 		Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn, OwnerReferences: testParentRefs()},
 			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		})).To(Succeed())
 		DeferCleanup(func() { deleteNode(key) })
@@ -179,7 +179,7 @@ var _ = Describe("Pause reconciliation", func() {
 	It("maintains persistence finalizers before pausing a node", func() {
 		key := types.NamespacedName{Name: "paused-persistent-node", Namespace: "default"}
 		node := &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn, OwnerReferences: testParentRefs()},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{

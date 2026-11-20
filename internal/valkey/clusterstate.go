@@ -24,14 +24,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	vclient "github.com/valkey-io/valkey-go"
+	"golang.org/x/sync/errgroup"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // DialFunc returns a client for the Valkey node at address (host:port). The
 // client belongs to whoever supplies the DialFunc; callers never call Close on
-// it.
+// it. It must be safe for concurrent calls: GetClusterState dials addresses in
+// parallel.
 type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
 
 // NodeState represents the current state of an inspected cluster node.
@@ -172,6 +175,10 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
+//
+// Nodes are dialled in parallel, so unreachable addresses cost about one dial
+// timeout in all rather than one each. The state is built in address order
+// whatever order the nodes answer in.
 func GetClusterState(ctx context.Context, addresses []string, port int, dial DialFunc) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
@@ -179,10 +186,10 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 		targets:      make(map[string]struct{}, len(addresses)),
 	}
 
-	for _, address := range addresses {
+	results := scrapeNodes(ctx, addresses, port, dial)
+	for i, address := range addresses {
 		state.targets[address] = struct{}{}
-		// Attempt to connect to the Valkey node and extract information.
-		node, answered, ownsSlots := getNodeState(ctx, address, port, dial)
+		node, answered, ownsSlots := results[i].node, results[i].answered, results[i].ownsSlots
 		if node == nil {
 			// The address was a pod this pass set out to scrape. Remember it,
 			// and the id when MYID succeeded, so the status can name a node
@@ -448,6 +455,50 @@ func (s *ClusterState) PrimaryUnscrapedButServing(shard *ShardState) bool {
 func (s *ClusterState) UnscrapedSlotOwnerHosts() []string {
 	_, hosts := s.unscrapedSlotOwners()
 	return hosts
+}
+
+// scrapeConcurrency caps the dials in flight during one scrape. Correctness does
+// not need it; it bounds the burst of TCP and TLS handshakes when nothing is
+// pooled, as after an operator restart or a credential rotation.
+const scrapeConcurrency = 32
+
+// scrapeResult is what getNodeState returned for one address.
+type scrapeResult struct {
+	node      *NodeState
+	answered  string
+	ownsSlots bool
+}
+
+// scrapeNodes scrapes each address in parallel and returns the results in
+// address order, with a nil node where a node was dropped. It waits for every
+// dial, even after ctx is cancelled: valkey-go dials a new client without the
+// caller's context.
+func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFunc) []scrapeResult {
+	results := make([]scrapeResult, len(addresses))
+	var g errgroup.Group
+	g.SetLimit(scrapeConcurrency)
+	var panicked any
+	var panicOnce sync.Once
+	for i, address := range addresses {
+		g.Go(func() error {
+			// Hand a panic back to the caller's goroutine, where controller-runtime
+			// recovers it. Here it would end the process.
+			defer func() {
+				if r := recover(); r != nil {
+					panicOnce.Do(func() { panicked = r })
+				}
+			}()
+			// Attempt to connect to the Valkey node and extract information.
+			r := &results[i]
+			r.node, r.answered, r.ownsSlots = getNodeState(ctx, address, port, dial)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if panicked != nil {
+		panic(panicked)
+	}
+	return results
 }
 
 // adoptDrainedPrimaries moves a slot-less pending primary into the shard of a
@@ -1090,10 +1141,9 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 
 	// The round trip can fail without a dial error: a pooled client may point
 	// at a server that went away since its last use, or the caller's context
-	// may have expired, as when an earlier node used up the role poller's pass
-	// budget. All five commands share one wire, so a transport-level failure
-	// on the first result means the whole round trip failed, not just one
-	// command.
+	// may have expired, as when the role poller's pass budget runs out. All
+	// five commands share one wire, so a transport-level failure on the first
+	// result means the whole round trip failed, not just one command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
 		return nil, "", false
@@ -1184,40 +1234,17 @@ func infoStringToMap(s string) map[string]string {
 	return m
 }
 
-// parseSlotsRange parses strings to find multiple SlotsRange's
-func parseSlotsRanges(s []string) ([]SlotsRange, error) {
-	ranges := []SlotsRange{}
-
-	for _, part := range s {
-		// During active slot migration, CLUSTER NODES appends entries like
-		// "[5461->-abc123]" (migrating) or "[5461-<-abc123]" (importing) to the
-		// slot fields. parseClusterNodesLine splits well-formed markers off
-		// before calling this, so a "[" field here is a malformed marker. Skip
-		// it rather than fail the whole line.
-		if strings.HasPrefix(part, "[") {
-			continue
-		}
-		r, err := parseSlotsRange(part)
-		if err != nil {
-			return nil, err
-		}
-		ranges = append(ranges, r)
-	}
-	return ranges, nil
-}
-
 // parseSlotsRange parses a string to find a single SlotsRange
 func parseSlotsRange(s string) (SlotsRange, error) {
-	if strings.Contains(s, "-") {
-		parts := strings.Split(s, "-")
-		if len(parts) != 2 {
+	if startText, endText, isRange := strings.Cut(s, "-"); isRange {
+		if strings.Contains(endText, "-") {
 			return SlotsRange{}, fmt.Errorf("invalid range: %s", s)
 		}
-		start, err := strconv.Atoi(parts[0])
+		start, err := strconv.Atoi(startText)
 		if err != nil {
 			return SlotsRange{}, err
 		}
-		end, err := strconv.Atoi(parts[1])
+		end, err := strconv.Atoi(endText)
 		if err != nil {
 			return SlotsRange{}, err
 		}

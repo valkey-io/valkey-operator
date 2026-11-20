@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -813,6 +814,15 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 	return users
 }
 
+// SystemPasswordRotationInterval returns how long an internal user's password
+// stays current, or zero when spec.acl.systemUsers.passwordRotation is unset.
+func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
+	if s.ACL == nil || s.ACL.SystemUsers == nil || s.ACL.SystemUsers.PasswordRotation == nil {
+		return 0
+	}
+	return time.Duration(s.ACL.SystemUsers.PasswordRotation.IntervalDays) * 24 * time.Hour
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -869,6 +879,10 @@ const (
 	// primary whose slots stay held because the scrape did not reach it.
 	// Non-blocking: Ready may stay True. The message names the address and id.
 	ConditionIncompleteScrape = "IncompleteScrape"
+	// ConditionExporterPasswordHeld is set while _exporter.previous is still
+	// accepted more than five minutes after the switch, and names the pods to
+	// restart. Non-blocking: the other system passwords keep rotating.
+	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 	// ConditionTLSConfigured reports whether the operator-managed TLS trust
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
@@ -905,10 +919,9 @@ const (
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
-// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
-// of a standalone ValkeyNode, while its value is exactly "true". The operator
-// copies it onto the ValkeyNodes of a paused cluster and removes it from them
-// when the cluster resumes.
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster while
+// its value is exactly "true". The operator copies it onto the ValkeyNodes of a
+// paused cluster and removes it from them when the cluster resumes.
 const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
 
 // ReasonPauseAnnotationSet is the reason of ConditionReconciliationPaused.
@@ -916,15 +929,17 @@ const ReasonPauseAnnotationSet = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing                  = "Initializing"
-	ReasonReconciling                   = "Reconciling"
-	ReasonClusterHealthy                = "ClusterHealthy"
-	ReasonServiceError                  = "ServiceError"
-	ReasonConfigMapError                = "ConfigMapError"
-	ReasonValkeyNodeError               = "ValkeyNodeError"
-	ReasonValkeyNodeListError           = "ValkeyNodeListError"
-	ReasonAddingNodes                   = "AddingNodes"
-	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	// ReasonExporterNotRestarted is used with ConditionExporterPasswordHeld.
+	ReasonExporterNotRestarted          = "ExporterNotRestarted"
 	ReasonMissingShards                 = "MissingShards"
 	ReasonMissingReplicas               = "MissingReplicas"
 	ReasonReconcileComplete             = "ReconcileComplete"
@@ -972,6 +987,12 @@ const (
 	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
 	// while topology work continues.
 	ReasonUsersACLUnresolved = "UsersACLUnresolved"
+
+	// ReasonInitialSyncGateFailed names the Warning event when the operator
+	// cannot write the valkey.io/initial-sync-complete readiness gate on a pod,
+	// and is used with Ready and Progressing while such a failure holds the
+	// node walk.
+	ReasonInitialSyncGateFailed = "InitialSyncGateFailed"
 )
 
 // +kubebuilder:object:root=true

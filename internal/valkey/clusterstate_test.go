@@ -1674,6 +1674,31 @@ func TestGetClusterStateHoldsSlotsReportedByAnotherShard(t *testing.T) {
 	}
 }
 
+// A primary dropped after CLUSTER MYID keeps the ranges its own table lists.
+// It can have just received them, before any peer's table shows them.
+func TestGetClusterStateHoldsTheOwnSlotsOfADroppedPrimary(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 100-16383\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected\n")
+	dropped := healthyScrape()
+	dropped[0] = blobResult("ghi")
+	dropped[3] = valkeyErrorResult("BUSY Valkey is busy running a script")
+	dropped[4] = blobResult("ghi 10.0.0.3:6379@16379 myself,master - 0 0 2 connected 0-99\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 100-16383\n")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.3:6379": dropped,
+	}))
+
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("slots the dropped primary just received were reported unassigned: %v", got)
+	}
+	if got := state.IncompleteScrapes(); len(got) != 1 || got[0].Id != "ghi" || !got[0].OwnsSlots {
+		t.Fatalf("incomplete scrapes = %+v, want ghi owning slots", got)
+	}
+}
+
 // Two peers can disagree after a migration: one still lists the old range and
 // another lists slots the primary just received. Both have to stay assigned.
 func TestGetClusterStateUnionsDisjointReportsOfAnUnscrapedPrimary(t *testing.T) {

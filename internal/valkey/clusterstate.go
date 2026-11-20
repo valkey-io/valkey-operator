@@ -125,6 +125,11 @@ type ClusterState struct {
 	// Shards: the scrape is not usable for topology.
 	answered map[string]bool
 
+	// answeredSlots are the owned ranges a dropped node's own CLUSTER NODES
+	// line listed. Peers may not have learned ranges it just received, so
+	// noteUnscrapedSlotOwnership holds these as well.
+	answeredSlots map[string][]SlotsRange
+
 	// incomplete are addresses this pass set out to scrape and did not keep.
 	// The order is the order of the address list passed to GetClusterState.
 	incomplete []IncompleteScrape
@@ -189,16 +194,17 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	results := scrapeNodes(ctx, addresses, port, dial)
 	for i, address := range addresses {
 		state.targets[address] = struct{}{}
-		node, answered, ownsSlots := results[i].node, results[i].answered, results[i].ownsSlots
+		node, answered, ownedSlots := results[i].node, results[i].answered, results[i].ownedSlots
 		if node == nil {
 			// The address was a pod this pass set out to scrape. Remember it,
 			// and the id when MYID succeeded, so the status can name a node
 			// that stays dropped. A later-command failure also keeps the id
 			// for the takeover and forget guards. The node stays out of the
 			// topology either way.
-			state.noteIncomplete(address, answered, ownsSlots)
+			state.noteIncomplete(address, answered, len(ownedSlots) > 0)
 			if answered != "" {
-				state.noteAnswered(answered, ownsSlots)
+				state.noteAnswered(answered, len(ownedSlots) > 0)
+				state.noteAnsweredSlots(answered, ownedSlots)
 			}
 			continue
 		}
@@ -254,6 +260,13 @@ func (s *ClusterState) noteUnscrapedSlotOwnership() {
 		shard *ShardState
 	}
 	owners := make(map[string]*held)
+	// A dropped primary's own table can list ranges it just received before
+	// any peer has learned them.
+	for id, slots := range s.answeredSlots {
+		if _, found := scraped[id]; !found {
+			owners[id] = &held{slots: slots}
+		}
+	}
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
 			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
@@ -464,9 +477,9 @@ const scrapeConcurrency = 32
 
 // scrapeResult is what getNodeState returned for one address.
 type scrapeResult struct {
-	node      *NodeState
-	answered  string
-	ownsSlots bool
+	node       *NodeState
+	answered   string
+	ownedSlots []SlotsRange
 }
 
 // scrapeNodes scrapes each address in parallel and returns the results in
@@ -490,7 +503,7 @@ func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFun
 			}()
 			// Attempt to connect to the Valkey node and extract information.
 			r := &results[i]
-			r.node, r.answered, r.ownsSlots = getNodeState(ctx, address, port, dial)
+			r.node, r.answered, r.ownedSlots = getNodeState(ctx, address, port, dial)
 			return nil
 		})
 	}
@@ -848,6 +861,18 @@ func (s *ClusterState) noteAnswered(id string, ownsSlots bool) {
 	}
 }
 
+// noteAnsweredSlots records the owned ranges a dropped node's own CLUSTER
+// NODES line listed.
+func (s *ClusterState) noteAnsweredSlots(id string, slots []SlotsRange) {
+	if len(slots) == 0 {
+		return
+	}
+	if s.answeredSlots == nil {
+		s.answeredSlots = make(map[string][]SlotsRange)
+	}
+	s.answeredSlots[id] = unionSlots(s.answeredSlots[id], slots)
+}
+
 // NodeAnswered reports whether id returned CLUSTER MYID this pass, including
 // a node dropped because a later command failed.
 func (s *ClusterState) NodeAnswered(id string) bool {
@@ -1099,32 +1124,32 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 	return nodes
 }
 
-// myselfOwnsSlots reports whether a CLUSTER NODES reply's myself line is a
-// primary with owned ranges. A Valkey error or a missing myself line does not.
-func myselfOwnsSlots(res vclient.ValkeyResult) bool {
+// myselfOwnedSlots returns the owned ranges on a CLUSTER NODES reply's myself
+// line when that line is a primary. A Valkey error or a missing myself line
+// gives none.
+func myselfOwnedSlots(res vclient.ValkeyResult) []SlotsRange {
 	raw, err := requiredScrapeString(res)
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, entry := range ParseClusterNodes(strings.TrimPrefix(raw, "txt:")) {
-		if entry.IsMyself() && entry.IsPrimary() && len(entry.Slots) > 0 {
-			return true
-		}
+	myself := ParseClusterNodesMyself(strings.TrimPrefix(raw, "txt:"))
+	if myself == nil || !myself.IsPrimary() {
+		return nil
 	}
-	return false
+	return myself.Slots
 }
 
 // Connect to a single Valkey node and scrapes its current state.
 // answered is the CLUSTER MYID when that command succeeded and the node was
-// then dropped. ownsSlots is that dropped node's own slot ownership.
-func getNodeState(ctx context.Context, address string, port int, dial DialFunc) (node *NodeState, answered string, ownsSlots bool) {
+// then dropped. ownedSlots are the ranges that dropped node's own table lists.
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc) (node *NodeState, answered string, ownedSlots []SlotsRange) {
 	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
 	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
 	client, err := dial(ctx, hostPort)
 	if err != nil {
 		log.Error(err, "failed to create Valkey client")
-		return nil, "", false
+		return nil, "", nil
 	}
 
 	node = &NodeState{Client: client,
@@ -1146,11 +1171,11 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	// result means the whole round trip failed, not just one command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
-		return nil, "", false
+		return nil, "", nil
 	}
 	if len(results) != 5 {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
-		return nil, "", false
+		return nil, "", nil
 	}
 
 	// Identity and topology have to come back whole. An empty id or node table
@@ -1161,14 +1186,14 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	id, err := requiredScrapeString(results[0])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER MYID")
-		return nil, "", false
+		return nil, "", nil
 	}
 	node.Id = id
 
 	shardid, err := requiredScrapeString(results[1])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER MYSHARDID")
-		return nil, id, myselfOwnsSlots(results[4])
+		return nil, id, myselfOwnedSlots(results[4])
 	}
 	node.ShardId = shardid
 
@@ -1185,24 +1210,24 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	cinfo, err := requiredScrapeString(results[3])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER INFO")
-		return nil, id, myselfOwnsSlots(results[4])
+		return nil, id, myselfOwnedSlots(results[4])
 	}
 	node.ClusterInfo = infoStringToMap(cinfo)
 
 	cnodes, err := requiredScrapeString(results[4])
 	if err != nil {
 		log.Error(err, "command failed: CLUSTER NODES")
-		return nil, id, false
+		return nil, id, nil
 	}
 	// Remove the encoding string included in a verbatim string.
 	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
 	myself := node.Myself()
 	if myself == nil {
 		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")
-		return nil, id, false
+		return nil, id, nil
 	}
 	node.Flags = myself.Flags
-	return node, "", false
+	return node, "", nil
 }
 
 // requiredScrapeString returns the reply of one scrape command. A Valkey

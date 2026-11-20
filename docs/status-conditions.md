@@ -186,6 +186,17 @@ Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annot
 Common reasons:
 - `PauseAnnotationSet` – the pause annotation is set to `"true"`.
 
+#### `ExporterPasswordHeld`
+Non-blocking. Set when the metrics exporter's previous password is still accepted more than five minutes after a [system password rotation](valkeycluster.md#system-password-rotation) switched to the new one, whether or not rotation is still turned on. `Ready` is not affected, and the other system passwords keep rotating.
+
+| Status | Meaning |
+|---|---|
+| `True` | The metrics exporter in the pods named in the message started before the switch, or within five minutes after it, so it may still send the previous password. That password stays accepted until those pods restart; restart them one at a time to finish the exporter's rotation. |
+| (absent) | No previous exporter password is held, or the switch was less than five minutes ago. |
+
+Common reasons:
+- `ExporterNotRestarted` – the exporter container has not started again since the switch.
+
 ---
 
 ### ValkeyNode conditions
@@ -503,6 +514,11 @@ These events are emitted during ACL user management.
 | `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
 | `UsersACLUnresolved` | Warning | A user's password Secret is missing or lacks a listed key, so the aclfile was not rebuilt; the nodes keep the last applied one. Emitted when the failure appears or changes |
 | `UsersACLResolved` | Normal | The aclfile was rebuilt after a `UsersACLUnresolved` failure |
+| `SystemPasswordRotationStarted` | Normal | The next system passwords were generated; the ones in use stay valid |
+| `SystemPasswordRotationCutover` | Normal | Every node accepts both passwords; clients are moving to the new ones |
+| `SystemPasswordRotationHolding` | Normal | A client still uses a previous system password, which stays accepted |
+| `SystemPasswordRotationFinished` | Normal | Every client uses the new passwords and the old ones were removed |
+| `SystemPasswordRotationHeld` | Warning | A rotation step failed; the rotation stays where it was and is tried again on the next reconcile, while users and ACLs keep reconciling |
 | `LegacySecretCopied` | Normal | A Secret an earlier release created under its `internal-` name was copied to its `valkey-` name. See [Upgrading from the `internal-` names](valkeycluster.md#upgrading-from-the-internal--names) |
 | `LegacySecretDeleted` | Normal | A Secret under its `internal-` name was deleted, because no ValkeyNode, workload template or pod of the cluster references it any more |
 | `LegacySecretRetireFailed` | Warning | Updating or deleting a Secret under its `internal-` name failed; it is tried again on the next reconcile, and the nodes keep rolling |

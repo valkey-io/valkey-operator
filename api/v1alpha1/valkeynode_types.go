@@ -337,6 +337,16 @@ type ValkeyNodeStatus struct {
 	// becomes True.
 	// +optional
 	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
+
+	// AppliedReplicationPasswordHash is the sha256 of the replication password
+	// the running server was last given with CONFIG SET primaryauth.
+	// +optional
+	AppliedReplicationPasswordHash string `json:"appliedReplicationPasswordHash,omitempty"`
+
+	// ReplicationPasswordAppliedTime is when that CONFIG SET was sent. A server
+	// container that started after it may hold an older password from the file.
+	// +optional
+	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
 }
 
 const (

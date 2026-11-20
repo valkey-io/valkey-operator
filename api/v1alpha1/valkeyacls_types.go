@@ -23,6 +23,39 @@ type ACLSpec struct {
 	// +listMapKey=name
 	// +optional
 	Users []ACLUserSpec `json:"users,omitempty"`
+
+	// SystemUsers configures the operator's internal users (_operator,
+	// _replication, _exporter).
+	// +optional
+	SystemUsers *SystemUsersSpec `json:"systemUsers,omitempty"`
+}
+
+// SystemUsersSpec configures the operator's internal users.
+type SystemUsersSpec struct {
+	// PasswordRotation turns on rotation of the passwords the operator
+	// generates for its internal users. Unset leaves those passwords
+	// unchanged.
+	// +optional
+	PasswordRotation *SystemPasswordRotationSpec `json:"passwordRotation,omitempty"`
+}
+
+// DefaultSystemPasswordRotationDays is the intervalDays the API server fills
+// in when systemUsers.passwordRotation is set without it. It must match the
+// +kubebuilder:default on IntervalDays.
+const DefaultSystemPasswordRotationDays = 30
+
+// SystemPasswordRotationSpec configures rotation of the internal users'
+// passwords. Every node accepts the new password before any client uses it,
+// and the previous one stays accepted until every client has switched.
+type SystemPasswordRotationSpec struct {
+	// IntervalDays is how many days a password stays current before the
+	// operator generates the next one. The first rotation happens one
+	// interval after rotation is turned on.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3650
+	// +kubebuilder:default=30
+	// +optional
+	IntervalDays int32 `json:"intervalDays,omitempty"`
 }
 
 // ACLUserState selects whether a user can authenticate.

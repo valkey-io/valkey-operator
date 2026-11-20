@@ -86,7 +86,7 @@ The pinned file holds the user's restart-only keys and the base config: everythi
 
 The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist therefore rolls nothing. If its cache lacks the live revision's key, the parent requeues until the cache catches up.
 
-The ValkeyNode controller owns `valkey-<node>` through a controller reference and is its only writer. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
+The ValkeyNode controller owns `valkey-<node>` through a controller reference and is its only writer. A ConfigMap of that name it does not control, such as the shared ConfigMap of a cluster named `<node>`, is left alone and the node reports `Ready=False` with reason `ConfigMapError`. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
 
 - writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. The field is required. A node stored before it existed has none until the parent reaches it in the upgrade roll; until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
 - never rewrites an existing revision key, and merge-patches the keys it changes, so other revision keys are kept.
@@ -111,6 +111,8 @@ The node controller deletes a revision key when all of these hold:
 - the workload has finished its roll: its controller has observed the latest generation, and for a StatefulSet `updateRevision` equals `currentRevision`, or for a Deployment every replica is updated
 
 Pods and the workload are read only when the ConfigMap holds more than one revision key. The delete is an optimistic-lock merge patch, so a key written since the read is not dropped. `valkey-<node>` itself is deleted with its ValkeyNode through the owner reference.
+
+During a roll `valkey-<node>` holds two revisions and `live.conf` under the 1 MiB ConfigMap limit, so a `spec.config` near half that size fails mid-roll with `ConfigMapError`.
 
 ### Upgrading
 

@@ -3668,6 +3668,11 @@ spec:
                   the running server was last confirmed to hold, recorded as ACLApplied
                   becomes True.
                 type: string
+              appliedReplicationPasswordHash:
+                description: |-
+                  AppliedReplicationPasswordHash is the sha256 of the replication password
+                  the running server was last given with CONFIG SET primaryauth.
+                type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:
@@ -3745,6 +3750,12 @@ spec:
                 description: Ready indicates whether the ValkeyNode is ready to serve
                   traffic.
                 type: boolean
+              replicationPasswordAppliedTime:
+                description: |-
+                  ReplicationPasswordAppliedTime is when that CONFIG SET was sent. A server
+                  container that started after it may hold an older password from the file.
+                format: date-time
+                type: string
               role:
                 description: Role is the Valkey replication role of this node (primary
                   or replica).

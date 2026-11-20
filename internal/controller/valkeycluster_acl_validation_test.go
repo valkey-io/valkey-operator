@@ -264,4 +264,30 @@ var _ = Describe("spec.acl validation", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("Username cannot start with '_'"))
 	})
+
+	rotation := func(days int32) func(*valkeyiov1alpha1.ValkeyClusterSpec) {
+		return func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
+			s.ACL = &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
+				PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: days},
+			}}
+		}
+	}
+
+	It("defaults systemUsers.passwordRotation.intervalDays", func() {
+		cluster, err := create(rotation(0))
+		Expect(err).NotTo(HaveOccurred())
+		got := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, got)).To(Succeed())
+		Expect(got.Spec.ACL.SystemUsers).NotTo(BeNil())
+		Expect(got.Spec.ACL.SystemUsers.PasswordRotation).NotTo(BeNil())
+		Expect(got.Spec.ACL.SystemUsers.PasswordRotation.IntervalDays).To(Equal(int32(valkeyiov1alpha1.DefaultSystemPasswordRotationDays)))
+	})
+
+	It("rejects a systemUsers.passwordRotation.intervalDays outside 1 to 3650", func() {
+		for _, days := range []int32{-1, 3651} {
+			_, err := create(rotation(days))
+			Expect(err).To(HaveOccurred(), "intervalDays %d", days)
+			Expect(err.Error()).To(ContainSubstring("spec.acl.systemUsers.passwordRotation.intervalDays"), "intervalDays %d", days)
+		}
+	})
 })

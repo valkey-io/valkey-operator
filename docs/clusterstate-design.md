@@ -14,8 +14,12 @@ snapshot of nodes that answered.
 It fans out over the given pod IPs, asking each node for `CLUSTER MYID`,
 `CLUSTER MYSHARDID`, `INFO`, `CLUSTER INFO`, and `CLUSTER NODES` in one round trip,
 on a client pinned to that node so it is never redirected elsewhere. Unreachable
-nodes are skipped. A primary with no slot assignment becomes a pending node;
-everything else is grouped into a shard by shard ID.
+nodes are skipped, and so is a node whose `CLUSTER MYID`, `CLUSTER MYSHARDID`,
+`CLUSTER INFO` or `CLUSTER NODES` reply fails or is empty, or whose node table
+has no `myself` line. The pass records each one as an incomplete scrape, and
+slots it may still be serving stay assigned rather than free for a new primary.
+A failed `INFO` only leaves its keys unknown. A primary with no slot assignment
+becomes a pending node; everything else is grouped into a shard by shard ID.
 
 One pass follows: a pending primary that a replica names as its primary, in a
 shard that has no primary of its own, moves into that shard. That is a primary

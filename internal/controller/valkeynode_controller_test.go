@@ -1038,7 +1038,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
 			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revA))
-			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
+			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey("valkey.io/config-hash"))
 
 			By("changing a restart-only key without a new config revision")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())

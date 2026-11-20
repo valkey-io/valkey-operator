@@ -38,7 +38,6 @@ import (
 
 const (
 	scriptsHashKey = "valkey.io/script-hash"
-	configHashKey  = "valkey.io/config-hash"
 	configFileKey  = "valkey.conf"
 
 	readinessScriptKey      = "readiness-check.sh"
@@ -277,12 +276,6 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 	writeSortedConfig(&configBuilder, baseConfig)
 
 	return configBuilder.String()
-}
-
-// buildServerConfig renders the cluster's full server config, live keys included.
-func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
 // upsertConfigMap creates or updates the cluster's scripts ConfigMap.

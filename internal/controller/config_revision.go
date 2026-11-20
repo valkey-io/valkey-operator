@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -77,16 +76,4 @@ func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, _ *va
 		return "", false, errLiveConfigRevisionNotCached
 	}
 	return content, true, nil
-}
-
-// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
-func configRevisionKeys(cm *corev1.ConfigMap) []string {
-	var out []string
-	for key := range cm.Data {
-		if _, ok := configRevisionFromKey(key); ok {
-			out = append(out, key)
-		}
-	}
-	slices.Sort(out)
-	return out
 }

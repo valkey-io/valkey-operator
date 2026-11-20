@@ -149,8 +149,8 @@ func TestForCluster(t *testing.T) {
 		assert.Equal(t, "pw", got[0].Password)
 		assert.Nil(t, got[0].TLSConfig)
 		assert.Equal(t, -1, got[0].PipelineMultiplex)
-		assert.Equal(t, 16*1024, got[0].ReadBufferEachConn)
-		assert.Equal(t, 8*1024, got[0].WriteBufferEachConn)
+		assert.Equal(t, 4*1024, got[0].ReadBufferEachConn)
+		assert.Equal(t, 4*1024, got[0].WriteBufferEachConn)
 		assert.Equal(t, 4, got[0].RingScaleEachConn)
 	})
 

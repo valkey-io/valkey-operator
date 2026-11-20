@@ -115,12 +115,13 @@ func (p *RolePoller) Start(ctx context.Context) error {
 
 // pollOnceWithin runs one pass under a deadline of budget.
 //
-// Scrapes dial each address in turn and valkey-go waits DefaultDialTimeout (5s)
-// on each, so a handful of unreachable nodes can outlast the poll interval many
-// times over. The loop itself is safe, since a Ticker drops missed ticks rather
-// than queueing them, but one partitioned cluster would stretch the effective
-// interval for every other cluster, since a single goroutine walks them all.
-// Per-node backoff caps the repeat cost of a dead node, never the first round.
+// A scrape dials a cluster's addresses in parallel and valkey-go waits
+// DefaultDialTimeout (5s) on each unreachable one, so a cluster with dead nodes
+// costs about one timeout, the whole poll interval. The loop itself is safe,
+// since a Ticker drops missed ticks rather than queueing them, but one
+// partitioned cluster would use up the pass for every cluster after it, since a
+// single goroutine walks them all. Per-node backoff caps the repeat cost of a
+// dead node, never the first round.
 //
 // A late pass is dropped rather than finished; the next one redoes it. Nodes
 // that were cut off don't appear in the scrape, so they read as "did not

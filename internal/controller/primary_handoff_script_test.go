@@ -305,7 +305,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
 		passwordFile := filepath.Join(filepath.Dir(calls), operatorUser)
 		require.NoError(t, os.WriteFile(passwordFile, []byte("op-mounted\n"), 0o644))
-		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile, "ROTATE_TO=op-rotated")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
@@ -316,19 +316,36 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		for i, want := range []string{"op-mounted", "op-rotated", "op-rotated"} {
 			assert.True(t, strings.HasPrefix(lines[i], want+" "), lines[i])
 			assert.Contains(t, lines[i], "--user "+operatorUser)
+			assert.NotContains(t, lines[i], "alice")
 		}
 	})
 
-	t.Run("ROLE calls fall back to the environment password without the mount", func(t *testing.T) {
+	t.Run("ROLE calls ignore VALKEYCLI_USER and VALKEYCLI_AUTH without the mount", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
-		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(string(auth), "op-env "), string(auth))
-		assert.Contains(t, string(auth), "--user "+operatorUser)
+		assert.True(t, strings.HasPrefix(string(auth), " "), string(auth))
+		assert.NotContains(t, string(auth), "--user")
+	})
+
+	t.Run("ROLE calls use VALKEY_USER and VALKEYCLI_AUTH in a pod without the mount", func(t *testing.T) {
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
+		cmd.Env = append(cmd.Env, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw",
+			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		auth, err := os.ReadFile(calls + ".auth")
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
+		require.Len(t, lines, 3)
+		for _, line := range lines {
+			assert.True(t, strings.HasPrefix(line, "env-pw "), line)
+			assert.Contains(t, line, "--user "+operatorUser)
+		}
 	})
 }
 

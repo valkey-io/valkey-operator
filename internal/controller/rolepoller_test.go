@@ -204,8 +204,9 @@ var _ = Describe("RolePoller", func() {
 		Expect(names()).To(BeEmpty(), "a node with no pod IP has nothing to compare against")
 	})
 
-	// Scrapes dial serially with a 5s timeout each, so without a deadline a
-	// partitioned cluster would stretch the interval for every other cluster.
+	// An unreachable node costs a scrape a 5s dial timeout, so without a
+	// deadline a partitioned cluster would stretch the interval for every other
+	// cluster.
 	It("bounds each pass with a deadline", func() {
 		var deadline time.Time
 		var bounded bool
@@ -450,12 +451,16 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "wiring-node",
-				Namespace: namespace,
-				Labels:    map[string]string{LabelCluster: "wiring-cluster"},
+				Name:            "wiring-node",
+				Namespace:       namespace,
+				Labels:          map[string]string{LabelCluster: "wiring-cluster"},
+				OwnerReferences: testParentRefs(),
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
+		// The pod below may exist before the StatefulSet, so creating it needs a
+		// matching Spec.WorkloadRevision.
+		Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
 		pod := &corev1.Pod{

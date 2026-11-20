@@ -915,10 +915,9 @@ const (
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
-// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
-// of a standalone ValkeyNode, while its value is exactly "true". The operator
-// copies it onto the ValkeyNodes of a paused cluster and removes it from them
-// when the cluster resumes.
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster while
+// its value is exactly "true". The operator copies it onto the ValkeyNodes of a
+// paused cluster and removes it from them when the cluster resumes.
 const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
 
 // ReasonPauseAnnotationSet is the reason of ConditionReconciliationPaused.

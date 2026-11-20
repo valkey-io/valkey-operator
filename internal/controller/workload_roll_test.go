@@ -81,23 +81,37 @@ func TestPodTemplateIgnoresDeprecatedServiceAccount(t *testing.T) {
 	assert.Equal(t, podTemplateRollHash(desired), podTemplateRollHash(*live))
 }
 
-func TestIsClusterOwned(t *testing.T) {
-	node := &valkeyiov1alpha1.ValkeyNode{}
-	assert.False(t, isClusterOwned(node))
-
-	ctrl := true
-	node.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "valkey.io/v1alpha1",
-		Kind:       "ValkeyCluster",
-		Name:       "c",
-		UID:        "1",
-		Controller: &ctrl,
-	}}
-	assert.True(t, isClusterOwned(node))
-
-	ctrl = false
-	node.OwnerReferences[0].Controller = &ctrl
-	assert.False(t, isClusterOwned(node))
+func TestHasKnownParent(t *testing.T) {
+	ref := func(apiVersion, kind string, controller *bool) metav1.OwnerReference {
+		return metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: "p", UID: "1", Controller: controller}
+	}
+	tests := []struct {
+		name string
+		refs []metav1.OwnerReference
+		want bool
+	}{
+		{name: "no owner", want: false},
+		{name: "ValkeyCluster controller", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", new(true))}, want: true},
+		{name: "ValkeyCluster not controller", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", new(false))}, want: false},
+		{name: "ValkeyCluster controller nil", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", nil)}, want: false},
+		{name: "other kind", refs: []metav1.OwnerReference{ref("apps/v1", "StatefulSet", new(true))}, want: false},
+		{name: "ValkeyCluster in another group", refs: []metav1.OwnerReference{ref("example.com/v1", "ValkeyCluster", new(true))}, want: false},
+		{name: "Valkey is not a known parent yet", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "Valkey", new(true))}, want: false},
+		{
+			name: "ValkeyCluster controller next to another owner",
+			refs: []metav1.OwnerReference{
+				ref("v1", "ConfigMap", nil),
+				ref("valkey.io/v1alpha1", "ValkeyCluster", new(true)),
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{OwnerReferences: tt.refs}}
+			assert.Equal(t, tt.want, hasKnownParent(node))
+		})
+	}
 }
 
 func TestWorkloadRevisionAllows(t *testing.T) {

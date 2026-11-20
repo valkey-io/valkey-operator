@@ -215,6 +215,7 @@ Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
+- `NoParent` – the node has no controller ownerReference to a `valkey.io` `ValkeyCluster`. The operator creates or updates no workload, Service or ConfigMap for the node and leaves the existing ones and the pod as they are. It still manages the persistence finalizer, and deleting the node still runs its finalizers. A ValkeyNode created by hand, or left behind by `kubectl delete valkeycluster <name> --cascade=orphan`, gets this reason. If the cluster was paused when it was deleted, its nodes keep the `valkey.io/pause-reconciliation` annotation and stay paused. They report `NoParent` after someone removes the annotation.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -334,7 +335,7 @@ Common reasons when `DefaultUserSessionsOpen=False`:
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
 
-The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully built pod template). It advances the field one node at a time (replicas first, with proactive failover before primaries when the update implies a real pod roll). Cluster-owned nodes only apply a rolling template update when the hash they compute matches `spec.workloadRevision`. Standalone ValkeyNodes ignore the field and apply immediately.
+The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully built pod template). It advances the field one node at a time (replicas first, with proactive failover before primaries when the update implies a real pod roll). A node only applies a rolling template update when the hash it computes matches `spec.workloadRevision`. A node without a ValkeyCluster parent is not reconciled at all, see `NoParent` under [`Ready`](#ready).
 
 | Status | Meaning |
 |---|---|
@@ -409,6 +410,7 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ValkeyNodeCreated` | Normal | ValkeyNode CR is created for a shard/replica position |
 | `ValkeyNodeUpdated` | Normal | ValkeyNode CR spec is updated (rolling update) |
 | `ValkeyNodeFailed` | Warning | Failed to create or update a ValkeyNode CR |
+| `NoParent` | Warning | A ValkeyNode has no `ValkeyCluster` controller ownerReference, so the operator stops reconciling it. Emitted when the node's `Ready` reason changes to `NoParent` |
 | `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
 | `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
 | `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |

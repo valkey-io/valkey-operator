@@ -146,17 +146,16 @@ type ValkeyNodeSpec struct {
 
 	// WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
 	// controller authorizes this node to apply. The ValkeyCluster controller sets
-	// it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
-	// controller applies a rolling StatefulSet/Deployment template update only
-	// when the template it builds hashes to this value. Standalone nodes ignore
-	// the field and apply immediately.
+	// it when advancing a roll. The ValkeyNode controller applies a rolling
+	// StatefulSet/Deployment template update only when the template it builds
+	// hashes to this value. A ValkeyNode without a ValkeyCluster parent is not
+	// reconciled.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
 
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
-	// flags and managed config to hostname mode. Standalone nodes leave this empty
-	// (IP announce).
+	// flags and managed config to hostname mode. Empty means IP announce.
 	// +kubebuilder:validation:Enum=IP;Hostname
 	// +optional
 	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
@@ -427,6 +426,9 @@ const (
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"
+	// ValkeyNodeReasonNoParent indicates the node has no known parent controller,
+	// so the operator does not create or update anything for it.
+	ValkeyNodeReasonNoParent = "NoParent"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.

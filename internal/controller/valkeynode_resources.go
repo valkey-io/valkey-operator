@@ -285,7 +285,7 @@ func statefulSetAfterServiceNameChange(desired, live *appsv1.StatefulSet) *appsv
 // refuseDesiredSTSCreate is true when creating the full desired STS would
 // skip WorkloadRevision (STS gone after orphan, pod still running).
 func refuseDesiredSTSCreate(node *valkeyiov1alpha1.ValkeyNode, pod *corev1.Pod, desiredHash string) bool {
-	return pod != nil && isClusterOwned(node) && !workloadRevisionAllows(node, desiredHash)
+	return pod != nil && !workloadRevisionAllows(node, desiredHash)
 }
 
 // buildContainersDef builds the base containers definition for the ValkeyNode

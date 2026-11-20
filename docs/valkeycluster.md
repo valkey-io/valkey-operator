@@ -167,10 +167,10 @@ The operator requires the `--default-valkey-image` and `--default-exporter-image
 flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
 `spec.exporter.image` is empty.
 
-- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster or
-  standalone ValkeyNode that omits `spec.image`.
+- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster that
+  omits `spec.image`.
 - Changing `--default-exporter-image` rolls pods with an enabled exporter whose
-  ValkeyCluster or standalone ValkeyNode omits `spec.exporter.image`.
+  ValkeyCluster omits `spec.exporter.image`.
 
 When upgrading a deployment that supplies its own manager arguments, add both
 flags. To keep the previous image defaults, use
@@ -729,6 +729,31 @@ Move the list under `spec.acl.users`, replace the booleans and nest `passwordSec
 
 Drop `passwordSecret` from users whose `password.type` is not `Secret`. The permission fields (`commands`, `keys`, `channels`, `permissions`) keep their names. The generated ACL is the same for both fields, so moving users changes nothing on the running nodes.
 
+#### System password rotation
+
+The operator connects to Valkey as three internal users: `_operator` (the operator and the probes), `_replication` (replicas connecting to their primary) and `_exporter` (the metrics exporter). It generates their passwords once, in the Secret `internal-<cluster>-system-passwords`, and by default never changes them.
+
+```yaml
+acl:
+  systemUsers:
+    passwordRotation:
+      intervalDays: 30
+```
+
+`acl.systemUsers.passwordRotation` turns on rotation. `intervalDays` (1 to 3650, default 30) is how long a password stays current, and the first rotation happens one interval after the field is set. A rotation never removes a password a client still uses:
+
+1. The operator generates the next password and loads it on every node next to the current one.
+2. Once every node accepts both, the new password becomes the one clients read. The operator reads the Secret on each connection, the probes and a restarting server read the mounted password files, and running replicas get the new password with `CONFIG SET primaryauth`.
+3. The old password is removed once the probes and replicas have switched, and no sooner than five minutes after the switch.
+
+The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. `_operator` and `_replication` keep rotating, but later rotations skip `_exporter` until then, so its password changes only when the pod restarts. To finish the exporter's rotation, restart the Valkey pods one at a time.
+
+Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
+
+A rotation step that fails, for example because the operator cannot list the pods it checks, leaves the rotation where it was and records a `SystemPasswordRotationHeld` warning event. Users and ACLs keep reconciling, and the step is tried again on the next reconcile.
+
+> **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
+
 ### Workload type
 
 ```yaml
@@ -760,8 +785,6 @@ The `Paused` column in `kubectl get valkeyclusters` shows `True` while the `Reco
 While the cluster is paused the operator creates, updates and deletes nothing that belongs to it, sends no commands to its Valkey nodes, not even the reads of the role poller, and leaves `spec` changes for later. It sets the `ReconciliationPaused` condition and records a `ReconciliationPaused` event, and looks at the cluster again every 30 seconds. Persistence finalizer metadata is still maintained on paused ValkeyNodes. Deleting a paused cluster still works, and a ValkeyNode that is being deleted still goes through its deletion handler, so with the `Delete` reclaim policy its workload and PVC are removed.
 
 The operator otherwise does not change objects it does not render itself, and the pause is the exception: it copies the annotation onto every ValkeyNode the cluster owns, and the ValkeyNode controller skips a node that carries it, so the StatefulSet or Deployment, `CONFIG SET` and `ACL LOAD` stay as they are as well. When the cluster resumes, the operator removes the annotation from all of its ValkeyNodes, including one you set on a node by hand. On resume, the cluster controller defers its normal work for one second to give node controllers a turn to refresh Pod IPs and readiness that stayed frozen during the pause. To pause a single node of a running cluster, pause the whole cluster.
-
-A standalone ValkeyNode, one with no ValkeyCluster, takes the same annotation on itself.
 
 ## Architecture
 

@@ -23,14 +23,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	vclient "github.com/valkey-io/valkey-go"
+	"golang.org/x/sync/errgroup"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // DialFunc returns a client for the Valkey node at address (host:port). The
 // client belongs to whoever supplies the DialFunc; callers never call Close on
-// it.
+// it. It must be safe for concurrent calls: GetClusterState dials addresses in
+// parallel.
 type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
 
 // NodeState represents the current state of an inspected cluster node.
@@ -133,15 +136,17 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
+//
+// Nodes are dialled in parallel, so unreachable addresses cost about one dial
+// timeout in all rather than one each. The state is built in address order
+// whatever order the nodes answer in.
 func GetClusterState(ctx context.Context, addresses []string, port int, dial DialFunc) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
 	}
 
-	for _, address := range addresses {
-		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, dial)
+	for _, node := range scrapeNodes(ctx, addresses, port, dial) {
 		if node != nil {
 			// Check if node is pending to be added. A primary carrying only a
 			// migration marker is mid-reshard and already part of the slot map,
@@ -176,6 +181,42 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	}
 	state.adoptDrainedPrimaries()
 	return &state
+}
+
+// scrapeConcurrency caps the dials in flight during one scrape. Correctness does
+// not need it; it bounds the burst of TCP and TLS handshakes when nothing is
+// pooled, as after an operator restart or a credential rotation.
+const scrapeConcurrency = 32
+
+// scrapeNodes scrapes each address in parallel and returns the results in
+// address order, nil where a node could not be reached. It waits for every
+// dial, even after ctx is cancelled: valkey-go dials a new client without the
+// caller's context.
+func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFunc) []*NodeState {
+	results := make([]*NodeState, len(addresses))
+	var g errgroup.Group
+	g.SetLimit(scrapeConcurrency)
+	var panicked any
+	var panicOnce sync.Once
+	for i, address := range addresses {
+		g.Go(func() error {
+			// Hand a panic back to the caller's goroutine, where controller-runtime
+			// recovers it. Here it would end the process.
+			defer func() {
+				if r := recover(); r != nil {
+					panicOnce.Do(func() { panicked = r })
+				}
+			}()
+			// Attempt to connect to the Valkey node and extract information.
+			results[i] = getNodeState(ctx, address, port, dial)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if panicked != nil {
+		panic(panicked)
+	}
+	return results
 }
 
 // adoptDrainedPrimaries moves a slot-less pending primary into the shard of a
@@ -620,10 +661,9 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 
 	// The round trip can fail without a dial error: a pooled client may point
 	// at a server that went away since its last use, or the caller's context
-	// may have expired, as when an earlier node used up the role poller's pass
-	// budget. All five commands share one wire, so a transport-level failure
-	// on the first result means the whole round trip failed, not just one
-	// command.
+	// may have expired, as when the role poller's pass budget runs out. All
+	// five commands share one wire, so a transport-level failure on the first
+	// result means the whole round trip failed, not just one command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
 		return nil

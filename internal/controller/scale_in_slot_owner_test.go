@@ -283,7 +283,9 @@ func TestDeleteExcessValkeyNodesKeepsPrimaryOnExcessNodeIndex(t *testing.T) {
 	assert.Empty(t, kept)
 	assert.True(t, deferred)
 	assert.True(t, nodeExists(t, r.Client, promoted))
-	assert.Contains(t, drainEvents(recorder), "Normal ScaleInDeferred Deferring deletion of c-0-1: it is the primary of shard 0 and no kept replica is synced")
+	assert.Empty(t, drainEvents(recorder))
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode c-0-1: it is the primary of shard 0 and no kept replica is synced",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing).Message)
 }
 
 // TestDeleteExcessValkeyNodesKeepsReplicasFromEitherField: node index 1 is in

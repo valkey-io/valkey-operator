@@ -213,8 +213,9 @@ func TestDeleteExcessValkeyNodesFailoverErrorDefers(t *testing.T) {
 	require.NoError(t, err, "waiting on a failover is not an error")
 	assert.Empty(t, kept)
 	assert.True(t, deferred)
-	assert.Contains(t, drainEvents(r.Recorder.(*events.FakeRecorder)),
-		"Normal ScaleInDeferred Deferring deletion of wedge-0-2: failover did not complete: CLUSTER FAILOVER timed out")
+	assert.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)), "the failover reports its own events")
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode wedge-0-2: failover did not complete: CLUSTER FAILOVER timed out",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing).Message)
 
 	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
 	require.NoError(t, err, "the primary is not deleted when its failover did not complete")
@@ -507,8 +508,9 @@ func TestDeleteExcessValkeyNodesKeepsPodlessNodeWithoutOtherPrimary(t *testing.T
 	require.NoError(t, err)
 	assert.True(t, deferred)
 	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
-	assert.Contains(t, drainEvents(r.Recorder.(*events.FakeRecorder)),
-		"Normal ScaleInDeferred Deferring deletion of wedge-0-2: this scrape cannot tell whether it is the primary of shard 0")
+	assert.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)))
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode wedge-0-2: this scrape cannot tell whether it is the primary of shard 0",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing).Message)
 
 	state.Shards = append(state.Shards, shard0WithPrimaryAt("node-0-0"))
 	deleted, _, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)

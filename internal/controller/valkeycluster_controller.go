@@ -2073,7 +2073,7 @@ func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, clust
 		if shardHasOtherPrimary(state, nodes, shardIndex, node.Status.PodIP) {
 			return true
 		}
-		r.deferExcessNodeDeletion(cluster, node, fmt.Sprintf("this scrape cannot tell whether it is the primary of shard %d", shardIndex))
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("this scrape cannot tell whether it is the primary of shard %d", shardIndex))
 		return false
 	}
 	if primary.Address != node.Status.PodIP {
@@ -2088,14 +2088,14 @@ func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, clust
 		}
 	}
 	if len(targets) == 0 {
-		r.deferExcessNodeDeletion(cluster, node, fmt.Sprintf("it is the primary of shard %d and no kept replica is synced", shardIndex))
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("it is the primary of shard %d and no kept replica is synced", shardIndex))
 		return false
 	}
 	log.Info("failing over excess primary before deleting its ValkeyNode",
 		"name", node.Name, "shard", shardIndex, "node", nodeIndex, "targets", len(targets))
 	if err := proactiveFailoverFn(ctx, r.Recorder, cluster, shard, targets); err != nil {
 		log.Info("failover of excess primary did not complete, deferring deletion", "name", node.Name, "err", err)
-		r.deferExcessNodeDeletion(cluster, node, fmt.Sprintf("failover did not complete: %v", err))
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("failover did not complete: %v", err))
 		return false
 	}
 	// This pass's scrape predates the failover.
@@ -2117,10 +2117,9 @@ func shardHasOtherPrimary(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Va
 	return false
 }
 
-// deferExcessNodeDeletion records why an excess node of a kept shard is not
-// deleted yet.
-func (r *ValkeyClusterReconciler) deferExcessNodeDeletion(cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode, reason string) {
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ScaleInDeferred", "ScaleIn", "Deferring deletion of %s: %s", node.Name, reason)
+// deferExcessNodeDeletion records in the conditions why an excess node of a
+// kept shard is not deleted yet.
+func deferExcessNodeDeletion(cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode, reason string) {
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
 		fmt.Sprintf("Scale-in is waiting to delete ValkeyNode %s: %s", node.Name, reason), metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)

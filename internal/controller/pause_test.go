@@ -239,7 +239,10 @@ var _ = Describe("Pause reconciliation", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards: 1,
-					ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "app"}}},
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:     "app",
+						Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "pause-app-password"}},
+					}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())

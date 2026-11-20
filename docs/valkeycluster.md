@@ -14,6 +14,7 @@
 - [Containers](#containers)
 - [Default images](#default-images)
 - [Metrics](#metrics)
+- [Operator-managed Secrets](#operator-managed-secrets)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
@@ -674,7 +675,7 @@ acl:
   - `Secret` (default): the passwords referenced by `password.secret`
   - `Any`: any password authenticates (Valkey `nopass`)
   - `Disabled`: no password authenticates (Valkey `resetpass`). The user can still authenticate with a TLS client certificate; see [mTLS](mtls.md)
-- `password.secret`: one or more password keys from a Secret (multiple keys supported for rotation). Defaults to the Secret `<cluster>-users` and the username as key. Only valid with `type: Secret`
+- `password.secret`: the Secret that holds the user's passwords, in `name`, and the keys to read from it, in `keys` (multiple keys supported for rotation). `keys` defaults to the username. Only valid with `type: Secret`, and `name` is required for an enabled user with `type: Secret`
   If the Secret is missing or lacks a listed key, a cluster that already has an aclfile keeps it, reports the user on the `Degraded` condition (`UsersACLUnresolved`) and keeps reconciling everything else, so an asynchronously created Secret (External Secrets Operator, for example) does not block scaling. A new cluster still waits for every user's Secret before it starts. While a user is unresolved, a system user change reaches the system-passwords Secret but not the aclfile, so an exporter enabled in that state cannot authenticate until the Secret resolves.
 - `commands`: command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys`: key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
@@ -715,6 +716,9 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `spec.users` and `spec.acl.users` cannot both be non-empty. An empty list in one is accepted next to a non-empty list in the other, and the non-empty list is used
 - Usernames are 1 to 128 characters with no whitespace. `permissions` cannot contain a newline except a single trailing one, and key and channel patterns cannot contain whitespace
 - `password.secret` is only valid with `password.type: Secret`
+- An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
+
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, and the API server rejects a new or changed user without the name. A cluster stored before this change keeps such a user: Kubernetes CRD validation ratcheting accepts any update that leaves that user unchanged (unless the `CRDValidationRatcheting` feature gate is turned off, which Kubernetes 1.33 and later no longer allow). The operator no longer reads `<cluster>-users` for it, and reports it on the `Degraded` condition with reason `UsersACLUnresolved` and the message `user <name>: password.secret.name is not set` (`passwordSecret.name` for `spec.users`), while the nodes keep the last aclfile. To keep the old Secret, set `password.secret.name: <cluster>-users` on that user.
 
 #### Migrating from `spec.users`
 
@@ -735,7 +739,7 @@ Drop `passwordSecret` from users whose `password.type` is not `Secret`. The perm
 
 #### System password rotation
 
-The operator connects to Valkey as three internal users: `_operator` (the operator and the probes), `_replication` (replicas connecting to their primary) and `_exporter` (the metrics exporter). It generates their passwords once, in the Secret `internal-<cluster>-system-passwords`, and by default never changes them.
+The operator connects to Valkey as three internal users: `_operator` (the operator and the probes), `_replication` (replicas connecting to their primary) and `_exporter` (the metrics exporter). It generates their passwords once, in the Secret `valkey-<cluster>-system-passwords`, and by default never changes them.
 
 ```yaml
 acl:
@@ -757,6 +761,38 @@ Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets th
 A rotation step that fails, for example because the operator cannot list the pods it checks, leaves the rotation where it was and records a `SystemPasswordRotationHeld` warning event. Users and ACLs keep reconciling, and the step is tried again on the next reconcile.
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
+
+### Operator-managed Secrets
+
+The operator creates these Secrets in the cluster's namespace. The ValkeyCluster controls them, so they are deleted with it.
+
+| Secret | Holds | Read by |
+|---|---|---|
+| `valkey-<cluster>-acl` | The aclfile: the users in `acl.users` and the operator's system users | Every node, which mounts it at `/config/users` and loads it with `ACL LOAD` |
+| `valkey-<cluster>-system-passwords` | The passwords of the `_operator`, `_replication` and `_exporter` system users, and the state of a [rotation](#system-password-rotation) in progress | The operator, and each pod: the probes and the server read the files mounted at `/etc/valkey/system-passwords`, `PRIMARY_AUTH` and `VALKEYCLI_AUTH` carry the same passwords as environment variables, and the exporter reads `REDIS_PASSWORD` |
+| `valkey-<cluster>-tls-trust` | The server root and the `clientAuth.ca` roots, only while `networking.tls.clientAuth.ca` is set | Every node, as `tls-ca-cert-file`. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca) |
+
+The `valkey-` prefix marks objects the operator owns, so do not give your own Secrets these names.
+
+#### Upgrading from the `internal-` names
+
+Releases up to v0.9.0 named the first two Secrets `internal-<cluster>-acl` and `internal-<cluster>-system-passwords`. On upgrade:
+
+1. The operator copies each old Secret to its new name, with every key, annotation and label. It never generates system passwords while the old Secret exists, so the nodes keep accepting the operator.
+2. Every node rolls once, one at a time, because its pod template names both Secrets.
+3. While any ValkeyNode, workload template or pod of the cluster still references an old Secret, the operator keeps it equal to the new one. A node that has not rolled yet keeps receiving ACL changes, and a container that restarts in place reads the current passwords. Then the operator deletes the old Secret.
+
+An old Secret the cluster does not control, for example one restored from a backup without its owner reference, is copied but never changed or deleted. Delete it yourself once every node has rolled. If one of the new names is already taken by a Secret the cluster does not control while it still controls the old one, the operator stops with `Ready=False` and reason `UsersACLError`, naming both. Delete or rename that Secret.
+
+Read the system passwords from `valkey-<cluster>-system-passwords` after the upgrade. A sidecar in `containers` that references an old name keeps that Secret in use, so it stays, kept equal to the new one, until you change the reference. A ValkeyNode without a `ValkeyCluster` parent is not migrated, since the operator does not reconcile it (reason `NoParent`).
+
+Rolling back to a release that uses the old names after the old Secrets are deleted makes it generate new system passwords, which the nodes reject. Before such a rollback, copy the Secret back under its old name, keeping its labels:
+
+```sh
+kubectl get secret valkey-<cluster>-system-passwords -o json \
+  | jq '.metadata.name = "internal-<cluster>-system-passwords" | del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp, .metadata.ownerReferences, .metadata.managedFields)' \
+  | kubectl create -f -
+```
 
 ### Workload type
 

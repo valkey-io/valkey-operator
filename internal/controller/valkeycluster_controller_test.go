@@ -1034,9 +1034,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, secret) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -1098,9 +1099,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)

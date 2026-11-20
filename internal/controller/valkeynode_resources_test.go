@@ -1591,7 +1591,7 @@ func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
 	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
 	require.NotNil(t, e.ValueFrom)
 	require.NotNil(t, e.ValueFrom.SecretKeyRef)
-	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "valkey-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "_operator", e.ValueFrom.SecretKeyRef.Key)
 }
 

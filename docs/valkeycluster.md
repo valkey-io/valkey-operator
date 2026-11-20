@@ -775,7 +775,7 @@ containers:
 
 The probes and the startup script read the `_operator` password from the mounted file and ignore both variables, so this override does not affect them. Changing it rolls the pods.
 
-Environment variables are read when the container starts. After a [system password rotation](#system-password-rotation), the default `VALKEYCLI_AUTH` holds the old `_operator` password, which stops working when the rotation removes it. Read the current one from the mounted file:
+`VALKEYCLI_AUTH` is set when the container starts and does not change after that. A [system password rotation](#system-password-rotation) keeps the old `_operator` password valid for at least five minutes after the switch, then removes it. From then on, `valkey-cli` in a pod that started before the rotation fails to authenticate until the container restarts. To use the current password, read it from the mounted file:
 
 ```sh
 VALKEYCLI_AUTH=$(cat /etc/valkey/system-passwords/_operator) valkey-cli

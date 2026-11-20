@@ -1086,6 +1086,21 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("configRevision"))
 		})
 
+		It("rejects a spec.config key that is not lowercase", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "upper-config-key", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+					ConfigRevision:      testConfigRevision,
+					SharedConfigMapName: testSharedConfigMapName,
+					WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+					Config:              map[string]string{"MAXMEMORY": "40mb"},
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+			Expect(err.Error()).To(ContainSubstring("spec.config keys must be lowercase"))
+		})
+
 		It("rejects a spec.configRevision that is not 12 lowercase hex characters", func() {
 			for _, rev := range []string{"../Not_Hex!", "ABCDEF012345", "0123456789a", "0123456789abc"} {
 				node := &valkeyiov1alpha1.ValkeyNode{

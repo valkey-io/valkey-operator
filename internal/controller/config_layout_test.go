@@ -617,3 +617,15 @@ var _ = Describe("config layout", func() {
 		Expect(getNode(name).Spec.ConfigRevision).NotTo(Equal(rev))
 	})
 })
+
+// configRevisionKeys returns the ConfigMap's pinned revision keys, sorted.
+func configRevisionKeys(cm *corev1.ConfigMap) []string {
+	var out []string
+	for key := range cm.Data {
+		if _, ok := configRevisionFromKey(key); ok {
+			out = append(out, key)
+		}
+	}
+	slices.Sort(out)
+	return out
+}

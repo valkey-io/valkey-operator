@@ -160,7 +160,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 		})
 	}
 
-	for i, key := range []string{configHashKey, "valkey.io/anything"} {
+	for i, key := range []string{"valkey.io/config-hash", "valkey.io/anything"} {
 		It(fmt.Sprintf("rejects the operator's annotation key %q", key), func() {
 			expectAdmission(fmt.Sprintf("pm-ra-%d", i),
 				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{key: "v"}},

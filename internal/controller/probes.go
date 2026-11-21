@@ -94,10 +94,12 @@ func serverProbes(node *valkeyiov1alpha1.ValkeyNode) (startup, liveness, readine
 
 // execCheckAndTimeout returns the handler that runs script, and the probe
 // timeout. A timeout from spec.probes is passed to the script, and the probe
-// gets one second more, so the script gives up before the kubelet does.
-// Without one the command passes none and the script keeps its default: the
-// command of a cluster that does not set spec.probes must not change, or an
-// operator upgrade rolls its pods.
+// gets one second more, so that the script normally gives up first. The
+// script counts 0.1s polls, which run late with a long timeout or a throttled
+// container; a check that runs past the extra second fails on the kubelet's
+// timeout instead. Without a timeout the command passes none and the script
+// keeps its default: the command of a cluster that does not set spec.probes
+// must not change, or an operator upgrade rolls its pods.
 func execCheckAndTimeout(script string, timeoutSeconds *int32, scriptDefaultSeconds int32) (corev1.ProbeHandler, int32) {
 	command, scriptTimeoutSeconds := script, scriptDefaultSeconds
 	if timeoutSeconds != nil {
@@ -134,10 +136,12 @@ func startupFailureThreshold(spec *valkeyiov1alpha1.StartupProbeSpec, primaryHan
 // without persistence, whose nodes start through primary-handoff.sh, gives
 // up within handoffStartupWindowSeconds: a restarted primary can wait up to
 // 300s for a replica hand-off before the server starts, and a shorter
-// startup probe restarts the container into the same wait. The value is
-// still applied.
+// startup probe restarts the container into the same wait. Without replicas
+// the script has no one to wait for. The value is still applied. Only
+// spec.probes is read, not a startup probe patched in through
+// spec.containers.
 func startupProbeConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	if cluster.Spec.Persistence != nil {
+	if cluster.Spec.Persistence != nil || cluster.GetReplicasPerShard() == 0 {
 		return nil
 	}
 	spec := probesOrEmpty(cluster.Spec.Probes).Startup
@@ -151,7 +155,7 @@ func startupProbeConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []confi
 	minThreshold := startupChecksCovering(handoffStartupWindowSeconds, initialDelaySeconds, periodSeconds)
 	return []configWarning{{
 		reason: valkeyiov1alpha1.ReasonStartupProbeTooShort,
-		message: fmt.Sprintf("spec.probes.startup gives up after %ds (initialDelaySeconds %d + (failureThreshold %d - 1) x periodSeconds %ds), below the recommended %ds without persistence: "+
+		message: fmt.Sprintf("spec.probes.startup gives up after %ds (initialDelaySeconds %ds + (failureThreshold %d - 1) x periodSeconds %ds), below the recommended %ds without persistence: "+
 			"a restarted primary can wait up to %ds for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least %d, or leave it unset",
 			windowSeconds, initialDelaySeconds, threshold, periodSeconds, handoffStartupWindowSeconds, primaryHandoffMaxWaitSeconds, minThreshold),

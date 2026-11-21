@@ -35,15 +35,16 @@ import (
 var _ = Describe("spec.probes startup warning", func() {
 	ctx := context.Background()
 
-	// createCluster creates a one-node cluster whose startup probe allows
-	// 50s, and removes it and its ValkeyNodes when the spec ends.
+	// createCluster creates a one-shard cluster with a replica whose startup
+	// probe allows 50s, and removes it and its ValkeyNodes when the spec ends.
 	createCluster := func(name string, persistence *valkeyiov1alpha1.PersistenceSpec) {
 		GinkgoHelper()
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:      1,
-				Persistence: persistence,
+				Shards:           1,
+				ReplicasPerShard: 1,
+				Persistence:      persistence,
 				Probes: &valkeyiov1alpha1.ProbesSpec{
 					Startup: &valkeyiov1alpha1.StartupProbeSpec{FailureThreshold: new(int32(10))},
 				},

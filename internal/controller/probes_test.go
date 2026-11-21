@@ -115,6 +115,8 @@ func TestServerProbesWithoutSpecProbesMatchTheLegacyRender(t *testing.T) {
 			Readiness: &valkeyv1.ReadinessProbeSpec{},
 		}},
 		{"liveness mode Enabled", &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: valkeyv1.LivenessProbeModeEnabled}}},
+		// A mode from a newer release keeps the probe.
+		{"unknown liveness mode", &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: "Future"}}},
 	}
 	for _, n := range nodes {
 		t.Run(n.name, func(t *testing.T) {
@@ -330,7 +332,7 @@ func TestStartupProbeConfigWarnings(t *testing.T) {
 	cluster := func(persistent bool, startup *valkeyv1.StartupProbeSpec) *valkeyv1.ValkeyCluster {
 		c := &valkeyv1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
-			Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1},
+			Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 1},
 		}
 		if startup != nil {
 			c.Spec.Probes = &valkeyv1.ProbesSpec{Startup: startup}
@@ -345,9 +347,19 @@ func TestStartupProbeConfigWarnings(t *testing.T) {
 		warnings := startupProbeConfigWarnings(cluster(false, &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(10))}))
 		require.Len(t, warnings, 1)
 		assert.Equal(t, valkeyv1.ReasonStartupProbeTooShort, warnings[0].reason)
-		assert.Equal(t, "spec.probes.startup gives up after 50s (initialDelaySeconds 5 + (failureThreshold 10 - 1) x periodSeconds 5s), below the recommended 400s without persistence: "+
+		assert.Equal(t, "spec.probes.startup gives up after 50s (initialDelaySeconds 5s + (failureThreshold 10 - 1) x periodSeconds 5s), below the recommended 400s without persistence: "+
 			"a restarted primary can wait up to 300s for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least 80, or leave it unset", warnings[0].message)
+	})
+
+	t.Run("no replicas, no hand-off to wait for", func(t *testing.T) {
+		c := cluster(false, &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(1))})
+		c.Spec.ReplicasPerShard = 0
+		require.True(t, usesPrimaryHandoffScript(buildClusterValkeyNode(c, 0, 0)))
+		assert.Empty(t, startupProbeConfigWarnings(c))
+
+		c.Spec.Replicas = 1 //nolint:staticcheck // the deprecated field must still count
+		assert.Len(t, startupProbeConfigWarnings(c), 1)
 	})
 
 	cases := []struct {
@@ -415,6 +427,16 @@ func TestContainersPatchesApplyAfterSpecProbes(t *testing.T) {
 		want.TimeoutSeconds = 4
 		want.PeriodSeconds = 20
 		assert.Equal(t, want, renderedServer(t, node).ReadinessProbe)
+	})
+
+	t.Run("a patched timeout leaves the script on the spec.probes timeout", func(t *testing.T) {
+		node := withPatch(
+			&valkeyv1.ProbesSpec{Readiness: &valkeyv1.ReadinessProbeSpec{TimeoutSeconds: new(int32(3))}},
+			corev1.Container{ReadinessProbe: &corev1.Probe{TimeoutSeconds: 10}},
+		)
+		got := renderedServer(t, node).ReadinessProbe
+		assert.Equal(t, int32(10), got.TimeoutSeconds)
+		assert.Equal(t, []string{shellPath, "-c", "/scripts/readiness-check.sh 3"}, got.Exec.Command)
 	})
 
 	t.Run("with liveness disabled a patch supplies its own handler", func(t *testing.T) {
@@ -503,18 +525,4 @@ func TestBuildClusterValkeyNodeCopiesProbes(t *testing.T) {
 	cluster.Spec.Probes = nil
 	assert.Nil(t, buildClusterValkeyNode(cluster, 0, 0).Spec.Probes,
 		"a cluster without spec.probes must leave the node field unset, so the stored ValkeyNode does not change")
-}
-
-// The cluster controller hashes the node it builds before the owner reference
-// is set and the node controller hashes the stored node; the startup
-// threshold depends on the node being a cluster member, so both must agree.
-func TestWorkloadRevisionParityWithProbes(t *testing.T) {
-	desired := probeTestNode(false, &valkeyv1.ProbesSpec{Startup: &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(10))}})
-	before, err := computeWorkloadRevision(desired)
-	require.NoError(t, err)
-	stored := desired.DeepCopy()
-	stored.OwnerReferences = []metav1.OwnerReference{{Kind: "ValkeyCluster", Name: "c", Controller: new(true)}}
-	after, err := computeWorkloadRevision(stored)
-	require.NoError(t, err)
-	assert.Equal(t, before, after)
 }

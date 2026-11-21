@@ -3239,7 +3239,8 @@ spec:
                       timeoutSeconds:
                         description: |-
                           TimeoutSeconds is how long Valkey has to answer a check. The probe's
-                          own timeout is one second longer, so the check gives up first.
+                          own timeout is one second longer, so that the check normally gives up
+                          first; a check that runs later fails on the probe's timeout instead.
                           Defaults to 4.
                         format: int32
                         maximum: 3600
@@ -3285,7 +3286,8 @@ spec:
                       timeoutSeconds:
                         description: |-
                           TimeoutSeconds is how long Valkey has to answer a check. The probe's
-                          own timeout is one second longer, so the check gives up first.
+                          own timeout is one second longer, so that the check normally gives up
+                          first; a check that runs later fails on the probe's timeout instead.
                           Defaults to 1.
                         format: int32
                         maximum: 3600
@@ -3305,9 +3307,9 @@ spec:
                           value is used as is. Unset, it is the smallest value that gives up no
                           sooner than 100s, or 400s on a node without persistence, where a
                           restarted primary can wait up to 300s for a replica hand-off before the
-                          server starts: 20 or 80 at the default delay and period. Without
-                          persistence, a probe that gives up before 400s is reported as a
-                          StartupProbeTooShort ConfigurationWarning.
+                          server starts: 20 or 80 at the default delay and period. On a cluster
+                          without persistence that has replicas, a probe that gives up before
+                          400s is reported as a StartupProbeTooShort ConfigurationWarning.
                         format: int32
                         minimum: 1
                         type: integer
@@ -3327,7 +3329,8 @@ spec:
                       timeoutSeconds:
                         description: |-
                           TimeoutSeconds is how long Valkey has to answer a check. The probe's
-                          own timeout is one second longer, so the check gives up first.
+                          own timeout is one second longer, so that the check normally gives up
+                          first; a check that runs later fails on the probe's timeout instead.
                           Defaults to 4.
                         format: int32
                         maximum: 3600

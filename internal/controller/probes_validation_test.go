@@ -59,10 +59,10 @@ var _ = Describe("spec.probes validation", func() {
 			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
 		}
 	}
-	// expectRejected requires the one error to be on field. A schema error
-	// keeps the API server from running the CEL rules, which it reports in a
-	// cause of its own.
-	expectRejected := func(name string, probes *valkeyiov1alpha1.ProbesSpec, field, message string) {
+	// expectRejected requires the one error to be on field, of type reason. A
+	// schema error keeps the API server from running the CEL rules, which it
+	// reports in a cause of its own.
+	expectRejected := func(name string, probes *valkeyiov1alpha1.ProbesSpec, field string, reason metav1.CauseType, message string) {
 		GinkgoHelper()
 		for _, obj := range probeObjects(name, probes) {
 			err := k8sClient.Create(ctx, obj)
@@ -78,6 +78,7 @@ var _ = Describe("spec.probes validation", func() {
 			}
 			Expect(causes).To(HaveLen(1), "%v", err)
 			Expect(causes[0].Field).To(Equal(field))
+			Expect(causes[0].Type).To(Equal(reason))
 			Expect(causes[0].Message).To(ContainSubstring(message))
 		}
 	}
@@ -130,14 +131,14 @@ var _ = Describe("spec.probes validation", func() {
 	for _, tc := range disabledWith {
 		It(fmt.Sprintf("rejects liveness %s with mode Disabled", tc.field), func() {
 			expectRejected("probes-disabled-"+strings.ToLower(tc.field), &valkeyiov1alpha1.ProbesSpec{Liveness: tc.liveness},
-				"spec.probes.liveness."+tc.field, tc.field+" cannot be set when mode is Disabled")
+				"spec.probes.liveness."+tc.field, metav1.CauseTypeForbidden, tc.field+" cannot be set when mode is Disabled")
 		})
 	}
 
 	It("rejects a liveness mode it does not know", func() {
 		expectRejected("probes-unknown-mode", &valkeyiov1alpha1.ProbesSpec{
 			Liveness: &valkeyiov1alpha1.LivenessProbeSpec{Mode: "TCPSocket"},
-		}, "spec.probes.liveness.mode", `Unsupported value: "TCPSocket"`)
+		}, "spec.probes.liveness.mode", metav1.CauseTypeFieldValueNotSupported, `Unsupported value: "TCPSocket"`)
 	})
 
 	const atLeastOne = "should be greater than or equal to 1"
@@ -164,7 +165,7 @@ var _ = Describe("spec.probes validation", func() {
 	}
 	for i, tc := range outOfBounds {
 		It(fmt.Sprintf("rejects %s out of bounds (%s)", tc.field, tc.message), func() {
-			expectRejected(fmt.Sprintf("probes-bounds-%d", i), tc.probes, "spec.probes."+tc.field, tc.message)
+			expectRejected(fmt.Sprintf("probes-bounds-%d", i), tc.probes, "spec.probes."+tc.field, metav1.CauseTypeFieldValueInvalid, tc.message)
 		})
 	}
 

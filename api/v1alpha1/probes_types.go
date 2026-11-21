@@ -47,7 +47,8 @@ type StartupProbeSpec struct {
 	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 
 	// TimeoutSeconds is how long Valkey has to answer a check. The probe's
-	// own timeout is one second longer, so the check gives up first.
+	// own timeout is one second longer, so that the check normally gives up
+	// first; a check that runs later fails on the probe's timeout instead.
 	// Defaults to 4.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
@@ -60,9 +61,9 @@ type StartupProbeSpec struct {
 	// value is used as is. Unset, it is the smallest value that gives up no
 	// sooner than 100s, or 400s on a node without persistence, where a
 	// restarted primary can wait up to 300s for a replica hand-off before the
-	// server starts: 20 or 80 at the default delay and period. Without
-	// persistence, a probe that gives up before 400s is reported as a
-	// StartupProbeTooShort ConfigurationWarning.
+	// server starts: 20 or 80 at the default delay and period. On a cluster
+	// without persistence that has replicas, a probe that gives up before
+	// 400s is reported as a StartupProbeTooShort ConfigurationWarning.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
@@ -85,7 +86,8 @@ type LivenessProbeSpec struct {
 	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 
 	// TimeoutSeconds is how long Valkey has to answer a check. The probe's
-	// own timeout is one second longer, so the check gives up first.
+	// own timeout is one second longer, so that the check normally gives up
+	// first; a check that runs later fails on the probe's timeout instead.
 	// Defaults to 4.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
@@ -107,7 +109,8 @@ type ReadinessProbeSpec struct {
 	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
 
 	// TimeoutSeconds is how long Valkey has to answer a check. The probe's
-	// own timeout is one second longer, so the check gives up first.
+	// own timeout is one second longer, so that the check normally gives up
+	// first; a check that runs later fails on the probe's timeout instead.
 	// Defaults to 1.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600

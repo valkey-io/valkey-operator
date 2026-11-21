@@ -190,7 +190,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		{"double-quoted timeout", `"5000"`, "30s"},
 		{"single-quoted timeout", "'5000'", "30s"},
 		{"invalid timeout falls back", "invalid", "90s"},
-		{"large timeout caps the wait", "9223372036854775807", "300s"},
+		{"large timeout caps the wait", "9223372036854775807", strconv.Itoa(primaryHandoffMaxWaitSeconds) + "s"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := runPrimaryHandoffScript(t, primary+replica+vars, "cluster-node-timeout "+tt.value+"\n", stubCLI{})
@@ -225,7 +225,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		require.NoError(t, cmd.Start())
 		require.Eventually(t, func() bool {
 			b, _ := os.ReadFile(log.Name())
-			return strings.Contains(string(b), "waiting up to 300s")
+			return strings.Contains(string(b), "waiting up to "+strconv.Itoa(primaryHandoffMaxWaitSeconds)+"s")
 		}, 10*time.Second, 50*time.Millisecond)
 		require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
 		done := make(chan error, 1)

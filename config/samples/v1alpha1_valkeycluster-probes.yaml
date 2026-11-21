@@ -1,0 +1,38 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: cluster-sample-probes
+spec:
+  shards: 3
+  replicasPerShard: 1
+  acl:
+    users:
+      # Valkey's open default user: any client, no password, every command.
+      # For trying the cluster out; restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+  # Each field set here replaces one default; see the Probes section of
+  # docs/valkeycluster.md. Changing probes rolls the pods.
+  probes:
+    startup:
+      # 120 checks at the default period of 5s: 600s for the server to answer.
+      failureThreshold: 120
+    liveness:
+      # 12 failed checks in a row at the default period of 5s: a server that
+      # does not answer for a minute is restarted, a busy one gets more time.
+      # Raise this before reaching for mode: Disabled, which leaves a hung
+      # server up and not Ready until its pod is deleted.
+      failureThreshold: 12
+    readiness:
+      periodSeconds: 10
+      # Valkey has 3s to answer; the probe's own timeout is 4s.
+      timeoutSeconds: 3
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"

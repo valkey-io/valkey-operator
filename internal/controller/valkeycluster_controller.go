@@ -236,6 +236,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			message: msg,
 		})
 	}
+	configWarnings = append(configWarnings, startupProbeConfigWarnings(cluster)...)
 	configWarnings = append(configWarnings, r.serviceAccountConfigWarnings(ctx, cluster)...)
 	configWarnings = append(configWarnings, versionGateConfigWarnings(cluster)...)
 	configWarnings = append(configWarnings, deprecatedFieldConfigWarnings(cluster)...)
@@ -1201,6 +1202,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TopologySpreadConstraints:     topologySpreadConstraints,
 			Exporter:                      exporter,
 			Containers:                    cluster.Spec.Containers,
+			Probes:                        cluster.Spec.Probes,
 			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
 			TLS:                           nodeTLSFromCluster(cluster),

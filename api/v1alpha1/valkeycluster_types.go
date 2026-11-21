@@ -949,6 +949,7 @@ const (
 	ReasonAllSlotsAssigned              = "AllSlotsAssigned"
 	ReasonSlotsUnassigned               = "SlotsUnassigned"
 	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
+	ReasonStartupProbeTooShort          = "StartupProbeTooShort"
 	ReasonPrimaryLost                   = "PrimaryLost"
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"

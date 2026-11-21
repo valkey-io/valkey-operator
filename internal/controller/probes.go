@@ -110,12 +110,13 @@ func execCheckAndTimeout(script string, timeoutSeconds *int32, scriptDefaultSeco
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe.
-// A value set in spec.probes is used as is. Unset, it is the number of checks
-// at the probe's period that cover the default window: 100s, or 400s where
-// primary-handoff.sh runs, since the script can hold the server back for up
-// to 300s for a replica hand-off. At the default period of 5s that is 20 or
-// 80. The window does not depend on cluster-node-timeout, which the script
-// reads from the config, so a change of it never rolls the pod.
+// A value set in spec.probes is used as is. Unset, it is the smallest
+// threshold whose probe gives up no sooner than the default window: 100s, or
+// 400s where primary-handoff.sh runs, since the script can hold the server
+// back for up to 300s for a replica hand-off. At the default delay and period
+// of 5s that is 20 or 80. The window does not depend on cluster-node-timeout,
+// which the script reads from the config, so a change of it never rolls the
+// pod.
 func startupFailureThreshold(spec *valkeyiov1alpha1.StartupProbeSpec, primaryHandoff bool) int32 {
 	if spec.FailureThreshold != nil {
 		return *spec.FailureThreshold
@@ -124,7 +125,9 @@ func startupFailureThreshold(spec *valkeyiov1alpha1.StartupProbeSpec, primaryHan
 	if primaryHandoff {
 		windowSeconds = handoffStartupWindowSeconds
 	}
-	return int32(checksCovering(windowSeconds, orDefault(spec.PeriodSeconds, defaultProbePeriodSeconds)))
+	return int32(startupChecksCovering(windowSeconds,
+		orDefault(spec.InitialDelaySeconds, defaultStartupInitialDelaySeconds),
+		orDefault(spec.PeriodSeconds, defaultProbePeriodSeconds)))
 }
 
 // startupProbeConfigWarnings warns when the startup probe of a cluster
@@ -139,25 +142,35 @@ func startupProbeConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []confi
 	}
 	spec := probesOrEmpty(cluster.Spec.Probes).Startup
 	threshold := startupFailureThreshold(spec, true)
+	initialDelaySeconds := orDefault(spec.InitialDelaySeconds, defaultStartupInitialDelaySeconds)
 	periodSeconds := orDefault(spec.PeriodSeconds, defaultProbePeriodSeconds)
-	windowSeconds := int64(threshold) * int64(periodSeconds)
+	windowSeconds := startupWindowSeconds(initialDelaySeconds, periodSeconds, threshold)
 	if windowSeconds >= handoffStartupWindowSeconds {
 		return nil
 	}
-	minThreshold := checksCovering(handoffStartupWindowSeconds, periodSeconds)
+	minThreshold := startupChecksCovering(handoffStartupWindowSeconds, initialDelaySeconds, periodSeconds)
 	return []configWarning{{
 		reason: valkeyiov1alpha1.ReasonStartupProbeTooShort,
-		message: fmt.Sprintf("spec.probes.startup gives up after %ds (failureThreshold %d x periodSeconds %ds), below the recommended %ds without persistence: "+
+		message: fmt.Sprintf("spec.probes.startup gives up after %ds (initialDelaySeconds %d + (failureThreshold %d - 1) x periodSeconds %ds), below the recommended %ds without persistence: "+
 			"a restarted primary can wait up to %ds for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least %d, or leave it unset",
-			windowSeconds, threshold, periodSeconds, handoffStartupWindowSeconds, primaryHandoffMaxWaitSeconds, minThreshold),
+			windowSeconds, initialDelaySeconds, threshold, periodSeconds, handoffStartupWindowSeconds, primaryHandoffMaxWaitSeconds, minThreshold),
 	}}
 }
 
-// checksCovering returns how many checks at periodSeconds cover windowSeconds.
-func checksCovering(windowSeconds int64, periodSeconds int32) int64 {
+// startupWindowSeconds returns when the startup probe gives up on a server
+// that never answers: it checks first after initialDelaySeconds, then every
+// periodSeconds, and gives up at the failureThreshold-th failed check.
+func startupWindowSeconds(initialDelaySeconds, periodSeconds, failureThreshold int32) int64 {
+	return int64(initialDelaySeconds) + int64(max(failureThreshold, 1)-1)*int64(periodSeconds)
+}
+
+// startupChecksCovering returns the smallest failureThreshold whose startup
+// probe gives up no sooner than windowSeconds.
+func startupChecksCovering(windowSeconds int64, initialDelaySeconds, periodSeconds int32) int64 {
 	period := int64(max(periodSeconds, 1))
-	return (windowSeconds + period - 1) / period
+	rest := max(windowSeconds-int64(initialDelaySeconds), 0)
+	return 1 + (rest+period-1)/period
 }
 
 // probesOrEmpty returns probes with every probe set, empty where unset.

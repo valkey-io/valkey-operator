@@ -146,10 +146,11 @@ func TestServerProbesOverrideOneDefaultPerField(t *testing.T) {
 		want   func(startup, liveness, readiness *corev1.Probe) (s, l, r *corev1.Probe)
 	}{
 		{
-			name:   "startup initialDelaySeconds",
+			name:   "startup initialDelaySeconds keeps the default window",
 			probes: valkeyv1.ProbesSpec{Startup: &valkeyv1.StartupProbeSpec{InitialDelaySeconds: new(int32(0))}},
 			want: func(s, l, r *corev1.Probe) (*corev1.Probe, *corev1.Probe, *corev1.Probe) {
 				s.InitialDelaySeconds = 0
+				s.FailureThreshold = 21
 				return s, l, r
 			},
 		},
@@ -158,7 +159,7 @@ func TestServerProbesOverrideOneDefaultPerField(t *testing.T) {
 			probes: valkeyv1.ProbesSpec{Startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10))}},
 			want: func(s, l, r *corev1.Probe) (*corev1.Probe, *corev1.Probe, *corev1.Probe) {
 				s.PeriodSeconds = 10
-				s.FailureThreshold = 10
+				s.FailureThreshold = 11
 				return s, l, r
 			},
 		},
@@ -279,6 +280,7 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 	cases := []struct {
 		name       string
 		persistent bool
+		delay      *int32
 		period     *int32
 		threshold  *int32
 		want       int32
@@ -287,22 +289,40 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 		{name: "a set threshold is applied as is", threshold: new(int32(10)), want: 10},
 		{name: "a higher threshold is applied as is", threshold: new(int32(100)), want: 100},
 		{name: "a set threshold does not follow the period", period: new(int32(1)), threshold: new(int32(30)), want: 30},
-		{name: "the default keeps 400s at a longer period", period: new(int32(10)), want: 40},
-		{name: "the default keeps 400s at a shorter period", period: new(int32(1)), want: 400},
+		{name: "the default keeps 400s at a longer period", period: new(int32(10)), want: 41},
+		{name: "the default keeps 400s at a shorter period", period: new(int32(1)), want: 396},
 		{name: "the default rounds up to cover 400s", period: new(int32(7)), want: 58},
-		{name: "the default is one check for a period past 400s", period: new(int32(600)), want: 1},
+		{name: "the default waits past the hand-off at a long period", period: new(int32(250)), want: 3},
+		{name: "the default is two checks for a period past 400s", period: new(int32(600)), want: 2},
+		{name: "the initial delay counts toward 400s", delay: new(int32(300)), want: 21},
+		{name: "one check after an initial delay past 400s", delay: new(int32(500)), want: 1},
 		{name: "the default covers 100s with persistence", persistent: true, want: 20},
-		{name: "the default keeps 100s at a longer period", persistent: true, period: new(int32(10)), want: 10},
+		{name: "the default keeps 100s at a longer period", persistent: true, period: new(int32(10)), want: 11},
 		{name: "the default rounds up to cover 100s", persistent: true, period: new(int32(7)), want: 15},
 		{name: "a set threshold is applied as is with persistence", persistent: true, threshold: new(int32(10)), want: 10},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			node := probeTestNode(tc.persistent, &valkeyv1.ProbesSpec{Startup: &valkeyv1.StartupProbeSpec{
-				PeriodSeconds: tc.period, FailureThreshold: tc.threshold,
+				InitialDelaySeconds: tc.delay, PeriodSeconds: tc.period, FailureThreshold: tc.threshold,
 			}})
 			assert.Equal(t, tc.want, renderedServer(t, node).StartupProbe.FailureThreshold)
 		})
+	}
+}
+
+func TestStartupDefaultThresholdIsTheSmallestCoveringTheHandoffWindow(t *testing.T) {
+	for _, delay := range []int32{0, 5, 300, 399, 400, 600} {
+		for period := int32(1); period <= 450; period++ {
+			d, p := delay, period
+			got := startupFailureThreshold(&valkeyv1.StartupProbeSpec{InitialDelaySeconds: &d, PeriodSeconds: &p}, true)
+			require.GreaterOrEqual(t, startupWindowSeconds(d, p, got), int64(handoffStartupWindowSeconds),
+				"delay %ds, period %ds: threshold %d gives up before the hand-off window", d, p, got)
+			if got > 1 {
+				require.Less(t, startupWindowSeconds(d, p, got-1), int64(handoffStartupWindowSeconds),
+					"delay %ds, period %ds: threshold %d is not the smallest", d, p, got)
+			}
+		}
 	}
 }
 
@@ -325,7 +345,7 @@ func TestStartupProbeConfigWarnings(t *testing.T) {
 		warnings := startupProbeConfigWarnings(cluster(false, &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(10))}))
 		require.Len(t, warnings, 1)
 		assert.Equal(t, valkeyv1.ReasonStartupProbeTooShort, warnings[0].reason)
-		assert.Equal(t, "spec.probes.startup gives up after 50s (failureThreshold 10 x periodSeconds 5s), below the recommended 400s without persistence: "+
+		assert.Equal(t, "spec.probes.startup gives up after 50s (initialDelaySeconds 5 + (failureThreshold 10 - 1) x periodSeconds 5s), below the recommended 400s without persistence: "+
 			"a restarted primary can wait up to 300s for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least 80, or leave it unset", warnings[0].message)
 	})
@@ -340,9 +360,13 @@ func TestStartupProbeConfigWarnings(t *testing.T) {
 		{name: "a period with the default threshold", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10))}},
 		{name: "exactly 400s", startup: &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(80))}},
 		{name: "one period short of 400s", startup: &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(79))}, atLeast: 80},
-		{name: "a longer period", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10)), FailureThreshold: new(int32(30))}, atLeast: 40},
+		{name: "a longer period", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10)), FailureThreshold: new(int32(30))}, atLeast: 41},
 		{name: "a period that does not divide 400", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(7)), FailureThreshold: new(int32(57))}, atLeast: 58},
-		{name: "raised to cover 400s", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10)), FailureThreshold: new(int32(40))}},
+		{name: "forty checks at 10s give up at 395s", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10)), FailureThreshold: new(int32(40))}, atLeast: 41},
+		{name: "raised to cover 400s", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10)), FailureThreshold: new(int32(41))}},
+		{name: "two checks at 250s give up before the hand-off", startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(250)), FailureThreshold: new(int32(2))}, atLeast: 3},
+		{name: "the initial delay counts toward 400s", startup: &valkeyv1.StartupProbeSpec{InitialDelaySeconds: new(int32(300)), FailureThreshold: new(int32(21))}},
+		{name: "one check short after an initial delay", startup: &valkeyv1.StartupProbeSpec{InitialDelaySeconds: new(int32(300)), FailureThreshold: new(int32(20))}, atLeast: 21},
 		{name: "persistence runs no hand-off", persistent: true, startup: &valkeyv1.StartupProbeSpec{FailureThreshold: new(int32(1))}},
 	}
 	for _, tc := range cases {

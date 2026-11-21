@@ -2629,6 +2629,134 @@ spec:
                         type: string
                     type: object
                 type: object
+              probes:
+                description: |-
+                  Probes tunes the startup, liveness and readiness probes of the server
+                  container. Unset fields keep the operator defaults, and a change rolls
+                  the pods. spec.containers patches are applied afterwards.
+                properties:
+                  liveness:
+                    description: Liveness tunes the liveness probe, or removes it.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is how many checks in a row may fail before the
+                          kubelet restarts the server container. Defaults to 5.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      mode:
+                        description: |-
+                          Mode selects the liveness check. Enabled runs the operator's built-in
+                          check. Disabled removes the probe, so the kubelet never restarts the
+                          server container for failing it. Defaults to Enabled when unset.
+                        enum:
+                        - Enabled
+                        - Disabled
+                        type: string
+                      periodSeconds:
+                        description: PeriodSeconds is how often the check runs. Defaults
+                          to 5.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      timeoutSeconds:
+                        description: |-
+                          TimeoutSeconds is how long Valkey has to answer a check. The probe's
+                          own timeout is one second longer, so the check gives up first.
+                          Defaults to 4.
+                        format: int32
+                        maximum: 3600
+                        minimum: 1
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - fieldPath: .periodSeconds
+                      message: periodSeconds cannot be set when mode is Disabled
+                      reason: FieldValueForbidden
+                      rule: '!has(self.mode) || self.mode != ''Disabled'' || !has(self.periodSeconds)'
+                    - fieldPath: .timeoutSeconds
+                      message: timeoutSeconds cannot be set when mode is Disabled
+                      reason: FieldValueForbidden
+                      rule: '!has(self.mode) || self.mode != ''Disabled'' || !has(self.timeoutSeconds)'
+                    - fieldPath: .failureThreshold
+                      message: failureThreshold cannot be set when mode is Disabled
+                      reason: FieldValueForbidden
+                      rule: '!has(self.mode) || self.mode != ''Disabled'' || !has(self.failureThreshold)'
+                  readiness:
+                    description: Readiness tunes the readiness probe.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is how many checks in a row may fail before the
+                          container stops counting as ready. Defaults to 5.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often the check runs. Defaults
+                          to 5.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      successThreshold:
+                        description: |-
+                          SuccessThreshold is how many checks in a row must pass before the
+                          container counts as ready, including after a failure. Defaults to 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      timeoutSeconds:
+                        description: |-
+                          TimeoutSeconds is how long Valkey has to answer a check. The probe's
+                          own timeout is one second longer, so the check gives up first.
+                          Defaults to 1.
+                        format: int32
+                        maximum: 3600
+                        minimum: 1
+                        type: integer
+                    type: object
+                  startup:
+                    description: |-
+                      Startup tunes the startup probe. The liveness and readiness probes
+                      start only after it passes.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is how many checks in a row may fail before the
+                          kubelet restarts the container. A set value is used as is. Unset, it
+                          is the number of checks that cover 100s, or 400s on a node without
+                          persistence, where a restarted primary can wait up to 300s for a
+                          replica hand-off before the server starts: 20 or 80 at the default
+                          period. Without persistence, failureThreshold times periodSeconds
+                          below 400s is reported as a StartupProbeTooShort ConfigurationWarning.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is how long after the container starts the first
+                          check runs. Defaults to 5.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often the check runs. Defaults
+                          to 5.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      timeoutSeconds:
+                        description: |-
+                          TimeoutSeconds is how long Valkey has to answer a check. The probe's
+                          own timeout is one second longer, so the check gives up first.
+                          Defaults to 4.
+                        format: int32
+                        maximum: 3600
+                        minimum: 1
+                        type: integer
+                    type: object
+                type: object
               replicas:
                 description: |-
                   Deprecated: use replicasPerShard, which has the same meaning. A spec

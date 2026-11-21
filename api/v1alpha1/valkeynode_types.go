@@ -109,6 +109,11 @@ type ValkeyNodeSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
+	// Probes tunes the probes of the server container. The ValkeyCluster
+	// controller copies it from the cluster's spec.probes.
+	// +optional
+	Probes *ProbesSpec `json:"probes,omitempty"`
+
 	// TLS configuration for the node
 	// +optional
 	TLS *NodeTLSSpec `json:"tls,omitempty"`

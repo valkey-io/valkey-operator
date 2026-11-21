@@ -409,6 +409,12 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
+	// Probes tunes the startup, liveness and readiness probes of the server
+	// container. Unset fields keep the operator defaults, and a change rolls
+	// the pods. spec.containers patches are applied afterwards.
+	// +optional
+	Probes *ProbesSpec `json:"probes,omitempty"`
+
 	// The operator sets the reserved keys itself.
 	// A user value would be overridden, and the user would get no signal.
 	// Keys are compared in lowercase, because Valkey ignores key case.

@@ -1,0 +1,533 @@
+/*
+Copyright 2026 Valkey Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/valkey-io/valkey-operator/internal/valkey"
+)
+
+// scaleInFixture builds a three-node shard (node-index 0, 1, 2) in a
+// two-shard cluster where the primary role sits on node-index 2 and the
+// replica link states are given per address.
+func scaleInFixture(t *testing.T, linkByAddress map[string]string) (*ValkeyClusterReconciler, *valkeyv1.ValkeyCluster, *valkey.ClusterState, *valkeyv1.ValkeyNodeList) {
+	t.Helper()
+
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 2, ReplicasPerShard: 1},
+	}
+
+	mk := func(name string, shard, node int, ip string) *valkeyv1.ValkeyNode {
+		n := newTestValkeyNode(name, "ns")
+		n.Labels = map[string]string{
+			LabelCluster:    "wedge",
+			LabelShardIndex: strconv.Itoa(shard),
+			LabelNodeIndex:  strconv.Itoa(node),
+		}
+		n.Status.PodIP = ip
+		return n
+	}
+	n00 := mk("wedge-0-0", 0, 0, "10.0.0.1")
+	n01 := mk("wedge-0-1", 0, 1, "10.0.0.2")
+	n02 := mk("wedge-0-2", 0, 2, "10.0.0.3")
+	n10 := mk("wedge-1-0", 1, 0, "10.0.1.1")
+
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n10}}
+
+	shard0 := &valkey.ShardState{
+		Id:        "shard-0",
+		PrimaryId: "node-0-2",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.1"]}},
+			{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.2"]}},
+			{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"master"}},
+		},
+	}
+	shard1 := &valkey.ShardState{
+		Id:        "shard-1",
+		PrimaryId: "node-1-0",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
+		},
+	}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard1}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n01, n02, n10).Build()
+
+	r := &ValkeyClusterReconciler{Client: c, Recorder: events.NewFakeRecorder(32)}
+	return r, cluster, state, nodes
+}
+
+func stubFailoverCounter() (*int, func()) {
+	calls := 0
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
+		calls++
+		return nil
+	}
+	return &calls, func() { proactiveFailoverFn = orig }
+}
+
+func TestDeleteExcessValkeyNodesDefersPrimaryDeletion(t *testing.T) {
+	// Replicas 2 -> 1. Node-index 2 is excess but is the shard primary
+	// with a synced kept replica available: the failover is initiated and
+	// the deletion is deferred until a fresh scrape confirms the new role.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.False(t, deleted, "nothing is deleted while the excess node is still the primary")
+	assert.True(t, deferred, "the deletion is deferred, so the caller requeues for a fresh scrape")
+	assert.Equal(t, 1, *failoverCalls, "the failover to the kept synced replica is initiated exactly once")
+
+	// The excess ValkeyNode still exists.
+	node := &valkeyv1.ValkeyNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, node))
+
+	// A fresh scrape now reports the failover completed: the node at
+	// 10.0.0.1 is the new primary and wedge-0-2 is a replica.
+	newState := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		{
+			Id:        "shard-0",
+			PrimaryId: "node-0-0",
+			Nodes: []*valkey.NodeState{
+				{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
+				{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+				{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+			},
+		},
+		state.Shards[1],
+	}}
+
+	deleted, deferred, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, newState, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deleted, "once the node is a replica, its ValkeyNode is deleted")
+	assert.False(t, deferred, "nothing is deferred once the node is a replica")
+	assert.Equal(t, 1, *failoverCalls, "no second failover is issued")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.Error(t, err, "the excess ValkeyNode CR is gone")
+	assert.True(t, k8serrors.IsNotFound(err))
+}
+
+func TestDeleteExcessValkeyNodesNoSyncedKeptReplicaDefers(t *testing.T) {
+	// The excess node is the primary and both kept replicas are unsynced:
+	// deletion must be deferred, no failover issued.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "down", "10.0.0.2": "down"})
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.False(t, deleted)
+	assert.Zero(t, *failoverCalls, "no failover without a synced kept replica")
+	assert.True(t, deferred, "deletion is deferred until a kept replica is synced")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.NoError(t, err, "the excess primary ValkeyNode is not deleted")
+
+	progressing := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing)
+	require.NotNil(t, progressing)
+	assert.Contains(t, progressing.Message, "wedge-0-2")
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionReady)
+	require.NotNil(t, ready)
+	assert.NotEqual(t, metav1.ConditionTrue, ready.Status)
+}
+
+func TestDeleteExcessValkeyNodesReplicaDeletedWithoutFailover(t *testing.T) {
+	// Node-index 2 is excess and is a replica: deleted with no failover.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
+	// Fresh scrape reports the primary at node-index 0.
+	state.Shards[0].PrimaryId = "node-0-0"
+	state.Shards[0].Nodes[0].Flags = []string{"master"}
+	state.Shards[0].Nodes[2].Flags = []string{"slave"}
+	state.Shards[0].Nodes[2].Info = map[string]string{"master_link_status": "up"}
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deleted)
+	assert.Zero(t, *failoverCalls, "a replica is deleted without failover")
+	assert.False(t, deferred, "no deferral for a plain replica deletion")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.Error(t, err, "the excess replica ValkeyNode is deleted")
+}
+
+func TestDeleteExcessValkeyNodesFailoverErrorDefers(t *testing.T) {
+	// The failover is attempted but does not complete: the node survives
+	// and the deletion is deferred without an error.
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
+		return fmt.Errorf("CLUSTER FAILOVER timed out")
+	}
+	t.Cleanup(func() { proactiveFailoverFn = orig })
+
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
+
+	_, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err, "waiting on a failover is not an error")
+	assert.Empty(t, kept)
+	assert.True(t, deferred)
+	assert.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)), "the failover reports its own events")
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode wedge-0-2: failover did not complete: CLUSTER FAILOVER timed out",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing).Message)
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.NoError(t, err, "the primary is not deleted when its failover did not complete")
+}
+
+func TestDeleteExcessValkeyNodesHighShardFailoverDoesNotStall(t *testing.T) {
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
+	}
+
+	mk := func(name string, shard, node int, ip string) *valkeyv1.ValkeyNode {
+		n := newTestValkeyNode(name, "ns")
+		n.Labels = map[string]string{
+			LabelCluster:    "wedge",
+			LabelShardIndex: strconv.Itoa(shard),
+			LabelNodeIndex:  strconv.Itoa(node),
+		}
+		n.Status.PodIP = ip
+		return n
+	}
+	n00 := mk("wedge-0-0", 0, 0, "10.0.0.1")
+	n20 := mk("wedge-2-0", 2, 0, "10.0.2.1")
+	n21 := mk("wedge-2-1", 2, 1, "10.0.2.2")
+	n22 := mk("wedge-2-2", 2, 2, "10.0.2.3")
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n20, *n21, *n22}}
+
+	shard2 := &valkey.ShardState{
+		Id:        "shard-2",
+		PrimaryId: "node-2-2",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.2.1", Id: "node-2-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.2.2", Id: "node-2-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.2.3", Id: "node-2-2", Flags: []string{"master"}},
+		},
+	}
+	shard0 := &valkey.ShardState{
+		Id:        "shard-0",
+		PrimaryId: "node-0-0",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
+		},
+	}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard2}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n20, n21, n22).Build()
+	r := &ValkeyClusterReconciler{Client: c, Recorder: events.NewFakeRecorder(32)}
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.False(t, deleted, "nothing is deleted while the excess node is still the primary")
+	assert.True(t, deferred, "the failover is initiated and the deletion deferred for a fresh scrape")
+	assert.Equal(t, 1, *failoverCalls, "the synced kept replica in a high-index shard is a failover target")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-2-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.NoError(t, err, "the high-shard excess primary is not deleted while it holds the role")
+
+	newState := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, {
+		Id:        "shard-2",
+		PrimaryId: "node-2-1",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.2.1", Id: "node-2-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.2.2", Id: "node-2-1", Flags: []string{"master"}},
+			{Address: "10.0.2.3", Id: "node-2-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+		},
+	}}}
+
+	deleted, deferred, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, newState, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deleted, "once the node is a replica, its ValkeyNode is deleted")
+	assert.False(t, deferred)
+	assert.Equal(t, 1, *failoverCalls, "no second failover is issued")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-2-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.Error(t, err, "the excess ValkeyNode CR is gone after the role moved")
+	assert.True(t, k8serrors.IsNotFound(err))
+}
+
+func TestDeleteExcessValkeyNodesNeverFailsOverToAnExcessReplica(t *testing.T) {
+	var failoverTargets [][]*valkey.NodeState
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(_ context.Context, _ events.EventRecorder, _ *valkeyv1.ValkeyCluster, _ *valkey.ShardState, targets []*valkey.NodeState) error {
+		failoverTargets = append(failoverTargets, targets)
+		return nil
+	}
+	t.Cleanup(func() { proactiveFailoverFn = orig })
+
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 2, ReplicasPerShard: 0},
+	}
+
+	mk := func(name string, shard, node int, ip string) *valkeyv1.ValkeyNode {
+		n := newTestValkeyNode(name, "ns")
+		n.Labels = map[string]string{
+			LabelCluster:    "wedge",
+			LabelShardIndex: strconv.Itoa(shard),
+			LabelNodeIndex:  strconv.Itoa(node),
+		}
+		n.Status.PodIP = ip
+		return n
+	}
+	n00 := mk("wedge-0-0", 0, 0, "10.0.0.1")
+	n01 := mk("wedge-0-1", 0, 1, "10.0.0.2")
+	n02 := mk("wedge-0-2", 0, 2, "10.0.0.3")
+	n03 := mk("wedge-0-3", 0, 3, "10.0.0.4")
+	n10 := mk("wedge-1-0", 1, 0, "10.0.1.1")
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01, *n02, *n03, *n10}}
+
+	shard0 := &valkey.ShardState{
+		Id:        "shard-0",
+		PrimaryId: "node-0-3",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.0.4", Id: "node-0-3", Flags: []string{"master"}},
+		},
+	}
+	shard1 := &valkey.ShardState{
+		Id:        "shard-1",
+		PrimaryId: "node-1-0",
+		Nodes: []*valkey.NodeState{
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
+		},
+	}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard1}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n01, n02, n03, n10).Build()
+	r := &ValkeyClusterReconciler{Client: c, Recorder: events.NewFakeRecorder(32)}
+
+	_, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deferred, "with no kept synced replica, the deletion waits instead of promoting a doomed node")
+	assert.Empty(t, failoverTargets, "no failover may target a replica the scale-in is deleting")
+
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-3", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.NoError(t, err, "the excess primary ValkeyNode is not deleted")
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-1", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.Error(t, err, "the plain excess replica is deleted")
+	err = r.Get(context.Background(), client.ObjectKey{Name: "wedge-0-2", Namespace: "ns"}, &valkeyv1.ValkeyNode{})
+	require.Error(t, err, "the plain excess replica is deleted")
+
+	shard0.Nodes[0].Info["master_link_status"] = "up"
+	_, deferred, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deferred)
+	require.Len(t, failoverTargets, 1, "the failover is initiated exactly once")
+	require.Len(t, failoverTargets[0], 1, "the only kept replica is the failover target")
+	assert.Equal(t, "10.0.0.1", failoverTargets[0][0].Address)
+}
+
+// wedgeNode returns a ValkeyNode of cluster "wedge" with its index labels and pod IP.
+func wedgeNode(shard, node int, ip string) *valkeyv1.ValkeyNode {
+	n := newTestValkeyNode(fmt.Sprintf("wedge-%d-%d", shard, node), "ns")
+	n.Labels = map[string]string{
+		LabelCluster:    "wedge",
+		LabelShardIndex: strconv.Itoa(shard),
+		LabelNodeIndex:  strconv.Itoa(node),
+	}
+	n.Status.PodIP = ip
+	return n
+}
+
+func TestDeleteExcessValkeyNodesFailoverErrorContinuesLoop(t *testing.T) {
+	// Shard 0's failover fails; shard 1's excess replica is still deleted
+	// in the same pass.
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(context.Context, events.EventRecorder, *valkeyv1.ValkeyCluster, *valkey.ShardState, []*valkey.NodeState) error {
+		return fmt.Errorf("CLUSTER FAILOVER timed out")
+	}
+	t.Cleanup(func() { proactiveFailoverFn = orig })
+
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "down"})
+	n12 := wedgeNode(1, 2, "10.0.1.3")
+	require.NoError(t, r.Create(context.Background(), n12))
+	nodes.Items = append(nodes.Items, *n12)
+	state.Shards[1].Nodes = append(state.Shards[1].Nodes,
+		&valkey.NodeState{Address: "10.0.1.3", Id: "node-1-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}})
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deferred)
+	assert.True(t, deleted, "the other shard's excess replica is deleted")
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")), "the primary whose failover failed is kept")
+	assert.False(t, nodeExists(t, r.Client, n12))
+}
+
+func TestDeleteExcessValkeyNodesPrimaryOnNodeOneToZeroReplicas(t *testing.T) {
+	// replicasPerShard 1 -> 0 with the primary on node-index 1: the role
+	// moves to node-index 0 before node-index 1 is deleted.
+	var targets [][]*valkey.NodeState
+	orig := proactiveFailoverFn
+	proactiveFailoverFn = func(_ context.Context, _ events.EventRecorder, _ *valkeyv1.ValkeyCluster, _ *valkey.ShardState, replicas []*valkey.NodeState) error {
+		targets = append(targets, replicas)
+		return nil
+	}
+	t.Cleanup(func() { proactiveFailoverFn = orig })
+
+	n00, n01 := wedgeNode(0, 0, "10.0.0.1"), wedgeNode(0, 1, "10.0.0.2")
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n01}}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 0},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
+	r := &ValkeyClusterReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n01).Build(),
+		Recorder: events.NewFakeRecorder(32),
+	}
+	shard := func(primary string) *valkey.ShardState {
+		s := &valkey.ShardState{Id: "shard-0", PrimaryId: primary, Nodes: []*valkey.NodeState{
+			{Address: "10.0.0.1", Id: "node-0-0", Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.0.2", Id: "node-0-1", Info: map[string]string{"master_link_status": "up"}},
+		}}
+		return s
+	}
+
+	_, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, &valkey.ClusterState{Shards: []*valkey.ShardState{shard("node-0-1")}}, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deferred)
+	require.Len(t, targets, 1)
+	require.Len(t, targets[0], 1)
+	assert.Equal(t, "10.0.0.1", targets[0][0].Address)
+	assert.True(t, nodeExists(t, r.Client, n01), "not deleted in the pass that fails it over")
+
+	deleted, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, &valkey.ClusterState{Shards: []*valkey.ShardState{shard("node-0-0")}}, nodes)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, deferred)
+	assert.Len(t, targets, 1, "no second failover")
+	assert.False(t, nodeExists(t, r.Client, n01))
+}
+
+// shard0WithPrimaryAt returns shard 0 of scaleInFixture without node-index 2,
+// with primaryID as its primary.
+func shard0WithPrimaryAt(primaryID string) *valkey.ShardState {
+	return &valkey.ShardState{Id: "shard-0", PrimaryId: primaryID, Nodes: []*valkey.NodeState{
+		{Address: "10.0.0.1", Id: "node-0-0", Info: map[string]string{"master_link_status": "up"}},
+		{Address: "10.0.0.2", Id: "node-0-1", Info: map[string]string{"master_link_status": "up"}},
+	}}
+}
+
+func TestDeleteExcessValkeyNodesKeepsUnscrapedPrimary(t *testing.T) {
+	// The dial to wedge-0-2 failed and no other node of shard 0 is a
+	// visible primary: it may still be the primary, so it is kept.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+	r, cluster, state, nodes := scaleInFixture(t, nil)
+	state.Shards[0] = shard0WithPrimaryAt("")
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.Zero(t, *failoverCalls)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+
+	state.Shards[0] = shard0WithPrimaryAt("node-0-0")
+	deleted, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deleted, "deleted once another node of its shard is the primary")
+	assert.False(t, deferred)
+	assert.False(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}
+
+func TestDeleteExcessValkeyNodesKeepsPodlessNodeWithoutOtherPrimary(t *testing.T) {
+	// wedge-0-2 has no pod IP while its pod is recreated, and shard 0 is
+	// missing from the scrape: kept until another primary is visible.
+	r, cluster, state, nodes := scaleInFixture(t, nil)
+	nodes.Items[2].Status.PodIP = ""
+	state.Shards = state.Shards[1:]
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+	assert.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)))
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode wedge-0-2: this scrape cannot tell whether it is the primary of shard 0",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing).Message)
+
+	state.Shards = append(state.Shards, shard0WithPrimaryAt("node-0-0"))
+	deleted, _, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}
+
+func TestDeleteExcessValkeyNodesKeepsNodeWithEmptyFlags(t *testing.T) {
+	// wedge-0-2 answered but its CLUSTER NODES did not parse, so no node
+	// of shard 0 is known to be the primary.
+	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
+	state.Shards[0].PrimaryId = ""
+	state.Shards[0].Nodes[2].Flags = nil
+
+	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.True(t, deferred)
+	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
+}

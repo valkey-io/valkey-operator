@@ -280,6 +280,7 @@ spec:
 		}
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", trustedPodName, roguePodName, unmappedPodName, rotatedPodName, "--ignore-not-found=true"))
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "configmap", spireBundle, "--ignore-not-found=true"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", "clientca-password", "--ignore-not-found=true"))
 		os.RemoveAll(tmpDir)
 	})
 
@@ -321,7 +322,7 @@ spec:
 		Expect(logs).To(Equal(spiffeID), "ACL WHOAMI should resolve to the user named by the certificate's URI SAN")
 	})
 
-	It("trusts a root added to the source live, without restarting any node", func() {
+	It("holds a new client root until unresolved users recover, without restarting any node", func() {
 		podUIDs := func() string {
 			out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("valkey.io/cluster=%s", clusterName),
 				"-o", "jsonpath={range .items[*]}{.metadata.uid}{\" \"}{.status.containerStatuses[0].restartCount}{\"\\n\"}{end}"))
@@ -333,11 +334,63 @@ spec:
 		phase, logs := whoami(rotatedPodName, rotatedCertSecret)
 		Expect(phase).To(Equal("Failed"), "a root not yet in the bundle must not be trusted: %s", logs)
 
+		By("tightening permissions while another user references a missing password Secret")
+		_, err := utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName, "--type=json", "-p",
+			`[
+				{"op":"replace","path":"/spec/users/0/permissions","value":"+acl|whoami"},
+				{"op":"add","path":"/spec/users/-","value":{
+					"name":"pending","enabled":true,
+					"passwordSecret":{"name":"clientca-password","keys":["current"]},"permissions":"+@read"
+				}}
+			]`))
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			cond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonUsersACLUnresolved))
+		}).Should(Succeed())
+		bundleBefore, err := utils.Run(exec.Command("kubectl", "get", "secret", "valkey-"+clusterName+"-tls-trust",
+			"-o", "jsonpath={.data.ca\\.crt}"))
+		Expect(err).NotTo(HaveOccurred())
+
 		publishBundle(clientCA, rotatedCA)
+		By("holding the new root even though nodes have applied the last good ACL")
+		Eventually(func(g Gomega) {
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			cond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonTrustBundlePending))
+			g.Expect(cond.Message).To(ContainSubstring("UsersACLUnresolved"))
+		}).Should(Succeed())
+		Consistently(func(g Gomega) {
+			bundle, err := utils.Run(exec.Command("kubectl", "get", "secret", "valkey-"+clusterName+"-tls-trust",
+				"-o", "jsonpath={.data.ca\\.crt}"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(bundle).To(Equal(bundleBefore))
+		}, 40*time.Second, 5*time.Second).Should(Succeed())
+		phase, logs = whoami(rotatedPodName, rotatedCertSecret)
+		Expect(phase).To(Equal("Failed"), "the held root must still be refused: %s", logs)
+		phase, logs = whoami(trustedPodName, clientCertSecret)
+		Expect(phase).To(Equal("Succeeded"), logs)
+		Expect(logs).To(Equal(spiffeID))
+
+		By("resolving the password Secret so nodes can apply the desired ACL before trusting the root")
+		_, err = utils.Run(exec.Command("kubectl", "create", "secret", "generic", "clientca-password",
+			"--from-literal=current=e2e-password"))
+		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
 			phase, logs := whoami(rotatedPodName, rotatedCertSecret)
 			g.Expect(phase).To(Equal("Succeeded"), logs)
 			g.Expect(logs).To(Equal(spiffeID))
+			cr, err := utils.GetValkeyClusterStatus(clusterName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)).To(BeNil())
+			cond := utils.FindCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonTrustBundleReady))
 		}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 		Expect(podUIDs()).To(Equal(before), "the new root must be picked up without recreating or restarting a pod")

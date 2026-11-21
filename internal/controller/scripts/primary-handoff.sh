@@ -152,11 +152,11 @@ node_owns_slots() {
         { sub(/\r$/, "") }
         $3 ~ /(^|,)myself(,|$)/ {
             for (i = 9; i <= NF; i++) {
-                if ($i ~ /^\[[0-9]+-(>|<)-.+\]$/) marker = 1
-                else if ($i ~ /^[0-9]+$/) owned = 1
+                if ($i ~ /^\[[0-9]+-(>|<)-.+\]$/ && substr($i, 2) + 0 <= 16383) marker = 1
+                else if ($i ~ /^[0-9]+$/ && $i + 0 <= 16383) owned = 1
                 else if ($i ~ /^[0-9]+-[0-9]+$/) {
                     split($i, bounds, "-")
-                    if (bounds[1] + 0 <= bounds[2] + 0) owned = 1
+                    if (bounds[1] + 0 <= bounds[2] + 0 && bounds[2] + 0 <= 16383) owned = 1
                     else invalid = 1
                 } else invalid = 1
             }

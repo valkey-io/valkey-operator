@@ -55,12 +55,14 @@ type StartupProbeSpec struct {
 	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 
 	// FailureThreshold is how many checks in a row may fail before the
-	// kubelet restarts the container. A set value is used as is. Unset, it
-	// is the number of checks that cover 100s, or 400s on a node without
-	// persistence, where a restarted primary can wait up to 300s for a
-	// replica hand-off before the server starts: 20 or 80 at the default
-	// period. Without persistence, failureThreshold times periodSeconds
-	// below 400s is reported as a StartupProbeTooShort ConfigurationWarning.
+	// kubelet restarts the container. The probe gives up after
+	// initialDelaySeconds + (failureThreshold - 1) x periodSeconds. A set
+	// value is used as is. Unset, it is the smallest value that gives up no
+	// sooner than 100s, or 400s on a node without persistence, where a
+	// restarted primary can wait up to 300s for a replica hand-off before the
+	// server starts: 20 or 80 at the default delay and period. Without
+	// persistence, a probe that gives up before 400s is reported as a
+	// StartupProbeTooShort ConfigurationWarning.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`

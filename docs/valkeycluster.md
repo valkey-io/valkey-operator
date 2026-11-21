@@ -333,7 +333,7 @@ Both checks run `valkey-cli` against the local server. The liveness check passes
 
 A failed liveness probe makes the kubelet restart the server container. The restart is not an eviction, so neither the PodDisruptionBudget nor the readiness gate holds it back, and from inside the pod a busy node looks the same as a hung one. Some of the operator's own work loads a node: a replacement replica's full sync forks the primary, and a rebalance or scale-in moves up to 400 slots in each `CLUSTER MIGRATESLOTS` batch. A CPU-throttled container makes both slower. The restart is handled like a crash of the server; see [Failure handling](#failure-handling) for what a primary keeps without `persistence`.
 
-Disable liveness when you would rather the cluster fail a node over than the kubelet restart it. A hung node then stays up but not Ready, and the cluster fails it over if it is a primary, but nothing restarts it until you delete the pod. Timing fields cannot be set together with `mode: Disabled`.
+For a node that is busy rather than hung, raise `liveness.failureThreshold` (or `periodSeconds`) first: the check already passes while the server loads its dataset, and a real hang still gets a restart. Disable liveness only when you would rather the cluster fail a node over than the kubelet restart it. A hung node then stays up but not Ready, and nothing restarts it until you delete the pod. The cluster fails it over if it is a primary, but the node walk waits at that node, so a roll and the steps after it do not run, and a later template change, turning liveness back on included, does not replace the pod, because the operator does not replace a pod whose server is running but does not answer. Timing fields cannot be set together with `mode: Disabled`.
 
 #### Startup window
 
@@ -343,7 +343,7 @@ The startup probe checks first after `initialDelaySeconds`, then every `periodSe
 
 #### Changing probes
 
-Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. A cluster that does not set `probes` keeps the pod template it had, so upgrading the operator does not roll it.
+Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. A cluster that does not set `probes` keeps the pod template it had, so upgrading the operator does not roll it. Rolling the operator back to a release without `probes` renders today's probes again, so the pods roll once and the liveness probe returns even where the ValkeyCluster still sets `liveness.mode: Disabled`.
 
 [`containers`](#containers) patches are applied after `probes`, so a probe field set in both takes the `containers` value, and `containers` remains the way to use your own check. To replace the liveness check, set `liveness.mode: Disabled` and give the `server` container a complete `livenessProbe`, handler included, in `containers`. With liveness disabled there is no operator probe for a patch to merge into, so a `livenessProbe` patch that sets only timings leaves a probe without a handler, which the API server rejects.
 

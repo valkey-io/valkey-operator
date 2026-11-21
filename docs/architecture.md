@@ -63,6 +63,7 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 - `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
+- `internal/controller/probes.go` — builds the server container's startup, liveness and readiness probes from `spec.probes`
 - `internal/controller/status.go` — condition helpers (`setCondition`)
 
 ## Naming convention

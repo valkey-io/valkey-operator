@@ -18,6 +18,7 @@
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
+- [Probes](#probes)
 - [Scheduling](#scheduling)
 - [Shards and replicas](#shards-and-replicas)
 - [TLS](#tls)
@@ -122,7 +123,7 @@ containers:
     command: ["sh", "-c", "sleep infinity"]
 ```
 
-`containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
+`containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar. To tune or disable the `server` container's probes, use [`probes`](#probes).
 
 The operator sets `securityContext.allowPrivilegeEscalation: false` on its
 `server` and `metrics-exporter` containers when the field is unset. It keeps
@@ -300,6 +301,51 @@ imagePullSecrets:
 ```
 
 `imagePullSecrets` is a list of `Secret` references (in the cluster's namespace) used to pull images from private registries. It is applied at the pod level, so a single list covers every image in the pod - the Valkey server, the metrics exporter sidecar, and any additional containers. It is optional and has no default; omit it when the nodes already authenticate to the registry.
+
+### Probes
+
+```yaml
+probes:
+  startup:
+    failureThreshold: 120
+  liveness:
+    mode: Disabled  # Enabled (default) | Disabled
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 3
+```
+
+`probes` tunes the startup, liveness and readiness probes of the `server` container. Each field you set replaces one default and the others keep theirs, so setting only `failureThreshold` keeps the period, the timeout and the check. The one default that follows another field is the startup `failureThreshold`, which keeps the startup window when you change `periodSeconds`; see [Startup window](#startup-window).
+
+| Probe | Check | `initialDelaySeconds` | `periodSeconds` | `timeoutSeconds` | `successThreshold` | `failureThreshold` |
+|---|---|---|---|---|---|---|
+| `startup` | `liveness-check.sh` | 5 | 5 | 4 | 1, fixed | enough checks for 100 seconds, or 400 without `persistence`: 20 or 80 at the default period |
+| `liveness` | `liveness-check.sh` | not settable | 5 | 4 | 1, fixed | 5 |
+| `readiness` | `readiness-check.sh` | not settable | 5 | 1 | 1 | 5 |
+
+`timeoutSeconds` is how long Valkey has to answer, at most 3600. The operator passes it to the check script and sets the probe's own timeout one second higher, so the script gives up before the kubelet does; the defaults above appear in the pod as 5, 5 and 2. Liveness and readiness have no `initialDelaySeconds` because they start only after the startup probe passes, and Kubernetes requires a `successThreshold` of 1 for startup and liveness.
+
+Both checks run `valkey-cli` against the local server. The liveness check passes on `PONG`, `LOADING` and `MASTERDOWN`, so a slow load of the dataset does not fail it, but a blocked event loop does: a slow command, a fork, or a CPU-throttled container where `valkey-cli` itself runs slowly. The readiness check passes only on `PONG`. A pod is Ready only once the [initial sync gate](#pod-disruption-budget) is set as well, which these settings do not change.
+
+#### Disabling liveness
+
+`liveness.mode: Disabled` removes the liveness probe. Only liveness can be disabled: the operator moves a roll on only once the containers are ready, so startup and readiness stay on.
+
+A failed liveness probe makes the kubelet restart the server container. The restart is not an eviction, so neither the PodDisruptionBudget nor the readiness gate holds it back, and from inside the pod a busy node looks the same as a hung one. Some of the operator's own work loads a node: a replacement replica's full sync forks the primary, and a rebalance or scale-in moves up to 400 slots in each `CLUSTER MIGRATESLOTS` batch. A CPU-throttled container makes both slower. The restart is handled like a crash of the server; see [Failure handling](#failure-handling) for what a primary keeps without `persistence`.
+
+Disable liveness when you would rather the cluster fail a node over than the kubelet restart it. A hung node then stays up but not Ready, and the cluster fails it over if it is a primary, but nothing restarts it until you delete the pod. Timing fields cannot be set together with `mode: Disabled`.
+
+#### Startup window
+
+Without `persistence`, a primary whose server restarts waits up to 300 seconds for a replica to take over before the server starts again (see [Failure handling](#failure-handling)), and its startup probe fails during the wait. A startup probe that gives up sooner restarts the container into the same wait, so a node whose replica never takes over would not start.
+
+An unset `failureThreshold` therefore covers 400 seconds without `persistence`, the wait plus the default 100 seconds, and 100 seconds with it, at whatever `periodSeconds` is: 80 or 20 checks at the default period of 5 seconds, 40 or 10 at 10 seconds. A `failureThreshold` you set is used as is. When `failureThreshold` × `periodSeconds` comes to less than 400 seconds on a cluster without `persistence`, the operator sets a `ConfigurationWarning` condition with reason `StartupProbeTooShort`, whose message names the `failureThreshold` that covers 400 seconds, and emits an event when the cluster first enters that state, as it does for a short [termination grace period](#termination-grace-period).
+
+#### Changing probes
+
+Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. A cluster that does not set `probes` keeps the pod template it had, so upgrading the operator does not roll it.
+
+[`containers`](#containers) patches are applied after `probes`, so a probe field set in both takes the `containers` value, and `containers` remains the way to use your own check. To replace the liveness check, set `liveness.mode: Disabled` and give the `server` container a complete `livenessProbe`, handler included, in `containers`. With liveness disabled there is no operator probe for a patch to merge into, so a `livenessProbe` patch that sets only timings leaves a probe without a handler, which the API server rejects.
 
 ### Shards and replicas
 

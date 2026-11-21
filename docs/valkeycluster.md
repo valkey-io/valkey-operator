@@ -59,6 +59,8 @@ Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clu
 
 #### Version-gated config
 
+Version gates use the final server image: a non-empty `server` container image in `spec.containers` overrides `spec.image`, which otherwise falls back to the operator default. The same image determines the config, system ACL rules and config roll hash. Correcting the version selected for an existing server image override can roll those pods once.
+
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
 
 Version gating applies only to keys the user sets in `spec.config`. Operator-managed directives rendered through the base config (for example `cluster-enabled`, TLS ports) are not filtered by `versionGatedConfig`; any future operator-owned directive that requires a newer Valkey minor must be gated explicitly where it is added.
@@ -275,7 +277,7 @@ The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetada
 
 ### Graceful shutdown
 
-On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+.
+On `SIGTERM` (a node drain, eviction, or preemption), a cluster primary fails its slots over to a replica before exiting, so descheduling a primary the operator did not initiate does not leave the shard without a writer. This is enabled by default through the `shutdown-on-sigterm failover` server config and requires Valkey 9.0+. With an image tagged below 9.0 the operator leaves the directive out, since an older server refuses to start on it.
 
 The handoff runs inside the pod's termination grace period. With defaults there is comfortable margin: the Kubernetes default `terminationGracePeriodSeconds` is 30s and the Valkey default `cluster-manual-failover-timeout` is 5s, so the failover completes well before `SIGKILL`. If you raise `cluster-manual-failover-timeout`, the operator raises the derived `terminationGracePeriodSeconds` to match; see [Termination grace period](#termination-grace-period).
 
@@ -705,7 +707,7 @@ acl:
 
 > **Upgrade note:** Before this version, a cluster that declared no `default` kept Valkey's open one. Upgrading the operator disables it on every such cluster, live through `ACL LOAD` and without a pod restart, so clients that connect without credentials start getting `NOAUTH`, including `valkey-cli` run inside a node's pod. Anonymous connections already open at the upgrade are closed; see "Connections that are already open" above. Before upgrading, declare `default` in `acl.users` on every cluster whose clients rely on it, with the access they need.
 
-ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`.
+ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the same way live-settable config is applied without rolling pods. Each node reports an [`ACLApplied`](status-conditions.md#aclapplied) condition once the change is live on the server. To confirm a node loaded the current revision, including permission-only edits, the operator appends a disabled bookkeeping user `_operator_acl_revision` whose password is a hash of the managed ACL. It cannot authenticate and is expected to appear in `ACL LIST`. For known Valkey 9.2.0+ images, an unchanged `ACL DIGEST` lets the controller reuse a fully verified revision without repeated reloads and per-user reads. The baseline is local to the controller process; older or unknown images use the existing full checks. See [`ACLApplied`](status-conditions.md#aclapplied) for the cache and fallback rules.
 
 > **Upgrade note:** Live application relies on the operator's `_operator` user holding the `acl|load`, `acl|getuser`, and `acl|users` commands, which older operator versions did not grant. Upgrading onto this version rewrites the pod template (it drops a now-unused annotation), so every existing cluster rolls once and picks up the new grants on restart, after which ACL changes apply live. The exception is a cluster old enough to predate that annotation entirely: it gets no automatic roll, so it needs a one-time manual pod restart after the upgrade before live ACL applies.
 

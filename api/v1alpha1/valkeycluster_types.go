@@ -972,7 +972,7 @@ const (
 	// ReasonSlotsHeldForUnreachablePrimary is used with ConditionNodesUnreachable
 	// when a replica still follows a primary the operator could not reach, so
 	// its slots stay assigned to it. If that primary is down, they stay
-	// unserved until a manual failover.
+	// unserved until a replica takes over, by Valkey's failover or a manual one.
 	ReasonSlotsHeldForUnreachablePrimary = "SlotsHeldForUnreachablePrimary"
 	// ReasonNodeQueryFailed is used with ConditionNodesUnreachable when a pod
 	// did not return a usable identity or topology.

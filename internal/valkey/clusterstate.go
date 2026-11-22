@@ -261,22 +261,11 @@ func (s *ClusterState) noteUnscrapedSlotOwnership() {
 	}
 	owners := make(map[string]*held)
 	// A dropped primary's own table can list ranges it just received before
-	// any peer has learned them. A scraped replica of it carries them on its
-	// shard, as for ranges a peer table reports.
+	// any peer has learned them.
 	for id, slots := range s.answeredSlots {
-		if _, found := scraped[id]; found {
-			continue
+		if _, found := scraped[id]; !found {
+			owners[id] = &held{slots: slots}
 		}
-		h := &held{slots: slots}
-		for _, node := range s.AllNodes() {
-			if node.PrimaryIdFromSelf() != id {
-				continue
-			}
-			if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
-				h.shard = shard
-			}
-		}
-		owners[id] = h
 	}
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
@@ -289,12 +278,17 @@ func (s *ClusterState) noteUnscrapedSlotOwnership() {
 				owners[entry.Id] = h
 			}
 			h.slots = unionSlots(h.slots, entry.Slots)
-			if node.PrimaryIdFromSelf() != entry.Id {
-				continue
-			}
-			if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
-				h.shard = shard
-			}
+		}
+	}
+	// A scraped replica of a held primary carries the ranges on its shard,
+	// whichever table reported them, so scale-in does not see it as drained.
+	for _, node := range s.AllNodes() {
+		h := owners[node.PrimaryIdFromSelf()]
+		if h == nil {
+			continue
+		}
+		if shard := s.shardByID(node.ShardId); shard != nil && shard.GetPrimaryNode() == nil {
+			h.shard = shard
 		}
 	}
 	for _, h := range owners {
@@ -370,7 +364,7 @@ func (s *ClusterState) shardByID(id string) *ShardState {
 // become fail, which is every cluster with replicas: 0 and two shards, where
 // the one surviving primary cannot form a failure majority.
 func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[string]struct{}, liveByAddress map[string]string) bool {
-	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 || entry.Host == "" {
+	if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
 		return false
 	}
 	if _, found := scraped[entry.Id]; found {
@@ -384,6 +378,10 @@ func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[st
 	if s.NodeAnswered(entry.Id) {
 		return true
 	}
+	// The checks below go by address, which a noaddr row does not have.
+	if entry.Host == "" {
+		return false
+	}
 	if _, isPod := s.targets[entry.Host]; !isPod {
 		return false
 	}
@@ -393,12 +391,18 @@ func (s *ClusterState) entryOwnsUnscrapedSlots(entry ClusterNode, scraped map[st
 	return true
 }
 
-// liveIDsByAddress maps each scraped node's address to the id it answered with.
+// liveIDsByAddress maps each address that answered CLUSTER MYID this pass,
+// scraped or dropped by a later command, to the id it answered with.
 func (s *ClusterState) liveIDsByAddress() map[string]string {
 	live := make(map[string]string)
 	for _, node := range s.AllNodes() {
 		if node.Address != "" && node.Id != "" {
 			live[node.Address] = node.Id
+		}
+	}
+	for _, inc := range s.incomplete {
+		if _, found := live[inc.Address]; !found && inc.Address != "" && inc.Id != "" {
+			live[inc.Address] = inc.Id
 		}
 	}
 	return live
@@ -937,26 +941,11 @@ func (s *ClusterState) HeldPrimaries() []HeldPrimary {
 	}
 	scraped := s.scrapedIDs()
 	live := s.liveIDsByAddress()
-	byID := make(map[string]*HeldPrimary)
-	var order []string
+	peerHosts := make(map[string][]string)
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
-			if !s.entryOwnsUnscrapedSlots(entry, scraped, live) {
-				continue
-			}
-			h := byID[entry.Id]
-			if h == nil {
-				h = &HeldPrimary{
-					Id:             entry.Id,
-					Host:           entry.Host,
-					ReplicaFollows: s.HasReplicaOf(entry.Id),
-				}
-				byID[entry.Id] = h
-				order = append(order, entry.Id)
-				continue
-			}
-			if h.Host == "" {
-				h.Host = entry.Host
+			if s.entryOwnsUnscrapedSlots(entry, scraped, live) {
+				peerHosts[entry.Id] = append(peerHosts[entry.Id], entry.Host)
 			}
 		}
 	}
@@ -965,25 +954,34 @@ func (s *ClusterState) HeldPrimaries() []HeldPrimary {
 		if _, found := scraped[id]; found {
 			continue
 		}
-		if _, listed := byID[id]; listed {
-			continue
+		if _, listed := peerHosts[id]; !listed {
+			peerHosts[id] = nil
 		}
-		h := &HeldPrimary{Id: id, ReplicaFollows: s.HasReplicaOf(id)}
-		for _, inc := range s.incomplete {
-			if inc.Id == id && inc.Address != "" {
-				h.Host = inc.Address
-				break
-			}
-		}
-		byID[id] = h
-		order = append(order, id)
 	}
-	slices.Sort(order)
-	out := make([]HeldPrimary, 0, len(order))
-	for _, id := range order {
-		out = append(out, *byID[id])
+	out := make([]HeldPrimary, 0, len(peerHosts))
+	for id, hosts := range peerHosts {
+		out = append(out, HeldPrimary{Id: id, Host: s.heldPrimaryHost(id, hosts), ReplicaFollows: s.HasReplicaOf(id)})
 	}
+	slices.SortFunc(out, func(x, y HeldPrimary) int { return cmp.Compare(x.Id, y.Id) })
 	return out
+}
+
+// heldPrimaryHost names where a held primary is: the address that answered
+// as that id this pass, or else the lowest address a peer lists, so the same
+// observations give the same message whatever order they were scraped in.
+func (s *ClusterState) heldPrimaryHost(id string, peerHosts []string) string {
+	for _, inc := range s.incomplete {
+		if inc.Id == id && inc.Address != "" {
+			return inc.Address
+		}
+	}
+	host := ""
+	for _, h := range peerHosts {
+		if h != "" && (host == "" || h < host) {
+			host = h
+		}
+	}
+	return host
 }
 
 // ScrapeHeldSummary describes nodes this pass could not scrape and primaries

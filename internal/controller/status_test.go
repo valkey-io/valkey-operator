@@ -188,7 +188,7 @@ func TestApplyNodesUnreachable(t *testing.T) {
 	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeQueryFailed))
 	g.Expect(cond.Message).To(Equal("could not query 10.0.0.4 (id abc, no slot table)"))
 	g.Expect(cond.ObservedGeneration).To(Equal(int64(3)))
-	g.Expect(<-recorder.Events).To(ContainSubstring("10.0.0.4"))
+	g.Eventually(recorder.Events).Should(Receive(ContainSubstring("10.0.0.4")), "the NodesUnreachable Warning was not emitted")
 
 	// The same gap on the next pass must not raise another event.
 	r.applyNodesUnreachable(ctx, cluster, state)

@@ -17,8 +17,9 @@ on a client pinned to that node so it is never redirected elsewhere. Unreachable
 nodes are skipped, and so is a node whose `CLUSTER MYID`, `CLUSTER MYSHARDID`,
 `CLUSTER INFO` or `CLUSTER NODES` reply fails or is empty, or whose node table
 has no `myself` line. The pass records each one for the `NodesUnreachable`
-condition, and slots it may still be serving stay assigned rather than free for
-a new primary.
+condition. Slots that its own table or a peer's still assigns to it stay
+assigned rather than free for a new primary; with neither, as for a lone
+primary with no replicas, the pass cannot tell they are taken.
 A failed `INFO` only leaves its keys unknown. A primary with no slot assignment
 becomes a pending node; everything else is grouped into a shard by shard ID.
 

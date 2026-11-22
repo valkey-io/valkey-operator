@@ -176,7 +176,7 @@ Common reasons:
 - `TrustBundleRejected` – the API server refused to store `valkey-<cluster>-tls-trust`, for example because it is over the 1 MiB Secret limit or an admission policy denies it. The Secret keeps its current contents, and the rest of the reconcile carries on.
 
 #### `ReconciliationPaused`
-Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annotation. The operator changes nothing in the cluster until the annotation is removed, so the other conditions keep the values they had when the pause began. See [Pausing reconciliation](valkeycluster.md#pausing-reconciliation).
+Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annotation. The operator changes nothing in the cluster until the annotation is removed, so the other conditions keep the values they had when the pause began, except `NodesUnreachable`, which is removed because a paused pass does not query the pods. See [Pausing reconciliation](valkeycluster.md#pausing-reconciliation).
 
 | Status | Meaning |
 |---|---|
@@ -196,7 +196,7 @@ Non-blocking. Set when the operator could not query a pod, or when it keeps a pr
 
 Common reasons:
 - `NodeQueryFailed` – a pod did not return a usable identity or topology, for example because a cluster command failed.
-- `SlotsHeldForUnreachablePrimary` – a replica still follows a primary the operator could not reach, so that primary's slots stay assigned to it. A primary that only failed a command keeps serving them; one that is down leaves them unserved until a manual failover.
+- `SlotsHeldForUnreachablePrimary` – a replica still follows a primary the operator could not reach, so that primary's slots stay assigned to it. A primary that only failed a command keeps serving them; one that is down leaves them unserved until a replica takes over, through Valkey's own failover or a manual one.
 
 #### `ExporterPasswordHeld`
 Non-blocking. Set when the metrics exporter's previous password is still accepted more than five minutes after a [system password rotation](valkeycluster.md#system-password-rotation) switched to the new one, whether or not rotation is still turned on. `Ready` is not affected, and the other system passwords keep rotating.

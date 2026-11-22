@@ -1757,6 +1757,109 @@ func TestGetClusterStateCopiesTheOwnSlotsOfADroppedPrimaryToItsReplica(t *testin
 	}
 }
 
+// A primary peers list as master,noaddr has no address, but a scraped replica
+// that still follows it keeps its ranges.
+func TestGetClusterStateHoldsTheSlotsOfAFollowedNoaddrPrimary(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 8192-16383\n" +
+		"ghi :0@0 master,noaddr - 0 0 2 connected 0-8191\n")
+	replica := healthyScrape()
+	replica[0] = blobResult("def")
+	replica[1] = blobResult("shard-2")
+	replica[2] = blobResult("role:slave\r\nmaster_link_status:down\r\n")
+	replica[4] = blobResult("def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n" +
+		"ghi :0@0 master,noaddr - 0 0 2 connected 0-8191\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 8192-16383\n")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.2:6379": replica,
+	}))
+
+	if got := state.GetUnassignedSlots(); len(got) != 0 {
+		t.Fatalf("slots of a followed noaddr primary were reported unassigned: %v", got)
+	}
+}
+
+// A pod that answered CLUSTER MYID with a new id at an address a peer still
+// names for an old primary releases that old primary's ranges, even though a
+// later command dropped the pod's scrape.
+func TestGetClusterStateReleasesAReplacedPrimaryWhenTheNewPodAnsweredMYID(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 8192-16383\n" +
+		"old 10.0.0.3:6379@16379 master - 0 0 2 connected 0-8191\n")
+	replacement := healthyScrape()
+	replacement[0] = blobResult("new")
+	replacement[3] = valkeyErrorResult("BUSY Valkey is busy running a script")
+	replacement[4] = blobResult("new 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.3:6379": replacement,
+	}))
+
+	if got, want := state.GetUnassignedSlots(), []SlotsRange{{0, 8191}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unassigned slots = %v, want %v: the old primary's address answered as another id", got, want)
+	}
+}
+
+// A replica's shard carries its dropped primary's ranges even when only
+// another shard's table lists them, so scale-in does not see it as drained.
+func TestGetClusterStateCopiesPeerReportedSlotsToTheReplicaShard(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 8192-16383\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 0-8191\n")
+	replica := healthyScrape()
+	replica[0] = blobResult("def")
+	replica[1] = blobResult("shard-2")
+	replica[2] = blobResult("role:slave\r\nmaster_link_status:down\r\n")
+	replica[4] = blobResult("def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected\n" +
+		"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 8192-16383\n")
+	dropped := healthyScrape()
+	dropped[0] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 6379, dialScrapeByAddress(t, map[string][]vclient.ValkeyResult{
+		"10.0.0.1:6379": viewer,
+		"10.0.0.2:6379": replica,
+		"10.0.0.3:6379": dropped,
+	}))
+
+	idx := slices.IndexFunc(state.Shards, func(s *ShardState) bool { return s.Id == "shard-2" })
+	if idx < 0 {
+		t.Fatalf("no shard for the replica: %+v", state.Shards)
+	}
+	if got, want := state.Shards[idx].Slots, []SlotsRange{{0, 8191}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("replica shard slots = %v, want %v", got, want)
+	}
+}
+
+// Two tables can name a held primary at different addresses. The reported
+// address must not depend on which table was scraped first.
+func TestHeldPrimaryHostDoesNotDependOnScrapeOrder(t *testing.T) {
+	viewer := healthyScrape()
+	viewer[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 8192-16383\n" +
+		"ghi 10.0.0.4:6379@16379 master - 0 0 2 connected 0-8191\n")
+	replica := healthyScrape()
+	replica[0] = blobResult("def")
+	replica[1] = blobResult("shard-2")
+	replica[2] = blobResult("role:slave\r\nmaster_link_status:down\r\n")
+	replica[4] = blobResult("def 10.0.0.2:6379@16379 myself,slave ghi 0 0 2 connected\n" +
+		"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected 0-8191\n")
+	byAddr := map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer, "10.0.0.2:6379": replica}
+
+	first := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dialScrapeByAddress(t, byAddr))
+	second := GetClusterState(context.Background(), []string{"10.0.0.2", "10.0.0.1"}, 6379, dialScrapeByAddress(t, byAddr))
+
+	want := []HeldPrimary{{Id: "ghi", Host: "10.0.0.3", ReplicaFollows: true}}
+	if got := first.HeldPrimaries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("held primaries = %+v, want %+v", got, want)
+	}
+	if got := second.HeldPrimaries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("held primaries in the other order = %+v, want %+v", got, want)
+	}
+}
+
 // Two peers can disagree after a migration: one still lists the old range and
 // another lists slots the primary just received. Both have to stay assigned.
 func TestGetClusterStateUnionsDisjointReportsOfAnUnscrapedPrimary(t *testing.T) {

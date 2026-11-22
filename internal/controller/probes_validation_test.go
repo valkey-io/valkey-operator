@@ -17,9 +17,7 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,8 +28,8 @@ import (
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -114,13 +112,12 @@ var _ = Describe("spec.probes validation", func() {
 	It("accepts the probes sample, which sets no startup warning", func() {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "v1alpha1_valkeycluster-probes.yaml"))
 		Expect(err).NotTo(HaveOccurred())
-		js, err := utilyaml.ToJSON(raw)
-		Expect(err).NotTo(HaveOccurred())
-		// Strict, as kubectl apply is: a misspelled key fails the decode.
-		decoder := json.NewDecoder(bytes.NewReader(js))
-		decoder.DisallowUnknownFields()
+		// Strict and case-sensitive, as kubectl apply is.
+		strict := kjson.NewSerializerWithOptions(kjson.DefaultMetaFactory, k8sClient.Scheme(), k8sClient.Scheme(),
+			kjson.SerializerOptions{Yaml: true, Strict: true})
 		sample := &valkeyiov1alpha1.ValkeyCluster{}
-		Expect(decoder.Decode(sample)).To(Succeed())
+		_, _, err = strict.Decode(raw, nil, sample)
+		Expect(err).NotTo(HaveOccurred())
 		sample.Namespace = "default"
 		Expect(sample.Spec.Probes).NotTo(BeNil())
 		Expect(startupProbeConfigWarnings(sample)).To(BeEmpty())

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1815,11 +1816,21 @@ func authorizedOrphanTakeovers(cluster *valkeyiov1alpha1.ValkeyCluster, candidat
 	return allowed
 }
 
+// Replication observations change during the same outage. Keep them in status,
+// but do not emit another warning just because an offset or counter changed.
+var takeoverObservationPattern = regexp.MustCompile(`offset (?:unknown|[0-9]+), sync in progress: (?:yes|no|unknown), primary link down: (?:unknown|[0-9]+s)`)
+
 // setAwaitingManualTakeover records why a persistent orphan needs operator action.
 func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) {
 	message := manualTakeoverMessage(cluster, nodes, candidates)
 	condition := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover || condition.Message != message {
+	warningChanged := condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover
+	if !warningChanged {
+		previous := takeoverObservationPattern.ReplaceAllString(condition.Message, "replication observations")
+		current := takeoverObservationPattern.ReplaceAllString(message, "replication observations")
+		warningChanged = previous != current
+	}
+	if warningChanged {
 		if len(message) <= 1024 {
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ReconcileValkeyCluster", "%s", message)
 		} else {
@@ -1836,7 +1847,20 @@ func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1a
 func manualTakeoverMessage(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) string {
 	items := manualTakeoverInstructions(cluster, nodes, candidates)
 	slices.Sort(items)
-	return "Persistent primary orphaned without failover quorum. " + strings.Join(items, "; ")
+	var message strings.Builder
+	message.WriteString("Persistent primary orphaned without failover quorum. ")
+	// metav1.Condition limits messages to 32768 characters. Reserve room for
+	// the omitted count and keep whole instructions so event comparison is stable.
+	for i, item := range items {
+		if message.Len()+len(item)+2 > 32000 {
+			return message.String() + fmt.Sprintf("; %d more orphaned primaries; see AwaitingManualTakeover events for recovery instructions", len(items)-i)
+		}
+		if i > 0 {
+			message.WriteString("; ")
+		}
+		message.WriteString(item)
+	}
+	return message.String()
 }
 
 func manualTakeoverInstructions(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) []string {

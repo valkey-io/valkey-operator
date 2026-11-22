@@ -261,3 +261,51 @@ func TestPromoteOrphanedReplicasDoesNotReuseAuthorization(t *testing.T) {
 	}
 	assert.Equal(t, 1, f.client.takeovers, "a stale topology must not allow a second TAKEOVER with consumed authorization")
 }
+
+func TestManualTakeoverWarningIgnoresChangingObservations(t *testing.T) {
+	f := newOrphanTakeoverFixture(t, true, "", nil)
+	recorder := events.NewFakeRecorder(8)
+	f.reconciler.Recorder = recorder
+	f.candidates[0].replica.Info = map[string]string{
+		"slave_repl_offset": "100", "master_sync_in_progress": "1", "master_link_down_since_seconds": "10",
+	}
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, f.candidates)
+	<-recorder.Events
+	f.candidates[0].replica.Info["slave_repl_offset"] = "200"
+	f.candidates[0].replica.Info["master_sync_in_progress"] = "0"
+	f.candidates[0].replica.Info["master_link_down_since_seconds"] = "40"
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, f.candidates)
+	condition := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	require.NotNil(t, condition)
+	assert.Contains(t, condition.Message, "offset 200, sync in progress: no, primary link down: 40s")
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("changed observations repeated a warning: %s", event)
+	default:
+	}
+	f.candidates[0].primaryId = "another-primary"
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, f.candidates)
+	assert.Contains(t, <-recorder.Events, "another-primary")
+}
+
+func TestManualTakeoverStatusLimitKeepsPerShardEvents(t *testing.T) {
+	f := newOrphanTakeoverFixture(t, true, "", nil)
+	candidates := make([]orphan, 200)
+	for i := range candidates {
+		candidates[i] = orphan{primaryId: fmt.Sprintf("%040d", i), replica: f.candidates[0].replica}
+	}
+	recorder := events.NewFakeRecorder(len(candidates))
+	f.reconciler.Recorder = recorder
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates)
+	for _, conditionType := range []string{valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ConditionDegraded} {
+		condition := meta.FindStatusCondition(f.cluster.Status.Conditions, conditionType)
+		require.NotNil(t, condition)
+		assert.LessOrEqual(t, len(condition.Message), 32768)
+		assert.Contains(t, condition.Message, "more orphaned primaries")
+	}
+	for _, candidate := range candidates {
+		event := <-recorder.Events
+		assert.Contains(t, event, candidate.primaryId)
+		assert.LessOrEqual(t, len(event), 1024)
+	}
+}

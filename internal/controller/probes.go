@@ -50,6 +50,9 @@ const (
 	// handoffStartupWindowSeconds is the startup window where
 	// primary-handoff.sh runs: the wait plus the default window.
 	handoffStartupWindowSeconds = primaryHandoffMaxWaitSeconds + defaultStartupWindowSeconds
+	// minDefaultStartupFailureThreshold is the least an unset startup
+	// failureThreshold gets, so a long initialDelaySeconds keeps retries.
+	minDefaultStartupFailureThreshold = 3
 )
 
 // serverProbes returns the startup, liveness and readiness probes of the
@@ -115,10 +118,11 @@ func execCheckAndTimeout(script string, timeoutSeconds *int32, scriptDefaultSeco
 // A value set in spec.probes is used as is. Unset, it is the smallest
 // threshold whose probe gives up no sooner than the default window: 100s, or
 // 400s where primary-handoff.sh runs, since the script can hold the server
-// back for up to 300s for a replica hand-off. At the default delay and period
-// of 5s that is 20 or 80. The window does not depend on cluster-node-timeout,
-// which the script reads from the config, so a change of it never rolls the
-// pod.
+// back for up to 300s for a replica hand-off. It is at least 3, so a long
+// initialDelaySeconds does not leave a single check. At the default delay and
+// period of 5s that is 20 or 80. The window does not depend on
+// cluster-node-timeout, which the script reads from the config, so a change
+// of it never rolls the pod.
 func startupFailureThreshold(spec *valkeyiov1alpha1.StartupProbeSpec, primaryHandoff bool) int32 {
 	if spec.FailureThreshold != nil {
 		return *spec.FailureThreshold
@@ -127,9 +131,9 @@ func startupFailureThreshold(spec *valkeyiov1alpha1.StartupProbeSpec, primaryHan
 	if primaryHandoff {
 		windowSeconds = handoffStartupWindowSeconds
 	}
-	return int32(startupChecksCovering(windowSeconds,
+	return int32(max(startupChecksCovering(windowSeconds,
 		orDefault(spec.InitialDelaySeconds, defaultStartupInitialDelaySeconds),
-		orDefault(spec.PeriodSeconds, defaultProbePeriodSeconds)))
+		orDefault(spec.PeriodSeconds, defaultProbePeriodSeconds)), minDefaultStartupFailureThreshold))
 }
 
 // startupProbeConfigWarnings warns when the startup probe of a cluster

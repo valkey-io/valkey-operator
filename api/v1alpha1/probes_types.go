@@ -61,9 +61,10 @@ type StartupProbeSpec struct {
 	// value is used as is. Unset, it is the smallest value that gives up no
 	// sooner than 100s, or 400s on a node without persistence, where a
 	// restarted primary can wait up to 300s for a replica hand-off before the
-	// server starts: 20 or 80 at the default delay and period. On a cluster
-	// without persistence that has replicas, a probe that gives up before
-	// 400s is reported as a StartupProbeTooShort ConfigurationWarning.
+	// server starts, and at least 3: 20 or 80 at the default delay and
+	// period. On a cluster without persistence that has replicas, a probe
+	// that gives up before 400s is reported as a StartupProbeTooShort
+	// ConfigurationWarning.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
@@ -74,9 +75,9 @@ type StartupProbeSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Disabled' || !has(self.timeoutSeconds)",message="timeoutSeconds cannot be set when mode is Disabled",fieldPath=".timeoutSeconds",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Disabled' || !has(self.failureThreshold)",message="failureThreshold cannot be set when mode is Disabled",fieldPath=".failureThreshold",reason="FieldValueForbidden"
 type LivenessProbeSpec struct {
-	// Mode selects the liveness check. Enabled runs the operator's built-in
+	// Mode selects the liveness check. BuiltIn runs the operator's built-in
 	// check. Disabled removes the probe, so the kubelet never restarts the
-	// server container for failing it. Defaults to Enabled when unset.
+	// server container for failing it. Defaults to BuiltIn when unset.
 	// +optional
 	Mode LivenessProbeMode `json:"mode,omitempty"`
 
@@ -131,14 +132,14 @@ type ReadinessProbeSpec struct {
 }
 
 // LivenessProbeMode selects the liveness check on the server container.
-// Enabled runs the operator's built-in check. Disabled removes the probe.
+// BuiltIn runs the operator's built-in check. Disabled removes the probe.
 // Values may be added in future versions; clients must handle unknown values.
-// +kubebuilder:validation:Enum=Enabled;Disabled
+// +kubebuilder:validation:Enum=BuiltIn;Disabled
 type LivenessProbeMode string
 
 const (
-	// LivenessProbeModeEnabled runs the operator's built-in liveness check.
-	LivenessProbeModeEnabled LivenessProbeMode = "Enabled"
+	// LivenessProbeModeBuiltIn runs the operator's built-in liveness check.
+	LivenessProbeModeBuiltIn LivenessProbeMode = "BuiltIn"
 	// LivenessProbeModeDisabled removes the liveness probe.
 	LivenessProbeModeDisabled LivenessProbeMode = "Disabled"
 )

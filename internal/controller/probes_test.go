@@ -114,7 +114,7 @@ func TestServerProbesWithoutSpecProbesMatchTheLegacyRender(t *testing.T) {
 			Liveness:  &valkeyv1.LivenessProbeSpec{},
 			Readiness: &valkeyv1.ReadinessProbeSpec{},
 		}},
-		{"liveness mode Enabled", &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: valkeyv1.LivenessProbeModeEnabled}}},
+		{"liveness mode BuiltIn", &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: valkeyv1.LivenessProbeModeBuiltIn}}},
 		// A mode from a newer release keeps the probe.
 		{"unknown liveness mode", &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: "Future"}}},
 	}
@@ -208,9 +208,9 @@ func TestServerProbesOverrideOneDefaultPerField(t *testing.T) {
 			},
 		},
 		{
-			name: "liveness failureThreshold with mode Enabled",
+			name: "liveness failureThreshold with mode BuiltIn",
 			probes: valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{
-				Mode: valkeyv1.LivenessProbeModeEnabled, FailureThreshold: new(int32(7)),
+				Mode: valkeyv1.LivenessProbeModeBuiltIn, FailureThreshold: new(int32(7)),
 			}},
 			want: func(s, l, r *corev1.Probe) (*corev1.Probe, *corev1.Probe, *corev1.Probe) {
 				l.FailureThreshold = 7
@@ -295,9 +295,9 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 		{name: "the default keeps 400s at a shorter period", period: new(int32(1)), want: 396},
 		{name: "the default rounds up to cover 400s", period: new(int32(7)), want: 58},
 		{name: "the default waits past the hand-off at a long period", period: new(int32(250)), want: 3},
-		{name: "the default is two checks for a period past 400s", period: new(int32(600)), want: 2},
+		{name: "the default keeps three checks for a period past 400s", period: new(int32(600)), want: 3},
 		{name: "the initial delay counts toward 400s", delay: new(int32(300)), want: 21},
-		{name: "one check after an initial delay past 400s", delay: new(int32(500)), want: 1},
+		{name: "the default keeps three checks after an initial delay past 400s", delay: new(int32(500)), want: 3},
 		{name: "the default covers 100s with persistence", persistent: true, want: 20},
 		{name: "the default keeps 100s at a longer period", persistent: true, period: new(int32(10)), want: 11},
 		{name: "the default rounds up to cover 100s", persistent: true, period: new(int32(7)), want: 15},
@@ -320,7 +320,8 @@ func TestStartupDefaultThresholdIsTheSmallestCoveringTheHandoffWindow(t *testing
 			got := startupFailureThreshold(&valkeyv1.StartupProbeSpec{InitialDelaySeconds: &d, PeriodSeconds: &p}, true)
 			require.GreaterOrEqual(t, startupWindowSeconds(d, p, got), int64(handoffStartupWindowSeconds),
 				"delay %ds, period %ds: threshold %d gives up before the hand-off window", d, p, got)
-			if got > 1 {
+			require.GreaterOrEqual(t, got, int32(minDefaultStartupFailureThreshold), "delay %ds, period %ds", d, p)
+			if got > minDefaultStartupFailureThreshold {
 				require.Less(t, startupWindowSeconds(d, p, got-1), int64(handoffStartupWindowSeconds),
 					"delay %ds, period %ds: threshold %d is not the smallest", d, p, got)
 			}

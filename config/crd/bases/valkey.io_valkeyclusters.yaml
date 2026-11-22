@@ -2647,11 +2647,11 @@ spec:
                         type: integer
                       mode:
                         description: |-
-                          Mode selects the liveness check. Enabled runs the operator's built-in
+                          Mode selects the liveness check. BuiltIn runs the operator's built-in
                           check. Disabled removes the probe, so the kubelet never restarts the
-                          server container for failing it. Defaults to Enabled when unset.
+                          server container for failing it. Defaults to BuiltIn when unset.
                         enum:
-                        - Enabled
+                        - BuiltIn
                         - Disabled
                         type: string
                       periodSeconds:
@@ -2731,9 +2731,10 @@ spec:
                           value is used as is. Unset, it is the smallest value that gives up no
                           sooner than 100s, or 400s on a node without persistence, where a
                           restarted primary can wait up to 300s for a replica hand-off before the
-                          server starts: 20 or 80 at the default delay and period. On a cluster
-                          without persistence that has replicas, a probe that gives up before
-                          400s is reported as a StartupProbeTooShort ConfigurationWarning.
+                          server starts, and at least 3: 20 or 80 at the default delay and
+                          period. On a cluster without persistence that has replicas, a probe
+                          that gives up before 400s is reported as a StartupProbeTooShort
+                          ConfigurationWarning.
                         format: int32
                         minimum: 1
                         type: integer

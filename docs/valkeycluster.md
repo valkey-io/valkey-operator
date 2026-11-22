@@ -309,7 +309,7 @@ probes:
   startup:
     failureThreshold: 120
   liveness:
-    mode: Disabled  # Enabled (default) | Disabled
+    mode: Disabled  # BuiltIn (default) | Disabled
   readiness:
     periodSeconds: 10
     timeoutSeconds: 3
@@ -319,7 +319,7 @@ probes:
 
 | Probe | Check | `initialDelaySeconds` | `periodSeconds` | `timeoutSeconds` | `successThreshold` | `failureThreshold` |
 |---|---|---|---|---|---|---|
-| `startup` | `liveness-check.sh` | 5 | 5 | 4 | 1, fixed | enough checks for 100 seconds, or 400 without `persistence`: 20 or 80 at the default period |
+| `startup` | `liveness-check.sh` | 5 | 5 | 4 | 1, fixed | enough checks for 100 seconds, or 400 without `persistence`, and at least 3: 20 or 80 at the default period |
 | `liveness` | `liveness-check.sh` | not settable | 5 | 4 | 1, fixed | 5 |
 | `readiness` | `readiness-check.sh` | not settable | 5 | 1 | 1 | 5 |
 
@@ -339,7 +339,7 @@ For a node that is busy rather than hung, raise `liveness.failureThreshold` (or 
 
 Without `persistence`, a primary whose server restarts waits up to 300 seconds for a replica to take over before the server starts again (see [Failure handling](#failure-handling)), and its startup probe fails during the wait. A startup probe that gives up sooner restarts the container into the same wait, so a node whose replica never takes over would not start.
 
-The startup probe checks first after `initialDelaySeconds`, then every `periodSeconds`, so it gives up after `initialDelaySeconds` + (`failureThreshold` − 1) × `periodSeconds`. An unset `failureThreshold` is the smallest that gives up no sooner than 400 seconds without `persistence`, the wait plus the default 100 seconds, and 100 seconds with it: 80 or 20 checks at the default delay and period of 5 seconds, 41 or 11 at a period of 10 seconds. An `initialDelaySeconds` at or past that window leaves it at 1, so the first failed check restarts the container; set `failureThreshold` as well when you raise the delay that far. A `failureThreshold` you set is used as is. When it gives up in less than 400 seconds on a cluster without `persistence` that has replicas, the operator sets a `ConfigurationWarning` condition with reason `StartupProbeTooShort`, whose message names the `failureThreshold` that covers 400 seconds, and emits an event when the cluster first enters that state, as it does for a short [termination grace period](#termination-grace-period). Without replicas a restarted primary has no one to wait for, so there is no warning. The warning reads `probes` only, not a startup probe patched in through [`containers`](#containers).
+The startup probe checks first after `initialDelaySeconds`, then every `periodSeconds`, so it gives up after `initialDelaySeconds` + (`failureThreshold` − 1) × `periodSeconds`. An unset `failureThreshold` is the smallest that gives up no sooner than 400 seconds without `persistence`, the longest wait plus the default 100 seconds, and 100 seconds with it, and at least 3, so a long `initialDelaySeconds` still leaves retries: 80 or 20 checks at the default delay and period of 5 seconds, 41 or 11 at a period of 10 seconds. A `failureThreshold` you set is used as is. When it gives up in less than 400 seconds on a cluster without `persistence` that has replicas, the operator sets a `ConfigurationWarning` condition with reason `StartupProbeTooShort`, whose message names the `failureThreshold` that covers 400 seconds, and emits an event when the cluster first enters that state, as it does for a short [termination grace period](#termination-grace-period). Without replicas a restarted primary has no one to wait for, so there is no warning. The warning reads `probes` only, not a startup probe patched in through [`containers`](#containers).
 
 #### Changing probes
 

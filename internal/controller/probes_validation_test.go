@@ -92,7 +92,7 @@ var _ = Describe("spec.probes validation", func() {
 				FailureThreshold:    new(int32(1)),
 			},
 			Liveness: &valkeyiov1alpha1.LivenessProbeSpec{
-				Mode:             valkeyiov1alpha1.LivenessProbeModeEnabled,
+				Mode:             valkeyiov1alpha1.LivenessProbeModeBuiltIn,
 				PeriodSeconds:    new(int32(1)),
 				TimeoutSeconds:   new(int32(3600)),
 				FailureThreshold: new(int32(1)),

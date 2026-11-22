@@ -2729,9 +2729,9 @@ spec:
                           kubelet restarts the container. The probe gives up after
                           initialDelaySeconds + (failureThreshold - 1) x periodSeconds. A set
                           value is used as is. Unset, it is the smallest value that gives up no
-                          sooner than 100s, or 400s on a node without persistence, where a
-                          restarted primary can wait up to 300s for a replica hand-off before the
-                          server starts, and at least 3: 20 or 80 at the default delay and
+                          sooner than 100s, or 400s on a cluster node without persistence, where
+                          primary-handoff.sh can hold a restarted primary back for up to 300s for
+                          a replica hand-off, and at least 3: 20 or 80 at the default delay and
                           period. On a cluster without persistence that has replicas, a probe
                           that gives up before 400s is reported as a StartupProbeTooShort
                           ConfigurationWarning.

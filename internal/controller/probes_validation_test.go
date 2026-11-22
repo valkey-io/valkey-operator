@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -110,11 +112,15 @@ var _ = Describe("spec.probes validation", func() {
 	})
 
 	It("accepts the probes sample, which sets no startup warning", func() {
-		f, err := os.Open(filepath.Join("..", "..", "config", "samples", "v1alpha1_valkeycluster-probes.yaml"))
+		raw, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "v1alpha1_valkeycluster-probes.yaml"))
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(f.Close)
+		js, err := utilyaml.ToJSON(raw)
+		Expect(err).NotTo(HaveOccurred())
+		// Strict, as kubectl apply is: a misspelled key fails the decode.
+		decoder := json.NewDecoder(bytes.NewReader(js))
+		decoder.DisallowUnknownFields()
 		sample := &valkeyiov1alpha1.ValkeyCluster{}
-		Expect(utilyaml.NewYAMLOrJSONDecoder(f, 4096).Decode(sample)).To(Succeed())
+		Expect(decoder.Decode(sample)).To(Succeed())
 		sample.Namespace = "default"
 		Expect(sample.Spec.Probes).NotTo(BeNil())
 		Expect(startupProbeConfigWarnings(sample)).To(BeEmpty())

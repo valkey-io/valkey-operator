@@ -301,6 +301,7 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 		{name: "the default covers 100s with persistence", persistent: true, want: 20},
 		{name: "the default keeps 100s at a longer period", persistent: true, period: new(int32(10)), want: 11},
 		{name: "the default rounds up to cover 100s", persistent: true, period: new(int32(7)), want: 15},
+		{name: "the default keeps three checks after an initial delay past 100s with persistence", persistent: true, delay: new(int32(200)), want: 3},
 		{name: "a set threshold is applied as is with persistence", persistent: true, threshold: new(int32(10)), want: 10},
 	}
 	for _, tc := range cases {

@@ -552,7 +552,7 @@ spec:
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
+				cmd := exec.Command("kubectl", "get", "secrets", "sample-users", "-o", "jsonpath={.data.defaultpw}")
 				b64Password, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
@@ -722,7 +722,7 @@ EOF`,
 
 			By("validating the _operator ACL covers every command the operator runs")
 			verifyOperatorAclCoverage := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
+				cmd := exec.Command("kubectl", "get", "secrets", "sample-users", "-o", "jsonpath={.data.defaultpw}")
 
 				b64Password, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())

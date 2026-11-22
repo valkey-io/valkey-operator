@@ -101,15 +101,15 @@ func TestClusterState_FindShardForAddress(t *testing.T) {
 				Id:        "shard-1",
 				PrimaryId: "node-1",
 				Nodes: []*NodeState{
-					{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master", "myself"}},
-					{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}},
+					{Address: "10.0.0.1", Id: "node-1", Flags: FlagMyself | FlagMaster},
+					{Address: "10.0.0.2", Id: "node-2", Flags: FlagSlave},
 				},
 			},
 			{
 				Id:        "shard-2",
 				PrimaryId: "node-3",
 				Nodes: []*NodeState{
-					{Address: "10.0.0.3", Id: "node-3", Flags: []string{"master"}},
+					{Address: "10.0.0.3", Id: "node-3", Flags: FlagMaster},
 				},
 			},
 		},
@@ -150,20 +150,20 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 	primary := &NodeState{
 		Id:          "primary-id",
 		Address:     "10.0.0.1",
-		Flags:       []string{"myself", "master"},
+		Flags:       FlagMyself | FlagMaster,
 		Info:        map[string]string{"role": "master"},
 		ClusterInfo: map[string]string{"cluster_size": "1"},
 	}
 	syncedReplica := &NodeState{
 		Id:      "replica-1-id",
 		Address: "10.0.0.2",
-		Flags:   []string{"slave"},
+		Flags:   FlagSlave,
 		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
 	unsyncedReplica := &NodeState{
 		Id:      "replica-2-id",
 		Address: "10.0.0.3",
-		Flags:   []string{"slave"},
+		Flags:   FlagSlave,
 		Info:    map[string]string{"role": "slave", "master_link_status": "down"},
 	}
 	// A replica whose own scrape looks healthy: its link is up and its own
@@ -172,7 +172,7 @@ func TestShardState_GetSyncedReplicas(t *testing.T) {
 	partitionedReplica := &NodeState{
 		Id:      "replica-3-id",
 		Address: "10.0.0.4",
-		Flags:   []string{"slave"},
+		Flags:   FlagSlave,
 		Info:    map[string]string{"role": "slave", "master_link_status": "up"},
 	}
 	primary.nodes = ParseClusterNodes("primary-id 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n" +
@@ -201,7 +201,7 @@ func TestShardState_GetSyncedReplicas_Empty(t *testing.T) {
 	primary := &NodeState{
 		Id:      "primary-id",
 		Address: "10.0.0.1",
-		Flags:   []string{"myself", "master"},
+		Flags:   FlagMyself | FlagMaster,
 		Info:    map[string]string{"role": "master"},
 	}
 	shard := &ShardState{
@@ -421,10 +421,10 @@ func TestClusterState_BestReplicaOf(t *testing.T) {
 			{
 				PrimaryId: "primary1",
 				Nodes: []*NodeState{
-					{Id: "primary1", Flags: []string{"master"}, nodes: ParseClusterNodes("primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n")},
-					{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
-					{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
-					{Id: "r3", Flags: []string{"slave"}, Info: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "primary1", Flags: FlagMaster, nodes: ParseClusterNodes("primary1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5461\n")},
+					{Id: "r1", Flags: FlagSlave, Info: map[string]string{"slave_repl_offset": "100"}, nodes: ParseClusterNodes("r1 10.0.0.2:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r2", Flags: FlagSlave, Info: map[string]string{"slave_repl_offset": "500"}, nodes: ParseClusterNodes("r2 10.0.0.3:6379@16379 myself,slave primary1 0 0 1 connected\n")},
+					{Id: "r3", Flags: FlagSlave, Info: map[string]string{"slave_repl_offset": "200"}, nodes: ParseClusterNodes("r3 10.0.0.4:6379@16379 myself,slave primary1 0 0 1 connected\n")},
 				},
 			},
 		},
@@ -927,14 +927,14 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 	// own slots, so the quorum is two reports.
 	size := func(n string) map[string]string { return map[string]string{"cluster_size": n} }
 	primary := func(id, view string) *NodeState {
-		return &NodeState{Id: id, Flags: []string{"myself", "master"}, ClusterInfo: size("3"),
+		return &NodeState{Id: id, Flags: FlagMyself | FlagMaster, ClusterInfo: size("3"),
 			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n" + view)}
 	}
 	replica := func(id, view string) *NodeState {
-		return &NodeState{Id: id, Flags: []string{"myself", "slave"}, ClusterInfo: size("3"),
+		return &NodeState{Id: id, Flags: FlagMyself | FlagSlave, ClusterInfo: size("3"),
 			nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n" + view)}
 	}
-	target := &NodeState{Id: "target", Flags: []string{"myself", "slave"},
+	target := &NodeState{Id: "target", Flags: FlagMyself | FlagSlave,
 		nodes: ParseClusterNodes("target 10.0.0.9:6379@16379 myself,slave p1 0 0 1 connected\n")}
 	build := func(a, b, c string) *ClusterState {
 		return &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
@@ -1014,10 +1014,10 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 // A node cut off from the cluster bus marks every peer fail? in its own
 // table. That one opinion must not empty the failover target list.
 func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *testing.T) {
-	primary := &NodeState{Id: "p", Flags: []string{"myself", "master"}, Info: map[string]string{"role": "master"},
+	primary := &NodeState{Id: "p", Flags: FlagMyself | FlagMaster, Info: map[string]string{"role": "master"},
 		ClusterInfo: map[string]string{"cluster_size": "1"}}
-	r1 := &NodeState{Id: "r1", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
-	r2 := &NodeState{Id: "r2", Flags: []string{"slave"}, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r1 := &NodeState{Id: "r1", Flags: FlagSlave, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
+	r2 := &NodeState{Id: "r2", Flags: FlagSlave, Info: map[string]string{"role": "slave", "master_link_status": "up"}}
 	primary.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
 	r1.nodes = ParseClusterNodes("p 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\nr1 10.0.0.2:6379@16379 myself,slave p 0 0 1 connected\nr2 10.0.0.3:6379@16379 slave p 0 0 1 connected\n")
 	// r2 is cut off and sees everyone as fail?.

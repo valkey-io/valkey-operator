@@ -308,4 +308,15 @@ func TestManualTakeoverStatusLimitKeepsPerShardEvents(t *testing.T) {
 		assert.Contains(t, event, candidate.primaryId)
 		assert.LessOrEqual(t, len(event), 1024)
 	}
+	previous := manualTakeoverMessage(f.cluster, f.nodes, candidates)
+	replacement := *candidates[len(candidates)-1].replica
+	replacement.Id = "replacement-replica"
+	candidates[len(candidates)-1].replica = &replacement
+	require.Equal(t, previous, manualTakeoverMessage(f.cluster, f.nodes, candidates), "changed candidate must be outside the shortened status")
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates)
+	var lastEvent string
+	for range candidates {
+		lastEvent = <-recorder.Events
+	}
+	assert.Contains(t, lastEvent, "replacement-replica", "events must refresh even when shortened status is unchanged")
 }

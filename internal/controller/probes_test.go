@@ -290,6 +290,7 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 		{name: "the default covers 400s where primary-handoff.sh runs", want: 80},
 		{name: "a set threshold is applied as is", threshold: new(int32(10)), want: 10},
 		{name: "a higher threshold is applied as is", threshold: new(int32(100)), want: 100},
+		{name: "a set threshold below three is applied as is", threshold: new(int32(1)), want: 1},
 		{name: "a set threshold does not follow the period", period: new(int32(1)), threshold: new(int32(30)), want: 30},
 		{name: "the default keeps 400s at a longer period", period: new(int32(10)), want: 41},
 		{name: "the default keeps 400s at a shorter period", period: new(int32(1)), want: 396},
@@ -303,6 +304,7 @@ func TestStartupFailureThresholdFromSpec(t *testing.T) {
 		{name: "the default rounds up to cover 100s", persistent: true, period: new(int32(7)), want: 15},
 		{name: "the default keeps three checks after an initial delay past 100s with persistence", persistent: true, delay: new(int32(200)), want: 3},
 		{name: "a set threshold is applied as is with persistence", persistent: true, threshold: new(int32(10)), want: 10},
+		{name: "a set threshold below three is applied as is with persistence", persistent: true, threshold: new(int32(1)), want: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

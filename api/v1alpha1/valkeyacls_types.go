@@ -119,7 +119,7 @@ type ACLPermissions struct {
 }
 
 // ACLUserSpec defines a Valkey ACL user.
-// +kubebuilder:validation:XValidation:rule="(has(self.state) && self.state == 'Disabled') || (has(self.password) && has(self.password.type) && self.password.type != 'Secret') || (has(self.password) && has(self.password.secret) && has(self.password.secret.name) && size(self.password.secret.name) > 0)",message="password.secret.name is required for an enabled user whose password.type is Secret, the default",fieldPath=".password.secret.name",reason="FieldValueRequired"
+// +kubebuilder:validation:XValidation:rule="(has(self.state) && self.state == 'Disabled') || (has(self.password) && has(self.password.type) && self.password.type in ['Any', 'Disabled']) || (has(self.password) && has(self.password.secret) && has(self.password.secret.name) && size(self.password.secret.name) > 0)",message="password.secret.name is required for an enabled user whose password.type is Secret, the default",fieldPath=".password.secret.name",reason="FieldValueRequired"
 type ACLUserSpec struct {
 	// Username
 	// +required

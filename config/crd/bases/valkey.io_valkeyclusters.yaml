@@ -215,9 +215,10 @@ spec:
                           whose password.type is Secret, the default
                         reason: FieldValueRequired
                         rule: (has(self.state) && self.state == 'Disabled') || (has(self.password)
-                          && has(self.password.type) && self.password.type != 'Secret')
-                          || (has(self.password) && has(self.password.secret) && has(self.password.secret.name)
-                          && size(self.password.secret.name) > 0)
+                          && has(self.password.type) && self.password.type in ['Any',
+                          'Disabled']) || (has(self.password) && has(self.password.secret)
+                          && has(self.password.secret.name) && size(self.password.secret.name)
+                          > 0)
                     type: array
                     x-kubernetes-list-map-keys:
                     - name

@@ -3196,8 +3196,7 @@ spec:
                 description: |-
                   PreferredEndpointType is set by the ValkeyCluster controller from
                   spec.networking.discovery. PreferredEndpointTypeHostname switches announce
-                  flags and managed config to hostname mode. Standalone nodes leave this empty
-                  (IP announce).
+                  flags and managed config to hostname mode. Empty means IP announce.
                 enum:
                 - IP
                 - Hostname
@@ -3616,10 +3615,10 @@ spec:
                 description: |-
                   WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
                   controller authorizes this node to apply. The ValkeyCluster controller sets
-                  it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
-                  controller applies a rolling StatefulSet/Deployment template update only
-                  when the template it builds hashes to this value. Standalone nodes ignore
-                  the field and apply immediately.
+                  it when advancing a roll. The ValkeyNode controller applies a rolling
+                  StatefulSet/Deployment template update only when the template it builds
+                  hashes to this value. A ValkeyNode without a ValkeyCluster parent is not
+                  reconciled.
                 type: string
               workloadType:
                 default: StatefulSet
@@ -3668,6 +3667,11 @@ spec:
                   AppliedACLRevision is the revision of the operator-managed aclfile that
                   the running server was last confirmed to hold, recorded as ACLApplied
                   becomes True.
+                type: string
+              appliedReplicationPasswordHash:
+                description: |-
+                  AppliedReplicationPasswordHash is the sha256 of the replication password
+                  the running server was last given with CONFIG SET primaryauth.
                 type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
@@ -3746,6 +3750,12 @@ spec:
                 description: Ready indicates whether the ValkeyNode is ready to serve
                   traffic.
                 type: boolean
+              replicationPasswordAppliedTime:
+                description: |-
+                  ReplicationPasswordAppliedTime is when that CONFIG SET was sent. A server
+                  container that started after it may hold an older password from the file.
+                format: date-time
+                type: string
               role:
                 description: Role is the Valkey replication role of this node (primary
                   or replica).

@@ -58,6 +58,7 @@ Common reasons when `Ready=False`:
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `valkey-<cluster>-tls-trust` Secret
+- `InitialSyncGateFailed` – a write of the `valkey.io/initial-sync-complete` readiness gate was refused (403, for example without `patch` on `pods/status`) or conflicted (409). The node walk is held for that pass, so no ValkeyNode is created or rolled and a pod the walk would replace is not left waiting on a gate that cannot be written. The steps after the walk still run. `Progressing` is `True` with the same reason. Any other failed write is reported only by the `InitialSyncGateFailed` event
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
   - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
@@ -102,7 +103,6 @@ Common reasons:
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 - `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `internal-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
 - `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
-
 ---
 
 ### Valkey-specific conditions
@@ -186,6 +186,17 @@ Set while the cluster carries the `valkey.io/pause-reconciliation: "true"` annot
 Common reasons:
 - `PauseAnnotationSet` – the pause annotation is set to `"true"`.
 
+#### `ExporterPasswordHeld`
+Non-blocking. Set when the metrics exporter's previous password is still accepted more than five minutes after a [system password rotation](valkeycluster.md#system-password-rotation) switched to the new one, whether or not rotation is still turned on. `Ready` is not affected, and the other system passwords keep rotating.
+
+| Status | Meaning |
+|---|---|
+| `True` | The metrics exporter in the pods named in the message started before the switch, or within five minutes after it, so it may still send the previous password. That password stays accepted until those pods restart; restart them one at a time to finish the exporter's rotation. |
+| (absent) | No previous exporter password is held, or the switch was less than five minutes ago. |
+
+Common reasons:
+- `ExporterNotRestarted` – the exporter container has not started again since the switch.
+
 ---
 
 ### ValkeyNode conditions
@@ -204,6 +215,7 @@ Common reasons when `Ready=False`:
 - `PodNotReady` – pod is missing, not ready, or the workload has not finished rolling out.
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
+- `NoParent` – the node has no controller ownerReference to a `valkey.io` `ValkeyCluster`. The operator creates or updates no workload, Service or ConfigMap for the node and leaves the existing ones and the pod as they are. It still manages the persistence finalizer, and deleting the node still runs its finalizers. A ValkeyNode created by hand, or left behind by `kubectl delete valkeycluster <name> --cascade=orphan`, gets this reason. If the cluster was paused when it was deleted, its nodes keep the `valkey.io/pause-reconciliation` annotation and stay paused. They report `NoParent` after someone removes the annotation.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -323,7 +335,7 @@ Common reasons when `DefaultUserSessionsOpen=False`:
 #### `WorkloadRollPending`
 Indicates that a rolling pod-template update is intentionally deferred: the ValkeyNode controller has built a pod template that differs from the live StatefulSet or Deployment, but `spec.workloadRevision` has not yet authorized that template. This is expected staging while the cluster advances rolls one node at a time, not an error.
 
-The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully built pod template). It advances the field one node at a time (replicas first, with proactive failover before primaries when the update implies a real pod roll). Cluster-owned nodes only apply a rolling template update when the hash they compute matches `spec.workloadRevision`. Standalone ValkeyNodes ignore the field and apply immediately.
+The ValkeyCluster controller owns `spec.workloadRevision` (a hash of the fully built pod template). It advances the field one node at a time (replicas first, with proactive failover before primaries when the update implies a real pod roll). A node only applies a rolling template update when the hash it computes matches `spec.workloadRevision`. A node without a ValkeyCluster parent is not reconciled at all, see `NoParent` under [`Ready`](#ready).
 
 | Status | Meaning |
 |---|---|
@@ -398,9 +410,11 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ValkeyNodeCreated` | Normal | ValkeyNode CR is created for a shard/replica position |
 | `ValkeyNodeUpdated` | Normal | ValkeyNode CR spec is updated (rolling update) |
 | `ValkeyNodeFailed` | Warning | Failed to create or update a ValkeyNode CR |
+| `NoParent` | Warning | A ValkeyNode has no `ValkeyCluster` controller ownerReference, so the operator stops reconciling it. Emitted when the node's `Ready` reason changes to `NoParent` |
 | `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
 | `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
 | `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |
+| `InitialSyncGateFailed` | Warning | The `valkey.io/initial-sync-complete` readiness gate could not be updated on a pod. |
 
 ### Cluster topology events
 
@@ -501,6 +515,11 @@ These events are emitted during ACL user management.
 | `LiveACLApplyFailed` | Warning | `ACL LOAD` (or the follow-up verification) failed on a node; the `ACLApplied` condition is set to `False` |
 | `UsersACLUnresolved` | Warning | A user's password Secret is missing or lacks a listed key, so the aclfile was not rebuilt; the nodes keep the last applied one. Emitted when the failure appears or changes |
 | `UsersACLResolved` | Normal | The aclfile was rebuilt after a `UsersACLUnresolved` failure |
+| `SystemPasswordRotationStarted` | Normal | The next system passwords were generated; the ones in use stay valid |
+| `SystemPasswordRotationCutover` | Normal | Every node accepts both passwords; clients are moving to the new ones |
+| `SystemPasswordRotationHolding` | Normal | A client still uses a previous system password, which stays accepted |
+| `SystemPasswordRotationFinished` | Normal | Every client uses the new passwords and the old ones were removed |
+| `SystemPasswordRotationHeld` | Warning | A rotation step failed; the rotation stays where it was and is tried again on the next reconcile, while users and ACLs keep reconciling |
 
 ### Viewing events
 

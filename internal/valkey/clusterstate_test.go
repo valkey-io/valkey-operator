@@ -19,8 +19,13 @@ package valkey
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	vclient "github.com/valkey-io/valkey-go"
 	vmock "github.com/valkey-io/valkey-go/mock"
@@ -47,44 +52,12 @@ func TestParseSlotsRange(t *testing.T) {
 	if slots != expect {
 		t.Errorf("Expected %v, got %v", expect, slots)
 	}
-}
 
-func TestParseSlotsRanges(t *testing.T) {
-	ranges, err := parseSlotsRanges([]string{"0-5460", "5461-10922", "10923-16383"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := []SlotsRange{{0, 5460}, {5461, 10922}, {10923, 16383}}
-	if !reflect.DeepEqual(ranges, expected) {
-		t.Errorf("expected %v, got %v", expected, ranges)
-	}
-
-	// Migrating/importing entries from CLUSTER NODES should be skipped.
-	ranges, err = parseSlotsRanges([]string{"0-5460", "[5461->-abc123]", "[5462-<-def456]"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected = []SlotsRange{{0, 5460}}
-	if !reflect.DeepEqual(ranges, expected) {
-		t.Errorf("expected %v, got %v", expected, ranges)
-	}
-
-	// Empty input.
-	ranges, err = parseSlotsRanges([]string{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(ranges) != 0 {
-		t.Errorf("expected empty, got %v", ranges)
-	}
-
-	// Only migration entries — should return empty.
-	ranges, err = parseSlotsRanges([]string{"[5461->-abc123]"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(ranges) != 0 {
-		t.Errorf("expected empty, got %v", ranges)
+	// Not a slot or a range
+	for _, bad := range []string{"", "x", "-5", "5-", "1-2-3", "9-3", "0--0"} {
+		if _, err := parseSlotsRange(bad); err == nil {
+			t.Errorf("Expected an error for %q", bad)
+		}
 	}
 }
 
@@ -1065,17 +1038,31 @@ func TestShardState_GetSyncedReplicas_PartitionedPeerDoesNotExcludeEveryone(t *t
 	}
 }
 
-func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
+// recordingDial returns a dial that fails every address and records it, in
+// whatever order the scrape's goroutines reach it.
+func recordingDial() (DialFunc, func() []string) {
+	var mu sync.Mutex
 	var dialled []string
 	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		dialled = append(dialled, address)
 		return nil, errors.New("connection refused")
 	}
+	return dial, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Sorted(slices.Values(dialled))
+	}
+}
+
+func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
+	dial, dialled := recordingDial()
 
 	state := GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2"}, 6379, dial)
 
-	if want := []string{"10.0.0.1:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
-		t.Fatalf("dialled %v, want %v", dialled, want)
+	if want := []string{"10.0.0.1:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled(), want) {
+		t.Fatalf("dialled %v, want %v", dialled(), want)
 	}
 	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
 		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
@@ -1083,16 +1070,157 @@ func TestGetClusterStateSkipsNodesThatFailToDial(t *testing.T) {
 }
 
 func TestGetClusterStateBracketsIPv6Addresses(t *testing.T) {
-	var dialled []string
-	dial := func(_ context.Context, address string) (vclient.Client, error) {
-		dialled = append(dialled, address)
-		return nil, errors.New("connection refused")
-	}
+	dial, dialled := recordingDial()
 
 	GetClusterState(context.Background(), []string{"fd00::1", "10.0.0.2"}, 6379, dial)
 
-	if want := []string{"[fd00::1]:6379", "10.0.0.2:6379"}; !reflect.DeepEqual(dialled, want) {
-		t.Fatalf("dialled %v, want %v", dialled, want)
+	if want := []string{"10.0.0.2:6379", "[fd00::1]:6379"}; !reflect.DeepEqual(dialled(), want) {
+		t.Fatalf("dialled %v, want %v", dialled(), want)
+	}
+}
+
+// Dead addresses each cost a full dial timeout. Dialled one at a time, k of
+// them cost k timeouts; dialled together, up to scrapeConcurrency share one.
+func TestGetClusterStateDialsConcurrentlyUpToTheCap(t *testing.T) {
+	addresses := make([]string, 40)
+	for i := range addresses {
+		addresses[i] = fmt.Sprintf("10.0.0.%d", i+1)
+	}
+	var mu sync.Mutex
+	active, peak, dialled := 0, 0, 0
+	full := make(chan struct{})
+	var fullOnce sync.Once
+	release := make(chan struct{})
+	var dial DialFunc = func(_ context.Context, _ string) (vclient.Client, error) {
+		mu.Lock()
+		active++
+		dialled++
+		peak = max(peak, active)
+		// Queued dials can refill the slots after release; signal only the first.
+		if active == scrapeConcurrency {
+			fullOnce.Do(func() { close(full) })
+		}
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return nil, errors.New("dial timeout")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		GetClusterState(context.Background(), addresses, 6379, dial)
+	}()
+
+	select {
+	case <-full:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatalf("only %d dials in flight at once, want %d", peak, scrapeConcurrency)
+	}
+	// Give a dial past the cap time to enter before releasing them all.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	<-done
+
+	if dialled != len(addresses) {
+		t.Errorf("dialled %d addresses, want %d", dialled, len(addresses))
+	}
+	if peak != scrapeConcurrency {
+		t.Errorf("%d dials in flight at once, want at most %d", peak, scrapeConcurrency)
+	}
+}
+
+// A panic while scraping one node reaches the caller, as it did when dials ran
+// on the caller's goroutine: controller-runtime recovers it there, where a
+// panic on another goroutine would end the process.
+func TestGetClusterStatePassesAPanicToTheCaller(t *testing.T) {
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		if address == "10.0.0.2:6379" {
+			panic("bad reply")
+		}
+		return nil, errors.New("connection refused")
+	}
+
+	defer func() {
+		if r := recover(); r != "bad reply" {
+			t.Errorf("recovered %v, want the scrape's panic", r)
+		}
+	}()
+	GetClusterState(context.Background(), []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 6379, dial)
+	t.Error("GetClusterState returned, want a panic")
+}
+
+// scrapedNode returns a client that answers the scrape as the node with the
+// given id, shard id and CLUSTER NODES "myself" line.
+func scrapedNode(ctrl *gomock.Controller, id, shardID, myself string) vclient.Client {
+	client := vmock.NewClient(ctrl)
+	client.EXPECT().
+		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]vclient.ValkeyResult{
+			vmock.Result(vmock.ValkeyString(id)),
+			vmock.Result(vmock.ValkeyString(shardID)),
+			vmock.Result(vmock.ValkeyString("")),
+			vmock.Result(vmock.ValkeyString("")),
+			vmock.Result(vmock.ValkeyString(myself + "\n")),
+		})
+	return client
+}
+
+// The state is built in address order, whatever order the nodes answer in:
+// findMeetTarget and HighestOffsetReplica depend on it.
+func TestGetClusterStateKeepsInputOrder(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	addresses := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+	clients := map[string]vclient.Client{
+		"10.0.0.1:6379": scrapedNode(ctrl, "r1", "s1", "r1 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected"),
+		"10.0.0.2:6379": scrapedNode(ctrl, "p2", "s2", "p2 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 0-8191"),
+		"10.0.0.3:6379": scrapedNode(ctrl, "p3", "s3", "p3 10.0.0.3:6379@16379 myself,master - 0 0 3 connected"),
+		"10.0.0.4:6379": scrapedNode(ctrl, "p1", "s1", "p1 10.0.0.4:6379@16379 myself,master - 0 0 1 connected 8192-16383"),
+	}
+	// Each dial returns only after the next address's dial has, so answers
+	// arrive in reverse order. The fallback keeps a serial scrape from hanging.
+	done := make([]chan struct{}, len(addresses))
+	for i := range done {
+		done[i] = make(chan struct{})
+	}
+	dial := func(_ context.Context, address string) (vclient.Client, error) {
+		i := slices.Index(addresses, strings.TrimSuffix(address, ":6379"))
+		if i+1 < len(done) {
+			select {
+			case <-done[i+1]:
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		close(done[i])
+		return clients[address], nil
+	}
+
+	state := GetClusterState(context.Background(), addresses, 6379, dial)
+
+	addressesOf := func(nodes []*NodeState) []string {
+		out := make([]string, 0, len(nodes))
+		for _, n := range nodes {
+			out = append(out, n.Address)
+		}
+		return out
+	}
+	if len(state.Shards) != 2 || state.Shards[0].Id != "s1" || state.Shards[1].Id != "s2" {
+		t.Fatalf("shards out of input order: %v", state.Shards)
+	}
+	if got, want := addressesOf(state.Shards[0].Nodes), []string{"10.0.0.1", "10.0.0.4"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("shard s1 nodes %v, want %v", got, want)
+	}
+	if got, want := addressesOf(state.PendingNodes), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("pending nodes %v, want %v", got, want)
+	}
+
+	empty := GetClusterState(context.Background(), nil, 6379, dial)
+	if len(empty.Shards) != 0 || len(empty.PendingNodes) != 0 {
+		t.Errorf("expected an empty state for no addresses, got %d shards and %d pending nodes", len(empty.Shards), len(empty.PendingNodes))
 	}
 }
 
@@ -1103,7 +1231,10 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	stale := vmock.NewClient(ctrl)
 	stale.EXPECT().
-		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
 
 	dial := func(_ context.Context, _ string) (vclient.Client, error) {
@@ -1114,5 +1245,46 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 
 	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
 		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := vmock.NewClient(ctrl)
+	// A Valkey 9 replica reply, trimmed. Valkey orders the sections itself.
+	info := "# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
+		"# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nslave_repl_offset:3108\r\n"
+	client.EXPECT().
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
+		Return([]vclient.ValkeyResult{
+			vmock.Result(vmock.ValkeyString("r1")),
+			vmock.Result(vmock.ValkeyString("s1")),
+			vmock.Result(vmock.ValkeyBlobString(info)),
+			vmock.Result(vmock.ValkeyString("")),
+			vmock.Result(vmock.ValkeyString("r1 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n")),
+		})
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return client, nil
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
+
+	if len(state.Shards) != 1 || len(state.Shards[0].Nodes) != 1 {
+		t.Fatalf("expected one shard with one node, got %+v", state.Shards)
+	}
+	got := state.Shards[0].Nodes[0].Info
+	want := map[string]string{
+		"loading":                 "1",
+		"master_link_status":      "down",
+		"master_sync_in_progress": "0",
+		"slave_repl_offset":       "3108",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("Info[%q] = %q, want %q", key, got[key], value)
+		}
 	}
 }

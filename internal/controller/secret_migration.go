@@ -131,7 +131,6 @@ func (r *ValkeyClusterReconciler) copyLegacySecret(ctx context.Context, cluster 
 		return nil, fmt.Errorf("copying secret %s to %s: %w", legacy.Name, name, err)
 	}
 	logf.FromContext(ctx).Info("copied the legacy Secret", "from", legacy.Name, "to", name)
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "LegacySecretCopied", "CopyLegacySecret", "Copied Secret %s to %s", legacy.Name, name)
 	return secret, nil
 }
 
@@ -192,7 +191,6 @@ func (r *ValkeyClusterReconciler) retireLegacySecrets(ctx context.Context, clust
 				continue
 			}
 			log.Info("deleted the legacy Secret", "secret", old.Name, "replacedBy", s.name)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "LegacySecretDeleted", "DeleteLegacySecret", "Deleted Secret %s, which %s replaces", old.Name, s.name)
 			continue
 		}
 		if maps.EqualFunc(old.Data, current.Data, bytes.Equal) && maps.Equal(old.Annotations, current.Annotations) {

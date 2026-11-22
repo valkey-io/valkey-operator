@@ -51,15 +51,14 @@ func migrationCluster() *valkeyiov1alpha1.ValkeyCluster {
 	}
 }
 
-func newMigrationReconciler(t *testing.T, objs ...client.Object) (*ValkeyClusterReconciler, client.Client, *events.FakeRecorder) {
+func newMigrationReconciler(t *testing.T, objs ...client.Object) (*ValkeyClusterReconciler, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	rec := events.NewFakeRecorder(100)
-	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: rec}, c, rec
+	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(100)}, c
 }
 
 // operatorOwned marks secret the way the operator creates its Secrets: with its
@@ -120,18 +119,6 @@ func getSecret(t *testing.T, c client.Client, name string) (*corev1.Secret, bool
 	return s, true
 }
 
-func drainRecorder(rec *events.FakeRecorder) []string {
-	var got []string
-	for {
-		select {
-		case e := <-rec.Events:
-			got = append(got, e)
-		default:
-			return got
-		}
-	}
-}
-
 func hashOf(password string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
 }
@@ -170,7 +157,7 @@ func TestReconcileUsersAclCopiesTheLegacySecrets(t *testing.T) {
 	ctx := context.Background()
 	cluster := migrationCluster()
 	legacy := operatorOwned(t, cluster, legacyPasswords())
-	r, c, rec := newMigrationReconciler(t, legacy, operatorOwned(t, cluster, legacyACL()))
+	r, c := newMigrationReconciler(t, legacy, operatorOwned(t, cluster, legacyACL()))
 
 	require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
 
@@ -191,15 +178,12 @@ func TestReconcileUsersAclCopiesTheLegacySecrets(t *testing.T) {
 
 	after, _ := getSecret(t, c, "internal-c-system-passwords")
 	assert.Equal(t, legacy.Data, after.Data, "the legacy Secret is not written while the copy is made")
-	got := drainRecorder(rec)
-	assert.Contains(t, got, "Normal LegacySecretCopied Copied Secret internal-c-system-passwords to valkey-c-system-passwords")
-	assert.Contains(t, got, "Normal LegacySecretCopied Copied Secret internal-c-acl to valkey-c-acl")
 }
 
 func TestReconcileUsersAclGeneratesPasswordsOnlyWithoutAnySecret(t *testing.T) {
 	ctx := context.Background()
 	cluster := migrationCluster()
-	r, c, _ := newMigrationReconciler(t)
+	r, c := newMigrationReconciler(t)
 
 	require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
 
@@ -222,7 +206,7 @@ func TestReconcileUsersAclCopiesALegacySecretItCannotSeeInTheCache(t *testing.T)
 	cluster := migrationCluster()
 	legacy := legacyPasswords()
 	legacy.Labels = nil
-	r, c, _ := newMigrationReconciler(t, legacy)
+	r, c := newMigrationReconciler(t, legacy)
 	r.Client = labelFilteredClient{Client: c}
 
 	require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
@@ -249,7 +233,7 @@ func TestInternalAclSecretExistsCopiesTheLegacyACL(t *testing.T) {
 		Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "missing"}},
 	}}}
 	legacy := operatorOwned(t, cluster, legacyACL())
-	r, c, _ := newMigrationReconciler(t, operatorOwned(t, cluster, legacyPasswords()), legacy)
+	r, c := newMigrationReconciler(t, operatorOwned(t, cluster, legacyPasswords()), legacy)
 
 	err := r.reconcileUsersAcl(ctx, cluster)
 	var unresolved *userSecretUnresolvedError
@@ -270,14 +254,13 @@ func TestOperatorSecretReadsACacheMissThroughTheAPIReader(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-system-passwords", Namespace: "ns"},
 		Data:       map[string][]byte{operatorUser: []byte("current-pw")},
 	})
-	r, c, rec := newMigrationReconciler(t, current, operatorOwned(t, cluster, legacyPasswords()))
+	r, c := newMigrationReconciler(t, current, operatorOwned(t, cluster, legacyPasswords()))
 	r.Client = hidingClient{Client: c, hidden: []string{"valkey-c-system-passwords"}}
 
 	got, err := r.operatorSecret(ctx, cluster, "valkey-c-system-passwords", "internal-c-system-passwords")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "current-pw", string(got.Data[operatorUser]), "a Secret the cache has not seen yet is not copied over again")
-	assert.Empty(t, drainRecorder(rec))
 }
 
 func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
@@ -292,7 +275,7 @@ func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
 	t.Run("while the cluster still controls the legacy Secret", func(t *testing.T) {
 		cluster := migrationCluster()
 		legacy := operatorOwned(t, cluster, legacyPasswords())
-		r, c, _ := newMigrationReconciler(t, stranger(), legacy)
+		r, c := newMigrationReconciler(t, stranger(), legacy)
 
 		err := r.reconcileUsersAcl(ctx, cluster)
 		require.Error(t, err)
@@ -309,7 +292,7 @@ func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
 		cluster := migrationCluster()
 		legacy := operatorOwned(t, cluster, legacyPasswords())
 		delete(legacy.Labels, "app.kubernetes.io/managed-by")
-		r, c, _ := newMigrationReconciler(t, stranger(), legacy)
+		r, c := newMigrationReconciler(t, stranger(), legacy)
 		r.Client = labelFilteredClient{Client: c}
 
 		err := r.reconcileUsersAcl(ctx, cluster)
@@ -319,7 +302,7 @@ func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
 
 	t.Run("but uses it when the legacy Secret is not the cluster's either", func(t *testing.T) {
 		cluster := migrationCluster()
-		r, c, _ := newMigrationReconciler(t, stranger(), legacyPasswords())
+		r, c := newMigrationReconciler(t, stranger(), legacyPasswords())
 
 		require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
 		acl, ok := getSecret(t, c, "valkey-c-acl")
@@ -420,7 +403,7 @@ func TestRetireLegacySecrets(t *testing.T) {
 				current["internal-c-system-passwords"], current["internal-c-acl"],
 				operatorOwned(t, cluster, legacyPasswords()), operatorOwned(t, cluster, legacyACL()),
 			}, tc.objs...)
-			r, c, rec := newMigrationReconciler(t, objs...)
+			r, c := newMigrationReconciler(t, objs...)
 
 			require.NoError(t, r.retireLegacySecrets(ctx, cluster))
 
@@ -435,19 +418,12 @@ func TestRetireLegacySecrets(t *testing.T) {
 				assert.Equal(t, replacement.Annotations, old.Annotations, "%s carries the annotations of %s", legacyName, replacement.Name)
 				assert.True(t, metav1.IsControlledBy(old, cluster))
 			}
-			deleted := 0
-			for _, e := range drainRecorder(rec) {
-				if assert.Contains(t, e, "Normal LegacySecretDeleted") {
-					deleted++
-				}
-			}
-			assert.Equal(t, 2-len(tc.kept), deleted)
 		})
 	}
 
 	t.Run("keeps a legacy Secret whose replacement does not exist", func(t *testing.T) {
 		cluster := migrationCluster()
-		r, c, _ := newMigrationReconciler(t, rolled, operatorOwned(t, cluster, legacyPasswords()))
+		r, c := newMigrationReconciler(t, rolled, operatorOwned(t, cluster, legacyPasswords()))
 
 		require.NoError(t, r.retireLegacySecrets(ctx, cluster))
 		_, exists := getSecret(t, c, "internal-c-system-passwords")
@@ -463,7 +439,7 @@ func TestRetireLegacySecrets(t *testing.T) {
 		})
 		inUse := nodeStatefulSet(corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Env: secretEnv("internal-c-system-passwords")}}})
 		for _, objs := range [][]client.Object{{rolled}, {rolled, inUse}} {
-			r, c, _ := newMigrationReconciler(t, append(objs, theirs.DeepCopy(), current.DeepCopy())...)
+			r, c := newMigrationReconciler(t, append(objs, theirs.DeepCopy(), current.DeepCopy())...)
 			require.NoError(t, r.retireLegacySecrets(ctx, cluster))
 			after, exists := getSecret(t, c, "internal-c-system-passwords")
 			require.True(t, exists, "not deleted")
@@ -488,17 +464,14 @@ func TestSecretMigrationSurvivesARestartAtEveryStep(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "c-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}},
 		Spec:       valkeyiov1alpha1.ValkeyNodeSpec{UsersACLSecretName: "internal-c-acl"},
 	}
-	_, store, _ := newMigrationReconciler(t, node, unrolled, operatorOwned(t, cluster, legacyPasswords()), operatorOwned(t, cluster, legacyACL()))
-	pass := func() []string {
+	_, store := newMigrationReconciler(t, node, unrolled, operatorOwned(t, cluster, legacyPasswords()), operatorOwned(t, cluster, legacyACL()))
+	pass := func() {
 		t.Helper()
-		rec := events.NewFakeRecorder(100)
-		r := &ValkeyClusterReconciler{Client: store, APIReader: store, Scheme: store.Scheme(), Recorder: rec}
+		r := &ValkeyClusterReconciler{Client: store, APIReader: store, Scheme: store.Scheme(), Recorder: events.NewFakeRecorder(100)}
 		require.NoError(t, r.reconcileUsersAcl(ctx, cluster))
 		require.NoError(t, r.retireLegacySecrets(ctx, cluster))
-		return drainRecorder(rec)
 	}
-	versions := func() []string {
-		names := []string{"valkey-c-system-passwords", "valkey-c-acl", "internal-c-system-passwords", "internal-c-acl"}
+	versions := func(names ...string) []string {
 		out := make([]string, 0, len(names))
 		for _, name := range names {
 			s, ok := getSecret(t, store, name)
@@ -523,9 +496,10 @@ func TestSecretMigrationSurvivesARestartAtEveryStep(t *testing.T) {
 	copiedPassword, _ := getSecret(t, store, "valkey-c-system-passwords")
 	assert.Equal(t, "operator-pw", string(copiedPassword.Data[operatorUser]))
 
-	settled := versions()
-	assert.Empty(t, pass(), "a restart after the copy changes nothing")
-	assert.Equal(t, settled, versions(), "and writes nothing")
+	names := []string{"valkey-c-system-passwords", "valkey-c-acl", "internal-c-system-passwords", "internal-c-acl"}
+	settled := versions(names...)
+	pass()
+	assert.Equal(t, settled, versions(names...), "a restart after the copy writes nothing")
 
 	// A writer updates the new Secret, and the operator restarts before the
 	// legacy one is updated to match.
@@ -541,24 +515,25 @@ func TestSecretMigrationSurvivesARestartAtEveryStep(t *testing.T) {
 	require.NoError(t, store.Get(ctx, client.ObjectKeyFromObject(node), node))
 	node.Spec.UsersACLSecretName = "valkey-c-acl"
 	require.NoError(t, store.Update(ctx, node))
-	assert.NotContains(t, pass(), "Normal LegacySecretDeleted Deleted Secret internal-c-acl, which valkey-c-acl replaces", "the template still mounts it")
+	pass()
+	_, aclKept := getSecret(t, store, "internal-c-acl")
+	assert.True(t, aclKept, "the template still mounts it")
 	sts := &appsv1.StatefulSet{}
 	require.NoError(t, store.Get(ctx, client.ObjectKeyFromObject(unrolled), sts))
 	sts.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name = "valkey-c-system-passwords"
 	sts.Spec.Template.Spec.Volumes[0].Secret.SecretName = "valkey-c-acl"
 	require.NoError(t, store.Update(ctx, sts))
 
-	assert.ElementsMatch(t, []string{
-		"Normal LegacySecretDeleted Deleted Secret internal-c-acl, which valkey-c-acl replaces",
-		"Normal LegacySecretDeleted Deleted Secret internal-c-system-passwords, which valkey-c-system-passwords replaces",
-	}, pass())
+	pass()
 	for _, s := range renamedSecrets("c") {
 		_, exists := getSecret(t, store, s.legacyName)
 		assert.False(t, exists, s.legacyName)
 		_, exists = getSecret(t, store, s.name)
 		assert.True(t, exists, s.name)
 	}
-	assert.Empty(t, pass(), "nothing is left to do")
+	final := versions("valkey-c-system-passwords", "valkey-c-acl")
+	pass()
+	assert.Equal(t, final, versions("valkey-c-system-passwords", "valkey-c-acl"), "nothing is left to do")
 }
 
 func TestFetchSystemUserPasswordFallsBackToTheLegacySecret(t *testing.T) {
@@ -566,12 +541,12 @@ func TestFetchSystemUserPasswordFallsBackToTheLegacySecret(t *testing.T) {
 	cluster := migrationCluster()
 	legacy := operatorOwned(t, cluster, legacyPasswords())
 
-	_, c, _ := newMigrationReconciler(t, legacy)
+	_, c := newMigrationReconciler(t, legacy)
 	password, err := fetchSystemUserPassword(ctx, operatorUser, c, "c", "ns")
 	require.NoError(t, err)
 	assert.Equal(t, "operator-pw", password, "an upgraded cluster is dialled before its Secret is copied")
 
-	_, c, _ = newMigrationReconciler(t, legacy.DeepCopy(), &corev1.Secret{
+	_, c = newMigrationReconciler(t, legacy.DeepCopy(), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-system-passwords", Namespace: "ns"},
 		Data:       map[string][]byte{operatorUser: []byte("current-pw")},
 	})
@@ -579,7 +554,7 @@ func TestFetchSystemUserPasswordFallsBackToTheLegacySecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "current-pw", password, "the new Secret wins once it exists")
 
-	_, c, _ = newMigrationReconciler(t)
+	_, c = newMigrationReconciler(t)
 	_, err = fetchSystemUserPassword(ctx, operatorUser, c, "c", "ns")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey-c-system-passwords", "the error names the Secret the operator expects")

@@ -211,12 +211,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	r.reportUsersACLUnresolved(ctx, cluster, aclErr)
 
-	// Reported, not returned: a failure here must not stop the reconcile,
+	// Logged, not returned: a failure here must not stop the reconcile,
 	// since that would also stop the nodes rolling off the legacy Secrets. It
 	// is tried again on the next reconcile.
 	if err := r.retireLegacySecrets(ctx, cluster); err != nil {
 		log.Error(err, "failed to retire the legacy Secrets")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "LegacySecretRetireFailed", "RetireLegacySecrets", "Failed to retire the legacy Secrets: %v", err)
 	}
 
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {

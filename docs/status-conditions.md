@@ -520,9 +520,6 @@ These events are emitted during ACL user management.
 | `SystemPasswordRotationHolding` | Normal | A client still uses a previous system password, which stays accepted |
 | `SystemPasswordRotationFinished` | Normal | Every client uses the new passwords and the old ones were removed |
 | `SystemPasswordRotationHeld` | Warning | A rotation step failed; the rotation stays where it was and is tried again on the next reconcile, while users and ACLs keep reconciling |
-| `LegacySecretCopied` | Normal | A Secret an earlier release created under its `internal-` name was copied to its `valkey-` name. See [Upgrading from the `internal-` names](valkeycluster.md#upgrading-from-the-internal--names) |
-| `LegacySecretDeleted` | Normal | A Secret under its `internal-` name was deleted, because no ValkeyNode, workload template or pod of the cluster references it any more |
-| `LegacySecretRetireFailed` | Warning | Updating or deleting a Secret under its `internal-` name failed; it is tried again on the next reconcile, and the nodes keep rolling |
 
 ### Viewing events
 

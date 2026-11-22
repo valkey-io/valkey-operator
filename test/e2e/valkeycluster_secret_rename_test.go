@@ -213,12 +213,10 @@ spec:
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
 		Expect(lostAccess).To(BeFalse(), "no node rejected the operator's password during the roll")
 
-		By("checking the copy and the deletion were reported (best-effort)")
+		By("checking no lockout was reported as an event either (best-effort)")
 		Eventually(func(g Gomega) {
-			normal, warnings, err := utils.GetEvents(name)
+			_, warnings, err := utils.GetEvents(name)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(normal).To(HaveKey("LegacySecretCopied"))
-			g.Expect(normal).To(HaveKey("LegacySecretDeleted"))
 			g.Expect(warnings).NotTo(HaveKey("OperatorAuthenticationFailed"))
 		}).Should(Succeed())
 	})

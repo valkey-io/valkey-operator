@@ -80,9 +80,8 @@ var _ = Describe("Secrets created under their legacy names", func() {
 			Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		}
 	}
-	newReconciler := func() (*ValkeyClusterReconciler, *events.FakeRecorder) {
-		recorder := events.NewFakeRecorder(100)
-		return &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder, ValkeyClients: testValkeyClients(k8sClient)}, recorder
+	newReconciler := func() *ValkeyClusterReconciler {
+		return &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(100), ValkeyClients: testValkeyClients(k8sClient)}
 	}
 	reconcileOnce := func(r *ValkeyClusterReconciler, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
@@ -140,7 +139,7 @@ var _ = Describe("Secrets created under their legacy names", func() {
 		}
 		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
 
-		r, recorder := newReconciler()
+		r := newReconciler()
 		Expect(reconcileOnce(r, cluster)).To(Succeed())
 
 		By("copying the passwords the nodes hold instead of generating new ones")
@@ -159,10 +158,6 @@ var _ = Describe("Secrets created under their legacy names", func() {
 			Expect(secret(s.legacyName).Data).To(Equal(secret(s.name).Data), s.legacyName)
 			Expect(secret(s.legacyName).Annotations).To(Equal(secret(s.name).Annotations), s.legacyName)
 		}
-		Expect(drainRecorder(recorder)).To(ContainElements(
-			"Normal LegacySecretCopied Copied Secret internal-legacy-names-system-passwords to valkey-legacy-names-system-passwords",
-			"Normal LegacySecretCopied Copied Secret internal-legacy-names-acl to valkey-legacy-names-acl",
-		))
 
 		By("deleting them once the workload has rolled onto the new names")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sts), sts)).To(Succeed())
@@ -173,10 +168,6 @@ var _ = Describe("Secrets created under their legacy names", func() {
 		Expect(exists("internal-legacy-names-system-passwords")).To(BeFalse())
 		Expect(exists("internal-legacy-names-acl")).To(BeFalse())
 		Expect(secret("valkey-legacy-names-system-passwords").Data).To(Equal(passwords.Data))
-		Expect(drainRecorder(recorder)).To(ContainElements(
-			"Normal LegacySecretDeleted Deleted Secret internal-legacy-names-system-passwords, which valkey-legacy-names-system-passwords replaces",
-			"Normal LegacySecretDeleted Deleted Secret internal-legacy-names-acl, which valkey-legacy-names-acl replaces",
-		))
 	})
 
 	It("keeps running on the legacy aclfile while a user Secret is missing", func() {
@@ -195,7 +186,7 @@ var _ = Describe("Secrets created under their legacy names", func() {
 		const lastGood = "user alice on #abc +@read\nuser default off ~* &* +@all\n"
 		createLegacySecrets(cluster, lastGood)
 
-		r, _ := newReconciler()
+		r := newReconciler()
 		Expect(reconcileOnce(r, cluster)).To(Succeed(), "an upgraded cluster has an aclfile to fall back to")
 
 		Expect(string(secret("valkey-legacy-names-unresolved-acl").Data[aclFilename])).To(Equal(lastGood))

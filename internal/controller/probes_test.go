@@ -349,7 +349,7 @@ func TestStartupProbeConfigWarnings(t *testing.T) {
 		require.Len(t, warnings, 1)
 		assert.Equal(t, valkeyv1.ReasonStartupProbeTooShort, warnings[0].reason)
 		assert.Equal(t, "spec.probes.startup gives up after 50s (initialDelaySeconds 5s + (failureThreshold 10 - 1) x periodSeconds 5s), below the recommended 400s without persistence: "+
-			"a restarted primary can wait up to 300s for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
+			"a restarted primary can wait up to six cluster-node-timeouts, at most 300s, for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least 80, or leave it unset", warnings[0].message)
 	})
 

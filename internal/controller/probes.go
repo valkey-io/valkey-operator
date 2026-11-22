@@ -160,7 +160,7 @@ func startupProbeConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []confi
 	return []configWarning{{
 		reason: valkeyiov1alpha1.ReasonStartupProbeTooShort,
 		message: fmt.Sprintf("spec.probes.startup gives up after %ds (initialDelaySeconds %ds + (failureThreshold %d - 1) x periodSeconds %ds), below the recommended %ds without persistence: "+
-			"a restarted primary can wait up to %ds for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
+			"a restarted primary can wait up to six cluster-node-timeouts, at most %ds, for a replica hand-off before the server starts, and a shorter startup probe restarts the container into the same wait; "+
 			"set failureThreshold to at least %d, or leave it unset",
 			windowSeconds, initialDelaySeconds, threshold, periodSeconds, handoffStartupWindowSeconds, primaryHandoffMaxWaitSeconds, minThreshold),
 	}}

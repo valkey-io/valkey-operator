@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -104,6 +107,19 @@ var _ = Describe("spec.probes validation", func() {
 				FailureThreshold: new(int32(1)),
 			},
 		})
+	})
+
+	It("accepts the probes sample, which sets no startup warning", func() {
+		f, err := os.Open(filepath.Join("..", "..", "config", "samples", "v1alpha1_valkeycluster-probes.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(f.Close)
+		sample := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(utilyaml.NewYAMLOrJSONDecoder(f, 4096).Decode(sample)).To(Succeed())
+		sample.Namespace = "default"
+		Expect(sample.Spec.Probes).NotTo(BeNil())
+		Expect(startupProbeConfigWarnings(sample)).To(BeEmpty())
+		Expect(k8sClient.Create(ctx, sample)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, sample)).To(Succeed())
 	})
 
 	It("accepts liveness timing fields with mode unset", func() {

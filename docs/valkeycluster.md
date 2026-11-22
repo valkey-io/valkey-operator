@@ -217,6 +217,8 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`. Its message and a Warning event identify the shard, failed primary, eligible replica, and command to authorize takeover.
 
+Alert on `Degraded=True` with reason `AwaitingManualTakeover`. Kubernetes events expire, so a Warning event may disappear while recovery is still pending.
+
 Before authorizing recovery, inspect the recovery condition, node roles, pods, and events:
 
 ```sh

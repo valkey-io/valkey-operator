@@ -1837,11 +1837,10 @@ func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1a
 // manualTakeoverMessage builds the condition text for orphaned shards.
 func manualTakeoverMessage(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) string {
 	items := manualTakeoverInstructions(cluster, nodes, candidates)
-	slices.Sort(items)
 	var message strings.Builder
 	message.WriteString("Persistent primary orphaned without failover quorum. ")
 	// metav1.Condition limits messages to 32768 characters. Reserve room for
-	// the omitted count and keep whole instructions so event comparison is stable.
+	// the omitted count and keep each recovery instruction intact.
 	for i, item := range items {
 		if message.Len()+len(item)+2 > 32000 {
 			return message.String() + fmt.Sprintf("; %d more orphaned primaries; see AwaitingManualTakeover events for recovery instructions", len(items)-i)
@@ -1883,6 +1882,7 @@ func manualTakeoverInstructions(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *
 		command := fmt.Sprintf("kubectl annotate valkeycluster %s -n %s %s=%s --overwrite", cluster.Name, cluster.Namespace, forceTakeoverAnnotation, candidate.primaryId)
 		items = append(items, fmt.Sprintf("%s can be recovered by replica %s (%s); to accept possible data loss, run: %s", primary, replica, details, command))
 	}
+	slices.Sort(items)
 	if len(items) > 0 && (len(candidates) > 1 || len(requested) > 0) {
 		items[len(items)-1] += ". For multiple approvals, use one comma-separated value including existing IDs; --overwrite replaces earlier approvals"
 	}

@@ -400,7 +400,9 @@ func TestManualTakeoverMessage(t *testing.T) {
 	})
 	t.Run("warns once about replacing multiple approvals", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "", nil)
-		candidates := append(f.candidates, orphan{primaryId: "p2", replica: f.candidates[0].replica})
-		assert.Equal(t, 1, strings.Count(manualTakeoverMessage(f.cluster, f.nodes, candidates), "--overwrite replaces"))
+		candidates := []orphan{{primaryId: "p2", replica: f.candidates[0].replica}, f.candidates[0]}
+		message := manualTakeoverMessage(f.cluster, f.nodes, candidates)
+		assert.Equal(t, 1, strings.Count(message, "--overwrite replaces"))
+		assert.Greater(t, strings.Index(message, "For multiple approvals"), strings.Index(message, "primary p2"))
 	})
 }

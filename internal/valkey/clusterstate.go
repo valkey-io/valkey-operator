@@ -960,6 +960,24 @@ func (s *ClusterState) HeldPrimaries() []HeldPrimary {
 			}
 		}
 	}
+	// A dropped primary's own table can hold slots no peer lists yet.
+	for id := range s.answeredSlots {
+		if _, found := scraped[id]; found {
+			continue
+		}
+		if _, listed := byID[id]; listed {
+			continue
+		}
+		h := &HeldPrimary{Id: id, ReplicaFollows: s.HasReplicaOf(id)}
+		for _, inc := range s.incomplete {
+			if inc.Id == id && inc.Address != "" {
+				h.Host = inc.Address
+				break
+			}
+		}
+		byID[id] = h
+		order = append(order, id)
+	}
 	slices.Sort(order)
 	out := make([]HeldPrimary, 0, len(order))
 	for _, id := range order {

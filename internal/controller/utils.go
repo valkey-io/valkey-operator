@@ -300,10 +300,10 @@ func shardExistsInTopology(state *valkey.ClusterState, shardIndex int, nodes *va
 	return false
 }
 
-// shardUnreadableButServing reports that a pod in this shard answered and its
-// own slot table lists ranges, but the scrape was dropped. The shard is
-// already serving. It is not a new shard: with the primary at a non-zero node
-// index, index order would roll that primary first.
+// shardUnreadableButServing reports that a pod in this shard was dropped from
+// the scrape while it still owns slots, by its own slot table or a peer's.
+// The shard is already serving. It is not a new shard: with the primary at a
+// non-zero node index, index order would roll that primary first.
 func shardUnreadableButServing(state *valkey.ClusterState, shardIndex int, nodes *valkeyv1.ValkeyNodeList) bool {
 	if state == nil {
 		return false
@@ -313,6 +313,11 @@ func shardUnreadableButServing(state *valkey.ClusterState, shardIndex int, nodes
 		if inc.OwnsSlots && inc.Address != "" {
 			serving[inc.Address] = struct{}{}
 		}
+	}
+	// Every member can fail CLUSTER NODES, leaving no own table, while
+	// another shard's table still lists the primary's slots.
+	for _, host := range state.UnscrapedSlotOwnerHosts() {
+		serving[host] = struct{}{}
 	}
 	if len(serving) == 0 {
 		return false

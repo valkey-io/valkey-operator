@@ -1704,6 +1704,9 @@ func TestGetClusterStateHoldsTheOwnSlotsOfADroppedPrimary(t *testing.T) {
 	if got, want := state.UnscrapedSlotOwnerHosts(), []string{"10.0.0.3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unscraped owner hosts = %v, want %v", got, want)
 	}
+	if got, want := state.HeldPrimaries(), []HeldPrimary{{Id: "ghi", Host: "10.0.0.3"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("held primaries = %+v, want %+v", got, want)
+	}
 }
 
 // A scraped replica of that dropped primary carries the held ranges on its
@@ -1745,6 +1748,12 @@ func TestGetClusterStateCopiesTheOwnSlotsOfADroppedPrimaryToItsReplica(t *testin
 	}
 	if got := state.GetUnassignedSlots(); len(got) != 0 {
 		t.Fatalf("unassigned slots = %v, want none", got)
+	}
+	if got, want := state.HeldPrimaries(), []HeldPrimary{{Id: "ghi", Host: "10.0.0.3", ReplicaFollows: true}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("held primaries = %+v, want %+v", got, want)
+	}
+	if kind, message := state.ScrapeHeldSummary(); kind != "slots-held" {
+		t.Fatalf("summary = %s %q, want slots-held while a replica follows the dropped primary", kind, message)
 	}
 }
 

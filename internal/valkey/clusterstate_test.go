@@ -1313,6 +1313,65 @@ func healthyScrape() []vclient.ValkeyResult {
 	}
 }
 
+func dialScrapeByAddress(t *testing.T, byAddr map[string][]vclient.ValkeyResult) DialFunc {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	return func(_ context.Context, address string) (vclient.Client, error) {
+		results, ok := byAddr[address]
+		if !ok {
+			return nil, fmt.Errorf("unexpected dial %s", address)
+		}
+		c := vmock.NewClient(ctrl)
+		c.EXPECT().
+			DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(results)
+		return c, nil
+	}
+}
+
+// A primary dropped from the scrape at one of its pod addresses can still be
+// serving the ranges a scraped node's table gives it, so they are not
+// assignable. GetUnassignedSlots still counts them.
+func TestAssignableSlotsLeavesOutAnUnscrapedPrimarysRanges(t *testing.T) {
+	viewer := func(ghiHost string) []vclient.ValkeyResult {
+		r := healthyScrape()
+		r[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 4096-16383\n" +
+			"ghi " + ghiHost + ":6379@16379 master - 0 0 2 connected 0-4095\n")
+		return r
+	}
+	dropped := healthyScrape()
+	dropped[0] = blobResult("ghi")
+	dropped[3] = valkeyErrorResult("NOPERM this user has no permissions to run the 'cluster|info' command")
+	replacement := healthyScrape()
+	replacement[0] = blobResult("new")
+	replacement[1] = blobResult("shard-9")
+	replacement[4] = blobResult("new 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n")
+
+	for _, tc := range []struct {
+		name       string
+		addresses  []string
+		byAddr     map[string][]vclient.ValkeyResult
+		assignable []SlotsRange
+	}{
+		{"held while the dropped primary's address is a pod", []string{"10.0.0.1", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.3"), "10.0.0.3:6379": dropped}, nil},
+		{"assignable once that address is no longer a pod", []string{"10.0.0.1"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.9")}, []SlotsRange{{0, 4095}}},
+		{"assignable once that address answered as another id", []string{"10.0.0.1", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.3"), "10.0.0.3:6379": replacement}, []SlotsRange{{0, 4095}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := GetClusterState(context.Background(), tc.addresses, 6379, dialScrapeByAddress(t, tc.byAddr))
+			if got, want := state.GetUnassignedSlots(), []SlotsRange{{0, 4095}}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unassigned slots = %v, want %v", got, want)
+			}
+			if got := state.AssignableSlots(); !reflect.DeepEqual(got, tc.assignable) {
+				t.Fatalf("assignable slots = %v, want %v", got, tc.assignable)
+			}
+		})
+	}
+}
+
 func dialScrape(t *testing.T, results []vclient.ValkeyResult) DialFunc {
 	t.Helper()
 	ctrl := gomock.NewController(t)

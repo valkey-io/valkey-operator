@@ -108,6 +108,9 @@ type ShardState struct {
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
+
+	// targets are the pod addresses this pass set out to scrape.
+	targets map[string]struct{}
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -144,6 +147,10 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
+		targets:      make(map[string]struct{}, len(addresses)),
+	}
+	for _, address := range addresses {
+		state.targets[address] = struct{}{}
 	}
 
 	for _, node := range scrapeNodes(ctx, addresses, port, dial) {
@@ -259,6 +266,53 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 		}
 	}
 	return remaining
+}
+
+// AssignableSlots returns the unassigned slots a new primary can be given. It
+// leaves out ranges a scraped node's CLUSTER NODES table gives to a primary
+// this pass did not scrape, at one of the pod addresses it set out to scrape.
+// That primary can still be serving them, for example when only its CLUSTER
+// INFO failed, and a new primary given them would take them over with a
+// higher config epoch. A primary whose address answered as another id has
+// been replaced, so its ranges stay assignable. GetUnassignedSlots still
+// counts all of these as unassigned.
+func (s *ClusterState) AssignableSlots() []SlotsRange {
+	free := s.GetUnassignedSlots()
+	scraped := make(map[string]struct{})
+	liveByAddress := make(map[string]string)
+	for _, node := range s.AllNodes() {
+		if node.Id == "" {
+			continue
+		}
+		scraped[node.Id] = struct{}{}
+		if node.Address != "" {
+			liveByAddress[node.Address] = node.Id
+		}
+	}
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
+				continue
+			}
+			if _, found := scraped[entry.Id]; found {
+				continue
+			}
+			if _, isPod := s.targets[entry.Host]; !isPod {
+				continue
+			}
+			if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+				continue
+			}
+			for _, owned := range entry.Slots {
+				var next []SlotsRange //nolint:prealloc
+				for _, base := range free {
+					next = append(next, SubtractSlotsRange(base, owned)...)
+				}
+				free = next
+			}
+		}
+	}
+	return free
 }
 
 // FindShardForAddress returns the shard containing a node with the given IP

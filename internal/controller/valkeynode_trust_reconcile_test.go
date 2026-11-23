@@ -133,6 +133,7 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 				OwnerReferences: testParentRefs(),
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				ConfigRevision:     testConfigRevision,
 				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				UsersACLSecretName: aclSecret,
 				TLS: &valkeyiov1alpha1.NodeTLSSpec{

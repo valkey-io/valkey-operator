@@ -268,14 +268,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			if errors.Is(err, errTransientRequeue) {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			workloadReason := "WorkloadError"
-			switch node.Spec.WorkloadType {
-			case valkeyiov1alpha1.WorkloadTypeStatefulSet:
-				workloadReason = "StatefulSetError"
-			case valkeyiov1alpha1.WorkloadTypeDeployment:
-				workloadReason = "DeploymentError"
-			}
-			r.setReadyCondition(ctx, node, workloadReason, err.Error())
+			r.setReadyCondition(ctx, node, workloadErrorReason(node.Spec.WorkloadType), err.Error())
 			return ctrl.Result{}, err
 		}
 		if err := r.pruneConfigRevisions(ctx, node); err != nil {
@@ -1027,6 +1020,17 @@ func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
 	}
 	log.V(1).Info("synced "+kind+" without pod template roll", "name", name)
 	return nil
+}
+
+// workloadErrorReason is the Ready reason for a failed workload write.
+func workloadErrorReason(workloadType valkeyiov1alpha1.WorkloadType) string {
+	switch workloadType {
+	case valkeyiov1alpha1.WorkloadTypeStatefulSet:
+		return "StatefulSetError"
+	case valkeyiov1alpha1.WorkloadTypeDeployment:
+		return "DeploymentError"
+	}
+	return "WorkloadError"
 }
 
 // readyError holds Ready at False with its reason while the pod may still

@@ -510,6 +510,9 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, fresh))).To(Succeed())
 		}
 		_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-pod", Namespace: namespace}})
+		// envtest does not garbage-collect, and the next node of this name has
+		// a new UID, so it would not own this ConfigMap.
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: nodeConfigMapName(node.Name), Namespace: namespace}})
 	})
 
 	It("reconciles a ValkeyNode pushed onto the channel", func() {

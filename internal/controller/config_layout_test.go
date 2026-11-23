@@ -590,6 +590,8 @@ var _ = Describe("config layout", func() {
 			Data:       map[string]string{"readiness-check.sh": "echo ok"},
 		}
 		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		// Unlabelled like a foreign object, so the suite cleanup misses it.
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
 		nodeWrites.Reset()
 
 		_, err := nr.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})

@@ -48,7 +48,8 @@ func serverNameNode(name, serverName string) *valkeyiov1alpha1.ValkeyNode {
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-			ConfigRevision: testConfigRevision,
+			SharedConfigMapName: testSharedConfigMapName,
+			ConfigRevision:      testConfigRevision,
 			TLS: &valkeyiov1alpha1.NodeTLSSpec{
 				Certificates: valkeyiov1alpha1.NodeTLSCertificates{
 					Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "tls"},

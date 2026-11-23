@@ -37,7 +37,7 @@ func TestValkeyNodeSpecOmitsEmptyParentFields(t *testing.T) {
 	require.NoError(t, err)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(data, &fields))
-	for _, name := range []string{"configRevision"} {
+	for _, name := range []string{"configRevision", "sharedConfigMapName"} {
 		assert.NotContains(t, fields, name)
 	}
 }

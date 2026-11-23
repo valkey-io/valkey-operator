@@ -30,6 +30,10 @@ import (
 // controller writes nothing for it.
 const testConfigRevision = "000000000000"
 
+// testSharedConfigMapName is the shared ConfigMap a test node's parent would
+// name. envtest runs no pods, so nothing creates it.
+const testSharedConfigMapName = "valkey-test-scripts"
+
 func pinTestCluster(config map[string]string) *valkeyiov1alpha1.ValkeyCluster {
 	return &valkeyiov1alpha1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "pin-test", Namespace: "default"},

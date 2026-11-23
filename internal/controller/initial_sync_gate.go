@@ -40,12 +40,12 @@ import (
 // is a replica whose full sync has finished. Pod Ready includes the gate, so
 // the PodDisruptionBudget does not count a replacement replica before it has
 // the data, and a drain cannot evict the primary it is still copying from.
-// The operator itself reads ContainersReady (podContainersReady), so the walk
-// never waits on the gate it is responsible for.
+// The node walk reads ContainersReady (podContainersReady), so it never waits
+// on the gate it is responsible for.
 const initialSyncGate corev1.PodConditionType = "valkey.io/initial-sync-complete"
 
 // initialSyncGateRecheck is how soon the cluster reconciles again while a
-// member's gate is still false.
+// member's readiness gate or PodReady condition is still pending.
 const initialSyncGateRecheck = 5 * time.Second
 
 // usesInitialSyncGate reports whether the node's pod carries initialSyncGate:
@@ -153,8 +153,8 @@ func (r *ValkeyClusterReconciler) readyServerContainers(ctx context.Context, nod
 // syncInitialSyncGates sets initialSyncGate on each member pod from this
 // pass's scrape. A node the scrape missed keeps its value. readyBefore holds
 // the server containers that were ready before the scrape (see
-// readyServerContainers). It reports whether any member pod is still gated,
-// so the caller can look again soon.
+// readyServerContainers). It reports whether any gated pod is still waiting
+// for its initial sync gate or for kubelet to report PodReady.
 func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList, state *valkey.ClusterState, readyBefore map[string]string) (bool, error) {
 	scraped := map[string]*valkey.NodeState{}
 	if state != nil {
@@ -163,7 +163,7 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		}
 	}
 	newPrimaries := newShardPrimaries(state, nodes)
-	gated := false
+	pending := false
 	var errs []error
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
@@ -174,6 +174,7 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		if err := r.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: node.Status.PodName}, pod); err != nil {
 			if !apierrors.IsNotFound(err) {
 				errs = append(errs, err)
+				pending = true
 			}
 			continue
 		}
@@ -191,16 +192,18 @@ func (r *ValkeyClusterReconciler) syncInitialSyncGates(ctx context.Context, node
 		if write {
 			if err := r.setInitialSyncGate(ctx, pod, want, reason, message); err != nil {
 				errs = append(errs, err)
-				gated = true
+				pending = true
 				continue
 			}
 			logf.FromContext(ctx).V(1).Info("initial sync gate updated", "pod", pod.Name, "ready", want, "reason", reason)
 		}
-		if !want {
-			gated = true
+		// A gate write does not update PodReady. Wait for the kubelet's
+		// condition, and never use a PodReady snapshot from before a write.
+		if write || !want || !podReady(pod) {
+			pending = true
 		}
 	}
-	return gated, errors.Join(errs...)
+	return pending, errors.Join(errs...)
 }
 
 // initialSyncGateChange decides the pod's gate and whether to write it. A true

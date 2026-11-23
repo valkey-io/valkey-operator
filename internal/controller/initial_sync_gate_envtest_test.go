@@ -22,7 +22,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 )
 
 var _ = Describe("initial sync gate patch", func() {
@@ -50,5 +57,65 @@ var _ = Describe("initial sync gate patch", func() {
 			corev1.ContainersReady: corev1.ConditionTrue,
 			initialSyncGate:        corev1.ConditionTrue,
 		}))
+	})
+
+	It("waits for kubelet PodReady before marking a formed cluster Ready", func() {
+		ctx := context.Background()
+		cluster := &valkeyiov1alpha1.ValkeyCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-pod-readiness", Namespace: "default"},
+			Spec:       valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, ctx, cluster)
+		state := &valkey.ClusterState{}
+		r := &ValkeyClusterReconciler{
+			Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100), ValkeyClients: testValkeyClients(k8sClient),
+			clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState { return state },
+		}
+		key := client.ObjectKeyFromObject(cluster)
+		reconcileOnce := func() reconcile.Result {
+			GinkgoHelper()
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, cluster)).To(Succeed())
+			return result
+		}
+		reconcileOnce()
+		node := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: valkeyNodeName(key.Name, 0, 0)}, node)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, ctx, node)
+		pod := gatePod("cluster-pod-readiness-0", "10.0.0.1", nil)
+		pod.Namespace = key.Namespace
+		podStatus := pod.Status
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(k8sClient.Delete, ctx, pod)
+		pod.Status = podStatus
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		node.Status.Ready = true
+		node.Status.ObservedGeneration = node.Generation
+		node.Status.PodName, node.Status.PodIP = pod.Name, pod.Status.PodIP
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		primary := gatePrimary(pod.Status.PodIP, "0-16383", nil)
+		state.Shards = []*valkey.ShardState{{
+			Id: primary.Id, PrimaryId: primary.Id, Nodes: []*valkey.NodeState{primary},
+			Slots: []valkey.SlotsRange{{Start: 0, End: valkey.TotalSlots - 1}},
+		}}
+
+		Expect(reconcileOnce().RequeueAfter).To(Equal(initialSyncGateRecheck))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+		Expect(podCondition(pod, initialSyncGate)).To(HaveField("Status", corev1.ConditionTrue))
+		Expect(meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionClusterFormed)).To(BeTrue())
+		Expect(meta.IsStatusConditionFalse(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeTrue())
+
+		// The gate stays True across reconciles while the kubelet has not reported PodReady.
+		Expect(reconcileOnce().RequeueAfter).To(Equal(initialSyncGateRecheck))
+		Expect(meta.IsStatusConditionFalse(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeTrue())
+
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue})
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		reconcileOnce()
+		Expect(meta.IsStatusConditionTrue(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)).To(BeTrue())
+		Expect(cluster.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 	})
 })

@@ -718,7 +718,7 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `password.secret` is only valid with `password.type: Secret`
 - An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
 
-> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, and the API server rejects a new or changed user without the name. A cluster stored before this change keeps such a user: Kubernetes CRD validation ratcheting accepts any update that leaves that user unchanged (unless the `CRDValidationRatcheting` feature gate is turned off, which Kubernetes 1.33 and later no longer allow). The operator no longer reads `<cluster>-users` for it, and reports it on the `Degraded` condition with reason `UsersACLUnresolved` and the message `user <name>: password.secret.name is not set` (`passwordSecret.name` for `spec.users`), while the nodes keep the last aclfile. To keep the old Secret, set `password.secret.name: <cluster>-users` on that user.
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, so set `password.secret.name: <cluster>-users` on every such user before upgrading.
 
 #### Migrating from `spec.users`
 

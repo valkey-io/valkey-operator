@@ -85,6 +85,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `podName` — name of the managed pod
 - `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`
 - `appliedReplicationPasswordHash` and `replicationPasswordAppliedTime` — the sha256 of the replication password last given to the running server with `CONFIG SET primaryauth`, and when it was sent; during a system password rotation the parent keeps the previous password until every server has it
+- `appliedLiveConfig`: the live-settable keys of `spec.config` that the server last accepted through CONFIG SET, recorded as `LiveConfigApplied` becomes `True`
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 

@@ -353,7 +353,7 @@ spec:
 
 			By("Verifying the exporter user password is not created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", "internal-"+valkeyName+"-system-passwords",
+				cmd := exec.Command("kubectl", "get", "secret", "valkey-"+valkeyName+"-system-passwords",
 					"-o", "jsonpath={.data._exporter}",
 				)
 				out, err := utils.Run(cmd)

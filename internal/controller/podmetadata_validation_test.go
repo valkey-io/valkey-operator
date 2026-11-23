@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"maps"
 	"strings"
@@ -94,7 +93,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 			},
 			&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-n", Namespace: "default"},
-				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{PodMetadata: pm},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, PodMetadata: pm},
 			},
 		}
 	}
@@ -183,10 +182,10 @@ var _ = Describe("podMetadata CEL validation", func() {
 			true, "")
 	})
 
-	// The pod also carries the operator's config-hash annotation, so the limit
-	// is checked against the final map, as the API server will see it.
-	operatorAnnotations := map[string]string{configHashKey: strings.Repeat("0", sha256.Size*2)}
-	operatorSize := len(configHashKey) + sha256.Size*2
+	// The pod also carries the operator's config-revision annotation, so the
+	// limit is checked against the final map, as the API server will see it.
+	operatorAnnotations := map[string]string{configRevisionKey: strings.Repeat("0", pinnedConfigRevisionLength)}
+	operatorSize := len(configRevisionKey) + pinnedConfigRevisionLength
 	for _, total := range []int{apivalidation.TotalAnnotationSizeLimitB, apivalidation.TotalAnnotationSizeLimitB + 1} {
 		annotations := map[string]string{"example.com/a": "x"}
 		annotations["example.com/b"] = strings.Repeat("x", total-operatorSize-len("example.com/a")-len("x")-len("example.com/b"))
@@ -196,7 +195,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 		It(fmt.Sprintf("annotations totalling %d bytes on the pod: accepted=%t, like the API server", total, accepted), func() {
 			expectAdmission(fmt.Sprintf("pm-as-%d", total),
 				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: annotations},
-				accepted, "annotations must total at most 262059 characters")
+				accepted, "annotations must total at most 262107 characters")
 		})
 	}
 })

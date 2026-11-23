@@ -76,8 +76,8 @@ const (
 // the mounted file when it is there and otherwise uses the environment value.
 // With handoff it starts the server through primary-handoff.sh when the
 // mounted ConfigMap carries that script, and directly otherwise, so a node
-// that mounts an external ConfigMap without the script still starts. $0 is
-// the server binary and $@ its arguments.
+// whose older shared ConfigMap lacks the script still starts. $0 is the
+// server binary and $@ its arguments.
 func replicationAuthShell(handoff bool) string {
 	start := `exec "$0" "$@" --primaryauth "$PRIMARY_AUTH"`
 	if handoff {

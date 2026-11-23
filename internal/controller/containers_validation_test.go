@@ -37,7 +37,7 @@ func containersCluster(name string, containers []corev1.Container) *valkeyiov1al
 func containersNode(name string, containers []corev1.Container) *valkeyiov1alpha1.ValkeyNode {
 	return &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec:       valkeyiov1alpha1.ValkeyNodeSpec{Containers: containers},
+		Spec:       valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, Containers: containers},
 	}
 }
 

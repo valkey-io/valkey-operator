@@ -932,6 +932,7 @@ func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, nod
 // template would not roll.
 func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
 	before := sts.DeepCopy()
+	matchServerDefaultedMaxUnavailable(&desired.Spec, &sts.Spec)
 	sts.Labels = desired.Labels
 	sts.Spec = desired.Spec
 	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
@@ -1309,8 +1310,9 @@ func podSupersededAndStuck(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	return !podReady(pod)
 }
 
-// nodeInfo returns the node's INFO output, or an error when the pod cannot be
-// reached. Tests inject nodeInfoFunc to bypass the live connection.
+// nodeInfo returns the persistence and replication sections of the node's INFO,
+// the two that syncInProgress reads, or an error when the pod cannot be reached.
+// Tests inject nodeInfoFunc to bypass the live connection.
 func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
@@ -1319,7 +1321,7 @@ func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alp
 	if err != nil {
 		return "", err
 	}
-	return c.Do(ctx, c.B().Info().Build()).ToString()
+	return c.Do(ctx, c.B().Info().Section("persistence", "replication").Build()).ToString()
 }
 
 // syncInProgress reports whether INFO shows the server still loading a dataset:
@@ -1434,7 +1436,8 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 		return ""
 	}
 
-	info, err := c.Do(ctx, c.B().Info().Build()).ToString()
+	// cluster for cluster_enabled, replication for role on a standalone node.
+	info, err := c.Do(ctx, c.B().Info().Section("cluster", "replication").Build()).ToString()
 	if err != nil {
 		log.Error(err, "failed to get info")
 		return ""

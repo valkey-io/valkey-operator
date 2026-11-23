@@ -439,6 +439,8 @@ spec:
 			verifyClusterAccess := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", singleNodeClusterName)
 
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
 					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
@@ -560,6 +562,8 @@ spec:
 				decoded, err := base64.StdEncoding.DecodeString(b64Password)
 				g.Expect(err).NotTo(HaveOccurred())
 				operatorPassword := string(decoded)
+
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
 				cmd = exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -1431,6 +1435,8 @@ spec:
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", deploymentClusterName)
+
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",

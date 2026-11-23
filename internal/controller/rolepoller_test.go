@@ -109,7 +109,7 @@ var _ = Describe("RolePoller", func() {
 				Namespace: "default",
 				Labels:    map[string]string{LabelCluster: clusterName},
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
@@ -456,7 +456,7 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 				Labels:          map[string]string{LabelCluster: "wiring-cluster"},
 				OwnerReferences: testParentRefs(),
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		// The pod below may exist before the StatefulSet, so creating it needs a
 		// matching Spec.WorkloadRevision.

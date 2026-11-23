@@ -43,9 +43,10 @@ var _ = Describe("status.appliedLiveConfig", func() {
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "applied-live-config", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				ConfigRevision: testConfigRevision,
-				WorkloadType:   valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Config:         map[string]string{"maxmemory": "100mb", "maxclients": "500"},
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Config:              map[string]string{"maxmemory": "100mb", "maxclients": "500"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())

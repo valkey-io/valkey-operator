@@ -139,7 +139,7 @@ func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 
 // The server command of a cluster node runs replicationAuthShell(true), which
 // falls back to the server binary when the mounted ConfigMap has no
-// primary-handoff.sh, as an external ConfigMap may not. The script and password
+// primary-handoff.sh, as an older shared ConfigMap may not. The script and password
 // paths are absolute, so this exercises the fallback, with the password from
 // the environment, on a machine without them.
 func TestPrimaryHandoffCommandFallsBackToServer(t *testing.T) {

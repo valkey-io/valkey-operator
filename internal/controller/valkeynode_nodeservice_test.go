@@ -263,7 +263,7 @@ var _ = Describe("per-node Services", func() {
 		key := types.NamespacedName{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}
 		defer func() {
 			_ = k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}})
-			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(node.Name), Namespace: node.Namespace}})
+			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetSharedConfigMapName(node.Name), Namespace: node.Namespace}})
 			_ = k8sClient.Delete(ctx, node)
 		}()
 
@@ -387,7 +387,7 @@ func newBareNode(name string) *valkeyiov1alpha1.ValkeyNode {
 			},
 			OwnerReferences: testParentRefs(),
 		},
-		Spec: valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision},
 	}
 }
 

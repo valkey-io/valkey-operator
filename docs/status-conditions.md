@@ -58,6 +58,7 @@ Common reasons when `Ready=False`:
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `valkey-<cluster>-tls-trust` Secret
+- `Reconciling` with message `Waiting for cluster pods to become Ready` – the cluster is waiting for a member pod's initial sync readiness gate or for the kubelet to report `PodReady=True`. Topology reconciliation can continue during this wait.
 - `InitialSyncGateFailed` – a write of the `valkey.io/initial-sync-complete` readiness gate was refused (403, for example without `patch` on `pods/status`) or conflicted (409). The node walk is held for that pass, so no ValkeyNode is created or rolled and a pod the walk would replace is not left waiting on a gate that cannot be written. The steps after the walk still run. `Progressing` is `True` with the same reason. Any other failed write is reported only by the `InitialSyncGateFailed` event
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
@@ -68,7 +69,7 @@ Common reasons when `Ready=False`:
 - `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
 
 Common reasons when `Ready=True`:
-- `ClusterHealthy` – Cluster is healthy
+- `ClusterHealthy` – the cluster is healthy and its member pods that carry the initial sync readiness gate report `PodReady=True`
 
 #### `Progressing`
 Indicates whether the cluster is being created, updated, or scaled.

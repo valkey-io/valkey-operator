@@ -117,10 +117,6 @@ Pods and the workload are read only when the ConfigMap holds more than one revis
 
 During a roll `valkey-<node>` holds two revisions and `live.conf` under the 1 MiB ConfigMap limit, so a `spec.config` near half that size fails mid-roll with `ConfigMapError`.
 
-### Upgrading
-
-Older operators wrote the full `valkey.conf` into `valkey-<cluster>` and stamped a `valkey.io/config-hash` annotation on the pod template. The new template drops that annotation and mounts the node ConfigMap `valkey-<node>`, so existing clusters roll once on upgrade, one node at a time. The `valkey.conf` key an older operator left in `valkey-<cluster>` is no longer updated, and pods that have rolled do not mount it.
-
 ## Init container
 
 Every ValkeyNode pod runs a `server-init` init container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap and can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.

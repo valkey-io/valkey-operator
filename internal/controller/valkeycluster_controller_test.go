@@ -468,7 +468,7 @@ var _ client.Reader = errorReader{}
 var _ = Describe("ValkeyCluster config hash propagation", func() {
 	ctx := context.Background()
 
-	It("should set configHashKey annotation on ValkeyNodes and update it when cluster config changes", func() {
+	It("should set spec.configRevision on ValkeyNodes and keep it when only a live key changes", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "config-hash-test",
@@ -516,8 +516,8 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		initialCMHash := cm.Annotations[configHashKey]
 		Expect(initialCMHash).NotTo(BeEmpty())
 
-		By("capturing each ValkeyNode's derived roll hash and authorized WorkloadRevision")
-		// The derived roll hash excludes live-settable keys so that changes to
+		By("capturing each ValkeyNode's config revision and authorized WorkloadRevision")
+		// The pinned config excludes live-settable keys so that changes to
 		// those keys do not trigger a pod roll.
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
@@ -526,10 +526,11 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		initialRevisions := map[string]string{}
 		for i := range nodeList.Items {
 			n := &nodeList.Items[i]
-			Expect(nodeServerConfigRollHash(n)).NotTo(BeEmpty())
+			Expect(n.Spec.ConfigRevision).To(Equal(pinnedConfigRevision(renderPinnedConfig(n))),
+				"ValkeyNode %s must be created with the desired config revision", n.Name)
 			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty(),
 				"ValkeyNode %s must be created with an authorized WorkloadRevision", n.Name)
-			initialHashes[n.Name] = nodeServerConfigRollHash(n)
+			initialHashes[n.Name] = n.Spec.ConfigRevision
 			initialRevisions[n.Name] = n.Spec.WorkloadRevision
 		}
 
@@ -549,14 +550,14 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		Expect(newCMHash).NotTo(BeEmpty())
 		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
-		By("verifying derived roll hash and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
+		By("verifying config revision and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, updatedNodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(updatedNodeList.Items).NotTo(BeEmpty())
 		for i := range updatedNodeList.Items {
 			n := &updatedNodeList.Items[i]
-			Expect(nodeServerConfigRollHash(n)).To(Equal(initialHashes[n.Name]),
-				"ValkeyNode %s roll hash must not change for live-settable key changes", n.Name)
+			Expect(n.Spec.ConfigRevision).To(Equal(initialHashes[n.Name]),
+				"ValkeyNode %s config revision must not change for live-settable key changes", n.Name)
 			Expect(n.Spec.WorkloadRevision).To(Equal(initialRevisions[n.Name]),
 				"ValkeyNode %s WorkloadRevision must not change for live-settable key changes (a change would roll the pod)", n.Name)
 		}
@@ -629,7 +630,7 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
 
-		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a derived config-hash annotation")
+		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
@@ -638,8 +639,9 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty())
 			tmpl, err := buildNodePodTemplate(n)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(tmpl.Annotations[configHashKey]).To(Equal(nodeServerConfigRollHash(n)),
-				"ValkeyNode %s pod template must carry the derived config-hash annotation even when the ConfigMap is not yet visible in the cache", n.Name)
+			Expect(n.Spec.ConfigRevision).NotTo(BeEmpty())
+			Expect(tmpl.Annotations[configRevisionKey]).To(Equal(n.Spec.ConfigRevision),
+				"ValkeyNode %s pod template must carry the config-revision annotation even when the ConfigMap is not yet visible in the cache", n.Name)
 		}
 	})
 })

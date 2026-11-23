@@ -989,6 +989,15 @@ spec:
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
                   the rest take effect on the next pod roll.
                 type: object
+              configRevision:
+                description: |-
+                  ConfigRevision names the pinned config revision the pod template
+                  references: the first 12 hex characters of the SHA-256 of the rendered
+                  restart-only config. The parent sets it. It stays at the live workload's
+                  revision while only live-settable keys differ, so those changes roll
+                  nothing.
+                pattern: ^[0-9a-f]{12}$
+                type: string
               containers:
                 description: |-
                   Containers allows patching the default containers via a strategic merge
@@ -2918,10 +2927,10 @@ spec:
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
-                    - message: 'annotations must total at most 262059 characters (keys
-                        plus values): 256 KiB less the operator''s valkey.io/config-hash
+                    - message: 'annotations must total at most 262107 characters (keys
+                        plus values): 256 KiB less the operator''s valkey.io/config-revision
                         annotation'
-                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262059
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262107
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending
@@ -3633,6 +3642,8 @@ spec:
                 - message: workloadType is immutable
                   reason: FieldValueForbidden
                   rule: self == oldSelf
+            required:
+            - configRevision
             type: object
             x-kubernetes-validations:
             - fieldPath: .persistence

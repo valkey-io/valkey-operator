@@ -69,9 +69,13 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 
 ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-index 0 is the *initial* primary; 1+ are replicas. After a failover, Valkey may promote a replica — the labels are not updated; the live role is always read from CLUSTER NODES. Labels `valkey.io/shard-index` and `valkey.io/node-index` are used by the reconciler to determine slot assignment vs. replication.
 
-## Config hash propagation
+## Config revisions
 
-When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spec.config` to each ValkeyNode. The ValkeyNode pod-template builders derive a SHA-256 roll hash from the node spec (config minus the live-settable allowlist, plus TLS) and stamp it as a pod template annotation — gated on `spec.serverConfigMapName`, the marker that a parent manages the node's config. The changed template then rolls out one node at a time, authorized by `spec.workloadRevision`. The hash render is shared with the ValkeyCluster ConfigMap path, and `internal/controller/config_rollhash_test.go` pins it byte-for-byte so operator upgrades do not roll pods.
+The pinned config holds every `spec.config` key except the live-settable allowlist (`liveConfigAllowlist`: `maxmemory`, `maxmemory-policy`, `maxclients`) and keys the image's Valkey version does not support, then the base config, then `include /config/live.conf`. Its revision is the first 12 hex characters of the SHA-256 of its content. A live value change therefore leaves the revision unchanged and rolls nothing.
+
+The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. `pinnedConfigRef` can keep the live workload's revision when only allowlisted keys differ from it. It needs that revision's content, which this layout does not store, so the parent always sets the revision rendered from the desired spec.
+
+The ValkeyNode pod-template builders set the `valkey.io/config-revision` annotation to the revision. The annotation comes from the node spec, so the template stays a pure function of the spec. A changed revision changes the template and rolls out one node at a time, authorized by `spec.workloadRevision`. Pods don't mount the pinned config yet: they mount `valkey.conf` from `valkey-<cluster>`.
 
 ## Init container
 

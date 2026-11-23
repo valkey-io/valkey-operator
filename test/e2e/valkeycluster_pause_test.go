@@ -59,7 +59,7 @@ var _ = Describe("ValkeyCluster pause", Label("cluster-lifecycle", "pause"), fun
 				kubectl(g, "get", "pods", "-l", selector, "--sort-by=.metadata.name", "-o", "jsonpath={.items[*].metadata.uid}"),
 				kubectl(g, "get", "statefulsets", "-l", selector, "--sort-by=.metadata.name", "-o", "jsonpath={.items[*].metadata.generation}"),
 				kubectl(g, "get", "configmap", "valkey-"+name, "-o", "jsonpath={.metadata.resourceVersion}"),
-				kubectl(g, "get", "secret", "internal-"+name+"-acl", "-o", "jsonpath={.metadata.resourceVersion}"),
+				kubectl(g, "get", "secret", "valkey-"+name+"-acl", "-o", "jsonpath={.metadata.resourceVersion}"),
 			}
 		}
 		DeferCleanup(func() {

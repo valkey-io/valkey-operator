@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -90,6 +91,22 @@ var _ = Describe("status.appliedLiveConfig", func() {
 		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "200mb"})).To(Succeed())
 		Expect(read().Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.AppliedLiveConfigEntry{{Name: "maxmemory", Value: "200mb"}}))
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(3))
+	})
+
+	It("keeps the recorded values when CONFIG SET fails", func() {
+		node.Status.AppliedLiveConfig = []valkeyiov1alpha1.AppliedLiveConfigEntry{{Name: "maxmemory", Value: "100mb"}}
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		r.newConfigClient = func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+			return &fakeConfigClient{err: errors.New("ERR CONFIG SET failed")}, nil
+		}
+
+		stop, _, err := r.applyLiveSettings(ctx, read())
+		Expect(err).To(HaveOccurred())
+		Expect(stop).To(BeTrue())
+
+		got := read()
+		Expect(got.Status.AppliedLiveConfig).To(Equal([]valkeyiov1alpha1.AppliedLiveConfigEntry{{Name: "maxmemory", Value: "100mb"}}))
+		Expect(meta.IsStatusConditionFalse(got.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeTrue())
 	})
 
 	It("clears the condition and the values when there is nothing to apply", func() {

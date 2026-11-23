@@ -347,7 +347,7 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		log.Error(err, "failed to apply live config")
 		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
 		reason, message := liveApplyFailure(node, err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
+		if condErr := r.setLiveConfigFailed(ctx, node, reason, message); condErr != nil {
 			log.Error(condErr, "failed to set LiveConfigApplied condition")
 		}
 		// The ACL step below is not reached, so report the lockout here.
@@ -489,8 +489,11 @@ func (r *ValkeyNodeReconciler) removeCondition(ctx context.Context, node *valkey
 	return err
 }
 
-func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, status, reason, message); err != nil {
+// setLiveConfigFailed sets LiveConfigApplied=False and leaves
+// status.appliedLiveConfig as it was. True is set only by setLiveConfigApplied,
+// which writes the values with it.
+func (r *ValkeyNodeReconciler) setLiveConfigFailed(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) error {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, metav1.ConditionFalse, reason, message); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil

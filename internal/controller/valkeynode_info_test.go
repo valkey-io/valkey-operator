@@ -91,7 +91,9 @@ func TestResolveRoleReadsClusterAndReplication(t *testing.T) {
 					"p1 10.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n")))
 
 		r := &ValkeyNodeReconciler{ValkeyClients: singleNodeClients{c}}
-		assert.Equal(t, RoleReplica, r.resolveRole(context.Background(), &valkeyiov1alpha1.ValkeyNode{}))
+		role, id := r.resolveRole(context.Background(), &valkeyiov1alpha1.ValkeyNode{})
+		assert.Equal(t, RoleReplica, role)
+		assert.Equal(t, "r1", id)
 	})
 
 	t.Run("standalone takes the role from INFO replication", func(t *testing.T) {
@@ -101,6 +103,8 @@ func TestResolveRoleReadsClusterAndReplication(t *testing.T) {
 			Return(vmock.Result(vmock.ValkeyBlobString(fmt.Sprintf(infoClusterReplication, "master", "0"))))
 
 		r := &ValkeyNodeReconciler{ValkeyClients: singleNodeClients{c}}
-		assert.Equal(t, RolePrimary, r.resolveRole(context.Background(), &valkeyiov1alpha1.ValkeyNode{}))
+		role, id := r.resolveRole(context.Background(), &valkeyiov1alpha1.ValkeyNode{})
+		assert.Equal(t, RolePrimary, role)
+		assert.Empty(t, id)
 	})
 }

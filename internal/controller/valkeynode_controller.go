@@ -196,6 +196,9 @@ type ValkeyNodeReconciler struct {
 	// replication role. Tests set it to a fake (envtest has no running Valkey
 	// server); when nil, resolveRole connects to the pod directly.
 	resolveRoleFunc func(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string
+	// resolveClusterNodeIDFunc, when set alongside resolveRoleFunc, supplies the
+	// cluster node ID that resolveRole returns; nil means "".
+	resolveClusterNodeIDFunc func(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string
 	// nodeInfoFunc, when set, overrides how nodeInfo reads a node's INFO output.
 	// Tests set it to a fake; when nil, nodeInfo connects to the pod directly.
 	nodeInfoFunc func(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error)
@@ -1131,11 +1134,13 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		rolledOut = rolled
 	}
 	role := ""
+	readID := ""
+	volumeUID := dataVolumeUID(node, pvc, pod)
 	if ready {
 		target := node.DeepCopy()
 		target.Status.PodName = pod.Name
 		target.Status.PodIP = pod.Status.PodIP
-		role = r.resolveRole(ctx, target)
+		role, readID = r.resolveRole(ctx, target)
 		// Transient INFO failure on a ready pod: the last-known role is kept
 		// below rather than blanking a healthy node, and a short requeue
 		// retries sooner than the backstop.
@@ -1152,6 +1157,11 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		// for, not of the node patchStatus reads: a spec changed since then is
 		// not processed yet, and its own reconcile stamps it.
 		current.Status.ObservedGeneration = node.Generation
+
+		// Read the recorded values before overwriting them: the ID is kept
+		// only while the volume is the one it was recorded against.
+		current.Status.ClusterNodeID, current.Status.DataVolumeUID = nextClusterNodeID(
+			current.Status.ClusterNodeID, current.Status.DataVolumeUID, volumeUID, readID), volumeUID
 
 		if node.Spec.Persistence != nil {
 			pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
@@ -1515,8 +1525,42 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	return nil
 }
 
+// dataVolumeUID returns the UID of the object holding /data: the PVC with
+// persistence, the pod without. It is "" when that object is nil.
+func dataVolumeUID(node *valkeyiov1alpha1.ValkeyNode, pvc *corev1.PersistentVolumeClaim, pod *corev1.Pod) string {
+	if node.Spec.Persistence != nil {
+		if pvc == nil {
+			return ""
+		}
+		return string(pvc.UID)
+	}
+	if pod == nil {
+		return ""
+	}
+	return string(pod.UID)
+}
+
+// nextClusterNodeID returns the cluster node ID to record. Nothing is recorded
+// without a known data volume, since the ID could not be tied to one. A read ID
+// wins. With none, the recorded ID is kept only while the data volume is the
+// one it was recorded against: a replaced or missing volume means the node
+// comes back with a new ID, so the old one is dropped.
+func nextClusterNodeID(recordedID, recordedVolumeUID, volumeUID, readID string) string {
+	if volumeUID == "" {
+		return ""
+	}
+	if readID != "" {
+		return readID
+	}
+	if volumeUID != "" && volumeUID == recordedVolumeUID {
+		return recordedID
+	}
+	return ""
+}
+
 // resolveRole returns the node's live replication role ("primary" or "replica"),
-// or "" if it cannot be determined. Tests inject resolveRoleFunc to bypass the
+// or "" if it cannot be determined, with the node's cluster node ID ("" in
+// standalone mode or when unknown). Tests inject resolveRoleFunc to bypass the
 // live Valkey connection (envtest has no running Valkey server).
 //
 // In cluster mode the role is derived from slot ownership (CLUSTER NODES), not
@@ -1524,33 +1568,36 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 // seconds before it re-establishes replication with its primary, whereas it
 // never owns hash slots. A primary always owns slots. Standalone nodes (cluster
 // disabled) have no slots, so they fall back to INFO replication directly.
-func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) string {
+func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (role, clusterNodeID string) {
 	if r.resolveRoleFunc != nil {
-		return r.resolveRoleFunc(ctx, node)
+		if r.resolveClusterNodeIDFunc != nil {
+			clusterNodeID = r.resolveClusterNodeIDFunc(ctx, node)
+		}
+		return r.resolveRoleFunc(ctx, node), clusterNodeID
 	}
 
 	log := logf.FromContext(ctx)
 	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
-		return ""
+		return "", ""
 	}
 
 	// cluster for cluster_enabled, replication for role on a standalone node.
 	info, err := c.Do(ctx, c.B().Info().Section("cluster", "replication").Build()).ToString()
 	if err != nil {
 		log.Error(err, "failed to get info")
-		return ""
+		return "", ""
 	}
 
 	if !parseClusterEnabled(info) {
-		return parseValkeyRole(info)
+		return parseValkeyRole(info), ""
 	}
 
 	nodes, err := c.Do(ctx, c.B().ClusterNodes().Build()).ToString()
 	if err != nil {
 		log.Error(err, "failed to get cluster nodes")
-		return ""
+		return "", ""
 	}
 	return parseClusterNodesRole(nodes)
 }
@@ -1641,6 +1688,8 @@ func parseClusterEnabled(info string) bool {
 // transiently report master before replication re-establishes, but no slots are
 // ever owned. Returns "" if there is no myself line.
 //
+// id is the myself entry's node ID, "" with no myself line.
+//
 // A slot-less myself,master therefore resolves to replica in two states: the
 // restarting replica above, and the primary of a freshly created shard before
 // CLUSTER ADDSLOTSRANGE. The second is a deliberate tradeoff — the two are
@@ -1653,15 +1702,15 @@ func parseClusterEnabled(info string) bool {
 // A master mid-reshard holding only a migration marker counts as owning slots
 // (see ClusterNode.HasSlotAssignment), which is the same answer GetClusterState
 // gives.
-func parseClusterNodesRole(clusterNodes string) string {
+func parseClusterNodesRole(clusterNodes string) (role, id string) {
 	myself := valkey.ParseClusterNodesMyself(clusterNodes)
 	if myself == nil {
-		return ""
+		return "", ""
 	}
 	if myself.IsPrimary() && myself.HasSlotAssignment() {
-		return RolePrimary
+		return RolePrimary, myself.Id
 	}
-	return RoleReplica
+	return RoleReplica, myself.Id
 }
 
 // parseValkeyRole extracts the replication role from the output of INFO replication,

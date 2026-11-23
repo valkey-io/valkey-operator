@@ -668,6 +668,70 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 	return nil
 }
 
+// NodeView is what the scraped nodes report for one node ID.
+type NodeView struct {
+	ID         string
+	Scraped    bool     // the node answered and its own myself line is the view
+	Hosts      []string // its scrape address, or every host the tables list for it
+	OwnsSlots  bool
+	PrimaryIDs []string // primaries it is listed as replicating; at most one when Scraped
+}
+
+// NodeViews returns one view per node ID any scraped node knows. A node that
+// answered is judged by its own myself line alone, since a cut-off peer can
+// hold a stale entry for it. Any other ID takes the union of the entries
+// across all scraped tables.
+func (s *ClusterState) NodeViews() map[string]NodeView {
+	nodes := s.AllNodes()
+	views := make(map[string]NodeView)
+
+	for _, n := range nodes {
+		myself := n.Myself()
+		if myself == nil {
+			continue
+		}
+		v := NodeView{ID: n.Id, Scraped: true, Hosts: []string{n.Address}, OwnsSlots: myself.HasSlotAssignment()}
+		if myself.PrimaryId != "" && myself.PrimaryId != "-" {
+			v.PrimaryIDs = []string{myself.PrimaryId}
+		}
+		views[n.Id] = v
+	}
+
+	merge := func(id, host string, entry *ClusterNode) {
+		if v, ok := views[id]; ok && v.Scraped {
+			return
+		}
+		v := views[id]
+		v.ID = id
+		if host != "" && !slices.Contains(v.Hosts, host) {
+			v.Hosts = append(v.Hosts, host)
+		}
+		if entry != nil {
+			v.OwnsSlots = v.OwnsSlots || entry.HasSlotAssignment()
+			if entry.PrimaryId != "" && entry.PrimaryId != "-" && !slices.Contains(v.PrimaryIDs, entry.PrimaryId) {
+				v.PrimaryIDs = append(v.PrimaryIDs, entry.PrimaryId)
+			}
+		}
+		views[id] = v
+	}
+
+	for _, n := range nodes {
+		if n.Myself() == nil {
+			merge(n.Id, n.Address, nil)
+		}
+		for i := range n.nodes {
+			merge(n.nodes[i].Id, n.nodes[i].Host, &n.nodes[i])
+		}
+	}
+
+	for id, v := range views {
+		slices.Sort(v.Hosts)
+		slices.Sort(v.PrimaryIDs)
+		views[id] = v
+	}
+	return views
+}
+
 // hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
 // endpoint field (<ip:port@cport[,hostname]>). Valkey writes the endpoint with a
 // bare IP, so an IPv6 host carries its own colons (fd00::2:6379@16379) and

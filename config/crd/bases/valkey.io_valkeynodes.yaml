@@ -3850,6 +3850,12 @@ spec:
                   AppliedReplicationPasswordHash is the sha256 of the replication password
                   the running server was last given with CONFIG SET primaryauth.
                 type: string
+              clusterNodeID:
+                description: |-
+                  ClusterNodeID is the Valkey cluster node ID from the node's own CLUSTER
+                  NODES. It is empty in standalone mode, before the pod's first ready read,
+                  and once the data volume is replaced or missing, until the next read.
+                type: string
               conditions:
                 description: Conditions represent the current state of the ValkeyNode.
                 items:
@@ -3910,6 +3916,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dataVolumeUID:
+                description: |-
+                  DataVolumeUID is the UID of the object holding /data: the PVC with
+                  persistence, the pod without. It is empty while that object is missing.
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed by the controller.

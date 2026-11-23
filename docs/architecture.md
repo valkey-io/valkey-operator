@@ -26,7 +26,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 2. Ensures a PVC (if persistence is configured)
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
 4. Deletes config revision keys that nothing uses any more
-5. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+5. Updates `status.ready`, `status.podIP`, `status.role`, `status.clusterNodeID`, `status.dataVolumeUID`, and `status.observedGeneration`
 6. Once the pod is ready, applies live config with CONFIG SET, records it in `status.appliedLiveConfig`, and rewrites `live.conf` to match
 
 #### Role resolution
@@ -43,6 +43,8 @@ Resolution is event-driven rather than tied to the reconcile cadence:
 Both are triggers only: the ValkeyNode controller re-reads its own state on every reconcile and never trusts a value handed to it.
 
 The role follows the pod, not the workload: it is cleared when the pod is not ready, kept at its last-known value on a transient read failure, and preserved while the node's StatefulSet/Deployment rolls (`status.ready` still reports the rollout).
+
+The controller also records `status.clusterNodeID` from the same CLUSTER NODES read and `status.dataVolumeUID`, the UID of the PVC with persistence or of the pod without. It is the only writer of both. The recorded ID survives a read failure while the volume UID is unchanged and is cleared when the volume is replaced or missing, since the node then comes back with a new ID.
 
 ### RolePoller
 

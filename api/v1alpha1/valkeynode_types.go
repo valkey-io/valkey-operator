@@ -347,6 +347,17 @@ type ValkeyNodeStatus struct {
 	// +optional
 	Role string `json:"role,omitempty"`
 
+	// ClusterNodeID is the Valkey cluster node ID from the node's own CLUSTER
+	// NODES. It is empty in standalone mode, before the pod's first ready read,
+	// and once the data volume is replaced or missing, until the next read.
+	// +optional
+	ClusterNodeID string `json:"clusterNodeID,omitempty"`
+
+	// DataVolumeUID is the UID of the object holding /data: the PVC with
+	// persistence, the pod without. It is empty while that object is missing.
+	// +optional
+	DataVolumeUID string `json:"dataVolumeUID,omitempty"`
+
 	// Conditions represent the current state of the ValkeyNode.
 	// +listType=map
 	// +listMapKey=type

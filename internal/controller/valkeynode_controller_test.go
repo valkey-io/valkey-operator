@@ -2233,6 +2233,49 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		Expect(updated.Status.Role).To(Equal(RolePrimary))
 	})
 
+	It("records the cluster node ID and data volume UID, and drops the ID when the volume changes", func() {
+		seedReadyWorkload(node)
+		r := &ValkeyNodeReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: events.NewFakeRecorder(100),
+			resolveRoleFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return RoleReplica
+			},
+			resolveClusterNodeIDFunc: func(_ context.Context, _ *valkeyiov1alpha1.ValkeyNode) string {
+				return "id-1"
+			},
+		}
+		podKey := types.NamespacedName{Name: node.Name + "-pod", Namespace: node.Namespace}
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+
+		_, err := r.updateStatus(ctx, node, nil)
+		Expect(err).NotTo(HaveOccurred())
+		updated := &valkeyiov1alpha1.ValkeyNode{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.ClusterNodeID).To(Equal("id-1"))
+		Expect(updated.Status.DataVolumeUID).To(Equal(string(pod.UID)))
+
+		By("replacing the pod with an unready one of a new UID")
+		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, podKey, &corev1.Pod{}))
+		}).Should(BeTrue())
+		replacement := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podKey.Name, Namespace: podKey.Namespace, Labels: pod.Labels},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
+		}
+		Expect(k8sClient.Create(ctx, replacement)).To(Succeed())
+		Expect(replacement.UID).NotTo(Equal(pod.UID))
+
+		_, err = r.updateStatus(ctx, node, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.ClusterNodeID).To(BeEmpty())
+		Expect(updated.Status.DataVolumeUID).To(Equal(string(replacement.UID)))
+	})
+
 	It("reports Ready from the containers while the readiness gate is false", func() {
 		seedReadyWorkload(node)
 		pod := &corev1.Pod{}
@@ -2975,7 +3018,9 @@ var _ = Describe("ValkeyNode resolveRole dispatch", func() {
 				return RolePrimary
 			},
 		}
-		Expect(r.resolveRole(ctx, node)).To(Equal(RolePrimary))
+		role, id := r.resolveRole(ctx, node)
+		Expect(role).To(Equal(RolePrimary))
+		Expect(id).To(BeEmpty())
 	})
 })
 

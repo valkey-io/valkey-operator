@@ -89,6 +89,7 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`
 - `appliedReplicationPasswordHash` and `replicationPasswordAppliedTime` — the sha256 of the replication password last given to the running server with `CONFIG SET primaryauth`, and when it was sent; during a system password rotation the parent keeps the previous password until every server has it
 - `appliedLiveConfig`: the live-settable keys of `spec.config` that the server last accepted through CONFIG SET, recorded as `LiveConfigApplied` becomes `True`
+- `clusterNodeID` and `dataVolumeUID` — the node's cluster node ID and the UID of the object holding `/data` (the PVC with persistence, the pod without). The ValkeyNode controller is their only writer. It keeps a recorded ID while the volume UID is unchanged and clears it when the volume is replaced or missing. Scale-in and `CLUSTER FORGET` read the ID to find a node whose server is down
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 

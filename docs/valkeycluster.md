@@ -280,6 +280,10 @@ If there are no reachable replicas or the wait expires, the server keeps its nod
 
 With `persistence`, a primary whose server crashes restarts with its node ID and reloads its last snapshot. Valkey does not enable the append-only file by default, so with snapshots alone the writes since the last save are lost, and its replica, which may hold them, full-syncs to the older data. Set `appendonly: "yes"` in `config` to keep that window small.
 
+The operator does not remove a failed primary from the cluster while one of its ValkeyNodes still records that node ID, or while a replica it cannot reach follows it. A replica that answers can take over instead: without `persistence` and without a majority of primaries to fail over, the operator removes the failed primary as before, even while its ValkeyNode records the ID. The hold ends when the ValkeyNode it waits for returns or its data volume is gone: delete its pod without `persistence`, or its PVC or ValkeyNode with `persistence`.
+
+A pod stuck Terminating on a Kubernetes node that has stopped responding is not replaced, because the StatefulSet waits for it to go. The cluster stays not Ready (`UpdatingNodes` or `MissingReplicas`) until it does, even after a replica has taken over its slots. Delete the Kubernetes node object, or force-delete the pod, once the node is known to be down.
+
 ### Pod disruption budget
 
 ```yaml
@@ -399,6 +403,14 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 ```
 
 `shards` sets the number of shards, and `replicasPerShard` sets the number of replicas in each shard in addition to its primary. A shard follows the [Valkey definition](https://valkey.io/commands/cluster-shards/): one primary and its replicas, serving the same slots. `replicasPerShard` defaults to 0.
+
+#### Scaling in
+
+When `shards` is lowered, the operator moves the slots of each excess shard to the shards that stay. It deletes the ValkeyNodes of an excess shard once none of them holds slots. Replicas stay with their shard until then.
+
+If the primary of an excess shard crashes during the drain, its replica takes over and the drain continues from it. See [Failure handling](#failure-handling) for what a crashed primary keeps with and without `persistence`.
+
+When the owner of a shard's slots is unreachable, the operator keeps the shard and the cluster reports `ScaleInBlocked`, or an earlier reason such as `UpdatingNodes` when a node of a shard that stays is not ready.
 
 #### Migrating from `spec.replicas`
 

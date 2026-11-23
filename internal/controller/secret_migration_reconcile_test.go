@@ -114,6 +114,7 @@ var _ = Describe("Secrets created under their legacy names", func() {
 
 		By("standing in for the node and its workload, still on the legacy names")
 		node := buildClusterValkeyNode(cluster, 0, 0)
+		node.Spec.ConfigRevision = testConfigRevision
 		node.Spec.UsersACLSecretName = "internal-legacy-names-acl"
 		Expect(controllerutil.SetControllerReference(cluster, node, k8sClient.Scheme())).To(Succeed())
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())

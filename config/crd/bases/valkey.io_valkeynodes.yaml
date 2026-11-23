@@ -3668,6 +3668,30 @@ spec:
                   the running server was last confirmed to hold, recorded as ACLApplied
                   becomes True.
                 type: string
+              appliedLiveConfig:
+                description: |-
+                  AppliedLiveConfig holds the live-settable keys of spec.config that the
+                  server last accepted through CONFIG SET, recorded as LiveConfigApplied
+                  becomes True.
+                items:
+                  description: AppliedLiveConfigEntry is one live-settable directive
+                    the server accepted.
+                  properties:
+                    name:
+                      description: Name is the directive name.
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the directive's value.
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               appliedReplicationPasswordHash:
                 description: |-
                   AppliedReplicationPasswordHash is the sha256 of the replication password

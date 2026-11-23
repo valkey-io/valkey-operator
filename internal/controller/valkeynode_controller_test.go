@@ -2019,61 +2019,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 	})
 })
 
-var _ = Describe("clearLiveConfigCondition", func() {
-	var (
-		node *valkeyiov1alpha1.ValkeyNode
-		r    *ValkeyNodeReconciler
-		ctx  context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-		node = &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "clearcond-test",
-				Namespace: "default",
-			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		r = &ValkeyNodeReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
-		}
-	})
-
-	AfterEach(func() {
-		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
-	})
-
-	It("removes a stale False condition so it reverts to absent", func() {
-		By("setting LiveConfigApplied=False, as a CONFIG SET failure would")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
-
-		By("clearing the condition, as happens once the offending key is removed")
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeNil())
-	})
-
-	It("does not write status when the condition is already absent", func() {
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		rvBefore := updated.ResourceVersion
-
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvBefore), "status write should be skipped when condition is absent")
-	})
-})
-
-var _ = Describe("setLiveConfigCondition", func() {
+var _ = Describe("setLiveConfigFailed", func() {
 	var (
 		node *valkeyiov1alpha1.ValkeyNode
 		r    *ValkeyNodeReconciler
@@ -2104,15 +2050,15 @@ var _ = Describe("setLiveConfigCondition", func() {
 	})
 
 	It("does not write status when the condition is unchanged", func() {
-		By("setting LiveConfigApplied=True for the first time")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+		By("setting LiveConfigApplied=False for the first time")
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "ERR unknown option")).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
 		By("setting the identical condition again")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "ERR unknown option")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
@@ -2120,14 +2066,14 @@ var _ = Describe("setLiveConfigCondition", func() {
 
 	It("does not write status when only the local port changes", func() {
 		By("setting LiveConfigApplied=False with a first failure message")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
 		By("failing again with the same error shape but a different local port")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
@@ -2135,7 +2081,7 @@ var _ = Describe("setLiveConfigCondition", func() {
 
 	It("writes status when the message changes beyond the local address", func() {
 		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", firstMessage)).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
@@ -2145,7 +2091,7 @@ var _ = Describe("setLiveConfigCondition", func() {
 			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
 			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
 		} {
-			Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+			Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", message)).To(Succeed())
 
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
@@ -2618,7 +2564,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 			"appendonly":       "yes",
 		}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeTrue())
+		Expect(applied).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 
@@ -2631,7 +2577,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {
@@ -2644,7 +2590,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 		Expect(called).To(BeFalse())
 	})
 })

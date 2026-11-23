@@ -288,24 +288,24 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if configErr != nil {
-		return configErr.result()
-	}
-
 	// Re-read after ensureWorkload may have written WorkloadRollPending status.
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// A Service error sets status.ready false while the pod can still be up.
-	// Apply live config, ACL and the trust bundle in that case, then requeue.
-	// A pod that is not up has nothing to dial, so that path returns the error.
-	if serviceErr != nil {
+	// A ConfigMap or Service error sets status.ready false while the pod can
+	// still be up. Apply live config, ACL and the trust bundle in that case,
+	// so a removed user loses access, then requeue. A pod that is not up has
+	// nothing to dial, so that path returns the error.
+	if notReady != nil {
 		up, err := r.podUp(ctx, node)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !up {
+			if configErr != nil {
+				return configErr.result()
+			}
 			return ctrl.Result{}, serviceErr
 		}
 	} else if !node.Status.Ready {
@@ -315,6 +315,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	if stop, result, err := r.applyLiveSettings(ctx, node); stop {
 		return result, err
+	}
+	if configErr != nil {
+		return configErr.result()
 	}
 	if serviceErr != nil {
 		log.Error(serviceErr, "per-node Service not ready, requeuing")

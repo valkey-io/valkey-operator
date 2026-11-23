@@ -33,7 +33,7 @@ trap 'exit 143' TERM
 conf=$1
 data_dir=${VALKEY_DATA_DIR:-/data}
 nodes_conf="$data_dir/nodes.conf"
-role_timeout=3 # seconds one ROLE call may take, connection and reply included
+cli_timeout=3 # seconds one valkey-cli call may take, connection and reply included
 operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
 # Read before load_operator_auth unsets them. See load_operator_auth.
 legacy_user=${VALKEY_USER:-}
@@ -153,7 +153,7 @@ load_operator_auth() {
 node_owns_slots() {
     reply="$data_dir/.cluster-reply"
     load_operator_auth
-    if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} CLUSTER NODES > "$reply" 2>/dev/null; then
+    if ! timeout_cmd "$cli_timeout" valkey-cli -t "$cli_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} CLUSTER NODES > "$reply" 2>/dev/null; then
         rm -f "$reply"
         return 1
     fi
@@ -186,7 +186,7 @@ node_owns_slots() {
 replica_moved_on() {
     reply="$data_dir/.role-reply"
     load_operator_auth
-    if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
+    if ! timeout_cmd "$cli_timeout" valkey-cli -t "$cli_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
         rm -f "$reply"
         return 1
     fi

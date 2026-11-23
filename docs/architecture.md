@@ -60,16 +60,16 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 
 ## Key packages
 
-- `internal/valkey/` — pure Valkey protocol layer: `ClusterState` / `NodeState` types, CLUSTER NODES parsing, slot range arithmetic, slot migration and rebalancing logic
-- `internal/controller/config.go` — renders server config from `spec.config` and the base config, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the scripts ConfigMap
+- `internal/valkey/`: the pure Valkey protocol layer, with `ClusterState` / `NodeState` types, CLUSTER NODES parsing, slot range arithmetic, slot migration and rebalancing logic
+- `internal/controller/config.go`: renders server config from `spec.config` and the base config, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the scripts ConfigMap
 - `internal/controller/config_pinned.go`: renders the pinned file and `live.conf`, names a revision, and decides which revision a node references (`pinnedConfigRef`)
 - `internal/controller/config_revision.go`: the parent sets `spec.configRevision` here, reading the live revision from the node's ConfigMap
 - `internal/controller/node_config.go`: the node controller writes `valkey-<node>` here and deletes unused revision keys
-- `internal/controller/users.go` — manages the system passwords Secret and the ACL Secret built from the user-defined password Secrets
-- `internal/controller/secret_migration.go` — moves Secrets that earlier releases created under `internal-` names to their `valkey-` names
-- `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
-- `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
-- `internal/controller/status.go` — condition helpers (`setCondition`)
+- `internal/controller/users.go`: manages the system passwords Secret and the ACL Secret built from the user-defined password Secrets
+- `internal/controller/secret_migration.go`: moves Secrets that earlier releases created under `internal-` names to their `valkey-` names
+- `internal/controller/failover.go`: proactive failover logic. Before rolling a primary, it promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
+- `internal/controller/valkeynode_resources.go`: builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
+- `internal/controller/status.go`: condition helpers (`setCondition`)
 
 ## Naming convention
 
@@ -83,15 +83,15 @@ A node's server config is split into two files, both in the node's `valkey-<node
 
 The pinned file holds the user's restart-only keys and the base config: everything in `spec.config` except the live-settable allowlist (`liveConfigAllowlist`: `maxmemory`, `maxmemory-policy`, `maxclients`) and keys the image's Valkey version does not support. It ends with `include /config/live.conf`, so a live value overrides any copy in the pinned file. Its revision is the first 12 hex characters of the SHA-256 of its content, and it is stored under the key `valkey-<rev>.conf`.
 
-`live.conf` holds the live-settable keys. It is rendered from `status.appliedLiveConfig`, filtered to allowlisted keys still in `spec.config`. When the status is empty it is rendered from the allowlisted keys in `spec.config`. A restarted pod therefore boots with the values its server last accepted.
+`live.conf` holds the live-settable keys. It is rendered from `status.appliedLiveConfig`, filtered to allowlisted keys still in `spec.config`. When the status is empty it is rendered from the allowlisted keys in `spec.config`. A restarted pod boots with the values its server last accepted.
 
 ### Who writes what
 
-The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist therefore rolls nothing. If its cache lacks the live revision's key, the parent requeues until the cache catches up.
+The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist rolls nothing. If its cache lacks the live revision's key, the parent requeues until the cache catches up.
 
 The ValkeyNode controller owns `valkey-<node>` through a controller reference and is its only writer. A ConfigMap of that name it does not control, such as the shared ConfigMap of a cluster named `<node>`, is left alone and the node reports `Ready=False` with reason `ConfigMapError`. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
 
-- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. The field is required. A node stored before it existed has none until the parent reaches it in the upgrade roll; until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
+- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. The schema requires `spec.configRevision`, but a node stored before the field existed has none until the parent reaches it in the upgrade roll. Until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
 - never rewrites an existing revision key, and merge-patches the keys it changes, so other revision keys are kept.
 - writes `live.conf` when the key is missing or its content differs from the render.
 - removes any key that is neither a revision key nor `live.conf`, such as scripts an older operator left under the same name.

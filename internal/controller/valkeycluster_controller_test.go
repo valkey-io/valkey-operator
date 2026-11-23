@@ -1680,6 +1680,35 @@ var _ = Describe("EventRecorder", func() {
 			Expect(cm.Annotations).To(HaveKeyWithValue(scriptsHashKey, scriptsHash))
 		})
 
+		It("should leave a ConfigMap of the shared name that the cluster does not own", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foreign-cm-0-0",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			By("standing in for node 0-0 of a cluster named foreign-cm, whose ConfigMap has the same name")
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      GetSharedConfigMapName(cluster.Name),
+					Namespace: cluster.Namespace,
+					Labels:    map[string]string{LabelCluster: "foreign-cm"},
+				},
+				Data: map[string]string{liveConfigFileKey: "maxmemory 100mb\n"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+			Expect(r.upsertConfigMap(ctx, cluster)).To(MatchError(ContainSubstring("not owned by ValkeyCluster")))
+			got := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
+			Expect(got.Data).To(Equal(foreign.Data))
+		})
+
 	})
 
 	Context("When reconciling cluster state", func() {

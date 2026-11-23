@@ -50,7 +50,7 @@ Indicates whether the cluster is fully functional and serving traffic.
 
 Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
-- `ConfigMapError` – failed to create/update configuration
+- `ConfigMapError` – failed to create or update the shared ConfigMap `valkey-<cluster>`, or a ConfigMap of that name exists that the cluster does not own, such as the node ConfigMap of node `cache-0-0` of cluster `cache` when this cluster is named `cache-0-0`
 - `UsersACLError` – the aclfile could not be built: a user Secret or key is missing and the cluster has no aclfile yet, a Secret read failed for another reason, or the internal ACL Secret could not be updated. It is also reported when `valkey-<cluster>-acl` or `valkey-<cluster>-system-passwords` exists without the cluster controlling it while the cluster still controls the Secret under its old `internal-` name. The message names both: delete or rename the first so the operator can copy the old Secret to it. The reconcile stops until the next pass. Once an aclfile exists, a missing user Secret or key is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
 - `OperatorAuthenticationFailed` – one or more nodes reject the operator's `_operator` password. See [`Degraded`](#degraded)
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users

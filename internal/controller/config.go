@@ -355,7 +355,12 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return nil
 	}
 
-	// ConfigMap exists
+	// ConfigMap exists. A node ConfigMap can share the name: cluster cache-0-0
+	// and node cache-0-0 of cluster cache both use valkey-cache-0-0. A
+	// ConfigMap this cluster does not control is left alone and reported.
+	if !metav1.IsControlledBy(serverConfigMap, cluster) {
+		return fmt.Errorf("configmap %s/%s exists and is not owned by ValkeyCluster %s", serverConfigMap.Namespace, serverConfigMap.Name, cluster.Name)
+	}
 
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)

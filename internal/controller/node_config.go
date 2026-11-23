@@ -206,7 +206,7 @@ func (r *ValkeyNodeReconciler) ensureLiveConfig(ctx context.Context, node *valke
 		cm.Data = map[string]string{}
 	}
 	cm.Data[liveConfigFileKey] = live
-	if err := r.Patch(ctx, cm, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, cm, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 	logf.FromContext(ctx).V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", []string{liveConfigFileKey})

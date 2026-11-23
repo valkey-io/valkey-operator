@@ -400,10 +400,12 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 	// status write now instead of on the next reconcile. A node without a
 	// revision may still mount the valkey-<node> ConfigMap an older operator
 	// wrote, so it is left alone; see Reconcile.
+	// A failed write does not stop the ACL step below: the status write
+	// requeues the node, and ensureNodeConfig writes live.conf again and
+	// reports ConfigMapError if it still fails.
 	if current.Spec.ConfigRevision != "" {
 		if err := r.ensureLiveConfig(ctx, current); err != nil {
 			log.Error(err, "failed to write live.conf")
-			return true, ctrl.Result{}, err
 		}
 	}
 

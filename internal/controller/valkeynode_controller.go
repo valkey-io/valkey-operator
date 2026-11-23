@@ -250,6 +250,9 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var configErr *readyError
 	if pinned {
 		configErr = r.ensureNodeConfigReady(ctx, node)
+		if configErr != nil && errors.Is(configErr, errTransientRequeue) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())

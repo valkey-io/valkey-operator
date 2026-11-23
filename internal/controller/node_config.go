@@ -166,7 +166,12 @@ func (r *ValkeyNodeReconciler) ensureNodeConfig(ctx context.Context, node *valke
 	for _, k := range stale {
 		delete(cm.Data, k)
 	}
-	if err := r.Patch(ctx, cm, client.MergeFrom(base)); err != nil {
+	// The optimistic lock ties the patch to the ConfigMap whose owner was
+	// checked above. A conflict means the cache lags a write, so retry.
+	if err := r.Patch(ctx, cm, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return errTransientRequeue
+		}
 		return err
 	}
 	log.V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", slices.Sorted(maps.Keys(data)), "removed", slices.Sorted(slices.Values(stale)))

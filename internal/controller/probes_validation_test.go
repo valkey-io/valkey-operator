@@ -51,7 +51,7 @@ var _ = Describe("spec.probes validation", func() {
 			},
 			&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-n", Namespace: "default"},
-				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{ConfigRevision: testConfigRevision, Probes: probes},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, Probes: probes},
 			},
 		}
 	}

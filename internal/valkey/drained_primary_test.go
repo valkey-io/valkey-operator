@@ -25,17 +25,17 @@ import (
 
 // replicaOf returns a replica node whose own CLUSTER NODES line names primary.
 func replicaOf(id, address, primary, shardID string) *NodeState {
-	n := &NodeState{Id: id, Address: address, ShardId: shardID, Flags: []string{"slave"}}
+	n := &NodeState{Id: id, Address: address, ShardId: shardID, Flags: FlagSlave}
 	n.SetClusterNodesForTesting(id + " " + address + ":6379@16379 myself,slave " + primary + " 0 0 1 connected\n")
 	return n
 }
 
 func TestAdoptDrainedPrimaries(t *testing.T) {
 	full := &ShardState{Id: "s0", PrimaryId: "p0", Slots: []SlotsRange{{Start: 0, End: 16383}},
-		Nodes: []*NodeState{{Id: "p0", Address: "10.0.0.1", Flags: []string{"master"}}, replicaOf("r0", "10.0.0.2", "p0", "s0")}}
+		Nodes: []*NodeState{{Id: "p0", Address: "10.0.0.1", Flags: FlagMaster}, replicaOf("r0", "10.0.0.2", "p0", "s0")}}
 
 	t.Run("a drained primary joins the shard of the replica that follows it", func(t *testing.T) {
-		drained := &NodeState{Id: "p1", Address: "10.0.1.1", ShardId: "s1", Flags: []string{"master"}}
+		drained := &NodeState{Id: "p1", Address: "10.0.1.1", ShardId: "s1", Flags: FlagMaster}
 		state := &ClusterState{
 			Shards:       []*ShardState{full, {Id: "s1", Nodes: []*NodeState{replicaOf("r1", "10.0.1.2", "p1", "s1")}}},
 			PendingNodes: []*NodeState{drained},
@@ -53,7 +53,7 @@ func TestAdoptDrainedPrimaries(t *testing.T) {
 	})
 
 	t.Run("a slot-less primary that no replica follows stays pending", func(t *testing.T) {
-		leader := &NodeState{Id: "p2", Address: "10.0.2.1", ShardId: "s2", Flags: []string{"master"}}
+		leader := &NodeState{Id: "p2", Address: "10.0.2.1", ShardId: "s2", Flags: FlagMaster}
 		state := &ClusterState{Shards: []*ShardState{full}, PendingNodes: []*NodeState{leader}}
 		state.adoptDrainedPrimaries()
 		assert.Equal(t, []*NodeState{leader}, state.PendingNodes)
@@ -61,7 +61,7 @@ func TestAdoptDrainedPrimaries(t *testing.T) {
 	})
 
 	t.Run("a stray beside a live primary stays pending and the shard keeps its primary", func(t *testing.T) {
-		stray := &NodeState{Id: "s", Address: "10.0.3.1", ShardId: "s0", Flags: []string{"master"}}
+		stray := &NodeState{Id: "s", Address: "10.0.3.1", ShardId: "s0", Flags: FlagMaster}
 		state := &ClusterState{Shards: []*ShardState{full}, PendingNodes: []*NodeState{stray}}
 		state.adoptDrainedPrimaries()
 		assert.Equal(t, []*NodeState{stray}, state.PendingNodes)

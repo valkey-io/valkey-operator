@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -74,13 +75,17 @@ type valkeyConfigClient interface {
 	// rather than an error, so a user that has not been loaded yet reads as out
 	// of sync.
 	UserPasswordHashes(ctx context.Context, username string) ([]string, error)
-	Close()
+	// UserEnabled reports whether the user exists and is on. An unknown user
+	// reads as not enabled.
+	UserEnabled(ctx context.Context, username string) (bool, error)
+	// KillUserClients closes every connection logged in as the user, other
+	// than the operator's own.
+	KillUserClients(ctx context.Context, username string) error
 }
 
 // realValkeyConfigClient applies CONFIG SET over a real valkey-go connection.
 type realValkeyConfigClient struct {
-	client  vclient.Client
-	release func()
+	client vclient.Client
 }
 
 func (rc *realValkeyConfigClient) SetConfig(ctx context.Context, params map[string]string) error {
@@ -131,15 +136,39 @@ func (rc *realValkeyConfigClient) UserPasswordHashes(ctx context.Context, userna
 	return normalizeHashes(hashes), nil
 }
 
-func (rc *realValkeyConfigClient) Close() { rc.release() }
+func (rc *realValkeyConfigClient) UserEnabled(ctx context.Context, username string) (bool, error) {
+	m, err := rc.client.Do(ctx, rc.client.B().AclGetuser().Username(username).Build()).AsMap()
+	if err != nil {
+		if vclient.IsValkeyNil(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("ACL GETUSER %s: %w", username, err)
+	}
+	flags, ok := m["flags"]
+	if !ok {
+		return false, nil
+	}
+	fs, err := flags.AsStrSlice()
+	if err != nil {
+		return false, fmt.Errorf("ACL GETUSER %s flags: %w", username, err)
+	}
+	return slices.Contains(fs, "on"), nil
+}
 
-// realConfigClient opens a real Valkey connection to the node's pod.
+func (rc *realValkeyConfigClient) KillUserClients(ctx context.Context, username string) error {
+	if err := rc.client.Do(ctx, rc.client.B().ClientKill().User(username).SkipmeYes().Build()).Error(); err != nil {
+		return fmt.Errorf("CLIENT KILL USER %s: %w", username, err)
+	}
+	return nil
+}
+
+// realConfigClient returns the pooled client for the node's pod.
 func realConfigClient(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return nil, err
 	}
-	return &realValkeyConfigClient{client: c, release: release}, nil
+	return &realValkeyConfigClient{client: c}, nil
 }
 
 // ValkeyNodeReconciler reconciles a ValkeyNode object
@@ -148,12 +177,13 @@ type ValkeyNodeReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  events.EventRecorder
 	APIReader client.Reader
-	// ValkeyClients dials the node's pod. Nil falls back to a provider built from
-	// Client and APIReader.
+	// ValkeyClients hands out pooled Valkey clients. SetupWithManager
+	// requires it.
 	ValkeyClients ClientProvider
-	// newConfigClient opens a Valkey client to a node's pod for live config
-	// application. SetupWithManager defaults it to realConfigClient; tests
-	// override it with a fake.
+
+	// newConfigClient returns the pooled client for a node's pod, for live
+	// config application. SetupWithManager defaults it to realConfigClient;
+	// tests override it with a fake.
 	newConfigClient func(ctx context.Context, r *ValkeyNodeReconciler, node *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error)
 	// RoleEvents carries reconcile triggers from the RolePoller, which detects
 	// role changes that produce no Kubernetes event (a failover between two
@@ -177,6 +207,7 @@ type ValkeyNodeReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="apps",resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -199,14 +230,24 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else if requeue {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if err := r.ensureConfigMap(ctx, node); err != nil {
-		r.setReadyCondition(ctx, node, "ConfigMapError", err.Error())
-		return ctrl.Result{}, err
+	// Paused through its own annotation, which the cluster controller sets on
+	// the nodes of a paused cluster: no workload update, no CONFIG SET, no ACL
+	// LOAD and no status write until it is removed.
+	if reconciliationPaused(node) {
+		log.V(1).Info("ValkeyNode reconciliation paused", "annotation", valkeyiov1alpha1.AnnotationPauseReconciliation)
+		return ctrl.Result{RequeueAfter: pausedRequeue}, nil
+	}
+	if !hasKnownParent(node) {
+		return r.reconcileNoParent(ctx, node)
 	}
 	if err := r.ensurePersistentVolumeClaim(ctx, node); err != nil {
 		r.setReadyCondition(ctx, node, "PersistentVolumeClaimError", err.Error())
 		return ctrl.Result{}, err
 	}
+
+	// A Service error must not block the workload. updateStatus reports it
+	// as Ready=False, so the cluster stops copying spec to later nodes.
+	serviceErr := r.ensureNodeService(ctx, node)
 
 	if err := r.ensureWorkload(ctx, node); err != nil {
 		if errors.Is(err, errTransientRequeue) {
@@ -223,7 +264,7 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	roleResolveFailed, err := r.updateStatus(ctx, node)
+	roleResolveFailed, err := r.updateStatus(ctx, node, serviceErr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -233,68 +274,28 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !node.Status.Ready {
+	// A Service error sets status.ready false while the pod can still be up.
+	// Apply live config, ACL and the trust bundle in that case, then requeue.
+	// A pod that is not up has nothing to dial, so that path returns the error.
+	if serviceErr != nil {
+		up, err := r.podUp(ctx, node)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !up {
+			return ctrl.Result{}, serviceErr
+		}
+	} else if !node.Status.Ready {
 		log.V(1).Info("ValkeyNode not ready, requeuing")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Apply live config before WorkloadRollPending requeue so a node waiting on
-	// Spec.WorkloadRevision can still clear LiveConfigApplied and not block
-	// the cluster controller on an unrelated condition.
-	applied, err := r.applyLiveConfig(ctx, node)
-	if err != nil {
-		log.Error(err, "failed to apply live config")
-		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
-			log.Error(condErr, "failed to set LiveConfigApplied condition")
-		}
-		return ctrl.Result{}, err
+	if stop, result, err := r.applyLiveSettings(ctx, node); stop {
+		return result, err
 	}
-	if applied {
-		if condErr := r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, "Live config applied"); condErr != nil {
-			log.Error(condErr, "failed to set LiveConfigApplied condition")
-			return ctrl.Result{}, condErr
-		}
-	} else {
-		// Nothing to apply (no allowlisted keys in spec.config). Clear any
-		// stale condition so it reverts to absent, which the cluster
-		// controller treats the same as True. Without this, a prior False
-		// (e.g. from a CONFIG SET failure) would persist after the offending
-		// key is removed and block cluster progress indefinitely.
-		if condErr := r.clearLiveConfigCondition(ctx, node); condErr != nil {
-			log.Error(condErr, "failed to clear LiveConfigApplied condition")
-			return ctrl.Result{}, condErr
-		}
-	}
-
-	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
-	// longer part of the pod template (it does not enter Spec.WorkloadRevision),
-	// so a node waiting on a roll must still pick up ACL edits without one.
-	aclSynced, err := r.applyLiveACL(ctx, node)
-	if err != nil {
-		log.Error(err, "failed to apply live ACL")
-		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()); condErr != nil {
-			log.Error(condErr, "failed to set ACLApplied condition")
-		}
-		return ctrl.Result{}, err
-	}
-	if !aclSynced {
-		// The reload ran, but the mounted aclfile had not caught up with the
-		// Secret, so it loaded stale content. Report that rather than claiming
-		// the desired passwords are live, and reload again on the requeue.
-		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
-		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation,
-			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
-			log.Error(condErr, "failed to set ACLApplied condition")
-			return ctrl.Result{}, condErr
-		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
-		"Desired ACL passwords are live"); condErr != nil {
-		log.Error(condErr, "failed to set ACLApplied condition")
-		return ctrl.Result{}, condErr
+	if serviceErr != nil {
+		log.Error(serviceErr, "per-node Service not ready, requeuing")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Waiting for Spec.WorkloadRevision: rely on watches when the cluster advances
@@ -314,64 +315,281 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-func (r *ValkeyNodeReconciler) setLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
+// podUp reports whether the pod's containers are ready and it has an IP.
+// status.ready is a separate signal: a Service error clears it while this pod
+// is still up. The dial uses status.podIP from this reconcile, so an empty
+// value waits.
+func (r *ValkeyNodeReconciler) podUp(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	if node.Status.PodIP == "" {
+		return false, nil
 	}
-	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: current.Generation,
-	}) {
-		return nil
+	pod, err := r.getPod(ctx, node)
+	if err != nil || pod == nil {
+		return false, err
 	}
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+	return pod.Status.PodIP != "" && podContainersReady(pod), nil
+}
+
+// applyLiveSettings runs CONFIG SET, ACL LOAD and the trust bundle reload.
+// When stop is true, Reconcile returns result and err.
+func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (stop bool, result ctrl.Result, err error) {
+	log := logf.FromContext(ctx)
+
+	// Apply live config before WorkloadRollPending requeue so a node waiting on
+	// Spec.WorkloadRevision can still clear LiveConfigApplied and not block
+	// the cluster controller on an unrelated condition.
+	applied, err := r.applyLiveConfig(ctx, node)
+	if err != nil {
+		log.Error(err, "failed to apply live config")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveConfigApplyFailed", "ApplyLiveConfig", "Failed to apply live config: %v", err)
+		reason, message := liveApplyFailure(node, err)
+		if condErr := r.setLiveConfigFailed(ctx, node, reason, message); condErr != nil {
+			log.Error(condErr, "failed to set LiveConfigApplied condition")
+		}
+		// The ACL step below is not reached, so report the lockout here.
+		if reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed && node.Spec.UsersACLSecretName != "" {
+			if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
+				log.Error(condErr, "failed to set ACLApplied condition")
+			}
+		}
+		result, err = liveApplyResult(reason, err)
+		return true, result, err
+	}
+	if len(applied) > 0 {
+		if condErr := r.setLiveConfigApplied(ctx, node, applied); condErr != nil {
+			log.Error(condErr, "failed to set LiveConfigApplied condition")
+			return true, ctrl.Result{}, condErr
+		}
+	} else {
+		// Nothing to apply (no allowlisted keys in spec.config). Clear any
+		// stale condition so it reverts to absent, which the cluster
+		// controller treats the same as True. Without this, a prior False
+		// (e.g. from a CONFIG SET failure) would persist after the offending
+		// key is removed and block cluster progress indefinitely.
+		if condErr := r.clearLiveConfigApplied(ctx, node); condErr != nil {
+			log.Error(condErr, "failed to clear LiveConfigApplied condition")
+			return true, ctrl.Result{}, condErr
+		}
+	}
+
+	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
+	// longer part of the pod template (it does not enter Spec.WorkloadRevision),
+	// so a node waiting on a roll must still pick up ACL edits without one.
+	aclSynced, aclRevision, err := r.applyLiveACL(ctx, node)
+	if err != nil {
+		log.Error(err, "failed to apply live ACL")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "LiveACLApplyFailed", "ApplyLiveACL", "Failed to apply live ACL: %v", err)
+		reason, message := liveApplyFailure(node, err)
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, reason, message); condErr != nil {
+			log.Error(condErr, "failed to set ACLApplied condition")
+		}
+		result, err = liveApplyResult(reason, err)
+		return true, result, err
+	}
+	if !aclSynced {
+		// The reload ran, but the mounted aclfile had not caught up with the
+		// Secret, so it loaded stale content. Report that rather than claiming
+		// the desired passwords are live, and reload again on the requeue.
+		log.V(1).Info("desired ACL passwords not live yet, waiting for the aclfile volume to propagate")
+		if condErr := r.setACLCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonPendingPropagation,
+			"Waiting for the mounted aclfile to reflect the desired ACL"); condErr != nil {
+			log.Error(condErr, "failed to set ACLApplied condition")
+			return true, ctrl.Result{}, condErr
+		}
+		return true, ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if condErr := r.setACLCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
+		"Desired ACL passwords are live"); condErr != nil {
+		log.Error(condErr, "failed to set ACLApplied condition")
+		return true, ctrl.Result{}, condErr
+	}
+	// Record which ACL revision ACLApplied=True confirmed. Whatever widens a
+	// node's trust bundle can hold new roots back until every node reports the
+	// current revision.
+	if err := r.setAppliedACLRevision(ctx, node, aclRevision); err != nil {
+		log.Error(err, "failed to record the applied ACL revision")
+		return true, ctrl.Result{}, err
+	}
+
+	// While a previous replication password is still accepted, point the
+	// running server at the current one. A restart reads the mounted file.
+	// This runs only after the ACL is live, so the primary already accepts
+	// the password CONFIG SET installs.
+	if err := r.applyReplicationPassword(ctx, node); err != nil {
+		log.Error(err, "failed to set the replication password")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "ReplicationPasswordApplyFailed", "ApplyReplicationPassword", "Failed to set the replication password: %v", err)
+		return true, ctrl.Result{}, err
+	}
+
+	// Reload the trust bundle live as well: a changed bundle never rolls the
+	// pod, and Valkey reads tls-ca-cert-file only when it starts or the TLS
+	// config is set. This runs only once the ACL is confirmed live (the
+	// not-synced case returned above). The ACL and the bundle are separate
+	// mounted Secrets that the kubelet updates independently, so reloading
+	// first could trust a new root while a stale ACL still lets its clients in
+	// as a permissive default.
+	if requeue, err := r.applyTrustBundle(ctx, node); err != nil {
+		return true, ctrl.Result{}, err
+	} else if requeue {
+		return true, ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	return false, ctrl.Result{}, nil
+}
+
+const liveConfigAppliedMessage = "Live config applied"
+
+// localAddr matches the local end of a net.OpError ("10.244.1.2:54034->"),
+// which changes on every redial.
+var localAddr = regexp.MustCompile(`\S+:\d+->`)
+
+// shouldSkipConditionUpdate reports whether a condition is unchanged after
+// ignoring the local address in network error messages. The local port can
+// change on every redial, and writing each change requeues the node without
+// backoff. Other message changes still update the condition. The full error
+// remains available in the operator log.
+func shouldSkipConditionUpdate(conditions []metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) bool {
+	existing := meta.FindStatusCondition(conditions, conditionType)
+	return existing != nil &&
+		existing.Status == status &&
+		existing.Reason == reason &&
+		existing.ObservedGeneration == observedGeneration &&
+		localAddr.ReplaceAllString(existing.Message, "") == localAddr.ReplaceAllString(message, "")
+}
+
+// setCondition sets a condition on the node's status. It writes nothing when
+// the condition is unchanged apart from the local address in a network error
+// (see shouldSkipConditionUpdate). The skip check runs on the node read from
+// first (see patchStatus).
+func (r *ValkeyNodeReconciler) setCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, first client.Reader, conditionType string, status metav1.ConditionStatus, reason, message string) error {
+	_, err := r.patchStatus(ctx, node, first, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		if shouldSkipConditionUpdate(current.Status.Conditions, conditionType, status, reason, message, current.Generation) {
+			return false
+		}
+		return meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               conditionType,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: current.Generation,
+		})
+	})
+	return err
+}
+
+// removeCondition removes a condition from the node's status. It writes
+// nothing when the condition is already absent.
+func (r *ValkeyNodeReconciler) removeCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, conditionType string) error {
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		return meta.RemoveStatusCondition(&current.Status.Conditions, conditionType)
+	})
+	return err
+}
+
+// setLiveConfigFailed sets LiveConfigApplied=False and leaves
+// status.appliedLiveConfig as it was. True is set only by setLiveConfigApplied,
+// which writes the values with it.
+func (r *ValkeyNodeReconciler) setLiveConfigFailed(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) error {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied, metav1.ConditionFalse, reason, message); err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
 }
 
+// liveApplyFailure is the reason and message for a failed live config or ACL
+// apply: AuthenticationFailed, naming the password Secret, when the node
+// rejected the operator's password, and ApplyFailed otherwise.
+func liveApplyFailure(node *valkeyiov1alpha1.ValkeyNode, err error) (string, string) {
+	if valkey.IsWrongPass(err) {
+		return valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed,
+			fmt.Sprintf("%v (the node rejects the %s password in Secret %s)", err, operatorUser, getSystemPasswordSecretName(node.Labels[LabelCluster]))
+	}
+	return valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error()
+}
+
+// authRetryInterval is how often a node, or a cluster with a node, that
+// rejects the operator's password is retried.
+const authRetryInterval = 10 * time.Second
+
+// liveApplyResult is the reconcile result for a failed live apply. A rejected
+// password retries on a fixed interval: the fix is often a manual ACL LOAD,
+// which no watch sees, and the cluster waits on this node's condition.
+// Anything else returns err for the usual backoff.
+func liveApplyResult(reason string, err error) (ctrl.Result, error) {
+	if reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed {
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
+	}
+	return ctrl.Result{}, err
+}
+
 // setACLCondition sets the ACLApplied condition, reporting whether the ACL the
 // cluster controller wrote to the mounted Secret is live on the server.
 func (r *ValkeyNodeReconciler) setACLCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
-	}
-	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: current.Generation,
-	}) {
-		return nil
-	}
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionACLApplied, status, reason, message); err != nil {
 		return fmt.Errorf("patch ACLApplied condition: %w", err)
 	}
 	return nil
 }
 
-// clearLiveConfigCondition removes the LiveConfigApplied condition if present.
-// An absent condition is treated as True by the cluster controller, so this is
-// the correct resting state when there are no allowlisted keys to apply. It
+// setTrustBundleCondition sets the TrustBundleApplied condition, reporting
+// whether the server has reloaded the mounted trust bundle.
+func (r *ValkeyNodeReconciler) setTrustBundleCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, status metav1.ConditionStatus, reason, message string) error {
+	if err := r.setCondition(ctx, node, r.Client, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied, status, reason, message); err != nil {
+		return fmt.Errorf("patch TrustBundleApplied condition: %w", err)
+	}
+	return nil
+}
+
+// clearTrustBundleCondition removes the TrustBundleApplied condition if
+// present, so a node whose trust bundle is removed stops reporting on it. It
 // no-ops (no patch) when the condition is already absent.
-func (r *ValkeyNodeReconciler) clearLiveConfigCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return fmt.Errorf("get ValkeyNode: %w", err)
+func (r *ValkeyNodeReconciler) clearTrustBundleCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	if err := r.removeCondition(ctx, node, valkeyiov1alpha1.ValkeyNodeConditionTrustBundleApplied); err != nil {
+		return fmt.Errorf("patch TrustBundleApplied condition: %w", err)
 	}
-	patchBase := current.DeepCopy()
-	if !meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied) {
-		return nil
+	return nil
+}
+
+// setLiveConfigApplied sets LiveConfigApplied=True and records applied as
+// status.appliedLiveConfig in the same write, so the two cannot disagree.
+func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, applied map[string]string) error {
+	entries := configEntries(applied)
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		changed := false
+		if !shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+			metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, liveConfigAppliedMessage, current.Generation) {
+			changed = meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+				Status:             metav1.ConditionTrue,
+				Reason:             valkeyiov1alpha1.ValkeyNodeReasonApplied,
+				Message:            liveConfigAppliedMessage,
+				ObservedGeneration: current.Generation,
+			})
+		}
+		if !slices.Equal(current.Status.AppliedLiveConfig, entries) {
+			current.Status.AppliedLiveConfig = entries
+			changed = true
+		}
+		return changed
+	})
+	if err != nil {
+		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
+	return nil
+}
+
+// clearLiveConfigApplied removes the LiveConfigApplied condition and clears
+// status.appliedLiveConfig in one write. It runs when spec.config holds no
+// allowlisted key.
+func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		changed := meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
+		if current.Status.AppliedLiveConfig != nil {
+			current.Status.AppliedLiveConfig = nil
+			changed = true
+		}
+		return changed
+	})
+	if err != nil {
 		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
 	}
 	return nil
@@ -381,26 +599,55 @@ func (r *ValkeyNodeReconciler) clearLiveConfigCondition(ctx context.Context, nod
 // so that errors from early reconcile stages (ConfigMap, PVC, workload creation)
 // are visible on the resource.
 func (r *ValkeyNodeReconciler) setReadyCondition(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, reason, message string) {
-	log := logf.FromContext(ctx)
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		log.Error(err, "failed to get ValkeyNode for status update")
-		return
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: current.Generation,
+		}) {
+			return false
+		}
+		current.Status.Ready = false
+		return true
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to patch ValkeyNode Ready condition")
 	}
-	patchBase := current.DeepCopy()
-	if !meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: current.Generation,
-	}) {
-		return
+}
+
+// reconcileNoParent reports Ready=False with reason NoParent and changes
+// nothing else. Without a parent nothing sets Spec.WorkloadRevision, so the
+// node would never apply a pod template change.
+func (r *ValkeyNodeReconciler) reconcileNoParent(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (ctrl.Result, error) {
+	var alreadyNoParent bool
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		ready := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+		alreadyNoParent = ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == valkeyiov1alpha1.ValkeyNodeReasonNoParent
+		changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:   valkeyiov1alpha1.ValkeyNodeConditionReady,
+			Status: metav1.ConditionFalse,
+			Reason: valkeyiov1alpha1.ValkeyNodeReasonNoParent,
+			Message: fmt.Sprintf("No controller ownerReference of a known kind (%s); the operator does not create or update resources for this ValkeyNode",
+				strings.Join(knownParentKinds, ", ")),
+			ObservedGeneration: current.Generation,
+		})
+		if current.Status.Ready || current.Status.ObservedGeneration != current.Generation {
+			current.Status.Ready = false
+			current.Status.ObservedGeneration = current.Generation
+			changed = true
+		}
+		return changed
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("patch NoParent condition: %w", err)
 	}
-	current.Status.Ready = false
-	if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-		log.Error(err, "failed to patch ValkeyNode Ready condition")
+	if !alreadyNoParent {
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ValkeyNodeReasonNoParent, "CheckParent",
+			"ValkeyNode has no controller ownerReference of a known kind (%s); not reconciling it", strings.Join(knownParentKinds, ", "))
 	}
+	return ctrl.Result{}, nil
 }
 
 func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
@@ -415,22 +662,23 @@ func (r *ValkeyNodeReconciler) ensureWorkload(ctx context.Context, node *valkeyi
 }
 
 // buildPodTemplateAnnotations assembles the annotations stamped on the pod
-// template, and therefore the ones that feed the WorkloadRevision roll hash.
-// Only the server-config hash lives here: a config change that is not
-// live-settable still needs a rolling restart to take effect, and the config
-// itself lives in a ConfigMap whose content changes never alter the pod
-// template. The hash is derived from the node spec (Config minus live-settable
-// keys, plus TLS), gated on ServerConfigMapName — the spec marker that a parent
-// manages this node's config. The gate must be a spec field, not ownership:
-// the cluster controller computes WorkloadRevision on a freshly built node
-// that has no owner references yet, and both sides must hash identically.
-// The ACL hash is deliberately absent. ACL edits are applied to the running
+// template, and therefore the ones that feed the WorkloadRevision roll hash:
+// the user's spec.podMetadata.annotations plus the pinned config revision.
+// The revision names the restart-only config the pod boots on, so a new one
+// rolls the pod. The parent sets spec.configRevision, and both controllers
+// build the template from the node spec alone, so they hash identically.
+// The ACL is deliberately absent. ACL edits are applied to the running
 // server live by the ValkeyNode reconciler (see applyLiveACL), so they must
 // not enter the WorkloadRevision and roll the pods.
 func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	annotations := map[string]string{}
-	if node.Spec.ServerConfigMapName != "" {
-		annotations[configHashKey] = nodeServerConfigRollHash(node)
+	// The field is required, but a node stored before it existed has none
+	// until its parent sets one.
+	if node.Spec.ConfigRevision != "" {
+		annotations[configRevisionKey] = node.Spec.ConfigRevision
+	}
+	if node.Spec.PodMetadata != nil {
+		return withUserMetadata(node.Spec.PodMetadata.Annotations, annotations)
 	}
 	return annotations
 }
@@ -653,16 +901,13 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 }
 
 // gateRollingWorkloadUpdate decides whether a rolling pod-template update may be
-// applied. Standalone nodes always apply. Cluster-owned nodes apply only when
-// Spec.WorkloadRevision matches the desired template hash (set by ValkeyCluster).
+// applied. It applies only when Spec.WorkloadRevision matches the desired
+// template hash, which the parent controller sets.
 func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
 	ctx context.Context,
 	node *valkeyiov1alpha1.ValkeyNode,
 	desiredHash string,
 ) (bool, error) {
-	if !isClusterOwned(node) {
-		return true, nil
-	}
 	// Fresh read: cluster may have advanced Spec.WorkloadRevision after this reconcile started.
 	fresh := &valkeyiov1alpha1.ValkeyNode{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), fresh); err != nil {
@@ -685,40 +930,33 @@ func (r *ValkeyNodeReconciler) gateRollingWorkloadUpdate(
 
 // markWorkloadRollPending sets WorkloadRollPending=True. Returns true when newly transitioned.
 func (r *ValkeyNodeReconciler) markWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, desiredHash string) (bool, error) {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return false, err
-	}
-	alreadyPending := meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
-	patchBase := current.DeepCopy()
-	changed := meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-		Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending,
-		Status:             metav1.ConditionTrue,
-		Reason:             valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision,
-		Message:            fmt.Sprintf("desired workload template hash %s awaits Spec.WorkloadRevision (have %q)", desiredHash, current.Spec.WorkloadRevision),
-		ObservedGeneration: current.Generation,
+	var alreadyPending, changed bool
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		alreadyPending = meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
+		changed = meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending,
+			Status:             metav1.ConditionTrue,
+			Reason:             valkeyiov1alpha1.ValkeyNodeReasonAwaitingWorkloadRevision,
+			Message:            fmt.Sprintf("desired workload template hash %s awaits Spec.WorkloadRevision (have %q)", desiredHash, current.Spec.WorkloadRevision),
+			ObservedGeneration: current.Generation,
+		})
+		return changed
 	})
-	if changed {
-		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-			return false, fmt.Errorf("patch WorkloadRollPending condition: %w", err)
-		}
+	if err != nil {
+		return false, fmt.Errorf("patch WorkloadRollPending condition: %w", err)
 	}
 	return !alreadyPending && changed, nil
 }
 
 func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	if !meta.IsStatusConditionTrue(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
-		return nil
-	}
-	patchBase := current.DeepCopy()
-	if meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending) {
-		if err := r.Status().Patch(ctx, current, client.MergeFrom(patchBase)); err != nil {
-			return fmt.Errorf("clear WorkloadRollPending condition: %w", err)
+	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		return meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
 		}
+		return fmt.Errorf("clear WorkloadRollPending condition: %w", err)
 	}
 	return nil
 }
@@ -727,6 +965,7 @@ func (r *ValkeyNodeReconciler) clearWorkloadRollPending(ctx context.Context, nod
 // template would not roll.
 func (r *ValkeyNodeReconciler) syncStatefulSetWithoutRoll(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, sts *appsv1.StatefulSet, desired *appsv1.StatefulSet) error {
 	before := sts.DeepCopy()
+	matchServerDefaultedMaxUnavailable(&desired.Spec, &sts.Spec)
 	sts.Labels = desired.Labels
 	sts.Spec = desired.Spec
 	if err := controllerutil.SetControllerReference(node, sts, r.Scheme); err != nil {
@@ -769,196 +1008,180 @@ func (r *ValkeyNodeReconciler) maybeUpdateWorkloadWithoutRoll(
 	return nil
 }
 
-// ensureConfigMap creates or updates the ConfigMap for the ValkeyNode.
-// If ServerConfigMapName is set, the ConfigMap is assumed to
-// be managed externally and this step is skipped.
-func (r *ValkeyNodeReconciler) ensureConfigMap(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	log := logf.FromContext(ctx)
-	if node.Spec.ServerConfigMapName != "" {
-		// ConfigMap is provided externally (e.g. by ValkeyCluster), skip creation.
-		return nil
-	}
-	desired, err := buildValkeyNodeConfigMap(node)
-	if err != nil {
-		return err
-	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      desired.Name,
-			Namespace: desired.Namespace,
-		},
-	}
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Labels = desired.Labels
-		cm.Data = desired.Data
-		return controllerutil.SetControllerReference(node, cm, r.Scheme)
-	})
-	if err != nil {
-		return err
-	}
-	log.V(1).Info("reconciled ConfigMap", "result", result, "name", cm.Name)
-	return nil
-}
-
 // updateStatus updates the ValkeyNode status based on workload and Pod state.
-func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (roleResolveFailed bool, err error) {
+func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, serviceErr error) (roleResolveFailed bool, err error) {
 	log := logf.FromContext(ctx)
 
-	current := &valkeyiov1alpha1.ValkeyNode{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
-		return false, err
-	}
-
-	// Snapshot for patch base before mutations.
-	patchBase := current.DeepCopy()
-	patch := client.MergeFrom(patchBase)
-
-	// Always stamp the observed generation so ValkeyCluster can detect
-	// whether the controller has processed the latest spec.
-	current.Status.ObservedGeneration = current.Generation
-
+	// Read the PVC, pod, rollout and role once. patchStatus may apply the
+	// change below more than once, and only the node it reads changes between
+	// attempts.
 	pvc, err := r.getPersistentVolumeClaim(ctx, node)
 	if err != nil {
 		return false, err
 	}
-	if node.Spec.Persistence != nil {
-		pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady,
-			Status:             pvcStatus,
-			Reason:             pvcReason,
-			Message:            pvcMessage,
-			ObservedGeneration: current.Generation,
-		})
-		pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(current, pvc)
-		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
-			Status:             pvcSizeStatus,
-			Reason:             pvcSizeReason,
-			Message:            pvcSizeMessage,
-			ObservedGeneration: current.Generation,
-		})
-	} else {
-		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
-		meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
-	}
-
 	pod, err := r.getPod(ctx, node)
 	if err != nil {
 		return false, err
 	}
+	// If the pod is ready, also verify the workload rollout has completed.
+	// The old pod may still be running (and ready) while the StatefulSet is rolling
+	// to a new spec; we must not report Ready=true until the rollout is done so the
+	// ValkeyCluster controller waits before advancing to the next node.
+	ready := pod != nil && podContainersReady(pod)
+	rolledOut := ready
+	if ready {
+		rolled, err := r.isWorkloadRolledOut(ctx, node, pod)
+		if err != nil {
+			return false, err
+		}
+		rolledOut = rolled
+	}
+	role := ""
+	if ready {
+		target := node.DeepCopy()
+		target.Status.PodName = pod.Name
+		target.Status.PodIP = pod.Status.PodIP
+		role = r.resolveRole(ctx, target)
+		// Transient INFO failure on a ready pod: the last-known role is kept
+		// below rather than blanking a healthy node, and a short requeue
+		// retries sooner than the backstop.
+		roleResolveFailed = role == ""
+	}
 
-	if pod == nil {
-		current.Status.Ready = false
-		current.Status.PodName = ""
-		current.Status.PodIP = ""
-		current.Status.Role = ""
-		reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-		message := "Pod does not exist yet"
+	var changed bool
+	written, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
+		before := current.Status.DeepCopy()
+
+		// Always stamp the observed generation so ValkeyCluster can detect
+		// whether the controller has processed the latest spec. It is the
+		// generation of the spec this reconcile acted on and observed the pod
+		// for, not of the node patchStatus reads: a spec changed since then is
+		// not processed yet, and its own reconcile stamps it.
+		current.Status.ObservedGeneration = node.Generation
+
 		if node.Spec.Persistence != nil {
-			_, reason, message = pvcStatusCondition(pvc)
+			pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady,
+				Status:             pvcStatus,
+				Reason:             pvcReason,
+				Message:            pvcMessage,
+				ObservedGeneration: node.Generation,
+			})
+			pvcSizeStatus, pvcSizeReason, pvcSizeMessage := pvcSizeStatusCondition(node, pvc)
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady,
+				Status:             pvcSizeStatus,
+				Reason:             pvcSizeReason,
+				Message:            pvcSizeMessage,
+				ObservedGeneration: node.Generation,
+			})
+		} else {
+			meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimReady)
+			meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionPersistentVolumeClaimSizeReady)
+		}
+
+		readyStatus := metav1.ConditionFalse
+		readyReason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
+		readyMessage := "Pod does not exist yet"
+		if pod == nil {
+			current.Status.Ready = false
+			current.Status.PodName = ""
+			current.Status.PodIP = ""
+			current.Status.Role = ""
+			if node.Spec.Persistence != nil {
+				_, readyReason, readyMessage = pvcStatusCondition(pvc)
+			}
+		} else {
+			current.Status.PodName = pod.Name
+			current.Status.PodIP = pod.Status.PodIP
+			current.Status.Ready = ready && rolledOut
+
+			// Role follows the pod, not the rollout: a pod that is serving has a
+			// resolvable role even while its workload rolls, and blanking it there
+			// would drop a live primary from role-based selection for the whole roll.
+			// Only an unready pod (nothing to ask) clears it.
+			if !ready {
+				current.Status.Role = ""
+			} else if role != "" {
+				current.Status.Role = role
+			}
+
+			if current.Status.Ready {
+				readyStatus = metav1.ConditionTrue
+				readyReason = valkeyiov1alpha1.ValkeyNodeReasonPodRunning
+				readyMessage = "Pod is running and ready"
+			} else {
+				readyMessage = "Pod is not ready"
+				if node.Spec.Persistence != nil {
+					if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
+						readyReason = pvcReason
+						readyMessage = pvcMessage
+					}
+				}
+			}
+		}
+		// One Ready write. ServiceError replaces the pod reason only when the
+		// pod would otherwise be ready. Writing True and then False would
+		// change LastTransitionTime on every reconcile.
+		if serviceErr != nil {
+			current.Status.Ready = false
+			if readyStatus == metav1.ConditionTrue {
+				readyStatus = metav1.ConditionFalse
+				readyReason = valkeyiov1alpha1.ValkeyNodeReasonServiceError
+				readyMessage = serviceErr.Error()
+			}
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: current.Generation,
+			Status:             readyStatus,
+			Reason:             readyReason,
+			Message:            readyMessage,
+			ObservedGeneration: node.Generation,
 		})
-	} else {
-		current.Status.PodName = pod.Name
-		current.Status.PodIP = pod.Status.PodIP
 
-		// If the pod is ready, also verify the workload rollout has completed.
-		// The old pod may still be running (and ready) while the StatefulSet is rolling
-		// to a new spec; we must not report Ready=true until the rollout is done so the
-		// ValkeyCluster controller waits before advancing to the next node.
-		ready := podReady(pod)
-		rolledOut := ready
-		if ready {
-			rolled, err := r.isWorkloadRolledOut(ctx, node)
-			if err != nil {
-				return false, err
-			}
-			rolledOut = rolled
-		}
-
-		current.Status.Ready = ready && rolledOut
-
-		// Role follows the pod, not the rollout: a pod that is serving has a
-		// resolvable role even while its workload rolls, and blanking it there
-		// would drop a live primary from role-based selection for the whole roll.
-		// Only an unready pod (nothing to ask) clears it.
-		if ready {
-			if role := r.resolveRole(ctx, current); role != "" {
-				current.Status.Role = role
-			} else {
-				// Transient INFO failure on a ready pod: keep the last-known
-				// role rather than blanking a healthy node, and signal a short
-				// requeue so we retry sooner than the backstop.
-				roleResolveFailed = true
-			}
-		} else {
-			current.Status.Role = ""
-		}
-
-		if current.Status.Ready {
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             valkeyiov1alpha1.ValkeyNodeReasonPodRunning,
-				Message:            "Pod is running and ready",
-				ObservedGeneration: current.Generation,
-			})
-		} else {
-			reason := valkeyiov1alpha1.ValkeyNodeReasonPodNotReady
-			message := "Pod is not ready"
-			if node.Spec.Persistence != nil {
-				if pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc); pvcStatus != metav1.ConditionTrue {
-					reason = pvcReason
-					message = pvcMessage
-				}
-			}
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             reason,
-				Message:            message,
-				ObservedGeneration: current.Generation,
-			})
-		}
+		changed = !reflect.DeepEqual(*before, current.Status)
+		return changed
+	})
+	if err != nil {
+		log.Error(err, "failed to update ValkeyNode status")
+		return false, err
 	}
-
-	if !reflect.DeepEqual(patchBase.Status, current.Status) {
-		if err := r.Status().Patch(ctx, current, patch); err != nil {
-			log.Error(err, "failed to update ValkeyNode status")
-			return false, err
-		}
-		log.V(1).Info("status updated", "ready", current.Status.Ready, "role", current.Status.Role)
+	if changed {
+		log.V(1).Info("status updated", "ready", written.Status.Ready, "role", written.Status.Role)
 	} else {
 		log.V(2).Info("status unchanged, skipping update")
 	}
 
 	// Sync status fields back to the caller's object so Reconcile uses the
 	// values just written: Ready gates the requeue, PodIP is used by applyLiveConfig.
-	node.Status.Ready = current.Status.Ready
-	node.Status.PodIP = current.Status.PodIP
+	node.Status.Ready = written.Status.Ready
+	node.Status.PodIP = written.Status.PodIP
 
 	return roleResolveFailed, nil
 }
 
 // isWorkloadRolledOut returns true if the workload (StatefulSet or Deployment)
-// has fully rolled out to the current spec — all pods are on the latest revision
-// and ready. The pod's own Ready condition is not sufficient: the old pod may
-// still be running while the StatefulSet/Deployment is rolling to a new spec.
+// has rolled out to the current spec and the pod it runs is up. The cached pod
+// the caller holds is not sufficient: the old pod may still be running while
+// the StatefulSet/Deployment is rolling to a new spec, and the cache can lag
+// behind the direct reads here.
 //
-// The check uses two gates for StatefulSets:
+// The check uses three gates for StatefulSets:
 //  1. status.observedGeneration >= metadata.generation — the STS controller has
 //     processed the latest spec (and computed the new updateRevision).
-//  2. status.currentRevision == status.updateRevision and every replica is
-//     updated and ready — all pods are on the new revision (the rolling
-//     update has completed, including after an orphan recreate).
-func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+//  2. every replica is on updateRevision (the rolling update has replaced the
+//     pod, including after an orphan recreate).
+//  3. a direct read finds the pod on updateRevision, not terminating, with its
+//     containers ready.
+//
+// ReadyReplicas and currentRevision are not used: they follow Pod Ready, which
+// waits on initialSyncGate, and the cluster controller sets that gate only
+// after this node is attached.
+func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, pod *corev1.Pod) (bool, error) {
+	if pod == nil {
+		return false, nil
+	}
 	// Use APIReader (direct API server read) when available so we always see the
 	// latest metadata.generation, bypassing the informer cache. Without this, the
 	// same reconcile that patches the STS spec would read a stale cached object
@@ -980,17 +1203,22 @@ func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *va
 		if sts.Status.ObservedGeneration < sts.Generation {
 			return false, nil
 		}
-		// Gate 2: rolling update not yet complete. A new StatefulSet starts with
-		// currentRevision == updateRevision, so after an orphan recreate the
-		// revisions match while the adopted pod still runs the old template;
-		// UpdatedReplicas counts only pods on updateRevision.
+		// Gate 2: rolling update not yet complete. UpdatedReplicas counts only
+		// pods on updateRevision, so it also catches an orphan recreate, where a
+		// new StatefulSet starts with currentRevision == updateRevision while
+		// the adopted pod still runs the old template.
 		replicas := int32(1)
 		if sts.Spec.Replicas != nil {
 			replicas = *sts.Spec.Replicas
 		}
-		return sts.Status.CurrentRevision == sts.Status.UpdateRevision &&
-			sts.Status.UpdatedReplicas >= replicas &&
-			sts.Status.ReadyReplicas >= replicas, nil
+		if sts.Status.UpdatedReplicas < replicas {
+			return false, nil
+		}
+		live, err := livePod(ctx, reader, pod)
+		if err != nil || live == nil {
+			return false, err
+		}
+		return live.Labels[appsv1.StatefulSetRevisionLabel] == sts.Status.UpdateRevision, nil
 	case valkeyiov1alpha1.WorkloadTypeDeployment:
 		dep := &appsv1.Deployment{}
 		if err := reader.Get(ctx, client.ObjectKey{Name: valkeyNodeResourceName(node), Namespace: node.Namespace}, dep); err != nil {
@@ -1003,10 +1231,30 @@ func (r *ValkeyNodeReconciler) isWorkloadRolledOut(ctx context.Context, node *va
 		if dep.Spec.Replicas != nil {
 			replicas = *dep.Spec.Replicas
 		}
-		return dep.Status.UpdatedReplicas >= replicas && dep.Status.ReadyReplicas >= replicas, nil
+		if dep.Status.UpdatedReplicas < replicas {
+			return false, nil
+		}
+		// The Recreate strategy never runs the old and new pod together, so a
+		// pod that is still live once the replicas are updated is the new one.
+		live, err := livePod(ctx, reader, pod)
+		return live != nil, err
 	default:
 		return false, nil
 	}
+}
+
+// livePod re-reads the pod directly and returns it when it is not terminating
+// and its containers are ready, or nil. A pod the cache still holds after it
+// was deleted reads as not found.
+func livePod(ctx context.Context, reader client.Reader, pod *corev1.Pod) (*corev1.Pod, error) {
+	fresh := &corev1.Pod{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if fresh.DeletionTimestamp != nil || !podContainersReady(fresh) {
+		return nil, nil
+	}
+	return fresh, nil
 }
 
 // getPod returns the pod for a ValkeyNode by listing with label selector.
@@ -1064,18 +1312,18 @@ func podSupersededAndStuck(pod *corev1.Pod, sts *appsv1.StatefulSet) bool {
 	return !podReady(pod)
 }
 
-// nodeInfo returns the node's INFO output, or an error when the pod cannot be
-// reached. Tests inject nodeInfoFunc to bypass the live connection.
+// nodeInfo returns the persistence and replication sections of the node's INFO,
+// the two that syncInProgress reads, or an error when the pod cannot be reached.
+// Tests inject nodeInfoFunc to bypass the live connection.
 func (r *ValkeyNodeReconciler) nodeInfo(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
 	if r.nodeInfoFunc != nil {
 		return r.nodeInfoFunc(ctx, node)
 	}
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		return "", err
 	}
-	defer release()
-	return c.Do(ctx, c.B().Info().Build()).ToString()
+	return c.Do(ctx, c.B().Info().Section("persistence", "replication").Build()).ToString()
 }
 
 // syncInProgress reports whether INFO shows the server still loading a dataset:
@@ -1096,7 +1344,7 @@ func syncInProgress(info string) bool {
 // container in the Running state. A missing status counts as not running.
 func serverContainerRunning(pod *corev1.Pod) bool {
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "server" {
+		if cs.Name == serverContainerName {
 			return cs.State.Running != nil
 		}
 	}
@@ -1134,7 +1382,14 @@ func (r *ValkeyNodeReconciler) replaceSupersededPod(ctx context.Context, node *v
 	// settles it: a server container that is not running (crash-looping on a
 	// bad config, or never pulled) is not loading anything and stays eligible.
 	// A running container that will not answer is left alone and retried.
-	info, err := r.nodeInfo(ctx, node)
+	//
+	// nodeInfo dials node.Status.PodIP, which only updateStatus refreshes, and
+	// Reconcile returns before updateStatus when this function defers. A pod
+	// that came back at another IP would be probed at the stale one on every
+	// retry and never replaced. So the probe goes to the pod just read.
+	probe := node.DeepCopy()
+	probe.Status.PodIP = pod.Status.PodIP
+	info, err := r.nodeInfo(ctx, probe)
 	switch {
 	case err == nil && syncInProgress(info):
 		logf.FromContext(ctx).V(1).Info("superseded pod is loading or syncing; deferring replacement", "pod", pod.Name)
@@ -1177,14 +1432,14 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	}
 
 	log := logf.FromContext(ctx)
-	c, release, err := r.valkeyClients().ForNode(ctx, node)
+	c, err := r.ValkeyClients.ForNode(ctx, node)
 	if err != nil {
 		log.Error(err, "failed to create valkey client")
 		return ""
 	}
-	defer release()
 
-	info, err := c.Do(ctx, c.B().Info().Build()).ToString()
+	// cluster for cluster_enabled, replication for role on a standalone node.
+	info, err := c.Do(ctx, c.B().Info().Section("cluster", "replication").Build()).ToString()
 	if err != nil {
 		log.Error(err, "failed to get info")
 		return ""
@@ -1202,25 +1457,72 @@ func (r *ValkeyNodeReconciler) resolveRole(ctx context.Context, node *valkeyiov1
 	return parseClusterNodesRole(nodes)
 }
 
-// applyLiveConfig applies the live-settable subset of the node's desired config
-// via CONFIG SET. Returns (true, nil) when CONFIG SET succeeds, (false, nil)
-// when there is nothing to apply, and (false, err) on failure.
-func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
-	params := liveConfigToApply(node.Spec.Config)
-	if len(params) == 0 {
+// applyTrustBundle reloads the node's trust bundle and reports the outcome as
+// the TrustBundleApplied condition, which it removes from a node without a
+// trust bundle. A failed reload is not returned as an error: the server
+// refused the file and keeps serving with the roots it last loaded, so it asks
+// for a requeue at a fixed cadence, as for a stale ACL, rather than error
+// backoff, which would delay picking up a fixed bundle. The error returned is
+// a failure to update the condition.
+func (r *ValkeyNodeReconciler) applyTrustBundle(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	log := logf.FromContext(ctx)
+	reloaded, err := r.reloadTrustBundle(ctx, node)
+	switch {
+	case err != nil:
+		log.Error(err, "failed to reload the trust bundle")
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, "TrustBundleReloadFailed", "ReloadTrustBundle", "Failed to reload the trust bundle: %v", err)
+		return true, r.setTrustBundleCondition(ctx, node, metav1.ConditionFalse, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, err.Error())
+	case reloaded:
+		return false, r.setTrustBundleCondition(ctx, node, metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied,
+			"The mounted trust bundle is loaded")
+	default:
+		return false, r.clearTrustBundleCondition(ctx, node)
+	}
+}
+
+// reloadTrustBundle has a node with a trust bundle re-read tls-ca-cert-file.
+// The bundle Secret can change while the pod runs (a SPIFFE trust domain
+// rotates its roots about daily), and the kubelet updates the mounted file in
+// place, but the running server keeps
+// the roots it loaded until its TLS config is set again: tls-auto-reload-interval
+// was not observed to reload the CA. CONFIG SET of the unchanged path rebuilds
+// the TLS context with the current file, so running this on every reconcile
+// bounds how long a new root waits by the volume refresh plus the requeue.
+// The reload affects new connections only. Returns (true, nil) once the bundle
+// is reloaded, (false, nil) for a node without a trust bundle, which is left
+// alone, and (false, err) on failure.
+func (r *ValkeyNodeReconciler) reloadTrustBundle(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (bool, error) {
+	if node.Spec.TLS == nil || node.Spec.TLS.Certificates.TrustBundle == nil {
 		return false, nil
 	}
-
 	c, err := r.newConfigClient(ctx, r, node)
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
-
-	if err := c.SetConfig(ctx, params); err != nil {
+	if err := c.SetConfig(ctx, map[string]string{"tls-ca-cert-file": tlsCertMountPath + "/" + tlsSecretKeyCA}); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// applyLiveConfig applies the live-settable subset of the node's desired config
+// via CONFIG SET and returns what it applied. It returns an empty map when
+// there is nothing to apply, and (nil, err) on failure.
+func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (map[string]string, error) {
+	params := liveConfigToApply(node.Spec.Config)
+	if len(params) == 0 {
+		return params, nil
+	}
+
+	c, err := r.newConfigClient(ctx, r, node)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.SetConfig(ctx, params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }
 
 // parseClusterEnabled reports whether the node runs in cluster mode, from the
@@ -1254,7 +1556,7 @@ func parseClusterEnabled(info string) bool {
 // (see ClusterNode.HasSlotAssignment), which is the same answer GetClusterState
 // gives.
 func parseClusterNodesRole(clusterNodes string) string {
-	myself := valkey.FindMyself(valkey.ParseClusterNodes(clusterNodes))
+	myself := valkey.ParseClusterNodesMyself(clusterNodes)
 	if myself == nil {
 		return ""
 	}
@@ -1307,7 +1609,9 @@ func (r *ValkeyNodeReconciler) podToValkeyNode(_ context.Context, obj client.Obj
 	}}}
 }
 
-// podReady reports whether the pod's PodReady condition is True.
+// podReady reports whether the pod's PodReady condition is True. That includes
+// readiness gates, as the StatefulSet controller and the PodDisruptionBudget
+// see it.
 func podReady(pod *corev1.Pod) bool {
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodReady {
@@ -1317,10 +1621,24 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// podContainersReady reports whether the pod's ContainersReady condition is
+// True. Node status reads this rather than PodReady: the cluster controller
+// sets initialSyncGate only after it has attached the node, so waiting on Pod
+// Ready here would wait on itself.
+func podContainersReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.ContainersReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // valkeyPodPredicate admits only pod transitions that can affect a node's role
-// or readiness: a PodReady flip, a PodIP change, or a phase change. Create and
-// delete pass through (unset predicate funcs default to true). Everything else
-// — the frequent kubelet status churn — is dropped to avoid a reconcile storm.
+// or readiness: a PodReady or ContainersReady flip, a PodIP change, or a phase
+// change. Create and delete pass through (unset predicate funcs default to
+// true). Everything else — the frequent kubelet status churn — is dropped to
+// avoid a reconcile storm.
 func valkeyPodPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -1330,6 +1648,7 @@ func valkeyPodPredicate() predicate.Predicate {
 				return false
 			}
 			return podReady(oldPod) != podReady(newPod) ||
+				podContainersReady(oldPod) != podContainersReady(newPod) ||
 				oldPod.Status.PodIP != newPod.Status.PodIP ||
 				oldPod.Status.Phase != newPod.Status.Phase
 		},
@@ -1338,6 +1657,9 @@ func valkeyPodPredicate() predicate.Predicate {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.ValkeyClients == nil {
+		return errors.New("ValkeyNode reconciler has no ClientProvider")
+	}
 	r.APIReader = mgr.GetAPIReader()
 	if r.newConfigClient == nil {
 		r.newConfigClient = realConfigClient
@@ -1345,6 +1667,7 @@ func (r *ValkeyNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Service{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(

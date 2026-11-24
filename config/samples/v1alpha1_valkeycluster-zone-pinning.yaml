@@ -7,7 +7,15 @@ metadata:
   name: cluster-sample-zone-pinning
 spec:
   shards: 3
-  replicas: 1
+  replicasPerShard: 1
+  acl:
+    users:
+      # Valkey's open default user: any client, no password, every command.
+      # For trying the cluster out; restrict or remove it in production.
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   scheduling:
     zone:
       # Each pod is pinned to zones[(shardIndex + nodeIndex) % len(zones)].

@@ -36,7 +36,7 @@ import (
 // Test valkey cluster on PSS restricted namespace
 const pssRestrictedNamespace = "valkey-pss-restricted"
 
-var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem"), func() {
+var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem", "security"), func() {
 	const noPersistClusterName = "cluster-readonly-rootfs-sample"
 	const noPersistManifest = "config/samples/v1alpha1_valkeycluster-readonly-rootfs.yaml"
 	const persistClusterName = "cluster-readonly-rootfs-persistent-sample"
@@ -99,7 +99,7 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 		// can't write nodes.conf to a read-only rootfs.
 		By("verifying the ConfigMap sets dir and cluster-config-file under /data")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(noPersistClusterName),
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(noPersistClusterName),
 				"-o", "jsonpath={.data.valkey\\.conf}",
 				"-n", pssRestrictedNamespace)
 			output, err := utils.Run(cmd)
@@ -123,6 +123,26 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 			}
 		}
 		Eventually(verifyROFS).Should(Succeed())
+
+		By("verifying every pod's init container inherits the server's securityContext, exits 0, and the pod is Ready")
+		verifyInitROFS := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", noPersistClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}"+
+					":{.spec.initContainers[?(@.name=='server-init')].securityContext.readOnlyRootFilesystem}"+
+					":{.status.initContainerStatuses[?(@.name=='server-init')].state.terminated.exitCode}"+
+					":{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+				"-n", pssRestrictedNamespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			pods := utils.GetNonEmptyLines(output)
+			g.Expect(pods).NotTo(BeEmpty())
+			for _, pod := range pods {
+				// name:readOnlyRootFilesystem:exitCode:Ready
+				g.Expect(pod).To(MatchRegexp(`^[^:]+:true:0:True$`))
+			}
+		}
+		Eventually(verifyInitROFS).Should(Succeed())
 
 		By("verifying /data is backed by an emptyDir")
 		verifyEmptyDir := func(g Gomega) {

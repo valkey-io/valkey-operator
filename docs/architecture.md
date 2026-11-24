@@ -11,8 +11,8 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 `internal/controller/valkeycluster_controller.go` — owns top-level orchestration. Each reconcile loop:
 
 1. Upserts a headless Service and PodDisruptionBudget
-2. Reconciles ACL users (creates an internal Secret with type `valkey.io/acl`)
-3. Upserts a ConfigMap containing `valkey.conf` and health-check scripts. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
+2. Reconciles ACL users (writes the `valkey-<cluster>-acl` and `valkey-<cluster>-system-passwords` Secrets, with type `valkey.io/acl`)
+3. Upserts a ConfigMap containing `valkey.conf`, the health-check scripts and the init container script. A SHA-256 of `valkey.conf` is propagated to each ValkeyNode spec to trigger rolling restarts when config changes
 4. Connects to live pods via `internal/valkey.GetClusterState` (CLUSTER INFO / CLUSTER NODES) to build a `ClusterState`
 5. Creates/updates ValkeyNode CRs — one per (shard, node-index) pair, named `<cluster>-<N>-<M>`. Updates are one-at-a-time, replicas-before-primary within each shard (the snapshot identifies the actual primary, which may differ from node-index 0 after a failover)
 6. Issues CLUSTER MEET, CLUSTER ADDSLOTSRANGE, CLUSTER REPLICATE in phases
@@ -22,10 +22,9 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 
 `internal/controller/valkeynode_controller.go` — manages the workload for a single node:
 
-1. Ensures a ConfigMap (skipped if `ServerConfigMapName` is set, i.e. when owned by ValkeyCluster)
-2. Ensures a PVC (if persistence is configured)
-3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
-4. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
+1. Ensures a PVC (if persistence is configured)
+2. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
+3. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
 
 #### Role resolution
 
@@ -54,13 +53,14 @@ It exists because a failover between two healthy pods moves nothing in Kubernete
 - A Valkey instance that fails to answer is backed off exponentially (up to a minute) rather than dialled every tick.
 - The Pod watch and the 30s backstop are both retained: the watch is faster for pod recreation, and the backstop is what makes a wedged poller a latency regression rather than an availability bug.
 
-Each tick opens one connection per node through the `ClientProvider` in `internal/controller/clients.go`. That is the cost that sets the interval. Pooled clients will replace those per-tick connections behind the same provider, without changing the poller.
+Each tick gets one client per node from the `ClientProvider` in `internal/controller/clients.go`, which takes it from the pool in `internal/valkey/pool.go`. The pool keeps each client open across ticks and reconciles, so a tick normally opens no connections.
 
 ## Key packages
 
 - `internal/valkey/` — pure Valkey protocol layer: `ClusterState` / `NodeState` types, CLUSTER NODES parsing, slot range arithmetic, slot migration and rebalancing logic
-- `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness shell scripts) into the ConfigMap
-- `internal/controller/users.go` — manages the internal `_operator` system user Secret and user-defined ACL Secrets
+- `internal/controller/config.go` — builds `valkey.conf` from `spec.config`, embeds `scripts/` (liveness/readiness probe scripts and `init.sh`) into the ConfigMap
+- `internal/controller/users.go` — manages the system passwords Secret and the ACL Secret built from the user-defined password Secrets
+- `internal/controller/secret_migration.go` — moves Secrets that earlier releases created under `internal-` names to their `valkey-` names
 - `internal/controller/failover.go` — proactive failover logic: before rolling a primary, promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go` — builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
 - `internal/controller/status.go` — condition helpers (`setCondition`)
@@ -69,9 +69,21 @@ Each tick opens one connection per node through the `ClientProvider` in `interna
 
 ValkeyNode names encode position: `<cluster>-<shardIndex>-<nodeIndex>`. Node-index 0 is the *initial* primary; 1+ are replicas. After a failover, Valkey may promote a replica — the labels are not updated; the live role is always read from CLUSTER NODES. Labels `valkey.io/shard-index` and `valkey.io/node-index` are used by the reconciler to determine slot assignment vs. replication.
 
-## Config hash propagation
+Every other child of a ValkeyCluster takes the `valkey-` prefix, so it cannot collide with an unrelated object in the namespace: the headless Service, PodDisruptionBudget and server ConfigMap are `valkey-<cluster>`, each node's StatefulSet or Deployment is `valkey-<cluster>-<shardIndex>-<nodeIndex>`, and the Secrets are `valkey-<cluster>-<purpose>` (`acl`, `system-passwords`, `tls-trust`), with no kind suffix. A Secret the user creates, such as a user password Secret, does not take the prefix. See [Operator-managed Secrets](valkeycluster.md#operator-managed-secrets).
 
-When `valkey.conf` changes, the ValkeyCluster controller propagates the new `spec.config` to each ValkeyNode. The ValkeyNode pod-template builders derive a SHA-256 roll hash from the node spec (config minus the live-settable allowlist, plus TLS) and stamp it as a pod template annotation — gated on `spec.serverConfigMapName`, the marker that a parent manages the node's config. The changed template then rolls out one node at a time, authorized by `spec.workloadRevision`. The hash render is shared with the ValkeyCluster ConfigMap path, and `internal/controller/config_rollhash_test.go` pins it byte-for-byte so operator upgrades do not roll pods.
+## Config revisions
+
+The pinned config holds every `spec.config` key except the live-settable allowlist (`liveConfigAllowlist`: `maxmemory`, `maxmemory-policy`, `maxclients`) and keys the image's Valkey version does not support, then the base config, then `include /config/live.conf`. Its revision is the first 12 hex characters of the SHA-256 of its content. A live value change therefore leaves the revision unchanged and rolls nothing.
+
+The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. `pinnedConfigRef` can keep the live workload's revision when only allowlisted keys differ from it. It needs that revision's content, which this layout does not store, so the parent always sets the revision rendered from the desired spec.
+
+The ValkeyNode pod-template builders set the `valkey.io/config-revision` annotation to the revision. The annotation comes from the node spec, so the template stays a pure function of the spec. A changed revision changes the template and rolls out one node at a time, authorized by `spec.workloadRevision`. Pods don't mount the pinned config yet: they mount `valkey.conf` from `valkey-<cluster>`.
+
+## Init container
+
+Every ValkeyNode pod runs a `server-init` init container before the server. It runs `/scripts/init.sh` from the scripts ConfigMap. A `valkey-<cluster>` written by v0.8.0 or earlier has no `init.sh` until the operator updates it, and the init container then logs and exits 0. The script can write files to the `init-conf` emptyDir, which the server container mounts at `/init`. The script is a no-op today. Because it lives in the ConfigMap, changing it updates the scripts hash on the ConfigMap and never the pod template, so it does not roll pods; a pod runs the new script the next time it starts. An init container does not re-run when the server container restarts in place.
+
+The init container copies the server container's image, pull policy, resources, security context, env and volume mounts after `spec.containers` patches. Matching resources and security context keep the pod's QoS class and pass the same Pod Security admission checks as the server. Matching env and mounts give `init.sh` the same view as the server, including `/data`, TLS certificates and the operator credentials, so a script that needs them does not change the pod template.
 
 ## Auto-generated files
 

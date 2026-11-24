@@ -29,6 +29,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
+	vclient "github.com/valkey-io/valkey-go"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -50,6 +51,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/controller"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -105,6 +107,7 @@ func main() {
 		"The address the pprof endpoint binds to, for example localhost:8082. Disabled by default. "+
 			"The endpoint serves plain HTTP with no authentication and exposes heap contents, so "+
 			"bind it to localhost and do not add it to a Service.")
+	imageFlags(flag.CommandLine)
 	seenNamespaces := make(map[string]struct{})
 	flag.Func("watch-namespace", "Namespace to watch (repeatable; omit for cluster-wide)", func(s string) error {
 		if s == "" {
@@ -126,6 +129,11 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if err := validateDefaultImages(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -206,6 +214,10 @@ func main() {
 		"app.kubernetes.io/managed-by": "valkey-operator",
 	})
 	cacheOpts := cache.Options{
+		// The operator never reads managedFields, which can be as large as the
+		// object itself, and every cached object and copy carries them. An
+		// update without them keeps the server's existing entries.
+		DefaultTransform: cache.TransformStripManagedFields(),
 		ByObject: map[client.Object]cache.ByObject{
 			&corev1.Service{}:               {Label: managedBySelector},
 			&appsv1.StatefulSet{}:           {Label: managedBySelector},
@@ -253,7 +265,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkeyClients := controller.NewClientProvider(mgr.GetClient(), mgr.GetAPIReader())
+	valkeyPool := valkey.NewPool(valkey.DefaultIdleTTL, vclient.NewClient)
+	if err := mgr.Add(valkeyPool); err != nil {
+		setupLog.Error(err, "Failed to add Valkey client pool")
+		os.Exit(1)
+	}
+	valkeyClients := controller.NewClientProvider(mgr.GetClient(), mgr.GetAPIReader(), valkeyPool)
 
 	if err := (&controller.ValkeyClusterReconciler{
 		Client:        mgr.GetClient(),
@@ -302,8 +319,32 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "Failed to run manager")
+	startErr := mgr.Start(ctrl.SetupSignalHandler()) // blocks until shutdown
+	// Reconciles and poller ticks have returned, unless the shutdown timeout
+	// expired or the lease was lost. Close before the exit below, which would
+	// skip a deferred call.
+	valkeyPool.Close()
+	if startErr != nil {
+		setupLog.Error(startErr, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+func imageFlags(fs *flag.FlagSet) {
+	fs.StringVar(&controller.DefaultImage, "default-valkey-image", "",
+		"Required. Valkey image used when spec.image is empty.")
+	fs.StringVar(&controller.DefaultExporterImage, "default-exporter-image", "",
+		"Required. Metrics exporter image used when spec.exporter.image is empty.")
+}
+
+func validateDefaultImages() error {
+	controller.DefaultImage = strings.TrimSpace(controller.DefaultImage)
+	controller.DefaultExporterImage = strings.TrimSpace(controller.DefaultExporterImage)
+	if controller.DefaultImage == "" {
+		return fmt.Errorf("--default-valkey-image must not be empty")
+	}
+	if controller.DefaultExporterImage == "" {
+		return fmt.Errorf("--default-exporter-image must not be empty")
+	}
+	return nil
 }

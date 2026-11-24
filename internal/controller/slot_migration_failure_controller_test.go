@@ -248,9 +248,9 @@ func TestRebalanceSlotsSurfacesMigrationFailure(t *testing.T) {
 		t.Fatal("expected a planned move")
 	}
 
-	inProgress, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	pending, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
 	if err == nil {
-		t.Fatalf("expected error from surfaced migration failure, got inProgress=%v", inProgress)
+		t.Fatalf("expected error from surfaced migration failure, got move=%v", pending)
 	}
 	if !strings.Contains(err.Error(), "handshake failed: ERR synthesize") {
 		t.Fatalf("error must carry the failed job message, got %q", err.Error())
@@ -278,11 +278,11 @@ func TestRebalanceSlotsAncientFailureDoesNotBlock(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	cluster.Spec.Shards = 2
 
-	inProgress, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	pending, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
 	if err != nil {
 		t.Fatalf("ancient failure must not error, got %v", err)
 	}
-	if !inProgress {
+	if pending == nil {
 		t.Fatal("expected the reconcile to proceed past the failure gate")
 	}
 }
@@ -339,11 +339,11 @@ func TestRebalanceSlotsForeignDestinationFailureDoesNotBlock(t *testing.T) {
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	cluster.Spec.Shards = 2
 
-	inProgress, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	pending, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
 	if err != nil {
 		t.Fatalf("a failure for another destination must not error, got %v", err)
 	}
-	if !inProgress {
+	if pending == nil {
 		t.Fatal("expected the rebalance to proceed past the failure gate")
 	}
 }

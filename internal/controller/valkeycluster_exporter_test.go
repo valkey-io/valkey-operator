@@ -48,9 +48,9 @@ var _ = Describe("exporter enabled defaulting", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Exporter: exporter,
+				Shards:           1,
+				ReplicasPerShard: 0,
+				Exporter:         exporter,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -94,8 +94,8 @@ var _ = Describe("exporter enabled defaulting", func() {
 		u.SetName("exp-omitted")
 		u.SetNamespace("default")
 		Expect(unstructured.SetNestedMap(u.Object, map[string]any{
-			"shards":   int64(1),
-			"replicas": int64(0),
+			"shards":           int64(1),
+			"replicasPerShard": int64(0),
 		}, "spec")).To(Succeed())
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
 		DeferCleanup(func() {
@@ -198,7 +198,7 @@ var _ = Describe("exporter enabled defaulting", func() {
 	It("does not stamp enabled onto a standalone ValkeyNode", func() {
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-standalone", Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {

@@ -14,27 +14,42 @@ snapshot of nodes that answered.
 It fans out over the given pod IPs, asking each node for `CLUSTER MYID`,
 `CLUSTER MYSHARDID`, `INFO`, `CLUSTER INFO`, and `CLUSTER NODES` in one round trip,
 on a client pinned to that node so it is never redirected elsewhere. Unreachable
-nodes are skipped. A primary with no slot assignment becomes a pending node;
-everything else is grouped into a shard by shard ID.
+nodes are skipped, and so is a node whose `CLUSTER MYID`, `CLUSTER MYSHARDID`,
+`CLUSTER INFO` or `CLUSTER NODES` reply fails or is empty, or whose node table
+has no `myself` line. A failed `INFO` only leaves its keys unknown. A primary
+with no slot assignment becomes a pending node; everything else is grouped into
+a shard by shard ID.
+
+One pass follows: a pending primary that a replica names as its primary, in a
+shard that has no primary of its own, moves into that shard. That is a primary
+drained to zero slots that kept its replica, as a scale-in reverted right after
+its drain leaves behind (`cluster-allow-replica-migration no` keeps it a
+primary). The shard then has a primary and no slots, so readers that care
+whether a shard serves check its slots, not only its primary: `countReadyShards`
+does not count it, and the role poller reports no role for its primary. A
+scale-out leader with no replica following it yet, and a slot-less primary
+beside a shard's live primary, stay pending.
 
 Two consequences follow:
 
 - **Never nil, but often empty.** With nothing reachable, shards and pending nodes
   are both empty, so callers test emptiness rather than nil.
-- **The caller releases the clients.** `GetClusterState` dials each node through
-  the `DialFunc` it is given, and the snapshot holds each client with its release
-  func, so `CloseClients` must run or clients leak; both call sites `defer` it.
-  Release closes the client today. Setup rather than the commands dominates scrape
-  cost, so client reuse across reconciles is planned: a pooling dialer can keep
-  the connection and make release a no-op without changing `ClusterState`.
+- **The pool owns the clients.** `GetClusterState` gets each node's client
+  through the `DialFunc` it is given, and the snapshot holds it for the
+  reconcile. The `ClientProvider` backs the `DialFunc` with the pool in
+  `internal/valkey/pool.go`, which keeps one client per address across
+  reconciles and poller ticks, so callers never close them. Each pooled
+  client stays connected as `_operator`, and valkey-go sends it a PING about
+  every second while idle, so `CLIENT LIST` on a node shows a standing
+  operator connection named `valkey-operator`.
 
 ## NodeState vs ClusterNode
 
 `NodeState` and `ClusterNode` both describe a node. They differ in *whose view* they
 hold, and that is the whole reason both exist.
 
-`NodeState` is one scraped node: the operator connected to it, so it owns the client,
-the dialled address, and that node's own command output.
+`NodeState` is one scraped node: it holds the client the scrape used (owned by the
+pool, not by `NodeState`), the dialled address, and that node's own command output.
 
 `ClusterNode` is one line of that node's `CLUSTER NODES` output, describing a cluster
 member **as the scraped node sees it**. Node A may list B as failed at an old address
@@ -97,7 +112,16 @@ Each predicate names the question it answers, because the distinction is easy to
 wrong. `HasFlag` remains available for the one caller that wants `fail` but not
 `fail?`.
 
+## INFO sections
+
+The scrape sends `INFO persistence replication`, not a full `INFO`, and keeps
+both sections in `Info`. The keys read are `loading` (persistence) and
+`master_link_status`, `master_sync_in_progress` and `slave_repl_offset`
+(replication). A key from any other section reads as `""`, so a new reader
+must add its section to the command. On a Valkey 9 replica the reply is about
+1.5 KiB, against about 6.4 KiB for a full `INFO`.
+
 ## Known limitations
 
-**`Info` keeps the whole INFO map.** Only `slave_repl_offset` and
-`master_link_status` are read, so the rest is retained per node for nothing.
+**`Info` keeps every key of both sections.** Only four are read, so the rest
+is retained per node for nothing.

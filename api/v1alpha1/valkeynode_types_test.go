@@ -17,12 +17,27 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWorkloadTypeConstants(t *testing.T) {
 	assert.Equal(t, WorkloadType("StatefulSet"), WorkloadTypeStatefulSet)
 	assert.Equal(t, WorkloadType("Deployment"), WorkloadTypeDeployment)
+}
+
+// The required fields the parent sets stay out of an empty spec. An update to
+// a node stored before a field existed would otherwise send "" and fail its
+// validation.
+func TestValkeyNodeSpecOmitsEmptyParentFields(t *testing.T) {
+	data, err := json.Marshal(ValkeyNodeSpec{})
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(data, &fields))
+	for _, name := range []string{"configRevision", "sharedConfigMapName"} {
+		assert.NotContains(t, fields, name)
+	}
 }

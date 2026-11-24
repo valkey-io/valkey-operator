@@ -58,7 +58,7 @@ var _ = Describe("ValkeyNode without a known parent", func() {
 	It("reports NoParent once and creates nothing", func() {
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "no-parent", Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(cleanup, node.DeepCopy())
@@ -101,8 +101,10 @@ var _ = Describe("ValkeyNode without a known parent", func() {
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "orphaned", Namespace: "default", OwnerReferences: testParentRefs()},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Image:        "valkey/valkey:9.0.0",
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Image:               "valkey/valkey:9.0.0",
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -131,7 +133,6 @@ var _ = Describe("ValkeyNode without a known parent", func() {
 		Expect(sts.Generation).To(Equal(generation))
 		Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
 		Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(podTemplateRollHash(*template)))
-		Expect(k8sClient.Get(ctx, name, &corev1.ConfigMap{})).To(Succeed())
 		_, ready := readyCondition(key)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonNoParent))

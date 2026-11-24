@@ -65,7 +65,7 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
 			Image:               "valkey/valkey:9.0.0",
-			ServerConfigMapName: "valkey-config",
+			SharedConfigMapName: "valkey-config",
 			// Off by default here so the exporter-agnostic cases assert on the
 			// server container alone. A nil Enabled means enabled.
 			Exporter: valkeyv1.ExporterSpec{Enabled: new(false)},
@@ -314,8 +314,8 @@ func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
 }
 
 // TestInitContainerCommand runs the init container's command against a
-// temporary script path. A ConfigMap without init.sh (an external ConfigMap
-// on a standalone ValkeyNode) must not block the pod.
+// temporary script path. A ConfigMap without init.sh (an older shared
+// ConfigMap) must not block the pod.
 func TestInitContainerCommand(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "init.sh")
@@ -752,34 +752,16 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
 }
 
-func TestBuildValkeyNodeConfigMap(t *testing.T) {
-	node := newTestValkeyNode("mynode", "test-ns")
-	cm, err := buildValkeyNodeConfigMap(node)
-
-	require.NoError(t, err)
-	assert.Equal(t, GetServerConfigMapName("mynode"), cm.Name)
-	assert.Equal(t, "test-ns", cm.Namespace)
-	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
-
-	// Must contain the script keys and valkey.conf
-	assert.Contains(t, cm.Data, "valkey.conf")
-	assert.Contains(t, cm.Data, "liveness-check.sh")
-	assert.Contains(t, cm.Data, "readiness-check.sh")
-	assert.Contains(t, cm.Data, "init.sh")
-	assert.Contains(t, cm.Data, primaryHandoffScriptKey)
-}
-
-func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
+func TestRenderPinnedConfig_WithPersistence(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 
-	cm, err := buildValkeyNodeConfigMap(node)
-	require.NoError(t, err)
-	assert.Contains(t, cm.Data["valkey.conf"], "dir /data")
-	assert.Contains(t, cm.Data["valkey.conf"], "cluster-config-file /data/nodes.conf")
+	conf := renderPinnedConfig(node)
+	assert.Contains(t, conf, "dir /data")
+	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
 }
 
-func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
+func TestRenderPinnedConfig_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
@@ -789,10 +771,7 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 		},
 	}
 
-	cm, err := buildValkeyNodeConfigMap(node)
-	require.NoError(t, err)
-
-	conf := cm.Data["valkey.conf"]
+	conf := renderPinnedConfig(node)
 	assert.Contains(t, conf, "aclfile /config/users/users.acl")
 	assert.Contains(t, conf, "dir /data")
 	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
@@ -800,7 +779,7 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	assert.Contains(t, conf, "port 0")
 }
 
-func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
+func TestRenderPinnedConfig_WithClientCertAuth(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		authClients     valkeyv1.TLSAuthClients
@@ -845,10 +824,7 @@ func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
 				},
 			}
 
-			cm, err := buildValkeyNodeConfigMap(node)
-			require.NoError(t, err)
-
-			conf := cm.Data["valkey.conf"]
+			conf := renderPinnedConfig(node)
 			for _, want := range tc.want {
 				assert.Contains(t, conf, want)
 			}
@@ -859,23 +835,12 @@ func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
 	}
 }
 
-func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
-	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"
-		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-		require.NoError(t, err)
-		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
-	})
-
-	t.Run("falls back to resource name when ServerConfigMapName is empty", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns")
-		node.Spec.ServerConfigMapName = ""
-		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-		require.NoError(t, err)
-		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
-	})
+func TestBuildValkeyNodePodTemplateSpec_ConfigMapNames(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns") // SharedConfigMapName = "valkey-config"
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
@@ -927,13 +892,12 @@ func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHan
 	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 }
 
-func TestBuildContainersDef_StandaloneNodeWithClusterLabelUsesTheWrapper(t *testing.T) {
-	// A standalone ValkeyNode may carry the cluster label and mount an
-	// external ConfigMap without the script. It gets the same command, which
-	// falls back to the server at run time, see TestPrimaryHandoffCommandFallsBackToServer.
+func TestBuildContainersDef_ClusterLabelUsesTheWrapper(t *testing.T) {
+	// A node whose older shared ConfigMap lacks the script gets the same
+	// command, which falls back to the server at run time, see
+	// TestPrimaryHandoffCommandFallsBackToServer.
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Labels = map[string]string{LabelCluster: "mynode"}
-	node.Spec.ServerConfigMapName = "my-own-config"
 	containers, err := buildContainersDef(node)
 	require.NoError(t, err)
 	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server"}, containers[0].Command[:4])
@@ -1450,7 +1414,7 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Scheduling.PriorityClassName, node.Spec.PriorityClassName, "PriorityClassName must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
+	assert.Equal(t, GetSharedConfigMapName(cluster.Name), node.Spec.SharedConfigMapName, "SharedConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 
@@ -1627,7 +1591,7 @@ func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
 	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
 	require.NotNil(t, e.ValueFrom)
 	require.NotNil(t, e.ValueFrom.SecretKeyRef)
-	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "valkey-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "_operator", e.ValueFrom.SecretKeyRef.Key)
 }
 
@@ -1744,6 +1708,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			node := newTestValkeyNode("mycluster-0-0", "test-ns")
 			node.Labels = map[string]string{LabelCluster: "mycluster"}
 			node.Spec.WorkloadType = workloadType
+			node.Spec.ConfigRevision = "aaaaaaaaaaaa"
 			node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{
 				Labels: map[string]valkeyv1.LabelValue{
 					"team":       "data",
@@ -1751,7 +1716,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 				},
 				Annotations: map[string]string{
 					"example.com/scrape": "true",
-					configHashKey:        "spoofed",
+					configRevisionKey:    "spoofed",
 				},
 			}
 
@@ -1761,7 +1726,7 @@ func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
 			assert.Equal(t, "data", tmpl.Labels["team"])
 			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
 			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
-			assert.Equal(t, nodeServerConfigRollHash(node), tmpl.Annotations[configHashKey], "operator annotations win over podMetadata")
+			assert.Equal(t, "aaaaaaaaaaaa", tmpl.Annotations[configRevisionKey], "operator annotations win over podMetadata")
 
 			var selector map[string]string
 			if workloadType == valkeyv1.WorkloadTypeDeployment {

@@ -989,6 +989,15 @@ spec:
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
                   the rest take effect on the next pod roll.
                 type: object
+              configRevision:
+                description: |-
+                  ConfigRevision names the pinned config revision the pod template
+                  references: the first 12 hex characters of the SHA-256 of the rendered
+                  restart-only config. The parent sets it. It stays at the live workload's
+                  revision while only live-settable keys differ, so those changes roll
+                  nothing.
+                pattern: ^[0-9a-f]{12}$
+                type: string
               containers:
                 description: |-
                   Containers allows patching the default containers via a strategic merge
@@ -2918,10 +2927,10 @@ spec:
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
-                    - message: 'annotations must total at most 262059 characters (keys
-                        plus values): 256 KiB less the operator''s valkey.io/config-hash
+                    - message: 'annotations must total at most 262107 characters (keys
+                        plus values): 256 KiB less the operator''s valkey.io/config-revision
                         annotation'
-                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262059
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262107
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending
@@ -3266,11 +3275,6 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              serverConfigMapName:
-                description: |-
-                  ServerConfigMapName specifies the name of the ConfigMap that contains the
-                  scripts, and Valkey config for the ValkeyNode.
-                type: string
               service:
                 description: |-
                   Service is set by the ValkeyCluster controller from
@@ -3284,6 +3288,13 @@ spec:
                 maxLength: 253
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+              sharedConfigMapName:
+                description: |-
+                  SharedConfigMapName names the ConfigMap the parent shares with its
+                  nodes. It holds the probe, init and primary handoff scripts and
+                  valkey.conf.
+                minLength: 1
                 type: string
               terminationGracePeriodSeconds:
                 description: |-
@@ -3633,6 +3644,9 @@ spec:
                 - message: workloadType is immutable
                   reason: FieldValueForbidden
                   rule: self == oldSelf
+            required:
+            - configRevision
+            - sharedConfigMapName
             type: object
             x-kubernetes-validations:
             - fieldPath: .persistence
@@ -3668,6 +3682,30 @@ spec:
                   the running server was last confirmed to hold, recorded as ACLApplied
                   becomes True.
                 type: string
+              appliedLiveConfig:
+                description: |-
+                  AppliedLiveConfig holds the live-settable keys of spec.config that the
+                  server last accepted through CONFIG SET, recorded as LiveConfigApplied
+                  becomes True.
+                items:
+                  description: AppliedLiveConfigEntry is one live-settable directive
+                    the server accepted.
+                  properties:
+                    name:
+                      description: Name is the directive name.
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the directive's value.
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               appliedReplicationPasswordHash:
                 description: |-
                   AppliedReplicationPasswordHash is the sha256 of the replication password

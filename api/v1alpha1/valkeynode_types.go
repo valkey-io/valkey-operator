@@ -91,10 +91,12 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// ServerConfigMapName specifies the name of the ConfigMap that contains the
-	// scripts, and Valkey config for the ValkeyNode.
-	// +optional
-	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
+	// SharedConfigMapName names the ConfigMap the parent shares with its
+	// nodes. It holds the probe, init and primary handoff scripts and
+	// valkey.conf.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`
 
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the
@@ -152,6 +154,15 @@ type ValkeyNodeSpec struct {
 	// reconciled.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
+
+	// ConfigRevision names the pinned config revision the pod template
+	// references: the first 12 hex characters of the SHA-256 of the rendered
+	// restart-only config. The parent sets it. It stays at the live workload's
+	// revision while only live-settable keys differ, so those changes roll
+	// nothing.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
+	ConfigRevision string `json:"configRevision,omitempty"`
 
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
@@ -347,6 +358,24 @@ type ValkeyNodeStatus struct {
 	// container that started after it may hold an older password from the file.
 	// +optional
 	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
+
+	// AppliedLiveConfig holds the live-settable keys of spec.config that the
+	// server last accepted through CONFIG SET, recorded as LiveConfigApplied
+	// becomes True.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AppliedLiveConfig []AppliedLiveConfigEntry `json:"appliedLiveConfig,omitempty"`
+}
+
+// AppliedLiveConfigEntry is one live-settable directive the server accepted.
+type AppliedLiveConfigEntry struct {
+	// Name is the directive name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Value is the directive's value.
+	Value string `json:"value"`
 }
 
 const (

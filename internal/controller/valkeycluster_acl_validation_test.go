@@ -229,7 +229,8 @@ var _ = Describe("spec.acl validation", func() {
 		legacy := legacyUser
 		legacy.RawAcl = "+ping\n"
 		_, err = create(legacyUsers(legacy))
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	It("rejects invalid legacy usernames", func() {
@@ -243,7 +244,8 @@ var _ = Describe("spec.acl validation", func() {
 		legacy := legacyUser
 		legacy.Name = strings.Repeat("a", 128)
 		_, err := create(legacyUsers(legacy))
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	It("rejects whitespace in key and channel patterns", func() {

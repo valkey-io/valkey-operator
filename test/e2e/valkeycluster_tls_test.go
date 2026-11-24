@@ -168,7 +168,7 @@ spec:
 				}
 			}
 
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName),
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(valkeyClusterName),
 				"-o", "jsonpath={.data.valkey\\.conf}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
@@ -434,7 +434,7 @@ spec:
 		})
 
 		It("drops the gated directive from the rendered config", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(gatedClusterName),
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(gatedClusterName),
 				"-o", "jsonpath={.data.valkey\\.conf}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())

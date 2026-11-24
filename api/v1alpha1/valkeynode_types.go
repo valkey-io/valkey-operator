@@ -91,10 +91,12 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// ServerConfigMapName specifies the name of the ConfigMap that contains the
-	// scripts, and Valkey config for the ValkeyNode.
-	// +optional
-	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
+	// SharedConfigMapName names the ConfigMap the parent shares with its
+	// nodes. It holds the probe, init and primary handoff scripts and
+	// valkey.conf.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`
 
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the
@@ -146,17 +148,25 @@ type ValkeyNodeSpec struct {
 
 	// WorkloadRevision is a hash of the fully built pod template the ValkeyCluster
 	// controller authorizes this node to apply. The ValkeyCluster controller sets
-	// it (cluster-owned nodes only) when advancing a roll. The ValkeyNode
-	// controller applies a rolling StatefulSet/Deployment template update only
-	// when the template it builds hashes to this value. Standalone nodes ignore
-	// the field and apply immediately.
+	// it when advancing a roll. The ValkeyNode controller applies a rolling
+	// StatefulSet/Deployment template update only when the template it builds
+	// hashes to this value. A ValkeyNode without a ValkeyCluster parent is not
+	// reconciled.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
 
+	// ConfigRevision names the pinned config revision the pod template
+	// references: the first 12 hex characters of the SHA-256 of the rendered
+	// restart-only config. The parent sets it. It stays at the live workload's
+	// revision while only live-settable keys differ, so those changes roll
+	// nothing.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
+	ConfigRevision string `json:"configRevision,omitempty"`
+
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
-	// flags and managed config to hostname mode. Standalone nodes leave this empty
-	// (IP announce).
+	// flags and managed config to hostname mode. Empty means IP announce.
 	// +kubebuilder:validation:Enum=IP;Hostname
 	// +optional
 	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
@@ -338,6 +348,34 @@ type ValkeyNodeStatus struct {
 	// becomes True.
 	// +optional
 	AppliedACLRevision string `json:"appliedACLRevision,omitempty"`
+
+	// AppliedReplicationPasswordHash is the sha256 of the replication password
+	// the running server was last given with CONFIG SET primaryauth.
+	// +optional
+	AppliedReplicationPasswordHash string `json:"appliedReplicationPasswordHash,omitempty"`
+
+	// ReplicationPasswordAppliedTime is when that CONFIG SET was sent. A server
+	// container that started after it may hold an older password from the file.
+	// +optional
+	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
+
+	// AppliedLiveConfig holds the live-settable keys of spec.config that the
+	// server last accepted through CONFIG SET, recorded as LiveConfigApplied
+	// becomes True.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AppliedLiveConfig []AppliedLiveConfigEntry `json:"appliedLiveConfig,omitempty"`
+}
+
+// AppliedLiveConfigEntry is one live-settable directive the server accepted.
+type AppliedLiveConfigEntry struct {
+	// Name is the directive name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Value is the directive's value.
+	Value string `json:"value"`
 }
 
 const (
@@ -417,6 +455,9 @@ const (
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"
+	// ValkeyNodeReasonNoParent indicates the node has no known parent controller,
+	// so the operator does not create or update anything for it.
+	ValkeyNodeReasonNoParent = "NoParent"
 	// ValkeyNodeReasonPersistentVolumeClaimPending indicates the managed PVC is not ready yet.
 	ValkeyNodeReasonPersistentVolumeClaimPending = "PersistentVolumeClaimPending"
 	// ValkeyNodeReasonPersistentVolumeClaimBound indicates the managed PVC is bound and ready to use.

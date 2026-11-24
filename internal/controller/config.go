@@ -80,12 +80,12 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 var scripts embed.FS
 var scriptsHash string
 
-func GetServerConfigMapName(clusterName string) string {
+func GetSharedConfigMapName(clusterName string) string {
 	return resourcePrefix + clusterName
 }
 
-// buildManagedConfig returns the operator-managed directives shared by the
-// cluster and standalone ValkeyNode config paths.
+// buildManagedConfig returns the operator-managed directives of the node
+// config.
 //
 //nolint:goconst
 func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, image string) map[string]string {
@@ -139,11 +139,6 @@ func renderConfig(config map[string]string) string {
 	builder.Grow(len(config) * averageParameterLength)
 	writeSortedConfig(&builder, config)
 	return builder.String()
-}
-
-func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
-	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, node.Spec.Image))
 }
 
 // Return a base config of parameters that users shouldn't be able to override.
@@ -290,19 +285,6 @@ func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
 	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
 }
 
-// nodeServerConfigRollHash derives the config roll hash from the node spec:
-// the rendered server config minus live-settable keys. Parents copy Config and
-// TLS verbatim onto the node spec, so this hash is byte-identical to the hash
-// the ValkeyCluster controller computes from its own spec — a hard requirement,
-// since a divergence would change every pod template on operator upgrade and
-// roll every pod (see config_rollhash_test.go).
-func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
-	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
-}
-
 // Create or update a default valkey.conf
 // If additional config is provided, append to the default map
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
@@ -339,10 +321,10 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
 
 	// Look for, and fetch existing configMap for this cluster
-	serverConfigMapName := GetServerConfigMapName(cluster.Name)
+	sharedConfigMapName := GetSharedConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      serverConfigMapName,
+		Name:      sharedConfigMapName,
 		Namespace: cluster.Namespace,
 	}, serverConfigMap); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -351,11 +333,11 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		}
 
 		// ConfigMap not found; This happens on cluster init
-		log.V(2).Info("creating server configMap", "name", serverConfigMapName)
+		log.V(2).Info("creating shared configMap", "name", sharedConfigMapName)
 
 		// Create configMap object with contents
 		serverConfigMap.ObjectMeta = metav1.ObjectMeta{
-			Name:      serverConfigMapName,
+			Name:      sharedConfigMapName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{

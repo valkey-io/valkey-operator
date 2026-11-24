@@ -28,13 +28,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOperatorUserPasswordSecret(t *testing.T) {
 	sel := operatorUserPasswordSecret("c1")
 	assert.NotNil(t, sel)
-	assert.Equal(t, "internal-c1-system-passwords", sel.Name)
+	assert.Equal(t, "valkey-c1-system-passwords", sel.Name)
 	assert.Equal(t, "_operator", sel.Key)
 	assert.NotNil(t, sel.Optional)
 	assert.True(t, *sel.Optional)
@@ -307,6 +308,58 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	}))
 }
 
+// The API server requires the Secret's name, but a cluster stored before it
+// did keeps a user without one through validation ratcheting. The operator no
+// longer reads <cluster>-users for such a user, and names the missing field.
+func TestReconcileUsersAclNamesTheUnsetSecretNameField(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	newReconciler := func() *ValkeyClusterReconciler {
+		fallback := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-users", Namespace: "ns"},
+			Data:       map[string][]byte{"alice": []byte("alice-pw")},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fallback).Build()
+		return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(100)}
+	}
+	cluster := func(spec valkeyiov1alpha1.ValkeyClusterSpec) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "cluster-uid"}, Spec: spec}
+	}
+
+	for desc, tc := range map[string]struct {
+		spec valkeyiov1alpha1.ValkeyClusterSpec
+		want string
+	}{
+		"spec.acl.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+				Name:     "alice",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"alice"}}},
+			}}}},
+			want: "user alice: password.secret.name is not set",
+		},
+		"spec.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Users: []valkeyiov1alpha1.UserAclSpec{{Name: "alice", Enabled: true}}}, //nolint:staticcheck // legacy spec.users
+			want: "user alice: passwordSecret.name is not set",
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			err := newReconciler().reconcileUsersAcl(ctx, cluster(tc.spec))
+			var unresolved *userSecretUnresolvedError
+			require.ErrorAs(t, err, &unresolved, "kept on the last good aclfile like a missing Secret")
+			assert.EqualError(t, err, tc.want)
+		})
+	}
+
+	t.Run("not for a disabled user", func(t *testing.T) {
+		spec := valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+			Name: "alice", State: valkeyiov1alpha1.ACLUserStateDisabled,
+		}}}}
+		require.NoError(t, newReconciler().reconcileUsersAcl(ctx, cluster(spec)))
+	})
+}
+
 func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -316,14 +369,15 @@ func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
 		{"empty", []byte{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "cache-users", Namespace: "default"},
 				Data:       map[string][]byte{"alice": tt.value},
 			}
-			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-			hashes, err := fetchUserPasswords(context.Background(), valkeyiov1alpha1.ACLUserSpec{Name: "alice"}, reader, "cache", "default")
+			user := valkeyiov1alpha1.ACLUserSpec{
+				Name:     "alice",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "cache-users"}},
+			}
+			hashes, err := fetchUserPasswords(context.Background(), user, "password.secret.name", providerTestClient(t, secret), "default")
 			require.NoError(t, err)
 			assert.Equal(t, []string{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, hashes)
 		})

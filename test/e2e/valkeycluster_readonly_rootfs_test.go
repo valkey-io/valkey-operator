@@ -99,7 +99,7 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 		// can't write nodes.conf to a read-only rootfs.
 		By("verifying the ConfigMap sets dir and cluster-config-file under /data")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(noPersistClusterName),
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(noPersistClusterName),
 				"-o", "jsonpath={.data.valkey\\.conf}",
 				"-n", pssRestrictedNamespace)
 			output, err := utils.Run(cmd)

@@ -63,7 +63,7 @@ var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "P
 
 		By("verifying the ConfigMap contains persistence settings")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(persistentClusterName), "-o", "jsonpath={.data.valkey\\.conf}")
+			cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(persistentClusterName), "-o", "jsonpath={.data.valkey\\.conf}")
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("dir /data"))

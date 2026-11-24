@@ -28,6 +28,7 @@ import (
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -100,15 +101,11 @@ var (
 )
 
 func getInternalSecretName(clusterName string) string {
-	return "internal-" + clusterName + "-acl"
-}
-
-func getDefaultSecretName(clusterName string) string {
-	return clusterName + "-users"
+	return resourcePrefix + clusterName + "-acl"
 }
 
 func getSystemPasswordSecretName(clusterName string) string {
-	return "internal-" + clusterName + "-system-passwords"
+	return resourcePrefix + clusterName + "-system-passwords"
 }
 
 // operatorUserPasswordSecret returns a SecretKeySelector for the operator-managed
@@ -128,50 +125,33 @@ func operatorUserPasswordSecret(clusterName string) *corev1.SecretKeySelector {
 func (r *ValkeyClusterReconciler) createSystemUsersAcl(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("getting system users secret: " + cluster.Name)
-	var systemsAcls strings.Builder
-	systemUserSecret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: cluster.Namespace,
-		Name:      getSystemPasswordSecretName(cluster.Name),
-	}, systemUserSecret)
+	// Every reconcile, including one where the Secret is already complete.
+	// Rotation is decided here. A Get that finds the Secret and returns
+	// would leave the passwords in place forever.
+	systemUserSecret, err := r.upsertSystemUsersPasswordSecret(ctx, cluster)
 	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch system users secret")
-			return "", err
-		}
-		systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
-		if err != nil {
-			log.Error(err, "failed to create system user secret")
-			return "", err
-		}
+		log.Error(err, "failed to reconcile system user secret")
+		return "", err
 	}
 
-	err = validateSystemUserPasswordSecret(systemUserSecret.Data, cluster)
-	if err != nil {
-		if errors.Is(err, errMissingSystemUser) {
-			systemUserSecret, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
-			if err != nil {
-				log.Error(err, "failed to update system user secret")
-				return "", err
-			}
-		} else {
-			// error is unknown system user, either by manual modification, or removal from between valkey-operator versions
-			log.Error(err, "error validating system user secret")
-		}
+	var systemsAcls strings.Builder
+	if err := validateSystemUserPasswordSecret(systemUserSecret.Data, cluster); err != nil && !errors.Is(err, errMissingSystemUser) {
+		// Unknown key, from a hand edit or a user removed between versions.
+		log.Error(err, "error validating system user secret")
 	}
 
 	for _, user := range systemUsers {
 		if user == exporterUser && !cluster.Spec.ExporterEnabled() {
 			continue
 		}
-		passwordHash := fmt.Sprintf("%x", sha256.Sum256(systemUserSecret.Data[user]))
+		passwordHashes := systemUserPasswordHashes(systemUserSecret.Data, user)
 		userAcl := valkeyiov1alpha1.ACLUserSpec{
 			Name: user,
 			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 				RawAcl: systemUsersAcls[user],
 			},
 		}
-		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, []string{passwordHash}))
+		fmt.Fprintf(&systemsAcls, "%s\n", buildUserAcl(userAcl, passwordHashes))
 	}
 
 	return systemsAcls.String(), nil
@@ -230,10 +210,11 @@ func (r *ValkeyClusterReconciler) reconcileUsersAcl(ctx context.Context, cluster
 
 	// Process each user, generating a complete ACL string
 	var usersAcls strings.Builder
+	nameField := passwordSecretNameField(cluster)
 	for _, user := range users {
 
 		// Get passwords from Secret
-		passwords, err := fetchUserPasswords(ctx, user, r.APIReader, cluster.Name, cluster.Namespace)
+		passwords, err := fetchUserPasswords(ctx, user, nameField, r.APIReader, cluster.Namespace)
 		if err != nil {
 			if _, ok := errors.AsType[*userSecretUnresolvedError](err); ok {
 				return err // already names the user
@@ -351,24 +332,42 @@ func buildUserAcl(user valkeyiov1alpha1.ACLUserSpec, passwords []string) string 
 }
 
 // userSecretUnresolvedError reports a user whose password the operator cannot
-// read: the referenced Secret is missing, or it lacks a key listed in
-// password.secret.keys. The cluster controller keeps the last good aclfile and
-// reports the user on the Degraded condition; see reportUsersACLUnresolved.
+// read: the user names no Secret, the referenced Secret is missing, or it
+// lacks a key listed in password.secret.keys. The cluster controller keeps the
+// last good aclfile and reports the user on the Degraded condition; see
+// reportUsersACLUnresolved.
 type userSecretUnresolvedError struct {
 	User   string
 	Secret string
 	Key    string
+	// NameField is the unset field that names the Secret, when Secret is empty.
+	NameField string
 }
 
 func (e *userSecretUnresolvedError) Error() string {
-	if e.Key == "" {
+	switch {
+	case e.Secret == "":
+		return fmt.Sprintf("user %s: %s is not set", e.User, e.NameField)
+	case e.Key == "":
 		return fmt.Sprintf("user %s: Secret %s not found", e.User, e.Secret)
+	default:
+		return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
 	}
-	return fmt.Sprintf("user %s: Secret %s has no key %s", e.User, e.Secret, e.Key)
 }
 
-// Fetches a Secret, and looks for referenced passwords
-func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, apiClient client.Reader, clusterName, clusterNamespace string) ([]string, error) {
+// passwordSecretNameField is the field that names a user's password Secret:
+// password.secret.name, or passwordSecret.name in the deprecated spec.users.
+func passwordSecretNameField(cluster *valkeyiov1alpha1.ValkeyCluster) string {
+	if cluster.Spec.ACL == nil || len(cluster.Spec.ACL.Users) == 0 {
+		return "passwordSecret.name"
+	}
+	return "password.secret.name"
+}
+
+// Fetches a Secret, and looks for referenced passwords. The API server
+// requires the Secret's name, but a cluster stored before it did may lack it;
+// nameField is the field the error names then.
+func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, nameField string, apiClient client.Reader, clusterNamespace string) ([]string, error) {
 
 	log := logf.FromContext(ctx)
 
@@ -377,15 +376,11 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 	if !enabled || user.PasswordType() != valkeyiov1alpha1.ACLPasswordTypeSecret {
 		return []string{}, nil
 	}
-	passwordSecret := valkeyiov1alpha1.PasswordSecretSpec{}
-	if user.Password != nil && user.Password.Secret != nil {
-		passwordSecret = *user.Password.Secret
+	if user.Password == nil || user.Password.Secret == nil || user.Password.Secret.Name == "" {
+		return []string{}, &userSecretUnresolvedError{User: user.Name, NameField: nameField}
 	}
-	// Look for a Secret matching the user-provided name, or clusterName-users
-	userSecretName := getDefaultSecretName(clusterName)
-	if passwordSecret.Name != "" {
-		userSecretName = passwordSecret.Name
-	}
+	passwordSecret := *user.Password.Secret
+	userSecretName := passwordSecret.Name
 
 	// Query API for the referenced Secret
 	userSecret := &corev1.Secret{}
@@ -442,6 +437,17 @@ func fetchSystemUserPassword(ctx context.Context, username string, apiClient cli
 		Namespace: clusterNamespace,
 		Name:      getSystemPasswordSecretName(clusterName),
 	}, systemSecret)
+	if apierrors.IsNotFound(err) {
+		// The ValkeyNode controller and the role poller dial an upgraded
+		// cluster before its cluster reconcile has copied the legacy Secret.
+		legacyErr := apiClient.Get(ctx, types.NamespacedName{
+			Namespace: clusterNamespace,
+			Name:      legacySystemPasswordSecretName(clusterName),
+		}, systemSecret)
+		if !apierrors.IsNotFound(legacyErr) {
+			err = legacyErr
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -488,7 +494,7 @@ func validateSystemUserPasswordSecret(data map[string][]byte, cluster *valkeyiov
 		return fmt.Errorf("%w: %s", errMissingSystemUser, user)
 	}
 	for user := range data {
-		if !slices.Contains(systemUsers, user) {
+		if !isSystemPasswordKey(user) {
 			return fmt.Errorf("%w: %s", errUnknownSystemUser, user)
 		}
 	}
@@ -499,25 +505,21 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	log := logf.FromContext(ctx)
 	var createSecret bool
 	secretName := getSystemPasswordSecretName(cluster.Name)
-	systemUsersSecret := &corev1.Secret{}
-
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      secretName,
-		Namespace: cluster.Namespace,
-	}, systemUsersSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch system users secret")
-			return nil, err
-		}
+	systemUsersSecret, err := r.operatorSecret(ctx, cluster, secretName, legacySystemPasswordSecretName(cluster.Name))
+	if err != nil {
+		log.Error(err, "failed to fetch system users secret")
+		return nil, err
+	}
+	if systemUsersSecret == nil {
 		log.V(2).Info("creating internal secret", "secretName", secretName)
 
+		systemUsersSecret = &corev1.Secret{}
 		systemUsersSecret.Type = AclSecretType
 		systemUsersSecret.ObjectMeta = metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 		}
-		systemUsersSecret.Data = make(map[string][]byte)
 		// Register ownership of the new internal Secret
 		if err := controllerutil.SetControllerReference(cluster, systemUsersSecret, r.Scheme); err != nil {
 			log.Error(err, "Failed to grab ownership of system users secret")
@@ -526,7 +528,11 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		}
 		createSecret = true
 	}
+	if systemUsersSecret.Data == nil {
+		systemUsersSecret.Data = make(map[string][]byte)
+	}
 
+	filled := map[string]bool{}
 	for _, user := range systemUsers {
 		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
 			continue
@@ -541,15 +547,49 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 			return systemUsersSecret, err
 		}
 		systemUsersSecret.Data[user] = password
+		filled[user] = true
 	}
 
-	var err error
+	beforeRotation := systemUsersSecret.DeepCopy()
+	signals, err := r.systemPasswordSignals(ctx, cluster, systemUsersSecret)
+	if err == nil {
+		signals.SkipNext = filled
+		err = advanceSystemPasswordRotation(systemUsersSecret, cluster.Spec.ExporterEnabled(), signals)
+	}
+	// A held rotation has no pod state to go on, so it leaves
+	// ExporterPasswordHeld as it was.
+	rotationHeld := err != nil
+	if rotationHeld {
+		// The users and ACLs do not depend on a rotation step, so a failed
+		// step holds the rotation where it was instead of failing them.
+		log.Error(err, "system password rotation held")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordRotationHeld", "ReconcileUsers",
+			"System password rotation is held: %v", err)
+		systemUsersSecret = beforeRotation.DeepCopy()
+	}
+	// A steady Secret is not written again. An Update on every reconcile
+	// would change its resourceVersion and requeue the cluster forever.
+	if !createSecret && len(filled) == 0 && equality.Semantic.DeepEqual(beforeRotation, systemUsersSecret) {
+		if !rotationHeld {
+			r.syncExporterPasswordHold(cluster, systemUsersSecret, signals)
+		}
+		return systemUsersSecret, nil
+	}
+
 	if createSecret {
 		err = r.Create(ctx, systemUsersSecret)
 	} else {
 		err = r.Update(ctx, systemUsersSecret)
 	}
-	return systemUsersSecret, err
+	if err != nil {
+		return systemUsersSecret, err
+	}
+	// Only after a successful write, so the condition matches the stored Secret.
+	if !rotationHeld {
+		r.syncExporterPasswordHold(cluster, systemUsersSecret, signals)
+	}
+	r.recordSystemPasswordRotation(cluster, beforeRotation, systemUsersSecret)
+	return systemUsersSecret, nil
 }
 
 func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, aclBytes []byte) error {
@@ -557,20 +597,17 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 	aclHash := fmt.Sprintf("%x", sha256.Sum256(aclBytes))
 	// An "internal" secrets object is used for synchronization
 	internalSecretName := getInternalSecretName(cluster.Name)
-	internalAclSecret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      internalSecretName,
-		Namespace: cluster.Namespace,
-	}, internalAclSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to fetch internal acl secret")
-			return err
-		}
-
+	internalAclSecret, err := r.operatorSecret(ctx, cluster, internalSecretName, legacyInternalSecretName(cluster.Name))
+	if err != nil {
+		log.Error(err, "failed to fetch internal acl secret")
+		return err
+	}
+	if internalAclSecret == nil {
 		// Internal secret was not found.
 		// Init, and add metadata to the new Secret object
 		log.V(2).Info("creating internal secret", "secretName", internalSecretName)
 
+		internalAclSecret = &corev1.Secret{}
 		internalAclSecret.ObjectMeta = metav1.ObjectMeta{
 			Name:      internalSecretName,
 			Namespace: cluster.Namespace,
@@ -612,6 +649,9 @@ func (r *ValkeyClusterReconciler) upsertInternalAclSecret(ctx context.Context, c
 		return nil
 	}
 	// Hashes are different; Update the acl contents of the internal secret
+	if internalAclSecret.Data == nil {
+		internalAclSecret.Data = map[string][]byte{}
+	}
 	internalAclSecret.Data[aclFilename] = aclBytes
 
 	// Update secret

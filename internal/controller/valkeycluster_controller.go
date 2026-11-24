@@ -1452,12 +1452,13 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
-	slots := state.GetUnassignedSlots()
+	slots := state.AssignableSlots()
 	if len(slots) == 0 {
-		// Scale-out: all slots already assigned to existing primaries.
-		// New primaries stay in PendingNodes; the rebalancer will find
-		// them and migrate slots to them.
-		log.V(1).Info("no unassigned slots; new primaries will receive slots via rebalance", "count", len(primaries))
+		// Scale-out: all slots already assigned to existing primaries, or
+		// held for a primary this pass did not scrape. New primaries stay in
+		// PendingNodes; the rebalancer will find them and migrate slots to
+		// them.
+		log.V(1).Info("no assignable slots; new primaries will receive slots via rebalance", "count", len(primaries))
 		return 0, nil
 	}
 

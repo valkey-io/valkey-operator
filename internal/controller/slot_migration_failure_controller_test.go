@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,8 +49,16 @@ type migrationStateServer struct {
 	addr     string
 	reply    func() [][]string
 
-	mu    sync.Mutex
-	clock func() time.Time
+	mu       sync.Mutex
+	clock    func() time.Time
+	received [][]string
+}
+
+// commands returns every command the server has received, in order.
+func (s *migrationStateServer) commands() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.received)
 }
 
 // setClock sets the time the server answers TIME with.
@@ -88,6 +97,9 @@ func (s *migrationStateServer) handle(conn net.Conn) {
 		if err != nil {
 			return
 		}
+		s.mu.Lock()
+		s.received = append(s.received, cmd)
+		s.mu.Unlock()
 		if _, err := w.WriteString(s.respond(cmd)); err != nil {
 			return
 		}
@@ -585,5 +597,73 @@ func TestHandleScaleInDrainedKeepsRebalanceFailed(t *testing.T) {
 				t.Fatalf("lastTransitionTime = %v, want %v", cond.LastTransitionTime, since)
 			}
 		})
+	}
+}
+
+// sentMigrateSlots reports whether the server received CLUSTER MIGRATESLOTS.
+func sentMigrateSlots(s *migrationStateServer) bool {
+	for _, cmd := range s.commands() {
+		if len(cmd) > 1 && strings.EqualFold(cmd[0], "CLUSTER") && strings.EqualFold(cmd[1], "MIGRATESLOTS") {
+			return true
+		}
+	}
+	return false
+}
+
+// knowDestination gives the source a peer table that lists the destination,
+// so the move gets past the gossip gate to MIGRATESLOTS.
+func knowDestination(src *valkey.ShardState) {
+	src.Nodes[0].SetClusterNodesForTesting(
+		"src-primary-id 127.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n" +
+			"dst-primary-id 10.0.0.2:6379@16379 master - 0 0 2 connected\n")
+}
+
+// TestRebalanceSlotsRetriesAfterWindow: once a failure is older than the
+// window on the node's clock, the rebalance issues the move again.
+func TestRebalanceSlotsRetriesAfterWindow(t *testing.T) {
+	nodeNow := time.Now()
+	server := newMigrationStateServer(t, func() [][]string {
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "handshake failed", nodeNow.Add(-3*time.Minute))}
+	})
+	server.setClock(func() time.Time { return nodeNow })
+	src, dst := rebalanceFixture(t, server)
+	knowDestination(src)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = 2
+
+	move, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	if err != nil {
+		t.Fatalf("an aged-out failure must not error, got %v", err)
+	}
+	if move == nil {
+		t.Fatal("expected the rebalance to return the move it issued")
+	}
+	if !sentMigrateSlots(server) {
+		t.Fatalf("expected CLUSTER MIGRATESLOTS, got %q", server.commands())
+	}
+}
+
+// TestDrainExcessShardsRetriesAfterWindow: the same for a scale-in drain.
+func TestDrainExcessShardsRetriesAfterWindow(t *testing.T) {
+	nodeNow := time.Now()
+	server := newMigrationStateServer(t, func() [][]string {
+		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed", nodeNow.Add(-3*time.Minute))}
+	})
+	server.setClock(func() time.Time { return nodeNow })
+	cluster, state, nodes := scaleInFixture(t, server, 1, false)
+	knowDestination(state.Shards[0])
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	drained, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
+	if err != nil {
+		t.Fatalf("an aged-out failure must not error, got %v", err)
+	}
+	if !drained {
+		t.Fatal("expected the drain to report a batch in flight")
+	}
+	if !sentMigrateSlots(server) {
+		t.Fatalf("expected CLUSTER MIGRATESLOTS, got %q", server.commands())
 	}
 }

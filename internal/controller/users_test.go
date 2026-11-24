@@ -360,26 +360,26 @@ func TestReconcileUsersAclNamesTheUnsetSecretNameField(t *testing.T) {
 	})
 }
 
-func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		value []byte
+func TestPreHashedPassword(t *testing.T) {
+	const hash = "a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+		wantHash bool
 	}{
-		{"nil", nil},
-		{"empty", []byte{}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "cache-users", Namespace: "default"},
-				Data:       map[string][]byte{"alice": tt.value},
-			}
-			user := valkeyiov1alpha1.ACLUserSpec{
-				Name:     "alice",
-				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "cache-users"}},
-			}
-			hashes, err := fetchUserPasswords(context.Background(), user, "password.secret.name", providerTestClient(t, secret), "default")
-			require.NoError(t, err)
-			assert.Equal(t, []string{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, hashes)
+		{"lowercase hash", "#" + hash, hash, true},
+		{"uppercase hash is lowercased", "#" + strings.ToUpper(hash), hash, true},
+		{"65 bytes but not hex is plaintext", "#" + strings.Repeat("z", 64), "", false},
+		{"hash with trailing newline is plaintext", "#" + hash + "\n", "", false},
+		{"no leading #", "x" + hash, "", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := preHashedPassword([]byte(tc.in))
+			assert.Equal(t, tc.wantHash, ok)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }

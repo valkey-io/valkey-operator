@@ -571,21 +571,36 @@ func TestSlotMigrationState_NodeClockBehind(t *testing.T) {
 	}
 }
 
-// TestSlotMigrationState_TimeErrorReturned: without the node's time the age
-// of a matching failure is unknown, so the reconcile gets an error.
-func TestSlotMigrationState_TimeErrorReturned(t *testing.T) {
-	s := newMigrationServer(t, func() [][]string {
-		return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake failed", time.Now())}
-	})
-	s.failTime()
-	node := migrationNode(t, s)
+// TestSlotMigrationState_TimeErrorFallsBackToOperatorClock: a node whose
+// aclfile predates the +time grant denies TIME. Failed jobs then age on the
+// operator's clock: a recent one is reported with its own message, and an
+// old one no longer holds the move, so the retry is not blocked forever.
+func TestSlotMigrationState_TimeErrorFallsBackToOperatorClock(t *testing.T) {
+	for name, tc := range map[string]struct {
+		age      time.Duration
+		reported bool
+	}{
+		"recent": {30 * time.Second, true},
+		"old":    {10 * time.Minute, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newMigrationServer(t, func() [][]string {
+				return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake failed", time.Now().Add(-tc.age))}
+			})
+			s.failTime()
+			node := migrationNode(t, s)
 
-	_, _, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
-	if err == nil {
-		t.Fatal("expected an error when TIME fails")
-	}
-	if !strings.Contains(err.Error(), "time failed on") {
-		t.Errorf("error = %q, want it to name the TIME failure", err)
+			_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
+			if err != nil {
+				t.Fatalf("a TIME error must not block the move, got %v", err)
+			}
+			if got := failed != nil; got != tc.reported {
+				t.Fatalf("reported = %v, want %v (%+v)", got, tc.reported, failed)
+			}
+			if failed != nil && failed.Message != "handshake failed" {
+				t.Errorf("message = %q, want the job's own", failed.Message)
+			}
+		})
 	}
 }
 

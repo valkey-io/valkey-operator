@@ -55,7 +55,7 @@ var _ = Describe("ValkeyNode status writes from a stale read", func() {
 		ctx = context.Background()
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "stale-status-test", Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 	})

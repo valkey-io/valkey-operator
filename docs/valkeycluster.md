@@ -14,6 +14,7 @@
 - [Containers](#containers)
 - [Default images](#default-images)
 - [Metrics](#metrics)
+- [Operator-managed Secrets](#operator-managed-secrets)
 - [Persistence](#persistence)
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
@@ -41,6 +42,8 @@ maxclients
 maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
 maxmemory-policy
 ```
+
+Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. A pod that restarts before the new file reaches it boots with the previous value, and the operator sets the current value with CONFIG SET once the pod is ready. Changing any other key rolls the pods one at a time.
 
 #### Failover tuning
 
@@ -71,9 +74,38 @@ For example, `tls-auto-reload-interval` requires Valkey `9.1.0` or newer.
 
 Apply the image change and wait for the roll to finish before adding a version-gated directive. Adding both in one spec change can write the new config to the shared ConfigMap before every node has the new image, and a node still on the old image can crash-loop if it restarts.
 
-#### Constraints
+#### Reserved keys
 
-- Cluster management settings owned by the operator cannot be overwritten
+The operator owns the keys below and rejects them in `config`. It sets each one itself, either in the base `valkey.conf` or as a `valkey-server` command-line flag. A user value would be overridden and the intent lost without a signal, so the CRD rejects it at admission. Keys are matched case-insensitively.
+
+```
+aclfile
+cluster-allow-replica-migration
+cluster-announce-hostname
+cluster-announce-ip
+cluster-config-file
+cluster-enabled
+cluster-preferred-endpoint-type
+cluster-replica-validity-factor
+dir
+port
+primaryauth
+primaryuser
+protected-mode
+shutdown-on-sigterm
+tls-auth-clients
+tls-auth-clients-user
+tls-ca-cert-file
+tls-cert-file
+tls-cluster
+tls-key-file
+tls-port
+tls-replication
+```
+
+Cluster directives the operator does not set, such as `cluster-require-full-coverage`, `cluster-migration-barrier` and `cluster-node-timeout`, stay available.
+
+Keys may contain only lowercase letters, digits, `.`, `_` and `-`. Valkey matches keys in any case, but the operator picks out live-settable keys such as `maxmemory` by exact name, so it would not apply `MAXMEMORY` live. Valkey also trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
 
 #### Future plans
 
@@ -138,10 +170,10 @@ The operator requires the `--default-valkey-image` and `--default-exporter-image
 flags. A ValkeyCluster or ValkeyNode uses these images when `spec.image` or
 `spec.exporter.image` is empty.
 
-- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster or
-  standalone ValkeyNode that omits `spec.image`.
+- Changing `--default-valkey-image` rolls the pods of every ValkeyCluster that
+  omits `spec.image`.
 - Changing `--default-exporter-image` rolls pods with an enabled exporter whose
-  ValkeyCluster or standalone ValkeyNode omits `spec.exporter.image`.
+  ValkeyCluster omits `spec.exporter.image`.
 
 When upgrading a deployment that supplies its own manager arguments, add both
 flags. To keep the previous image defaults, use
@@ -222,6 +254,10 @@ The operator creates a `PodDisruptionBudget` with `maxUnavailable: 1` selecting 
 | `Cluster` | Operator creates and owns a single cluster-wide PDB |
 | `Disabled` | Operator deletes the PDB if it exists and does not recreate it |
 
+A PDB counts a pod as available only when the pod is Ready. Each cluster pod has the readiness gate `valkey.io/initial-sync-complete`, which the operator sets once the pod holds its shard's data: it owns slots, or it is a replica that finished its full sync from its primary. The primary of a shard that is not in the cluster yet is marked straight away, since it has nothing to copy. Until then the pod is not Ready, so a node drain cannot evict a primary while its replacement replica is still copying the data. A dropped replication link does not clear the gate; a new full sync, a dataset load, or a restart of the server container does, and the pod has to show its data again. The operator's own roll waits for the containers to be ready, not for the gate.
+
+If the operator is down, new pods stay not Ready and drains wait until it is back; running pods keep their gate. The operator needs `get` and `patch` on `pods/status` to set it. A refused write holds the roll and is reported as `InitialSyncGateFailed`; see [status conditions](status-conditions.md#ready).
+
 ### Pod metadata
 
 ```yaml
@@ -236,7 +272,7 @@ podMetadata:
 
 Keys the operator owns are rejected: any label or annotation key under `valkey.io/`, and the `app.kubernetes.io/` `name`, `instance`, `component`, `part-of` and `managed-by` labels. Other `app.kubernetes.io/` keys, such as `app.kubernetes.io/version`, are allowed.
 
-Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-hash` annotation (85 bytes). Each map holds at most 1024 entries.
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB. Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 
@@ -641,7 +677,7 @@ acl:
   - `Secret` (default): the passwords referenced by `password.secret`
   - `Any`: any password authenticates (Valkey `nopass`)
   - `Disabled`: no password authenticates (Valkey `resetpass`). The user can still authenticate with a TLS client certificate; see [mTLS](mtls.md)
-- `password.secret`: one or more password keys from a Secret (multiple keys supported for rotation). Defaults to the Secret `<cluster>-users` and the username as key. Only valid with `type: Secret`
+- `password.secret`: the Secret that holds the user's passwords, in `name`, and the keys to read from it, in `keys` (multiple keys supported for rotation). `keys` defaults to the username. Only valid with `type: Secret`, and `name` is required for an enabled user with `type: Secret`. An empty Secret value sets an empty password: clients can authenticate with `AUTH <user> ""`. This differs from a missing key. Use `Any` to accept any password, or `Disabled` to disallow password authentication.
   If the Secret is missing or lacks a listed key, a cluster that already has an aclfile keeps it, reports the user on the `Degraded` condition (`UsersACLUnresolved`) and keeps reconciling everything else, so an asynchronously created Secret (External Secrets Operator, for example) does not block scaling. A new cluster still waits for every user's Secret before it starts. While a user is unresolved, a system user change reaches the system-passwords Secret but not the aclfile, so an exporter enabled in that state cannot authenticate until the Secret resolves.
 - `commands`: command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys`: key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
@@ -682,6 +718,9 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `spec.users` and `spec.acl.users` cannot both be non-empty. An empty list in one is accepted next to a non-empty list in the other, and the non-empty list is used
 - Usernames are 1 to 128 characters with no whitespace. `permissions` cannot contain a newline except a single trailing one, and key and channel patterns cannot contain whitespace
 - `password.secret` is only valid with `password.type: Secret`
+- An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
+
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, so set `password.secret.name: <cluster>-users` on every such user before upgrading.
 
 #### Migrating from `spec.users`
 
@@ -700,6 +739,43 @@ Move the list under `spec.acl.users`, replace the booleans and nest `passwordSec
 
 Drop `passwordSecret` from users whose `password.type` is not `Secret`. The permission fields (`commands`, `keys`, `channels`, `permissions`) keep their names. The generated ACL is the same for both fields, so moving users changes nothing on the running nodes.
 
+#### System password rotation
+
+The operator connects to Valkey as three internal users: `_operator` (the operator and the probes), `_replication` (replicas connecting to their primary) and `_exporter` (the metrics exporter). It generates their passwords once, in the Secret `valkey-<cluster>-system-passwords`, and by default never changes them.
+
+```yaml
+acl:
+  systemUsers:
+    passwordRotation:
+      intervalDays: 30
+```
+
+`acl.systemUsers.passwordRotation` turns on rotation. `intervalDays` (1 to 3650, default 30) is how long a password stays current, and the first rotation happens one interval after the field is set. A rotation never removes a password a client still uses:
+
+1. The operator generates the next password and loads it on every node next to the current one.
+2. Once every node accepts both, the new password becomes the one clients read. The operator reads the Secret on each connection, the probes and a restarting server read the mounted password files, and running replicas get the new password with `CONFIG SET primaryauth`.
+3. The old password is removed once the probes and replicas have switched, and no sooner than five minutes after the switch.
+
+The metrics exporter reads its password only when its container starts, and a rotation does not restart it. Its old password stays accepted until that container starts again more than five minutes after the switch, and the cluster reports [`ExporterPasswordHeld`](status-conditions.md#exporterpasswordheld) meanwhile. `_operator` and `_replication` keep rotating, but later rotations skip `_exporter` until then, so its password changes only when the pod restarts. To finish the exporter's rotation, restart the Valkey pods one at a time.
+
+Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets the clock, so turning it on again waits a full interval. A rotation already under way still finishes.
+
+A rotation step that fails, for example because the operator cannot list the pods it checks, leaves the rotation where it was and records a `SystemPasswordRotationHeld` warning event. Users and ACLs keep reconciling, and the step is tried again on the next reconcile.
+
+> **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
+
+### Operator-managed Secrets
+
+The operator creates these Secrets in the cluster's namespace. The ValkeyCluster controls them, so they are deleted with it.
+
+| Secret | Holds | Read by |
+|---|---|---|
+| `valkey-<cluster>-acl` | The aclfile: the users in `acl.users` and the operator's system users | Every node, which mounts it at `/config/users` and loads it with `ACL LOAD` |
+| `valkey-<cluster>-system-passwords` | The passwords of the `_operator`, `_replication` and `_exporter` system users, and the state of a [rotation](#system-password-rotation) in progress | The operator, and each pod: the probes and the server read the files mounted at `/etc/valkey/system-passwords`, `PRIMARY_AUTH` and `VALKEYCLI_AUTH` carry the same passwords as environment variables, and the exporter reads `REDIS_PASSWORD` |
+| `valkey-<cluster>-tls-trust` | The server root and the `clientAuth.ca` roots, only while `networking.tls.clientAuth.ca` is set | Every node, as `tls-ca-cert-file`. See [Trusting a separate client CA](mtls.md#trusting-a-separate-client-ca) |
+
+The `valkey-` prefix marks objects the operator owns, so do not give your own Secrets these names.
+
 ### Workload type
 
 ```yaml
@@ -715,6 +791,22 @@ workloadType: StatefulSet  # default
 - `metadata.name` is limited by the longest name derived from it. With `StatefulSet`, every ValkeyNode gets a StatefulSet named `valkey-<name>-<shard>-<node>`, and that name must stay within 52 characters: Kubernetes stamps each StatefulSet pod with a `controller-revision-hash` label made of the StatefulSet name and an 11-character suffix, label values are limited to 63 characters, and a longer StatefulSet never gets its pod. With single-digit shard and node indexes that allows a name of 41 characters; each extra digit in the highest shard index (`shards - 1`) or node index (`replicasPerShard`) takes one character away, so a scale-out that pushes an index into more digits is rejected as well. With `Deployment` there is no such label, and the limit is the headless Service `valkey-<name>`, a DNS label of at most 63 characters, so the name may have up to 56 characters. The ValkeyNode name `<name>-<shard>-<node>` is the `app.kubernetes.io/instance` label value of its pod with either workload type, so it must stay within 63 characters as well. The StatefulSet rule already keeps it there, and a `Deployment` cluster only reaches that limit with a long name and thousands of shards. All three rules are enforced at admission.
 - A cluster created before these rules whose name breaks them is frozen: the API server rejects every spec update until the cluster is scaled down to a size the rule accepts, or deleted. Both still work.
 - `metadata.name` must not contain `.`. Kubernetes accepts a dot in a custom resource name, but the headless Service `valkey-<name>` is a DNS label and cannot hold one. The API server rejects a dotted name at creation. A cluster created with a dotted name before this rule never got its Service; delete it and create it again under a name without a dot.
+
+### Pausing reconciliation
+
+```yaml
+metadata:
+  annotations:
+    valkey.io/pause-reconciliation: "true"
+```
+
+The annotation stops the operator from acting on the cluster, for example while you repair a shard by hand or look at a failed cluster before anything is changed. Only the exact value `"true"` pauses. Any other value, or removing the annotation, resumes reconciliation.
+
+The `Paused` column in `kubectl get valkeyclusters` shows `True` while the `ReconciliationPaused` condition is set. It is empty when the condition is absent.
+
+While the cluster is paused the operator creates, updates and deletes nothing that belongs to it, sends no commands to its Valkey nodes, not even the reads of the role poller, and leaves `spec` changes for later. It sets the `ReconciliationPaused` condition and records a `ReconciliationPaused` event, and looks at the cluster again every 30 seconds. Persistence finalizer metadata is still maintained on paused ValkeyNodes. Deleting a paused cluster still works, and a ValkeyNode that is being deleted still goes through its deletion handler, so with the `Delete` reclaim policy its workload and PVC are removed.
+
+The operator otherwise does not change objects it does not render itself, and the pause is the exception: it copies the annotation onto every ValkeyNode the cluster owns, and the ValkeyNode controller skips a node that carries it, so the StatefulSet or Deployment, `CONFIG SET` and `ACL LOAD` stay as they are as well. When the cluster resumes, the operator removes the annotation from all of its ValkeyNodes, including one you set on a node by hand. On resume, the cluster controller defers its normal work for one second to give node controllers a turn to refresh Pod IPs and readiness that stayed frozen during the pause. To pause a single node of a running cluster, pause the whole cluster.
 
 ## Architecture
 

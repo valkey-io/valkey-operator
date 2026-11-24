@@ -153,7 +153,7 @@ func effectiveWorkloadType(t valkeyiov1alpha1.WorkloadType) valkeyiov1alpha1.Wor
 // counts as a roll. The recorded IP can be stale, but then the failover finds
 // no primary at that address and does nothing. Config never enters the decision
 // directly: live-settable keys are applied via CONFIG SET (see applyLiveConfig)
-// and the roll-relevant subset reaches the template as a derived annotation
+// and the roll-relevant subset reaches the template through spec.configRevision
 // (see buildPodTemplateAnnotations), so it is captured by the hashes.
 func needsProactiveFailoverForRoll(current, desired *valkeyiov1alpha1.ValkeyNode, liveTemplateHash string) bool {
 	if current.Status.PodIP == "" {

@@ -84,13 +84,17 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		markRolledOut()
 		labels := valkeyNodeLabels(node)
 		labels[appsv1.StatefulSetRevisionLabel] = "rev-1"
+		labels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: valkeyNodeResourceName(node) + "-0", Namespace: node.Namespace, Labels: labels},
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status.PodIP = "10.0.0.9"
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 		return r.Reconcile(ctx, req)
@@ -124,12 +128,15 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 		}))).To(Succeed())
 		node = &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "trust-order-",
-				Namespace:    "default",
+				GenerateName:    "trust-order-",
+				Namespace:       "default",
+				OwnerReferences: testParentRefs(),
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				UsersACLSecretName: aclSecret,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				UsersACLSecretName:  aclSecret,
 				TLS: &valkeyiov1alpha1.NodeTLSSpec{
 					ServerName: "localhost",
 					Certificates: valkeyiov1alpha1.NodeTLSCertificates{
@@ -139,7 +146,7 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		Expect(k8sClient.Create(ctx, withParentFields(node))).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -231,8 +238,15 @@ var _ = Describe("ValkeyNode trust bundle reload ordering", func() {
 
 		latest := current()
 		latest.Spec.TLS.Certificates.TrustBundle = nil
+		Expect(setDesiredWorkloadRevision(latest)).To(Succeed())
 		Expect(k8sClient.Update(ctx, latest)).To(Succeed())
 		_, _ = r.Reconcile(ctx, req) // updates the StatefulSet template
+		sts := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: valkeyNodeResourceName(node)}, sts)).To(Succeed())
+		Expect(sts.Spec.Template.Spec.Volumes).To(ContainElement(SatisfyAll(
+			HaveField("Name", tlsVolumeName),
+			HaveField("Projected", BeNil()),
+		)))
 		markRolledOut()
 		delete(cfg.params, "tls-ca-cert-file")
 		_, err = r.Reconcile(ctx, req)

@@ -27,7 +27,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
@@ -61,10 +60,9 @@ var _ = Describe("ValkeyCluster persistence", Ordered, Label("ValkeyCluster", "P
 		}
 		Eventually(verifyClusterReady).Should(Succeed())
 
-		By("verifying the ConfigMap contains persistence settings")
+		By("verifying the node's pinned config contains persistence settings")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(persistentClusterName), "-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(persistentClusterName+"-0-0", "default")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("dir /data"))
 			g.Expect(output).To(ContainSubstring("cluster-config-file /data/nodes.conf"))

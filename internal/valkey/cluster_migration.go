@@ -27,13 +27,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// SlotMigrationInProgress checks whether the source node has any
-// non-terminal CLUSTER MIGRATESLOTS operations running.
-func SlotMigrationInProgress(ctx context.Context, src *NodeState) (bool, error) {
-	inProgress, _, err := SlotMigrationState(ctx, src, nil, "", nil)
-	return inProgress, err
-}
-
 // SlotMigrationFailure describes a failed CLUSTER MIGRATESLOTS job, as
 // reported by CLUSTER GETSLOTMIGRATIONS on the node that ran it.
 type SlotMigrationFailure struct {
@@ -107,35 +100,34 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 	}
 	var failed *SlotMigrationFailure
 	for _, migration := range migrations {
-		values, parseErr := migration.AsStrMap()
+		fields, parseErr := migration.AsMap()
 		if parseErr != nil {
 			log.V(1).Info("unable to parse slot migration entry; treating as in progress", "src", src.Address, "error", parseErr)
 			return true, nil, nil
 		}
-		state := strings.ToLower(values["state"])
+		// A missing or non-string field reads as "".
+		field := func(name string) string {
+			msg := fields[name]
+			v, _ := msg.ToString()
+			return v
+		}
+		state := strings.ToLower(field("state"))
 		if !isSlotMigrationTerminal(state) {
 			return true, nil, nil
 		}
 		if state != "failed" {
 			continue
 		}
-		fields, fieldErr := migration.AsMap()
-		if fieldErr != nil {
-			// Not a field/value structure; skip it rather than guessing.
-			log.V(1).Info("unable to parse slot migration entry fields", "src", src.Address, "error", fieldErr)
-			continue
-		}
 		job := SlotMigrationFailure{
-			TargetNode: values["target_node"],
-			Slots:      parseSlotRanges(values["slot_ranges"]),
-			Message:    values["message"],
+			TargetNode: field("target_node"),
+			Slots:      parseSlotRanges(field("slot_ranges")),
+			Message:    strings.TrimSpace(field("message")),
 			LastUpdate: time.Unix(0, 0),
 		}
-		// last_update_time is an integer reply, which AsStrMap does not
-		// carry, so read it from the typed field map. A missing or
-		// unparseable timestamp stays the zero time, and a zero-time job
-		// is never within the recency window, so a garbled entry cannot
-		// wedge the reconcile.
+		// last_update_time is an integer reply. A missing or unparseable
+		// timestamp stays the zero time, and a zero-time job is never
+		// within the recency window, so a garbled entry cannot wedge the
+		// reconcile.
 		if v, ok := fields["last_update_time"]; ok {
 			if t, err := v.AsInt64(); err == nil {
 				job.LastUpdate = time.Unix(t, 0).UTC()
@@ -167,7 +159,7 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 // Unparseable parts are skipped, matching the server's own format.
 func parseSlotRanges(s string) []SlotsRange {
 	var ranges []SlotsRange
-	for _, part := range strings.Fields(s) {
+	for part := range strings.FieldsSeq(s) {
 		start, end, ok := strings.Cut(part, "-")
 		first, err1 := strconv.Atoi(start)
 		last, err2 := strconv.Atoi(end)

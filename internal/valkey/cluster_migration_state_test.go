@@ -20,7 +20,7 @@ import (
 // CLUSTER GETSLOTMIGRATIONS with the entries produced by the reply
 // callback, recording every command it receives. Entries use the flat
 // field/value array form CLUSTER GETSLOTMIGRATIONS returns, so both RESP 3
-// maps and flat arrays parse through AsStrMap, matching production.
+// maps and flat arrays parse through AsMap, matching production.
 type migrationServer struct {
 	listener net.Listener
 	commands chan []string
@@ -224,6 +224,28 @@ func TestSlotMigrationState_FailedJobReported(t *testing.T) {
 	}
 	if got, want := failed.LastUpdate.Unix(), now.Add(-30*time.Second).Unix(); got != want {
 		t.Errorf("last update = %v, want %v", failed.LastUpdate, now.Add(-30*time.Second))
+	}
+}
+
+// TestSlotMigrationState_MessageTrimmed: Valkey stores the target's error
+// reply with its CRLF, which must not reach the condition message.
+func TestSlotMigrationState_MessageTrimmed(t *testing.T) {
+	now := time.Now()
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("failed", migTargetA, "0-399",
+			"Received error during handshake to target: -ERR Slots are being manually imported\r\n", now.Add(-30*time.Second))}
+	})
+	node := migrationNode(t, s)
+
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if failed == nil {
+		t.Fatal("the failed job was not reported")
+	}
+	if want := "Received error during handshake to target: -ERR Slots are being manually imported"; failed.Message != want {
+		t.Errorf("message = %q, want %q", failed.Message, want)
 	}
 }
 

@@ -493,6 +493,11 @@ func TestHandleScaleInMigrationFailureEmitsSlotRebalanceFailed(t *testing.T) {
 	if drainFailed {
 		t.Fatalf("an async migration failure must not emit DrainFailed, got %q", got)
 	}
+	for _, ev := range got {
+		if strings.Contains(ev, "SlotRebalanceFailed") && !strings.Contains(ev, "Draining excess shards: slot migration from ") {
+			t.Fatalf("event should name the drain once, got %q", ev)
+		}
+	}
 
 	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	if cond == nil {

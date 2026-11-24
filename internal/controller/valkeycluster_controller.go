@@ -1887,6 +1887,25 @@ func asyncSlotMigrationFailed(src, dst, message string) error {
 	return &slotMigrationFailedError{err: fmt.Errorf("slot migration from %s to %s failed: %s", src, dst, message)}
 }
 
+// migrationPending reports whether a migration is still running on the
+// move's source. A recent asynchronous failure of this move comes back as a
+// slotMigrationFailedError, so it reaches the same Degraded and Warning path
+// as a synchronous MIGRATESLOTS error instead of being re-issued every
+// reconcile.
+func migrationPending(ctx context.Context, move *valkey.SlotMove, ranges []valkey.SlotsRange) (bool, error) {
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, ranges, move.Dst.Id)
+	if err != nil {
+		return false, err
+	}
+	if inProgress {
+		return true, nil
+	}
+	if failed != nil {
+		return false, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
+	}
+	return false, nil
+}
+
 // rebalanceSlots plans one slot move and starts it. It returns the move while
 // the rebalance has work left, whether this pass migrated a batch or waited
 // for one in flight, and nil once the slots are balanced.
@@ -1897,20 +1916,14 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
-	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id)
+	ranges := valkey.SlotsToRanges(move.Slots)
+	inProgress, err := migrationPending(ctx, move, ranges)
 	if err != nil {
 		return nil, err
 	}
 	if inProgress {
 		log.V(1).Info("slot migration already in progress", "src", move.Src.Address)
 		return move, nil
-	}
-	if failed != nil {
-		// A migration the operator issued earlier failed asynchronously,
-		// after CLUSTER MIGRATESLOTS accepted it. Surface it through the
-		// same Degraded/Warning path as a synchronous MIGRATESLOTS error
-		// instead of silently re-issuing the same move every reconcile.
-		return nil, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
@@ -1922,7 +1935,6 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	log.V(1).Info("rebalancing slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancing", "RebalanceSlots", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
 
-	ranges := valkey.SlotsToRanges(move.Slots)
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			log.V(1).Info("slots no longer served by source; will retry with fresh state", "src", move.Src.Address, "dst", move.Dst.Address)
@@ -1974,7 +1986,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		// errors keep the DrainFailed event.
 		var migrationFailed *slotMigrationFailedError
 		if errors.As(err, &migrationFailed) {
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "ScaleIn", "Slot migration failed while draining excess shards: %v", err)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "ScaleIn", "Draining excess shards: %v", err)
 		} else {
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
 		}
@@ -2070,18 +2082,14 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return false, err
 	}
 
-	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id)
+	ranges := valkey.SlotsToRanges(move.Slots)
+	inProgress, err := migrationPending(ctx, move, ranges)
 	if err != nil {
 		return false, err
 	}
 	if inProgress {
 		log.V(1).Info("drain migration in progress", "src", move.Src.Address)
 		return true, nil
-	}
-	if failed != nil {
-		// Same as the rebalance path: surface an asynchronous
-		// migration failure instead of re-issuing the drain move.
-		return false, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
 	}
 
 	if !move.Src.KnowsNode(move.Dst.Id) {
@@ -2092,7 +2100,6 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 	log.V(1).Info("draining slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsDraining", "ScaleIn", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
 
-	ranges := valkey.SlotsToRanges(move.Slots)
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			return true, nil

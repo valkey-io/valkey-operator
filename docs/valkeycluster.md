@@ -718,7 +718,7 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `password.secret` is only valid with `password.type: Secret`
 - An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
 
-> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, so set `password.secret.name: <cluster>-users` on every such user before upgrading.
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone. On `spec.acl.users`, set `password.secret.name: <cluster>-users` on every such user. A stored `spec.users` cannot be changed, so move those users to `spec.acl.users` and set `password.secret.name` there.
 
 #### Migrating from `spec.users`
 

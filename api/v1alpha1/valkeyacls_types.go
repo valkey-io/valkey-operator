@@ -117,7 +117,7 @@ func (u ACLUserSpec) PasswordType() ACLPasswordType {
 }
 
 // An UserAclSpec contains user, authorization, and permissions-related configurations.
-// It is the legacy spec.users entry, replaced by ACLUserSpec and removed in v1beta1.
+// It is the legacy spec.users entry, replaced by ACLUserSpec.
 type UserAclSpec struct {
 
 	// Username

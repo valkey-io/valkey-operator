@@ -114,11 +114,12 @@ var _ = Describe("spec.acl validation", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("accepts legacy spec.users alone", func() {
+	It("rejects a new legacy spec.users", func() {
 		_, err := create(func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
 			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser} //nolint:staticcheck // legacy spec.users
 		})
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	// A typed client drops users: [] through omitempty, so send it unstructured

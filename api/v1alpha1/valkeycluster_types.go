@@ -299,6 +299,10 @@ var ReservedConfigKeys = []string{
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.replicas) && has(self.replicasPerShard))",message="spec.replicas is deprecated and cannot be combined with spec.replicasPerShard: remove spec.replicas (set it to null) in the same update",fieldPath=".replicasPerShard",reason="FieldValueForbidden"
+//
+// A new or changed spec.replicas or spec.users is rejected. optionalOldSelf runs the rule on create, where any value is new. An unchanged stored value stays valid. Clearing spec.replicas requires replicasPerShard equal to that stored count. Clearing spec.users requires every legacy user name on spec.acl.users.
+// +kubebuilder:validation:XValidation:rule="(!has(self.replicas) && (!oldSelf.hasValue() || !has(oldSelf.value().replicas) || (has(self.replicasPerShard) && self.replicasPerShard == oldSelf.value().replicas))) || (has(self.replicas) && oldSelf.hasValue() && has(oldSelf.value().replicas) && self.replicas == oldSelf.value().replicas)",optionalOldSelf=true,message="spec.replicas is deprecated and cannot be added or changed: set spec.replicasPerShard to the stored spec.replicas and remove spec.replicas in the same update",fieldPath=".replicas",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="((!has(self.users) || size(self.users) == 0) && (!oldSelf.hasValue() || !has(oldSelf.value().users) || size(oldSelf.value().users) == 0 || (has(self.acl) && has(self.acl.users) && oldSelf.value().users.all(u, self.acl.users.exists(a, a.name == u.name))))) || (oldSelf.hasValue() && has(oldSelf.value().users) && has(self.users) && self.users == oldSelf.value().users)",optionalOldSelf=true,message="spec.users is deprecated and cannot be added or changed: move every user name to spec.acl.users and remove spec.users in the same update",fieldPath=".users",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistence) || has(self.persistence)",message="persistence cannot be removed once set",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.persistence) || !has(self.persistence)",message="persistence cannot be added after creation",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!has(self.persistence) || !has(oldSelf.persistence) || quantity(self.persistence.size).compareTo(quantity(oldSelf.persistence.size)) >= 0",message="persistence.size may only be expanded",fieldPath=".persistence.size",reason="FieldValueForbidden"
@@ -356,7 +360,8 @@ type ValkeyClusterSpec struct {
 	Shards int32 `json:"shards"`
 
 	// Deprecated: use replicasPerShard, which has the same meaning. A spec
-	// cannot set both. This field is removed in v1beta1.
+	// cannot set both. A new or changed value is rejected. Removing it
+	// requires replicasPerShard set to this same count in that update.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
@@ -393,7 +398,8 @@ type ValkeyClusterSpec struct {
 
 	// Valkey users managed by the operator.
 	//
-	// Deprecated: use spec.acl.users; removed in v1beta1.
+	// Deprecated: use spec.acl.users. A new or changed value is rejected.
+	// Removing it requires every user name on spec.acl.users in that update.
 	//
 	// +listType=map
 	// +listMapKey=name

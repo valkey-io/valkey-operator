@@ -114,6 +114,22 @@ func TestOrphansToTakeOver(t *testing.T) {
 		assert.Empty(t, orphansToTakeOver(state))
 	})
 
+	t.Run("a dropped scrape still blocks takeover and counts toward quorum", func(t *testing.T) {
+		// CLUSTER INFO failed after MYID, so p0 is not in the topology. Its
+		// replica still has a stale fail?. p0 answered and owns slots.
+		state := quorumLost()
+		state.NoteAnsweredForTesting("p0", true)
+		assert.True(t, state.HasFailoverQuorum())
+		assert.Empty(t, orphansToTakeOver(state))
+	})
+
+	t.Run("a dropped scrape without slots blocks only that primary", func(t *testing.T) {
+		state := quorumLost()
+		state.NoteAnsweredForTesting("p0", false)
+		assert.False(t, state.HasFailoverQuorum())
+		assert.Equal(t, []string{"p1/r1"}, pairs(orphansToTakeOver(state)))
+	})
+
 	t.Run("never takes over a primary the operator reached", func(t *testing.T) {
 		// p0 answered the scrape, here as a slotless pending node so the
 		// served-shard rule does not apply; its replica's stale flag must not

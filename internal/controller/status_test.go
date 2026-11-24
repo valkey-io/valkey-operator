@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	"github.com/valkey-io/valkey-operator/internal/valkey"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -163,4 +164,41 @@ func TestNodesWithFailedACL(t *testing.T) {
 	g.Expect(nodesRejectingOperator(nodes)).To(Equal([]string{"locked-out-a", "locked-out-b"}))
 	g.Expect(nodesRejectingOperator(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
 	g.Expect(nodesWithFailedACL(&valkeyiov1alpha1.ValkeyNodeList{})).To(BeEmpty())
+}
+
+func TestApplyNodesUnreachable(t *testing.T) {
+	g := NewWithT(t)
+
+	ctx := context.Background()
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Generation = 3
+	recorder := events.NewFakeRecorder(10)
+	r := &ValkeyClusterReconciler{Recorder: recorder}
+
+	r.applyNodesUnreachable(ctx, cluster, &valkey.ClusterState{})
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionNodesUnreachable)).To(BeNil())
+
+	state := &valkey.ClusterState{}
+	state.NoteIncompleteForTesting("10.0.0.4", "abc", false)
+	r.applyNodesUnreachable(ctx, cluster, state)
+
+	cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionNodesUnreachable)
+	g.Expect(cond).NotTo(BeNil())
+	g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+	g.Expect(cond.Reason).To(Equal(valkeyiov1alpha1.ReasonNodeQueryFailed))
+	g.Expect(cond.Message).To(Equal("could not query 10.0.0.4 (id abc, no slot table)"))
+	g.Expect(cond.ObservedGeneration).To(Equal(int64(3)))
+	g.Eventually(recorder.Events).Should(Receive(ContainSubstring("10.0.0.4")), "the NodesUnreachable Warning was not emitted")
+
+	// The same gap on the next pass must not raise another event.
+	r.applyNodesUnreachable(ctx, cluster, state)
+	g.Expect(recorder.Events).To(BeEmpty())
+
+	r.applyNodesUnreachable(ctx, cluster, &valkey.ClusterState{})
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionNodesUnreachable)).To(BeNil())
+
+	r.applyNodesUnreachable(ctx, cluster, state)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionNodesUnreachable)).NotTo(BeNil())
+	r.applyNodesUnreachable(ctx, cluster, nil)
+	g.Expect(meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionNodesUnreachable)).To(BeNil())
 }

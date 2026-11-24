@@ -2172,6 +2172,105 @@ var _ = Describe("reconcileValkeyNodes", func() {
 			"expected errShardRollSkipped, got %v (requeue=%v)", err, requeue)
 		Expect(requeue).To(BeFalse())
 	})
+
+	It("does not roll an unreadable shard whose primary still owns slots", func() {
+		By("creating all nodes, marking them ready and publishing pod IPs")
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+
+		By("dropping shard 0's scrapes after failover promoted node index 1")
+		// Neither member is in the topology. The promoted primary's own slot
+		// table was read before CLUSTER INFO failed, so the shard is serving.
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-2",
+					Slots:     []valkey.SlotsRange{{Start: 8192, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}},
+						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
+					},
+				},
+			},
+		}
+		state.NoteIncompleteForTesting("10.0.0.2", "promoted", true)
+		state.NoteIncompleteForTesting("10.0.0.1", "demoted", false)
+
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		shard0RVs := map[string]string{
+			node00: getResourceVersion(node00),
+			node01: getResourceVersion(node01),
+		}
+
+		By("rolling the readable shard and leaving the unreadable one alone")
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+		Expect(getImage(node11)).To(Equal(newImage))
+		for name, rv := range shard0RVs {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be rolled while its shard's scrape was dropped", name)
+			Expect(getImage(name)).NotTo(Equal(newImage), name)
+		}
+	})
+
+	It("does not roll a shard whose members all failed CLUSTER NODES while a peer lists its slots", func() {
+		By("creating all nodes, marking them ready and publishing pod IPs")
+		createAllNodes()
+		setPodIP(node00, "10.0.0.1")
+		setPodIP(node01, "10.0.0.2")
+		setPodIP(node10, "10.0.1.1")
+		setPodIP(node11, "10.0.1.2")
+
+		By("dropping both of shard 0's scrapes before either read its own slot table")
+		// Failover promoted node index 1. Shard 1's table still lists it
+		// owning 0-8191, which is all that says shard 0 is serving.
+		peer := &valkey.NodeState{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}}
+		peer.SetClusterNodesForTesting("node-2 10.0.1.1:6379@16379 myself,master - 0 0 2 connected 8192-16383\n" +
+			"promoted 10.0.0.2:6379@16379 master - 0 0 3 connected 0-8191\n" +
+			"demoted 10.0.0.1:6379@16379 slave promoted 0 0 3 connected\n")
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-2",
+					Slots:     []valkey.SlotsRange{{Start: 8192, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						peer,
+						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
+					},
+				},
+			},
+		}
+		state.SetTargetsForTesting("10.0.0.1", "10.0.0.2", "10.0.1.1", "10.0.1.2")
+		state.NoteIncompleteForTesting("10.0.0.2", "promoted", false)
+		state.NoteAnsweredForTesting("promoted", false)
+		state.NoteIncompleteForTesting("10.0.0.1", "demoted", false)
+		state.NoteAnsweredForTesting("demoted", false)
+
+		const newImage = "valkey/valkey:9.1.0"
+		cluster.Spec.Image = newImage
+		shard0RVs := map[string]string{
+			node00: getResourceVersion(node00),
+			node01: getResourceVersion(node01),
+		}
+
+		By("rolling the readable shard and leaving the unreadable one alone")
+		requeue, err := reconcileNodesWithState(state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requeue).To(BeTrue())
+		Expect(getImage(node11)).To(Equal(newImage))
+		for name, rv := range shard0RVs {
+			Expect(getResourceVersion(name)).To(Equal(rv),
+				"%s must not be rolled while a peer still lists its shard's slots", name)
+			Expect(getImage(name)).NotTo(Equal(newImage), name)
+		}
+	})
 })
 
 var _ = Describe("reconcileValkeyNode", func() {

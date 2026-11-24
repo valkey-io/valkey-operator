@@ -875,6 +875,11 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionNodesUnreachable names a pod the operator could not query this
+	// pass, or a primary whose slots stay held because it could not be
+	// reached. Non-blocking: Ready may stay True. The message names the
+	// address and id.
+	ConditionNodesUnreachable = "NodesUnreachable"
 	// ConditionExporterPasswordHeld is set while _exporter.previous is still
 	// accepted more than five minutes after the switch, and names the pods to
 	// restart. Non-blocking: the other system passwords keep rotating.
@@ -964,6 +969,14 @@ const (
 	// ReasonTLSWithIPAnnounce is used with ConditionTLSEndpointWarning when TLS
 	// is enabled and preferred endpoint type is IP (default or explicit).
 	ReasonTLSWithIPAnnounce = "TLSWithIPAnnounce"
+	// ReasonSlotsHeldForUnreachablePrimary is used with ConditionNodesUnreachable
+	// when a replica still follows a primary the operator could not reach, so
+	// its slots stay assigned to it. If that primary is down, they stay
+	// unserved until a replica takes over, by Valkey's failover or a manual one.
+	ReasonSlotsHeldForUnreachablePrimary = "SlotsHeldForUnreachablePrimary"
+	// ReasonNodeQueryFailed is used with ConditionNodesUnreachable when a pod
+	// did not return a usable identity or topology.
+	ReasonNodeQueryFailed = "NodeQueryFailed"
 	// ReasonTrustBundleError is used with ConditionReady when the operator
 	// cannot read a trust source or write valkey-<cluster>-tls-trust.
 	ReasonTrustBundleError = "TrustBundleError"

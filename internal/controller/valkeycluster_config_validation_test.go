@@ -45,7 +45,7 @@ func configCluster(name string, config map[string]string) *valkeyiov1alpha1.Valk
 
 const reservedKeyMessage = "must not set operator-owned keys"
 
-const keyFormatMessage = "keys may contain only letters, digits"
+const keyFormatMessage = "keys may contain only lowercase letters, digits"
 
 var _ = Describe("ValkeyCluster spec.config validation", func() {
 	ctx := context.Background()
@@ -93,6 +93,18 @@ var _ = Describe("ValkeyCluster spec.config validation", func() {
 		Entry("trailing space", "port "),
 		Entry("tab padded", "\tport"),
 		Entry("embedded space", "port x"),
+	)
+
+	// The operator matches live-settable keys as written, so MAXMEMORY would
+	// never be applied live.
+	DescribeTable("rejects keys that are not lowercase",
+		func(key string) {
+			err := k8sClient.Create(ctx, configCluster("cfg-upper", map[string]string{key: "40mb"}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(keyFormatMessage))
+		},
+		Entry("upper case", "MAXMEMORY"),
+		Entry("mixed case", "MaxMemory"),
 	)
 
 	It("admits an absent config", func() {

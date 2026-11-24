@@ -27,10 +27,6 @@ import (
 )
 
 const (
-	// configRevisionKey is the pod template annotation naming the pinned
-	// config revision (spec.configRevision) the pod boots on.
-	configRevisionKey = "valkey.io/config-revision"
-
 	liveConfigFileKey = "live.conf"
 
 	// pinnedConfigRevisionLength is the number of hex characters of the

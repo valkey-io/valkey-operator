@@ -987,15 +987,22 @@ spec:
                   Config is the user-facing Valkey configuration, copied verbatim from the
                   owning cluster's Spec.Config. The controller applies the subset of these
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
-                  the rest take effect on the next pod roll.
+                  the rest take effect on the next pod roll. Keys are lowercase, as the
+                  cluster's are.
+                maxProperties: 1000
                 type: object
+                x-kubernetes-validations:
+                - message: spec.config keys must be lowercase
+                  rule: self.all(key, key == key.lowerAscii())
               configRevision:
                 description: |-
                   ConfigRevision names the pinned config revision the pod template
                   references: the first 12 hex characters of the SHA-256 of the rendered
                   restart-only config. The parent sets it. It stays at the live workload's
                   revision while only live-settable keys differ, so those changes roll
-                  nothing.
+                  nothing. The node writes the key valkey-<rev>.conf in its ConfigMap
+                  valkey-<node> only when its own spec renders to this revision. A node
+                  stored before the field existed has none until its parent sets it.
                 pattern: ^[0-9a-f]{12}$
                 type: string
               containers:
@@ -2922,15 +2929,14 @@ spec:
                       type: string
                     description: |-
                       Annotations added to the object. Values have no format rule, but keys and
-                      values together are limited to 256 KiB less the operator's own annotation.
+                      values together are limited to 256 KiB.
                       Keys under valkey.io/ are reserved for the operator.
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
-                    - message: 'annotations must total at most 262107 characters (keys
-                        plus values): 256 KiB less the operator''s valkey.io/config-revision
-                        annotation'
-                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262107
+                    - message: annotations must total at most 262144 characters (keys
+                        plus values)
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262144
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending
@@ -3292,8 +3298,8 @@ spec:
               sharedConfigMapName:
                 description: |-
                   SharedConfigMapName names the ConfigMap the parent shares with its
-                  nodes. It holds the probe, init and primary handoff scripts and
-                  valkey.conf.
+                  nodes. It holds the probe, init and primary handoff scripts. A pod does
+                  not start until all four script keys are present.
                 minLength: 1
                 type: string
               terminationGracePeriodSeconds:

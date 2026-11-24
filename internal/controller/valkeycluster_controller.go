@@ -881,6 +881,10 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		existing = current
 	}
 	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
+		if errors.Is(err, errLiveConfigRevisionNotCached) {
+			log.V(1).Info("live config revision not cached yet, waiting", "name", desired.Name, "revision", live.configRevision)
+			return nodeRequeued, nil
+		}
 		return nodeUnchanged, err
 	}
 	if err := setDesiredWorkloadRevision(desired); err != nil {
@@ -1013,7 +1017,7 @@ func (r *ValkeyClusterReconciler) liveWorkloadTemplates(ctx context.Context, nod
 		}
 		out[n.Name] = liveWorkloadTemplate{
 			hash:           podTemplateRollHash(*template),
-			configRevision: template.Annotations[configRevisionKey],
+			configRevision: mountedConfigRevision(&template.Spec),
 		}
 	}
 	return out, nil
@@ -1452,12 +1456,13 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
-	slots := state.GetUnassignedSlots()
+	slots := state.AssignableSlots()
 	if len(slots) == 0 {
-		// Scale-out: all slots already assigned to existing primaries.
-		// New primaries stay in PendingNodes; the rebalancer will find
-		// them and migrate slots to them.
-		log.V(1).Info("no unassigned slots; new primaries will receive slots via rebalance", "count", len(primaries))
+		// Scale-out: all slots already assigned to existing primaries, or
+		// held for a primary this pass did not scrape. New primaries stay in
+		// PendingNodes; the rebalancer will find them and migrate slots to
+		// them.
+		log.V(1).Info("no assignable slots; new primaries will receive slots via rebalance", "count", len(primaries))
 		return 0, nil
 	}
 

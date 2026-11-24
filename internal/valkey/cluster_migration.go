@@ -89,7 +89,9 @@ const slotMigrationFailureWindow = 2 * time.Minute
 // field can never silently unblock the retry loop. A failed job older than
 // slotMigrationFailureWindow is not reported either. The node stamps
 // last_update_time with its own clock, so the age is measured against the
-// node's TIME, read in the same pipeline.
+// node's TIME, read in the same pipeline. A TIME error only matters when a
+// matching failed job needs aging, so a node whose aclfile predates the
+// operator's +time grant still reports running jobs.
 func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, targetNode string) (bool, *SlotMigrationFailure, error) {
 	log := logf.FromContext(ctx)
 	resps := src.Client.DoMulti(ctx,
@@ -100,11 +102,9 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 	if err != nil {
 		return false, nil, wrapUnsupportedErr(fmt.Errorf("getslotmigrations failed on %s: %w", src.Address, err))
 	}
-	nodeNow, err := parseTimeReply(resps[1])
-	if err != nil {
-		return false, nil, fmt.Errorf("time failed on %s: %w", src.Address, err)
-	}
+	nodeNow, timeErr := parseTimeReply(resps[1])
 	var failed *SlotMigrationFailure
+	unaged := false
 	for _, migration := range migrations {
 		fields, parseErr := migration.AsMap()
 		if parseErr != nil {
@@ -150,12 +150,20 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 		if !job.overlaps(planned) {
 			continue
 		}
+		if timeErr != nil {
+			// A later entry may still be running; decide after the scan.
+			unaged = true
+			continue
+		}
 		if nodeNow.Sub(job.LastUpdate) > slotMigrationFailureWindow {
 			continue
 		}
 		if failed == nil || job.LastUpdate.After(failed.LastUpdate) {
 			failed = &job
 		}
+	}
+	if unaged {
+		return false, nil, fmt.Errorf("time failed on %s: %w", src.Address, timeErr)
 	}
 	return false, failed, nil
 }

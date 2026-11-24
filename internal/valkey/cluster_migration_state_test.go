@@ -572,9 +572,11 @@ func TestSlotMigrationState_NodeClockBehind(t *testing.T) {
 }
 
 // TestSlotMigrationState_TimeErrorReturned: without the node's time the age
-// of a failure is unknown, so the reconcile gets an error.
+// of a matching failure is unknown, so the reconcile gets an error.
 func TestSlotMigrationState_TimeErrorReturned(t *testing.T) {
-	s := newMigrationServer(t, func() [][]string { return nil })
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake failed", time.Now())}
+	})
 	s.failTime()
 	node := migrationNode(t, s)
 
@@ -584,5 +586,35 @@ func TestSlotMigrationState_TimeErrorReturned(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "time failed on") {
 		t.Errorf("error = %q, want it to name the TIME failure", err)
+	}
+}
+
+// TestSlotMigrationState_TimeErrorIgnoredWithoutFailure: TIME is only needed
+// to age a matching failed job. A node that denies TIME (an aclfile from
+// before the operator granted it) must still report a running job, and no
+// failure when there is none to age.
+func TestSlotMigrationState_TimeErrorIgnoredWithoutFailure(t *testing.T) {
+	for name, entries := range map[string][][]string{
+		"running":      {migrationEntry("failed", migTargetA, "0-399", "handshake failed", time.Now()), migrationEntry("running", migTargetA, "0-399", "", time.Now())},
+		"none":         nil,
+		"other target": {migrationEntry("failed", migTargetB, "0-399", "handshake failed", time.Now())},
+		"other slots":  {migrationEntry("failed", migTargetA, "8000-8399", "handshake failed", time.Now())},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newMigrationServer(t, func() [][]string { return entries })
+			s.failTime()
+			node := migrationNode(t, s)
+
+			inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
+			if err != nil {
+				t.Fatalf("TIME is not needed here, got %v", err)
+			}
+			if failed != nil {
+				t.Fatalf("no matching failure, got %+v", failed)
+			}
+			if want := name == "running"; inProgress != want {
+				t.Fatalf("inProgress = %v, want %v", inProgress, want)
+			}
+		})
 	}
 }

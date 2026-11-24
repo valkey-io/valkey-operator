@@ -29,10 +29,3 @@ spec:
       periodSeconds: 10
       # Valkey has 3s to answer; the probe's own timeout is 4s.
       timeoutSeconds: 3
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"

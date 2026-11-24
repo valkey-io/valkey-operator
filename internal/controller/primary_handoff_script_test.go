@@ -257,6 +257,10 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		{"an overflowing slot keeps the identity", self + " " + strings.Repeat("9", 400) + "\n", true, false},
 		{"an overflowing range endpoint keeps the identity", self + " 0-" + strings.Repeat("9", 400) + "\n", true, false},
 		{"an overflowing marker slot keeps the identity", self + " [" + strings.Repeat("9", 400) + "->-" + otherID + "]\n", true, false},
+		{"a migration marker with a malformed peer ID keeps the identity", self + " [1->-x]\n", true, false},
+		{"a migration marker with a short peer ID keeps the identity", self + " [5461->-67ed2db8]\n", true, false},
+		{"a nonnumeric config epoch keeps the identity", strings.Replace(self, " 0 0 2 ", " 0 0 zero ", 1) + " 5461\n", true, false},
+		{"a short node ID keeps the identity", strings.Replace(self, "e7d1", "e7", 1) + " 5461\n", true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := runPrimaryHandoffScript(t, primary+replica+other+vars, "cluster-node-timeout 1\n", stubCLI{clusterNodes: &tt.nodes, clusterError: tt.clusterError})

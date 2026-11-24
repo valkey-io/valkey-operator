@@ -161,8 +161,11 @@ node_owns_slots() {
     awk '
         { sub(/\r$/, "") }
         $3 ~ /(^|,)myself(,|$)/ {
+            # A malformed self entry must not count as a slot assignment: the
+            # node ID is 40 hex characters and the config epoch is numeric.
+            if (NF < 8 || $1 !~ /^[0-9a-fA-F]{40}$/ || $7 !~ /^[0-9]+$/) exit
             for (i = 9; i <= NF; i++) {
-                if ($i ~ /^\[[0-9]+-(>|<)-.+\]$/ && substr($i, 2) + 0 <= 16383) marker = 1
+                if ($i ~ /^\[[0-9]+-(>|<)-[0-9a-fA-F]{40}\]$/ && substr($i, 2) + 0 <= 16383) marker = 1
                 else if ($i ~ /^[0-9]+$/ && $i + 0 <= 16383) owned = 1
                 else if ($i ~ /^[0-9]+-[0-9]+$/) {
                     split($i, bounds, "-")

@@ -1987,8 +1987,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		// accepted it is the same failure class as the rebalance
 		// path's, so surface it with the same event; other drain
 		// errors keep the DrainFailed event.
-		var migrationFailed *slotMigrationFailedError
-		if errors.As(err, &migrationFailed) {
+		if _, ok := errors.AsType[*slotMigrationFailedError](err); ok {
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "ScaleIn", "Draining excess shards: %v", err)
 		} else {
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)

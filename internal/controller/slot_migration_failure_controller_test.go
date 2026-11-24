@@ -190,11 +190,11 @@ const foreignTargetID = "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9"
 // numeric fields as RESP integers, matching the server wire format. An
 // empty targetNode omits the field, modeling a server that does not
 // report the migration destination.
-func stateEntry(state, targetNode, slotRanges, message string, lastUpdate time.Time) []string {
+func stateEntry(state, targetNode, message string, lastUpdate time.Time) []string {
 	entry := []string{
 		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",
 		"operation", "EXPORT",
-		"slot_ranges", slotRanges,
+		"slot_ranges", "0-399",
 		"source_node", "93941e777e17fcbc92d4398cc957ffea888f472b",
 		"state", state,
 		"message", message,
@@ -261,7 +261,7 @@ func TestRebalanceSlotsSurfacesMigrationFailure(t *testing.T) {
 	// recency window, must surface as an error carrying the job message
 	// instead of being silently retried every reconcile.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "handshake failed: ERR synthesize", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "handshake failed: ERR synthesize", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -288,8 +288,7 @@ func TestRebalanceSlotsSurfacesMigrationFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "slot migration from ") {
 		t.Fatalf("error must name the move, got %q", err.Error())
 	}
-	var migrationFailed *slotMigrationFailedError
-	if !errors.As(err, &migrationFailed) {
+	if _, ok := errors.AsType[*slotMigrationFailedError](err); !ok {
 		t.Fatalf("rebalance failure must stay distinguishable as an async slot migration failure, got %T", err)
 	}
 }
@@ -300,7 +299,7 @@ func TestRebalanceSlotsAncientFailureDoesNotBlock(t *testing.T) {
 	// the reconcile proceeds past the failure gate (here up to the gossip
 	// gate, which requeues without error).
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "ancient failure", time.Now().Add(-6*time.Minute))}
+		return [][]string{stateEntry("failed", "dst-primary-id", "ancient failure", time.Now().Add(-6*time.Minute))}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -322,7 +321,7 @@ func TestDrainExcessShardsSurfacesMigrationFailure(t *testing.T) {
 	// dst shard (index 0). A failed drain migration within the recency
 	// window must surface as an error instead of being re-issued.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed: ERR drain", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "transfer failed: ERR drain", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -349,8 +348,7 @@ func TestDrainExcessShardsSurfacesMigrationFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "transfer failed: ERR drain") {
 		t.Fatalf("error must carry the failed job message, got %q", err.Error())
 	}
-	var migrationFailed *slotMigrationFailedError
-	if !errors.As(err, &migrationFailed) {
+	if _, ok := errors.AsType[*slotMigrationFailedError](err); !ok {
 		t.Fatalf("drain failure must stay distinguishable as an async slot migration failure, got %T", err)
 	}
 }
@@ -361,7 +359,7 @@ func TestRebalanceSlotsForeignDestinationFailureDoesNotBlock(t *testing.T) {
 	// the failure gate (here up to the gossip gate, which requeues
 	// without error).
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", foreignTargetID, "0-399", "handshake failed at the old destination", time.Now())}
+		return [][]string{stateEntry("failed", foreignTargetID, "handshake failed at the old destination", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -383,7 +381,7 @@ func TestDrainExcessShardsForeignDestinationFailureProceeds(t *testing.T) {
 	// node other than the shard the drain plan picked: the drain
 	// proceeds past the failure gate to the gossip requeue.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", foreignTargetID, "0-399", "transfer failed to the old destination", time.Now())}
+		return [][]string{stateEntry("failed", foreignTargetID, "transfer failed to the old destination", time.Now())}
 	})
 	src, dst := rebalanceFixture(t, server)
 
@@ -432,7 +430,7 @@ func recorderEvents(recorder events.EventRecorder) []string {
 	return got
 }
 
-func scaleInFixture(t *testing.T, server *migrationStateServer, specShards int32, srcPrimaryMissing bool) (*valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
+func scaleInFixture(t *testing.T, server *migrationStateServer) (*valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
 	t.Helper()
 	if server != nil {
 		src, dst := rebalanceFixture(t, server)
@@ -444,7 +442,7 @@ func scaleInFixture(t *testing.T, server *migrationStateServer, specShards int32
 				Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: dst.Nodes[0].Address}},
 		}}
 		cluster := &valkeyiov1alpha1.ValkeyCluster{}
-		cluster.Spec.Shards = specShards
+		cluster.Spec.Shards = 1
 		return cluster, state, nodes
 	}
 	// No scripted server: a drain whose plan cannot find a destination
@@ -468,7 +466,7 @@ func scaleInFixture(t *testing.T, server *migrationStateServer, specShards int32
 			Status: valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.2"}},
 	}}
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
-	cluster.Spec.Shards = specShards
+	cluster.Spec.Shards = 1
 	return cluster, state, nodes
 }
 
@@ -478,9 +476,9 @@ func TestHandleScaleInMigrationFailureEmitsSlotRebalanceFailed(t *testing.T) {
 	// it, leave DrainFailed to other drain errors, and hold Degraded=True
 	// with reason RebalanceFailed.
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed: ERR drain", time.Now())}
+		return [][]string{stateEntry("failed", "dst-primary-id", "transfer failed: ERR drain", time.Now())}
 	})
-	cluster, state, nodes := scaleInFixture(t, server, 1, false)
+	cluster, state, nodes := scaleInFixture(t, server)
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 
@@ -527,7 +525,7 @@ func TestHandleScaleInDrainPlanErrorEmitsDrainFailed(t *testing.T) {
 	// Drain failures that are not asynchronous migration failures keep
 	// the DrainFailed event: here the drain plan cannot find a
 	// destination primary, which fails before any migration state is read.
-	cluster, state, nodes := scaleInFixture(t, nil, 1, true)
+	cluster, state, nodes := scaleInFixture(t, nil)
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 
@@ -569,9 +567,9 @@ func TestHandleScaleInDrainedKeepsRebalanceFailed(t *testing.T) {
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			server := newMigrationStateServer(t, func() [][]string {
-				return [][]string{stateEntry("running", "dst-primary-id", "0-399", "", time.Now())}
+				return [][]string{stateEntry("running", "dst-primary-id", "", time.Now())}
 			})
-			cluster, state, nodes := scaleInFixture(t, server, 1, false)
+			cluster, state, nodes := scaleInFixture(t, server)
 			since := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 				Type: valkeyiov1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
@@ -623,7 +621,7 @@ func knowDestination(src *valkey.ShardState) {
 func TestRebalanceSlotsRetriesAfterWindow(t *testing.T) {
 	nodeNow := time.Now()
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "handshake failed", nodeNow.Add(-3*time.Minute))}
+		return [][]string{stateEntry("failed", "dst-primary-id", "handshake failed", nodeNow.Add(-3*time.Minute))}
 	})
 	server.setClock(func() time.Time { return nodeNow })
 	src, dst := rebalanceFixture(t, server)
@@ -649,10 +647,10 @@ func TestRebalanceSlotsRetriesAfterWindow(t *testing.T) {
 func TestDrainExcessShardsRetriesAfterWindow(t *testing.T) {
 	nodeNow := time.Now()
 	server := newMigrationStateServer(t, func() [][]string {
-		return [][]string{stateEntry("failed", "dst-primary-id", "0-399", "transfer failed", nodeNow.Add(-3*time.Minute))}
+		return [][]string{stateEntry("failed", "dst-primary-id", "transfer failed", nodeNow.Add(-3*time.Minute))}
 	})
 	server.setClock(func() time.Time { return nodeNow })
-	cluster, state, nodes := scaleInFixture(t, server, 1, false)
+	cluster, state, nodes := scaleInFixture(t, server)
 	knowDestination(state.Shards[0])
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}

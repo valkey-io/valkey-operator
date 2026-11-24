@@ -543,13 +543,10 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	return c[0]
 }
 
-// initContainerCommand runs script when it exists and exits 0 otherwise. An
-// older shared ConfigMap (spec.sharedConfigMapName) may lack init.sh, and its
-// absence must not block the pod.
+// initContainerCommand runs script. The scripts volume mounts every script
+// key, so a pod whose ConfigMap lacks one does not start.
 func initContainerCommand(script string) []string {
-	return []string{shellPath, "-c", fmt.Sprintf(
-		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
-		script, shellPath)}
+	return []string{shellPath, script}
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
@@ -587,16 +584,27 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 						LocalObjectReference: corev1.LocalObjectReference{
 							Name: node.Spec.SharedConfigMapName,
 						},
+						Items: []corev1.KeyToPath{
+							{Key: readinessScriptKey, Path: readinessScriptKey},
+							{Key: livenessScriptKey, Path: livenessScriptKey},
+							{Key: initScriptKey, Path: initScriptKey},
+							{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+						},
 						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
 			},
 			{
+				// One volume, so kubelet swaps both files in one atomic write.
 				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: node.Spec.SharedConfigMapName,
+							Name: nodeConfigMapName(node.Name),
+						},
+						Items: []corev1.KeyToPath{
+							{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: configFileKey},
+							{Key: liveConfigFileKey, Path: liveConfigFileKey},
 						},
 					},
 				},

@@ -1897,7 +1897,7 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
-	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id, nil)
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -2070,7 +2070,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return false, err
 	}
 
-	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id, nil)
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, valkey.SlotsToRanges(move.Slots), move.Dst.Id)
 	if err != nil {
 		return false, err
 	}

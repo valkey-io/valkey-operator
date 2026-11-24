@@ -25,6 +25,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,16 @@ type migrationStateServer struct {
 	listener net.Listener
 	addr     string
 	reply    func() [][]string
+
+	mu    sync.Mutex
+	clock func() time.Time
+}
+
+// setClock sets the time the server answers TIME with.
+func (s *migrationStateServer) setClock(clock func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = clock
 }
 
 func newMigrationStateServer(t *testing.T, reply func() [][]string) *migrationStateServer {
@@ -54,7 +65,7 @@ func newMigrationStateServer(t *testing.T, reply func() [][]string) *migrationSt
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &migrationStateServer{listener: ln, addr: ln.Addr().String(), reply: reply}
+	s := &migrationStateServer{listener: ln, addr: ln.Addr().String(), reply: reply, clock: time.Now}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -109,6 +120,13 @@ func (s *migrationStateServer) respond(cmd []string) string {
 			}
 		}
 		return b.String()
+	case strings.EqualFold(cmd[0], "TIME"):
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		now := s.clock()
+		sec := strconv.FormatInt(now.Unix(), 10)
+		usec := strconv.Itoa(now.Nanosecond() / 1000)
+		return fmt.Sprintf("*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(sec), sec, len(usec), usec)
 	default:
 		return "+OK\r\n"
 	}

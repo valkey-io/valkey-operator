@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,24 @@ type migrationServer struct {
 	commands chan []string
 	addr     string
 	reply    func() [][]string
+
+	mu      sync.Mutex
+	clock   func() time.Time
+	timeErr bool
+}
+
+// setClock sets the time the server answers TIME with.
+func (s *migrationServer) setClock(clock func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = clock
+}
+
+// failTime makes the server answer TIME with an error.
+func (s *migrationServer) failTime() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.timeErr = true
 }
 
 func newMigrationServer(t *testing.T, reply func() [][]string) *migrationServer {
@@ -39,6 +58,7 @@ func newMigrationServer(t *testing.T, reply func() [][]string) *migrationServer 
 		commands: make(chan []string, 64),
 		addr:     ln.Addr().String(),
 		reply:    reply,
+		clock:    time.Now,
 	}
 	go func() {
 		for {
@@ -102,9 +122,24 @@ func (s *migrationServer) respond(cmd []string) string {
 			}
 		}
 		return b.String()
+	case strings.EqualFold(cmd[0], "TIME"):
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.timeErr {
+			return "-ERR scripted\r\n"
+		}
+		return timeReply(s.clock())
 	default:
 		return "+OK\r\n"
 	}
+}
+
+// timeReply encodes t as a TIME reply: Unix seconds and microseconds as two
+// bulk strings.
+func timeReply(t time.Time) string {
+	sec := strconv.FormatInt(t.Unix(), 10)
+	usec := strconv.Itoa(t.Nanosecond() / 1000)
+	return fmt.Sprintf("*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(sec), sec, len(usec), usec)
 }
 
 // readCommand reads one RESP array-of-bulk-strings request.
@@ -201,9 +236,10 @@ func TestSlotMigrationState_FailedJobReported(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399", failMsg, now.Add(-30*time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -235,9 +271,10 @@ func TestSlotMigrationState_MessageTrimmed(t *testing.T) {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399",
 			"Received error during handshake to target: -ERR Slots are being manually imported\r\n", now.Add(-30*time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -257,9 +294,10 @@ func TestSlotMigrationState_InProgressStillWorks(t *testing.T) {
 			migrationEntry("running", migTargetA, "400-799", "", now),
 		}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -278,9 +316,10 @@ func TestSlotMigrationState_NoOverlapNoReport(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "16000-16383", "manual reshard gone wrong", now.Add(-30*time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -299,9 +338,10 @@ func TestSlotMigrationState_StaleFailureIgnored(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399", "ancient failure", now.Add(-3*slotMigrationFailureWindow))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -321,9 +361,10 @@ func TestSlotMigrationState_MostRecentFailureWins(t *testing.T) {
 			migrationEntry("failed", migTargetA, "0-399", "newer failure", now.Add(-30*time.Second)),
 		}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -346,9 +387,10 @@ func TestSlotMigrationState_NewestOfMixedTargets(t *testing.T) {
 			migrationEntry("failed", migTargetB, "0-399", "target B refused", now.Add(-15*time.Second)),
 		}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, "", func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, "")
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -365,9 +407,10 @@ func TestSlotMigrationState_ForeignTargetFiltered(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake refused by A", now.Add(-30*time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -376,7 +419,7 @@ func TestSlotMigrationState_ForeignTargetFiltered(t *testing.T) {
 	}
 
 	// The same job is still reported for the destination it failed on.
-	_, failed, err = SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	_, failed, err = SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -393,9 +436,10 @@ func TestSlotMigrationState_UnknownTargetStillReported(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", "", "0-399", "target-less failure", now.Add(-30*time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB, func() time.Time { return now })
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetB)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -412,9 +456,10 @@ func TestSlotMigrationState_SuccessAndEmptyHistory(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("success", migTargetA, "0-399", "", now.Add(-time.Second))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -423,8 +468,9 @@ func TestSlotMigrationState_SuccessAndEmptyHistory(t *testing.T) {
 	}
 
 	empty := newMigrationServer(t, func() [][]string { return nil })
+	empty.setClock(func() time.Time { return now })
 	emptyNode := migrationNode(t, empty)
-	inProgress, failed, err = SlotMigrationState(context.Background(), emptyNode, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err = SlotMigrationState(context.Background(), emptyNode, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState empty: %v", err)
 	}
@@ -441,9 +487,10 @@ func TestSlotMigrationState_ZeroTimestampNotRecent(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399", "garbled entry", time.Unix(0, 0))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -486,9 +533,10 @@ func TestSlotMigrationState_FutureTimestampStillReported(t *testing.T) {
 	s := newMigrationServer(t, func() [][]string {
 		return [][]string{migrationEntry("failed", migTargetA, "0-399", "skewed clock failure", now.Add(10*time.Minute))}
 	})
+	s.setClock(func() time.Time { return now })
 	node := migrationNode(t, s)
 
-	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA, func() time.Time { return now })
+	inProgress, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
 	if err != nil {
 		t.Fatalf("SlotMigrationState: %v", err)
 	}
@@ -500,5 +548,41 @@ func TestSlotMigrationState_FutureTimestampStillReported(t *testing.T) {
 	}
 	if failed.Message != "skewed clock failure" {
 		t.Errorf("message = %q, want %q", failed.Message, "skewed clock failure")
+	}
+}
+
+// TestSlotMigrationState_NodeClockBehind: the node stamps last_update_time
+// with its own clock. A node three minutes behind the operator must still
+// report a failure from ten seconds ago.
+func TestSlotMigrationState_NodeClockBehind(t *testing.T) {
+	nodeNow := time.Now().Add(-3 * time.Minute)
+	s := newMigrationServer(t, func() [][]string {
+		return [][]string{migrationEntry("failed", migTargetA, "0-399", "handshake failed", nodeNow.Add(-10*time.Second))}
+	})
+	s.setClock(func() time.Time { return nodeNow })
+	node := migrationNode(t, s)
+
+	_, failed, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
+	if err != nil {
+		t.Fatalf("SlotMigrationState: %v", err)
+	}
+	if failed == nil {
+		t.Fatal("a failure ten seconds old on the node's clock was not reported")
+	}
+}
+
+// TestSlotMigrationState_TimeErrorReturned: without the node's time the age
+// of a failure is unknown, so the reconcile gets an error.
+func TestSlotMigrationState_TimeErrorReturned(t *testing.T) {
+	s := newMigrationServer(t, func() [][]string { return nil })
+	s.failTime()
+	node := migrationNode(t, s)
+
+	_, _, err := SlotMigrationState(context.Background(), node, []SlotsRange{{Start: 0, End: 399}}, migTargetA)
+	if err == nil {
+		t.Fatal("expected an error when TIME fails")
+	}
+	if !strings.Contains(err.Error(), "time failed on") {
+		t.Errorf("error = %q, want it to name the TIME failure", err)
 	}
 }

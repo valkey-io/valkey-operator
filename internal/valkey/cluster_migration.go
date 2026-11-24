@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	vclient "github.com/valkey-io/valkey-go"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -85,18 +86,23 @@ const slotMigrationFailureWindow = 2 * time.Minute
 // must not wedge (or be misattributed to) this one. An empty targetNode
 // disables the destination filter, and a job whose target_node the server
 // does not report still matches every destination, so a server without the
-// field can never silently unblock the retry loop. now is injectable for
-// tests; a nil now means time.Now. A failed job older than
-// slotMigrationFailureWindow is not reported either.
-func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, targetNode string, now func() time.Time) (bool, *SlotMigrationFailure, error) {
+// field can never silently unblock the retry loop. A failed job older than
+// slotMigrationFailureWindow is not reported either. The node stamps
+// last_update_time with its own clock, so the age is measured against the
+// node's TIME, read in the same pipeline.
+func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRange, targetNode string) (bool, *SlotMigrationFailure, error) {
 	log := logf.FromContext(ctx)
-	cmd := src.Client.B().Arbitrary("CLUSTER", "GETSLOTMIGRATIONS").Build()
-	migrations, err := src.Client.Do(ctx, cmd).ToArray()
+	resps := src.Client.DoMulti(ctx,
+		src.Client.B().Arbitrary("CLUSTER", "GETSLOTMIGRATIONS").Build(),
+		src.Client.B().Time().Build(),
+	)
+	migrations, err := resps[0].ToArray()
 	if err != nil {
 		return false, nil, wrapUnsupportedErr(fmt.Errorf("getslotmigrations failed on %s: %w", src.Address, err))
 	}
-	if now == nil {
-		now = time.Now
+	nodeNow, err := parseTimeReply(resps[1])
+	if err != nil {
+		return false, nil, fmt.Errorf("time failed on %s: %w", src.Address, err)
 	}
 	var failed *SlotMigrationFailure
 	for _, migration := range migrations {
@@ -144,7 +150,7 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 		if !job.overlaps(planned) {
 			continue
 		}
-		if now().Sub(job.LastUpdate) > slotMigrationFailureWindow {
+		if nodeNow.Sub(job.LastUpdate) > slotMigrationFailureWindow {
 			continue
 		}
 		if failed == nil || job.LastUpdate.After(failed.LastUpdate) {
@@ -152,6 +158,24 @@ func SlotMigrationState(ctx context.Context, src *NodeState, planned []SlotsRang
 		}
 	}
 	return false, failed, nil
+}
+
+// parseTimeReply reads a TIME reply: Unix seconds and microseconds as two
+// bulk strings.
+func parseTimeReply(resp vclient.ValkeyResult) (time.Time, error) {
+	parts, err := resp.AsStrSlice()
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(parts) != 2 {
+		return time.Time{}, fmt.Errorf("unexpected TIME reply %q", parts)
+	}
+	sec, err1 := strconv.ParseInt(parts[0], 10, 64)
+	usec, err2 := strconv.ParseInt(parts[1], 10, 64)
+	if err1 != nil || err2 != nil {
+		return time.Time{}, fmt.Errorf("unexpected TIME reply %q", parts)
+	}
+	return time.Unix(sec, usec*1000).UTC(), nil
 }
 
 // parseSlotRanges parses the slot_ranges field of a migration job: one or

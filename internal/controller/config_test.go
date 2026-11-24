@@ -482,3 +482,9 @@ var _ = Describe("Discovery managed config", func() {
 		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 })
+
+// buildServerConfig renders the cluster's full server config, live keys included.
+func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
+	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
+}

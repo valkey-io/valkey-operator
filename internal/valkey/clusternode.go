@@ -76,6 +76,26 @@ const (
 	FlagNoFlags
 )
 
+// Has reports whether f has any of the given flags.
+func (f NodeFlags) Has(flags NodeFlags) bool {
+	return f&flags != 0
+}
+
+// String returns the flag names as CLUSTER NODES writes them, e.g. "myself,master".
+func (f NodeFlags) String() string {
+	var b strings.Builder
+	for _, nf := range nodeFlagNames {
+		if f.Has(nf.flag) {
+			if b.Len() > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(nf.name)
+		}
+	}
+	return b.String()
+}
+
+// Keep Valkey's order so String writes names in correct order.
 var nodeFlagNames = [...]struct {
 	flag NodeFlags
 	name string
@@ -114,9 +134,9 @@ func parseNodeFlags(s string) NodeFlags {
 	return flags
 }
 
-// HasFlag reports whether the line carries flag.
-func (c *ClusterNode) HasFlag(flag NodeFlags) bool {
-	return c.Flags&flag != 0
+// HasFlag reports whether the node has any of the given flags.
+func (c *ClusterNode) HasFlag(flags NodeFlags) bool {
+	return c.Flags.Has(flags)
 }
 
 // IsMyself reports whether this line describes the node that produced the

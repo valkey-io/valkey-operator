@@ -453,3 +453,31 @@ func TestParseNodeFlags(t *testing.T) {
 		}
 	})
 }
+
+func TestNodeFlagsString(t *testing.T) {
+	for _, tc := range []struct {
+		flags NodeFlags
+		want  string
+	}{
+		{0, ""},
+		{FlagMaster, "master"},
+		{FlagMyself | FlagMaster, "myself,master"},
+		{FlagSlave | FlagPFail | FlagNoFailover, "slave,fail?,nofailover"},
+		// The output follows Valkey's order, not the order the bits are combined in.
+		{FlagNoFailover | FlagSlave | FlagMyself, "myself,slave,nofailover"},
+	} {
+		if got := tc.flags.String(); got != tc.want {
+			t.Errorf("NodeFlags(%09b).String() = %q, want %q", uint16(tc.flags), got, tc.want)
+		}
+	}
+}
+
+func TestNodeFlagsHas(t *testing.T) {
+	f := FlagSlave | FlagFail
+	if !f.Has(FlagFail) || !f.Has(FlagMaster|FlagSlave) {
+		t.Errorf("%v: want fail and one of master|slave", f)
+	}
+	if f.Has(FlagMaster) || f.Has(0) {
+		t.Errorf("%v: want neither master nor the empty set", f)
+	}
+}

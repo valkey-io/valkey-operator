@@ -347,7 +347,7 @@ func (n *NodeState) GetSlots() []SlotsRange {
 
 // IsPrimary return true if this is a primary node.
 func (n *NodeState) IsPrimary() bool {
-	return n.Flags&FlagMaster != 0
+	return n.Flags.Has(FlagMaster)
 }
 
 // CurrentEpoch returns the cluster's current epoch as reported by this node's

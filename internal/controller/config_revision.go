@@ -38,7 +38,7 @@ import (
 // live workload template references. A new node, a node without a workload,
 // or a live revision whose key is gone from the node's ConfigMap gets the
 // desired revision.
-func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster,
+func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context,
 	desired, current *valkeyiov1alpha1.ValkeyNode, liveRev string) error {
 	pinned := renderPinnedConfig(desired)
 	desiredRev := pinnedConfigRevision(pinned)
@@ -46,7 +46,7 @@ func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context, 
 	if current == nil || liveRev == "" || liveRev == desiredRev {
 		return nil
 	}
-	liveData, found, err := r.liveRevisionContent(ctx, cluster, current, liveRev)
+	liveData, found, err := r.liveRevisionContent(ctx, current, liveRev)
 	if err != nil {
 		return fmt.Errorf("read config revision %s for %s: %w", liveRev, current.Name, err)
 	}
@@ -70,8 +70,8 @@ var errLiveConfigRevisionNotCached = errors.New("live config revision not in cac
 // API server has the key, the cache trails it and errLiveConfigRevisionNotCached
 // is returned. If the ConfigMap or the key is gone, found is false and the
 // caller uses the desired revision, so the node rolls through the usual gate.
-func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, _ *valkeyiov1alpha1.ValkeyCluster,
-	node *valkeyiov1alpha1.ValkeyNode, rev string) (content string, found bool, err error) {
+func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode,
+	rev string) (content string, found bool, err error) {
 	content, found, err = readConfigRevision(ctx, r.Client, node, rev)
 	if err != nil || found {
 		return content, found, err

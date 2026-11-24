@@ -889,7 +889,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	if currentExists {
 		existing = current
 	}
-	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
+	if err := r.setDesiredConfigRevision(ctx, desired, existing, live.configRevision); err != nil {
 		if errors.Is(err, errLiveConfigRevisionNotCached) {
 			log.V(1).Info("live config revision not cached yet, waiting", "name", desired.Name, "revision", live.configRevision)
 			return nodeRequeued, nil

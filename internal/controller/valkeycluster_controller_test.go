@@ -510,11 +510,11 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("reading the config hash from the cluster ConfigMap")
+		By("checking the cluster ConfigMap holds the scripts and no valkey.conf")
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
-		initialCMHash := cm.Annotations[configHashKey]
-		Expect(initialCMHash).NotTo(BeEmpty())
+		Expect(cm.Data).To(HaveKey(initScriptKey))
+		Expect(cm.Data).NotTo(HaveKey(configFileKey))
 
 		By("capturing each ValkeyNode's config revision and authorized WorkloadRevision")
 		// The pinned config excludes live-settable keys so that changes to
@@ -542,13 +542,6 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		By("reconciling after the config change")
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
-
-		By("verifying the ConfigMap has a new full hash (all keys changed)")
-		updatedCM := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
-		newCMHash := updatedCM.Annotations[configHashKey]
-		Expect(newCMHash).NotTo(BeEmpty())
-		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
 		By("verifying config revision and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
@@ -625,12 +618,12 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("reading the config hash the operator persisted to the ConfigMap")
+		By("reading the scripts ConfigMap the operator created")
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
-		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
+		Expect(cm.Data).To(HaveKey(initScriptKey))
 
-		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
+		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a mounted config revision")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
@@ -640,8 +633,8 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			tmpl, err := buildNodePodTemplate(n)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(n.Spec.ConfigRevision).NotTo(BeEmpty())
-			Expect(tmpl.Annotations[configRevisionKey]).To(Equal(n.Spec.ConfigRevision),
-				"ValkeyNode %s pod template must carry the config-revision annotation even when the ConfigMap is not yet visible in the cache", n.Name)
+			Expect(mountedConfigRevision(&tmpl.Spec)).To(Equal(n.Spec.ConfigRevision),
+				"ValkeyNode %s pod template must mount its config revision even when the ConfigMap is not yet visible in the cache", n.Name)
 		}
 	})
 })
@@ -1685,6 +1678,35 @@ var _ = Describe("EventRecorder", func() {
 			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
 			Expect(cm.Data).To(HaveKey(initScriptKey))
 			Expect(cm.Annotations).To(HaveKeyWithValue(scriptsHashKey, scriptsHash))
+		})
+
+		It("should leave a ConfigMap of the shared name that the cluster does not own", func() {
+			cluster := &valkeyiov1alpha1.ValkeyCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foreign-cm-0-0",
+					Namespace: "default",
+				},
+				Spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+
+			By("standing in for node 0-0 of a cluster named foreign-cm, whose ConfigMap has the same name")
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      GetSharedConfigMapName(cluster.Name),
+					Namespace: cluster.Namespace,
+					Labels:    map[string]string{LabelCluster: "foreign-cm"},
+				},
+				Data: map[string]string{liveConfigFileKey: "maxmemory 100mb\n"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+			Expect(r.upsertConfigMap(ctx, cluster)).To(MatchError(ContainSubstring("not owned by ValkeyCluster")))
+			got := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), got)).To(Succeed())
+			Expect(got.Data).To(Equal(foreign.Data))
 		})
 
 	})

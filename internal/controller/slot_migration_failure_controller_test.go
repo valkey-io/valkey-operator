@@ -541,3 +541,49 @@ func TestHandleScaleInDrainPlanErrorEmitsDrainFailed(t *testing.T) {
 		t.Fatalf("a non-migration drain failure must not emit SlotRebalanceFailed, got %q", got)
 	}
 }
+
+// TestHandleScaleInDrainedKeepsRebalanceFailed: a retried drain batch is
+// accepted before it can fail again, so the pass that issues it must not drop
+// a RebalanceFailed Degraded. Otherwise lastTransitionTime resets every
+// window and a persistent failure never looks old. Other Degraded reasons
+// are stale by then and go.
+func TestHandleScaleInDrainedKeepsRebalanceFailed(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		kept   bool
+	}{
+		{valkeyiov1alpha1.ReasonRebalanceFailed, true},
+		{valkeyiov1alpha1.ReasonNodeAddFailed, false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			server := newMigrationStateServer(t, func() [][]string {
+				return [][]string{stateEntry("running", "dst-primary-id", "0-399", "", time.Now())}
+			})
+			cluster, state, nodes := scaleInFixture(t, server, 1, false)
+			since := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
+			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+				Type: valkeyiov1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+				Reason: tc.reason, Message: "earlier failure", LastTransitionTime: since,
+			})
+
+			r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+			if _, requeue := r.handleScaleIn(context.Background(), cluster, state, nodes); !requeue {
+				t.Fatal("expected handleScaleIn to requeue while the drain is in flight")
+			}
+
+			cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			if !tc.kept {
+				if cond != nil {
+					t.Fatalf("Degraded %s should be cleared, got %+v", tc.reason, cond)
+				}
+				return
+			}
+			if cond == nil {
+				t.Fatal("Degraded RebalanceFailed was cleared by the retry")
+			}
+			if !cond.LastTransitionTime.Equal(&since) {
+				t.Fatalf("lastTransitionTime = %v, want %v", cond.LastTransitionTime, since)
+			}
+		})
+	}
+}

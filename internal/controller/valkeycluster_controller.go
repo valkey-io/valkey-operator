@@ -555,8 +555,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
 		// that hadn't received slots yet during scale-out). A users ACL
-		// failure is not stale: only the ACL step clears it.
-		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		// failure is not stale: only the ACL step clears it. Nor is a
+		// failed migration: this pass may be its retry, which can fail
+		// again; the healthy branch clears it once the slots are balanced.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded,
+			valkeyiov1alpha1.ReasonUsersACLUnresolved, valkeyiov1alpha1.ReasonRebalanceFailed)
 		// Name the shard receiving this batch. With more than one shard
 		// under its share, the name changes as each one fills.
 		msg := "Rebalancing slots across primaries"
@@ -1995,7 +1998,10 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	case drained:
-		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		// Keep a failed migration's Degraded, as the rebalance does: this
+		// pass may be its retry.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded,
+			valkeyiov1alpha1.ReasonUsersACLUnresolved, valkeyiov1alpha1.ReasonRebalanceFailed)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true

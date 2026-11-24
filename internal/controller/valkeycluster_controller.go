@@ -2015,23 +2015,31 @@ func setScaleInBlocked(cluster *valkeyiov1alpha1.ValkeyCluster, msg string) {
 }
 
 // splitShardsForScaleIn returns the in-spec shards, emptiest first, and the
-// excess shards that still own slots. Shards whose index is unknown are in
-// neither list. PlanDrainMove sends slots to the first destination, so putting
-// the emptiest first keeps them from being moved twice by the rebalance.
+// excess shards that still own slots, both with ties in shard index order.
+// Shards whose index is unknown are in neither list. PlanDrainMove sends slots
+// to the first destination, so putting the emptiest first keeps them from
+// being moved twice by the rebalance. The scrape lists shards in no fixed
+// order; sorting by index keeps a failed move's source and destination the
+// same on the next pass.
 func splitShardsForScaleIn(shards []*valkey.ShardState, nodes *valkeyiov1alpha1.ValkeyNodeList, expectedShards int) (remaining, draining []*valkey.ShardState) {
+	index := make(map[*valkey.ShardState]int, len(shards))
 	for _, shard := range shards {
 		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex < 0 {
 			continue
 		}
+		index[shard] = shardIndex
 		if shardIndex < expectedShards {
 			remaining = append(remaining, shard)
 		} else if len(shard.Slots) > 0 {
 			draining = append(draining, shard)
 		}
 	}
-	slices.SortStableFunc(remaining, func(a, b *valkey.ShardState) int {
-		return cmp.Compare(countSlots(a.Slots), countSlots(b.Slots))
+	slices.SortFunc(remaining, func(a, b *valkey.ShardState) int {
+		return cmp.Or(cmp.Compare(countSlots(a.Slots), countSlots(b.Slots)), cmp.Compare(index[a], index[b]))
+	})
+	slices.SortFunc(draining, func(a, b *valkey.ShardState) int {
+		return cmp.Compare(index[a], index[b])
 	})
 	return remaining, draining
 }

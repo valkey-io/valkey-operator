@@ -106,6 +106,31 @@ func TestSplitShardsForScaleIn(t *testing.T) {
 	assert.Empty(t, draining)
 }
 
+// TestSplitShardsForScaleInOrderIsStable: the scrape lists shards in no fixed
+// order. Equal destinations and the excess shards must come out the same way
+// every pass, so a failed move is retried against the same pair.
+func TestSplitShardsForScaleInOrderIsStable(t *testing.T) {
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	for i := range 4 {
+		nodes.Items = append(nodes.Items, *primaryNode(i))
+	}
+	shards := []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 4095}),
+		primaryShard(1, valkey.SlotsRange{Start: 4096, End: 8191}),
+		primaryShard(2, valkey.SlotsRange{Start: 8192, End: 12287}),
+		primaryShard(3, valkey.SlotsRange{Start: 12288, End: 16383}),
+	}
+	for _, order := range [][]int{{1, 0, 3, 2}, {0, 1, 2, 3}} {
+		var listed []*valkey.ShardState
+		for _, i := range order {
+			listed = append(listed, shards[i])
+		}
+		remaining, draining := splitShardsForScaleIn(listed, nodes, 2)
+		assert.Equal(t, []string{"p0", "p1"}, primaryIDs(remaining), "order %v", order)
+		assert.Equal(t, []string{"p2", "p3"}, primaryIDs(draining), "order %v", order)
+	}
+}
+
 // TestEffectiveShardsSkipsPostFailoverReplacement: shard 0's primary restarted
 // empty before its replica was promoted. The new pod waits to become that
 // replica, so it is not a new shard and must not receive drained slots.

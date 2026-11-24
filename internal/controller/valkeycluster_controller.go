@@ -96,6 +96,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -107,6 +108,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Ensure the headless Service exists (upsertService).
 //   - Ensure PodDisruptionBudget exists (reconcilePodDisruptionBudget).
 //   - Ensure internal ACL users are configured (reconcileUsersAcl).
+//   - Keep each Secret left under its legacy name equal to its replacement
+//     while the cluster's workloads still read it, then delete it
+//     (retireLegacySecrets).
 //   - Ensure the ConfigMap with valkey.conf and health-check scripts exists
 //     (upsertConfigMap).
 //   - Build the Valkey cluster state by connecting to each node and scraping
@@ -207,6 +211,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	r.reportUsersACLUnresolved(ctx, cluster, aclErr)
 
+	// Logged, not returned: a failure here must not stop the reconcile,
+	// since that would also stop the nodes rolling off the legacy Secrets. It
+	// is tried again on the next reconcile.
+	if err := r.retireLegacySecrets(ctx, cluster); err != nil {
+		log.Error(err, "failed to retire the legacy Secrets")
+	}
+
 	if err := r.upsertConfigMap(ctx, cluster); err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonConfigMapError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)
@@ -268,12 +279,23 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, err
 	}
+	// Before the scrape, so a gate is earned only by a server container that
+	// was already ready when its INFO was read.
+	readyBefore := r.readyServerContainers(ctx, nodes)
 	state := r.scrapeClusterState(ctx, nodes, dial)
 
 	// A node that rejects the operator's password is missing from state, so
 	// the steps below would act on a partial view and blame the topology.
 	if rejecting := nodesRejectingOperator(nodes); len(rejecting) > 0 {
 		r.reportOperatorLockout(cluster, rejecting)
+		// The scrape is partial here, so no gate can be earned. A nil state
+		// still clears the gate of a pod whose server container restarted,
+		// which reads only the pod's own status.
+		if _, err := r.syncInitialSyncGates(ctx, nodes, nil, nil); err != nil {
+			log.Error(err, "failed to update the initial sync readiness gate")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
+				"%s", initialSyncGateFailedMessage(err))
+		}
 		// The partial scrape would zero the shard counts; keep the last ones.
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
@@ -283,12 +305,30 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	}
 
+	// Before the walk, which returns early on many paths. A failure leaves
+	// each gate as it is until a later pass (initialSyncGateFailedMessage).
+	gatesPending, gateErr := r.syncInitialSyncGates(ctx, nodes, state, readyBefore)
+	if gateErr != nil {
+		log.Error(gateErr, "failed to update the initial sync readiness gate")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
+			"%s", initialSyncGateFailedMessage(gateErr))
+	}
+
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says
 	// which shard is waiting and why. It comes up as a typed error so the
 	// walk can stop at that node the way it stops at one mid-roll.
 	var deferred *rollDeferredError
-	requeue, err := r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	var requeue bool
+	if initialSyncGateHoldsWalk(gateErr) {
+		// A pod the walk replaced now might never become Ready, so the walk
+		// stops at the pods already replaced. The steps below still run, as
+		// for a skipped roll.
+		rollSkipped = true
+		reportInitialSyncGateHold(cluster, gateErr)
+	} else {
+		requeue, err = r.reconcileValkeyNodes(ctx, cluster, nodes, state, trustBundle)
+	}
 	if errors.As(err, &deferred) {
 		err = nil
 	}
@@ -529,16 +569,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// A shard's roll was skipped. Conditions were set at detection; persist them
-	// and requeue so the next pass re-evaluates.
+	// A shard's roll was skipped, or a failed gate write held the walk.
+	// Conditions were set at detection; persist them and requeue so the next
+	// pass re-evaluates.
 	if rollSkipped {
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// Cluster is healthy - set all positive conditions
-	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
-	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
+	if gatesPending {
+		const waiting = "Waiting for cluster pods to become Ready"
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, waiting, metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, waiting, metav1.ConditionTrue)
+	} else {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
+	}
 	// A node whose ACL the operator cannot apply leaves the declared users out of
 	// Valkey while every other check passes, so the cluster would otherwise read
 	// as fully healthy with an ACL that is not in effect.
@@ -565,7 +611,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			fmt.Sprintf("ACL not applied on %s", strings.Join(failed, ", ")), metav1.ConditionTrue)
 	default:
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready: shards %d, replicasPerShard %d", cluster.Spec.Shards, cluster.GetReplicasPerShard())
+		if !gatesPending {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ClusterReady", "ReconcileCluster", "Cluster ready: shards %d, replicasPerShard %d", cluster.Spec.Shards, cluster.GetReplicasPerShard())
+		}
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
@@ -576,6 +624,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.V(1).Info("reconcile done")
+	if gatesPending {
+		log.V(1).Info("cluster pod readiness pending, rechecking", "after", initialSyncGateRecheck)
+		return ctrl.Result{RequeueAfter: initialSyncGateRecheck}, nil
+	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
@@ -722,7 +774,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	totalCreated := 0
 
-	liveHashes, err := r.liveWorkloadTemplateHashes(ctx, nodes)
+	liveTemplates, err := r.liveWorkloadTemplates(ctx, nodes)
 	if err != nil {
 		return false, err
 	}
@@ -749,7 +801,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// actual primary (which may differ from node-index=0 after a failover)
 		// and place it last.
 		for _, nodeIndex := range replicaFirstNodeOrder(shardIndex, nodesPerShard, nodes, clusterState) {
-			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveHashes, trustBundle)
+			result, err := r.reconcileValkeyNode(ctx, cluster, shardIndex, nodeIndex, clusterState, liveTemplates, trustBundle)
 			var deferred *rollDeferredError
 			if errors.As(err, &deferred) {
 				err = nil
@@ -798,16 +850,13 @@ const (
 
 // reconcileValkeyNode reconciles a single ValkeyNode for (shardIndex, nodeIndex).
 // Returns a nodeResult signaling the outcome or required next action.
-// liveTemplateHashes is the reconcileValkeyNodes snapshot so WorkloadRevision
-// and failover decisions stay consistent for the whole pass.
-func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplateHashes map[string]string, trustBundle string) (nodeResult, error) {
+// liveTemplates is the reconcileValkeyNodes snapshot so WorkloadRevision,
+// config revision and failover decisions stay consistent for the whole pass.
+func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex, nodeIndex int, clusterState *valkey.ClusterState, liveTemplates map[string]liveWorkloadTemplate, trustBundle string) (nodeResult, error) {
 	log := logf.FromContext(ctx)
 
 	desired := buildClusterValkeyNode(cluster, shardIndex, nodeIndex)
 	withTrustBundle(desired, trustBundle)
-	if err := setDesiredWorkloadRevision(desired); err != nil {
-		return nodeUnchanged, err
-	}
 
 	node := &valkeyiov1alpha1.ValkeyNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -816,7 +865,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		},
 	}
 
-	// Load current node (if any) for failover decisions.
+	// Load current node (if any) for the config revision and failover decisions.
 	current := &valkeyiov1alpha1.ValkeyNode{}
 	currentExists := true
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
@@ -826,10 +875,23 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 		currentExists = false
 	}
 
-	liveHash := ""
-	if liveTemplateHashes != nil {
-		liveHash = liveTemplateHashes[desired.Name]
+	live := liveTemplates[desired.Name]
+	var existing *valkeyiov1alpha1.ValkeyNode
+	if currentExists {
+		existing = current
 	}
+	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
+		if errors.Is(err, errLiveConfigRevisionNotCached) {
+			log.V(1).Info("live config revision not cached yet, waiting", "name", desired.Name, "revision", live.configRevision)
+			return nodeRequeued, nil
+		}
+		return nodeUnchanged, err
+	}
+	if err := setDesiredWorkloadRevision(desired); err != nil {
+		return nodeUnchanged, err
+	}
+
+	liveHash := live.hash
 	// Proactive failover only when the Spec update implies a real pod template
 	// change, not pure WorkloadRevision backfill when live already matches.
 	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
@@ -931,29 +993,34 @@ func (r *ValkeyClusterReconciler) handleUnchangedValkeyNode(ctx context.Context,
 	return nodeUnchanged, nil
 }
 
-// liveWorkloadTemplateHashes returns podTemplateRollHash of each cluster node's
-// live StatefulSet or Deployment template (empty string when missing).
-func (r *ValkeyClusterReconciler) liveWorkloadTemplateHashes(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]string, error) {
-	out := make(map[string]string, len(nodes.Items))
+// liveWorkloadTemplate is what the parent reads from a node's live
+// StatefulSet or Deployment template.
+type liveWorkloadTemplate struct {
+	// hash is podTemplateRollHash of the template.
+	hash string
+	// configRevision is the pinned config revision the template references.
+	configRevision string
+}
+
+// liveWorkloadTemplates returns each cluster node's live workload template
+// summary. Nodes without a workload are absent.
+func (r *ValkeyClusterReconciler) liveWorkloadTemplates(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) (map[string]liveWorkloadTemplate, error) {
+	out := make(map[string]liveWorkloadTemplate, len(nodes.Items))
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
-		hash, err := r.livePodTemplateHash(ctx, n)
+		template, err := livePodTemplate(ctx, r.Client, n)
 		if err != nil {
 			return nil, err
 		}
-		if hash != "" {
-			out[n.Name] = hash
+		if template == nil {
+			continue
+		}
+		out[n.Name] = liveWorkloadTemplate{
+			hash:           podTemplateRollHash(*template),
+			configRevision: mountedConfigRevision(&template.Spec),
 		}
 	}
 	return out, nil
-}
-
-func (r *ValkeyClusterReconciler) livePodTemplateHash(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (string, error) {
-	template, err := livePodTemplate(ctx, r.Client, node)
-	if err != nil || template == nil {
-		return "", err
-	}
-	return podTemplateRollHash(*template), nil
 }
 
 // livePodTemplate returns the pod template of a node's workload, or nil when
@@ -1166,7 +1233,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			TopologySpreadConstraints:     topologySpreadConstraints,
 			Exporter:                      exporter,
 			Containers:                    cluster.Spec.Containers,
-			ServerConfigMapName:           GetServerConfigMapName(cluster.Name),
+			SharedConfigMapName:           GetSharedConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
 			TLS:                           nodeTLSFromCluster(cluster),
 			Config:                        cluster.Spec.Config,
@@ -1389,12 +1456,13 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
-	slots := state.GetUnassignedSlots()
+	slots := state.AssignableSlots()
 	if len(slots) == 0 {
-		// Scale-out: all slots already assigned to existing primaries.
-		// New primaries stay in PendingNodes; the rebalancer will find
-		// them and migrate slots to them.
-		log.V(1).Info("no unassigned slots; new primaries will receive slots via rebalance", "count", len(primaries))
+		// Scale-out: all slots already assigned to existing primaries, or
+		// held for a primary this pass did not scrape. New primaries stay in
+		// PendingNodes; the rebalancer will find them and migrate slots to
+		// them.
+		log.V(1).Info("no assignable slots; new primaries will receive slots via rebalance", "count", len(primaries))
 		return 0, nil
 	}
 
@@ -2164,13 +2232,16 @@ const aclNotAppliedSeparator = "; ACL not applied on "
 // internalAclSecretExists reports whether the cluster already has an aclfile
 // in its internal ACL Secret, which is what the nodes keep running while a
 // rebuild fails. A Secret whose aclfile entry is missing or empty is no
-// fallback: the nodes have nothing to keep.
+// fallback: the nodes have nothing to keep. A cluster that has only the legacy
+// ACL Secret gets it copied first, since that is the aclfile its nodes run and
+// the one they mount once they roll onto the new name.
 func (r *ValkeyClusterReconciler) internalAclSecretExists(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: getInternalSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
+	secret, err := r.operatorSecret(ctx, cluster, getInternalSecretName(cluster.Name), legacyInternalSecretName(cluster.Name))
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to read the internal ACL Secret")
 		return false
 	}
-	return len(secret.Data[aclFilename]) > 0
+	return secret != nil && len(secret.Data[aclFilename]) > 0
 }
 
 // reportUsersACLUnresolved carries the result of the ACL step on the Degraded

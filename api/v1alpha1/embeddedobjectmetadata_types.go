@@ -30,8 +30,7 @@ type LabelValue string
 // using self.matches() because Kubernetes 1.31 has no CEL format library.
 // MaxProperties only bounds the CEL cost estimate. Annotation sizes are counted
 // in characters, not bytes: size(bytes()) exceeds the CEL cost budget unless
-// values and counts are capped. 262059 is 256 KiB minus the operator's
-// valkey.io/config-hash annotation (85 bytes).
+// values and counts are capped. 262144 is 256 KiB, the API server's limit.
 type EmbeddedObjectMetadata struct {
 	// Labels added to the object. Keys under valkey.io/ and the
 	// app.kubernetes.io/ name, instance, component, part-of and managed-by keys
@@ -43,10 +42,10 @@ type EmbeddedObjectMetadata struct {
 	Labels map[string]LabelValue `json:"labels,omitempty"`
 
 	// Annotations added to the object. Values have no format rule, but keys and
-	// values together are limited to 256 KiB less the operator's own annotation.
+	// values together are limited to 256 KiB.
 	// Keys under valkey.io/ are reserved for the operator.
 	// +kubebuilder:validation:MaxProperties=1024
-	// +kubebuilder:validation:XValidation:rule="self.map(k, size(k) + size(self[k])).sum() <= 262059",message="annotations must total at most 262059 characters (keys plus values): 256 KiB less the operator's valkey.io/config-hash annotation"
+	// +kubebuilder:validation:XValidation:rule="self.map(k, size(k) + size(self[k])).sum() <= 262144",message="annotations must total at most 262144 characters (keys plus values)"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?([.][A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*/)?([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]$') && (!k.contains('/') || k.indexOf('/') <= 253))",message="annotation keys must be an optional DNS subdomain prefix (at most 253 characters) and '/', followed by a name of at most 63 alphanumerics, '-', '_' or '.', starting and ending with an alphanumeric"
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('valkey.io/'))",message="annotation keys under valkey.io/ are reserved for the operator",reason="FieldValueForbidden"
 	// +optional

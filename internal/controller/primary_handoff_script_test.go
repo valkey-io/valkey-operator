@@ -137,21 +137,18 @@ func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 	}
 }
 
-// The server command of a cluster node runs replicationAuthShell(true), which
-// falls back to the server binary when the mounted ConfigMap has no
-// primary-handoff.sh, as an external ConfigMap may not. The script and password
-// paths are absolute, so this exercises the fallback, with the password from
-// the environment, on a machine without them.
-func TestPrimaryHandoffCommandFallsBackToServer(t *testing.T) {
-	for _, path := range []string{"/scripts/" + primaryHandoffScriptKey, systemPasswordMountPath + "/" + replicationUser} {
-		if _, err := os.Stat(path); err == nil {
-			t.Skip(path + " exists on this machine")
-		}
+// replicationAuthShell starts the server with the password from the
+// environment when the password file is not mounted. The password path is
+// absolute, so this runs on a machine without it.
+func TestReplicationAuthShellUsesTheEnvironmentPassword(t *testing.T) {
+	path := systemPasswordMountPath + "/" + replicationUser
+	if _, err := os.Stat(path); err == nil {
+		t.Skip(path + " exists on this machine")
 	}
 	binDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
-	cmd := exec.Command(shellPath, "-c", replicationAuthShell(true), "valkey-server", "/config/valkey.conf", "--port", "6379")
+	cmd := exec.Command(shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf", "--port", "6379")
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "PRIMARY_AUTH=re-current")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))

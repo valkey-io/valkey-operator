@@ -1164,7 +1164,8 @@ func scrapedNode(ctrl *gomock.Controller, id, shardID, myself string) vclient.Cl
 			vmock.Result(vmock.ValkeyString(id)),
 			vmock.Result(vmock.ValkeyString(shardID)),
 			vmock.Result(vmock.ValkeyString("")),
-			vmock.Result(vmock.ValkeyString("")),
+			// An empty CLUSTER INFO drops the node from the scrape.
+			vmock.Result(vmock.ValkeyString("cluster_state:ok\r\n")),
 			vmock.Result(vmock.ValkeyString(myself + "\n")),
 		})
 	return client
@@ -1231,7 +1232,10 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	stale := vmock.NewClient(ctrl)
 	stale.EXPECT().
-		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
 
 	dial := func(_ context.Context, _ string) (vclient.Client, error) {
@@ -1242,5 +1246,229 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 
 	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
 		t.Fatalf("expected an empty state, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := vmock.NewClient(ctrl)
+	// A Valkey 9 replica reply, trimmed. Valkey orders the sections itself.
+	info := "# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
+		"# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nslave_repl_offset:3108\r\n"
+	client.EXPECT().
+		DoMulti(gomock.Any(),
+			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
+			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("CLUSTER", "NODES")).
+		Return([]vclient.ValkeyResult{
+			vmock.Result(vmock.ValkeyString("r1")),
+			vmock.Result(vmock.ValkeyString("s1")),
+			vmock.Result(vmock.ValkeyBlobString(info)),
+			vmock.Result(vmock.ValkeyString("cluster_state:ok\r\n")),
+			vmock.Result(vmock.ValkeyString("r1 10.0.0.1:6379@16379 myself,slave p1 0 0 1 connected\n")),
+		})
+	dial := func(_ context.Context, _ string) (vclient.Client, error) {
+		return client, nil
+	}
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dial)
+
+	if len(state.Shards) != 1 || len(state.Shards[0].Nodes) != 1 {
+		t.Fatalf("expected one shard with one node, got %+v", state.Shards)
+	}
+	got := state.Shards[0].Nodes[0].Info
+	want := map[string]string{
+		"loading":                 "1",
+		"master_link_status":      "down",
+		"master_sync_in_progress": "0",
+		"slave_repl_offset":       "3108",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("Info[%q] = %q, want %q", key, got[key], value)
+		}
+	}
+}
+
+func blobResult(s string) vclient.ValkeyResult {
+	return vmock.Result(vmock.ValkeyBlobString(s))
+}
+
+func valkeyErrorResult(s string) vclient.ValkeyResult {
+	return vmock.Result(vmock.ValkeyError(s))
+}
+
+// primaryNodesLine is a CLUSTER NODES myself line for node id "abc".
+const primaryNodesLine = "abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-16383\n"
+
+// healthyScrape is the five replies getNodeState asks for, in order:
+// CLUSTER MYID, CLUSTER MYSHARDID, INFO, CLUSTER INFO, CLUSTER NODES.
+func healthyScrape() []vclient.ValkeyResult {
+	return []vclient.ValkeyResult{
+		blobResult("abc"),
+		blobResult("shard-1"),
+		blobResult("role:master\r\n"),
+		blobResult("cluster_known_nodes:2\r\ncluster_current_epoch:3\r\n"),
+		blobResult(primaryNodesLine),
+	}
+}
+
+func dialScrapeByAddress(t *testing.T, byAddr map[string][]vclient.ValkeyResult) DialFunc {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	return func(_ context.Context, address string) (vclient.Client, error) {
+		results, ok := byAddr[address]
+		if !ok {
+			return nil, fmt.Errorf("unexpected dial %s", address)
+		}
+		c := vmock.NewClient(ctrl)
+		c.EXPECT().
+			DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(results)
+		return c, nil
+	}
+}
+
+// A primary dropped from the scrape at one of its pod addresses can still be
+// serving the ranges a scraped node's table gives it, so they are not
+// assignable. GetUnassignedSlots still counts them.
+func TestAssignableSlotsLeavesOutAnUnscrapedPrimarysRanges(t *testing.T) {
+	viewer := func(ghiHost string) []vclient.ValkeyResult {
+		r := healthyScrape()
+		r[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 4096-16383\n" +
+			"ghi " + ghiHost + ":6379@16379 master - 0 0 2 connected 0-4095\n")
+		return r
+	}
+	dropped := healthyScrape()
+	dropped[0] = blobResult("ghi")
+	dropped[3] = valkeyErrorResult("NOPERM this user has no permissions to run the 'cluster|info' command")
+	replacement := healthyScrape()
+	replacement[0] = blobResult("new")
+	replacement[1] = blobResult("shard-9")
+	replacement[4] = blobResult("new 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n")
+
+	for _, tc := range []struct {
+		name       string
+		addresses  []string
+		byAddr     map[string][]vclient.ValkeyResult
+		assignable []SlotsRange
+	}{
+		{"held while the dropped primary's address is a pod", []string{"10.0.0.1", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.3"), "10.0.0.3:6379": dropped}, nil},
+		{"assignable once that address is no longer a pod", []string{"10.0.0.1"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.9")}, []SlotsRange{{0, 4095}}},
+		{"assignable once that address answered as another id", []string{"10.0.0.1", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{"10.0.0.1:6379": viewer("10.0.0.3"), "10.0.0.3:6379": replacement}, []SlotsRange{{0, 4095}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := GetClusterState(context.Background(), tc.addresses, 6379, dialScrapeByAddress(t, tc.byAddr))
+			if got, want := state.GetUnassignedSlots(), []SlotsRange{{0, 4095}}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unassigned slots = %v, want %v", got, want)
+			}
+			if got := state.AssignableSlots(); !reflect.DeepEqual(got, tc.assignable) {
+				t.Fatalf("assignable slots = %v, want %v", got, tc.assignable)
+			}
+		})
+	}
+}
+
+func dialScrape(t *testing.T, results []vclient.ValkeyResult) DialFunc {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	c := vmock.NewClient(ctrl)
+	c.EXPECT().
+		DoMulti(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(results)
+	return func(_ context.Context, _ string) (vclient.Client, error) {
+		return c, nil
+	}
+}
+
+func assertNoNodes(t *testing.T, state *ClusterState) {
+	t.Helper()
+	if len(state.Shards) != 0 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected the node to be skipped, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+}
+
+func TestGetClusterStateKeepsACompleteScrape(t *testing.T) {
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dialScrape(t, healthyScrape()))
+
+	if len(state.Shards) != 1 || len(state.PendingNodes) != 0 {
+		t.Fatalf("expected one shard, got %d shards and %d pending nodes", len(state.Shards), len(state.PendingNodes))
+	}
+	shard := state.Shards[0]
+	if shard.Id != "shard-1" || shard.PrimaryId != "abc" {
+		t.Fatalf("shard id %q primary %q", shard.Id, shard.PrimaryId)
+	}
+}
+
+// A Valkey error or an empty reply on identity or topology must not become a
+// member with blank fields. That member would share a shard with every other
+// blank id, look joined rather than isolated, and could be picked as a MEET
+// target. INFO is the exception: a missing replication section only marks the
+// node out of sync.
+func TestGetClusterStateSkipsNodeWhenScrapeCommandFails(t *testing.T) {
+	busy := valkeyErrorResult("BUSY Valkey is busy running a script")
+	cases := []struct {
+		name    string
+		results []vclient.ValkeyResult
+	}{
+		{name: "CLUSTER MYID", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[0] = busy
+			return r
+		}()},
+		{name: "empty CLUSTER MYID", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[0] = blobResult("")
+			return r
+		}()},
+		{name: "CLUSTER MYSHARDID", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[1] = busy
+			return r
+		}()},
+		{name: "CLUSTER INFO", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[3] = busy
+			return r
+		}()},
+		{name: "CLUSTER NODES", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[4] = busy
+			return r
+		}()},
+		{name: "CLUSTER NODES without myself", results: func() []vclient.ValkeyResult {
+			r := healthyScrape()
+			r[4] = blobResult("peer 10.0.0.2:6379@16379 master - 0 0 1 connected 0-16383\n")
+			return r
+		}()},
+		{name: "every command BUSY", results: []vclient.ValkeyResult{busy, busy, busy, busy, busy}},
+		{name: "short DoMulti reply", results: healthyScrape()[:4]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dialScrape(t, tc.results))
+			assertNoNodes(t, state)
+		})
+	}
+}
+
+func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
+	results := healthyScrape()
+	results[2] = valkeyErrorResult("BUSY Valkey is busy running a script")
+
+	state := GetClusterState(context.Background(), []string{"10.0.0.1"}, 6379, dialScrape(t, results))
+
+	if len(state.Shards) != 1 || len(state.Shards[0].Nodes) != 1 {
+		t.Fatalf("expected the node to stay, got %d shards", len(state.Shards))
+	}
+	node := state.Shards[0].Nodes[0]
+	if node.Id != "abc" || node.ShardId != "shard-1" || !node.IsPrimary() {
+		t.Fatalf("identity lost: id %q shard %q flags %v", node.Id, node.ShardId, node.Flags)
+	}
+	if node.Info["master_link_status"] == "up" || node.Info["role"] != "" {
+		t.Fatalf("INFO failure should leave replication fields unknown, got %v", node.Info)
 	}
 }

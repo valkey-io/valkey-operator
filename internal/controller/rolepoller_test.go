@@ -109,7 +109,7 @@ var _ = Describe("RolePoller", func() {
 				Namespace: "default",
 				Labels:    map[string]string{LabelCluster: clusterName},
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
@@ -456,25 +456,31 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 				Labels:          map[string]string{LabelCluster: "wiring-cluster"},
 				OwnerReferences: testParentRefs(),
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
+		withParentFields(node)
 		// The pod below may exist before the StatefulSet, so creating it needs a
 		// matching Spec.WorkloadRevision.
 		Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
+		podLabels := valkeyNodeLabels(node)
+		podLabels[appsv1.StatefulSetRevisionLabel] = "rev-1"
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      node.Name + "-pod",
 				Namespace: namespace,
-				Labels:    valkeyNodeLabels(node),
+				Labels:    podLabels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
 		pod.Status.PodIP = "10.0.0.1"
-		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		}
 		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
 		// envtest runs no StatefulSet controller, so the rollout has to be
@@ -504,6 +510,9 @@ var _ = Describe("RolePoller channel wiring", Label("wiring"), func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, fresh))).To(Succeed())
 		}
 		_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-pod", Namespace: namespace}})
+		// envtest does not garbage-collect, and the next node of this name has
+		// a new UID, so it would not own this ConfigMap.
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: nodeConfigMapName(node.Name), Namespace: namespace}})
 	})
 
 	It("reconciles a ValkeyNode pushed onto the channel", func() {

@@ -50,14 +50,16 @@ Indicates whether the cluster is fully functional and serving traffic.
 
 Common reasons when `Ready=False`:
 - `ServiceError` – failed to create/update headless service
-- `ConfigMapError` – failed to create/update configuration
-- `UsersACLError` – the aclfile could not be built: a user Secret or key is missing and the cluster has no aclfile yet, a Secret read failed for another reason, or the internal ACL Secret could not be updated. The reconcile stops until the next pass. Once an aclfile exists, a missing user Secret or key is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
+- `ConfigMapError` – failed to create or update the shared ConfigMap `valkey-<cluster>`, or a ConfigMap of that name exists that the cluster does not own, such as the node ConfigMap of node `cache-0-0` of cluster `cache` when this cluster is named `cache-0-0`
+- `UsersACLError` – the aclfile could not be built: a user Secret or key is missing and the cluster has no aclfile yet, a Secret read failed for another reason, or the internal ACL Secret could not be updated. It is also reported when `valkey-<cluster>-acl` or `valkey-<cluster>-system-passwords` exists without the cluster controlling it while the cluster still controls the Secret under its old `internal-` name. The message names both: delete or rename the first so the operator can copy the old Secret to it. The reconcile stops until the next pass. Once an aclfile exists, a missing user Secret or key is reported on [`Degraded`](#degraded) as `UsersACLUnresolved` instead, and the reconcile carries on
 - `OperatorAuthenticationFailed` – one or more nodes reject the operator's `_operator` password. See [`Degraded`](#degraded)
 - `SystemUsersACLError` – failed to reconcile system/internal ACL users
 - `ValkeyNodeError` – failed to create/update ValkeyNode CRs
 - `ValkeyNodeListError` – failed to list ValkeyNodes
 - `PodDisruptionBudgetError` – failed to create/update/delete the PodDisruptionBudget
 - `TrustBundleError` – a transient failure reading a `clientAuth.ca` source or writing the `valkey-<cluster>-tls-trust` Secret
+- `Reconciling` with message `Waiting for cluster pods to become Ready` – the cluster is waiting for a member pod's initial sync readiness gate or for the kubelet to report `PodReady=True`. Topology reconciliation can continue during this wait.
+- `InitialSyncGateFailed` – a write of the `valkey.io/initial-sync-complete` readiness gate was refused (403, for example without `patch` on `pods/status`) or conflicted (409). The node walk is held for that pass, so no ValkeyNode is created or rolled and a pod the walk would replace is not left waiting on a gate that cannot be written. The steps after the walk still run. `Progressing` is `True` with the same reason. Any other failed write is reported only by the `InitialSyncGateFailed` event
 - `Reconciling` – controller is making changes
 - `UpdatingNodes` – rolling update of ValkeyNode CRs in progress
   - while the roll of a shard's primary is on hold, because the shard has no synced replica to fail over to or the proactive failover to one did not complete, the message names the shard, the node and which of the two it is, for example `Updating ValkeyNodes: the roll of shard 2 primary valkey-c-2-0 is waiting, the shard has no synced replica to fail over to`. A healthy roll passes through this too, while the replica it rolled first does its initial sync, so the message says where a roll is, not that it is stuck. To catch a roll that runs too long, alert on `valkey_operator_cluster_state_info{state="Reconciling"} == 1` with a `for` clause of your choosing, and read the message for which shard to look at. A failed or timed-out failover also leaves a `FailoverFailed` or `FailoverTimeout` event
@@ -67,7 +69,7 @@ Common reasons when `Ready=False`:
 - `ScaleInBlocked` – scale-in cannot finish: an excess shard owns slots and there is no in-spec primary to drain into, or an excess ValkeyNode is kept because it may still own slots
 
 Common reasons when `Ready=True`:
-- `ClusterHealthy` – Cluster is healthy
+- `ClusterHealthy` – the cluster is healthy and its member pods that carry the initial sync readiness gate report `PodReady=True`
 
 #### `Progressing`
 Indicates whether the cluster is being created, updated, or scaled.
@@ -100,9 +102,8 @@ Common reasons:
 - `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
-- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, so the aclfile could not be rebuilt. The message names the user and the Secret, and the key when the Secret exists but lacks it; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `internal-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
-- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `internal-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
-
+- `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, or the user names no Secret, so the aclfile could not be rebuilt. Only a cluster stored before `password.secret.name` was required can have a user that names no Secret; see the upgrade note under [Users](valkeycluster.md#users). The message names the user and the Secret, and the key when the Secret exists but lacks it, or the unset field; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `valkey-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
+- `OperatorAuthenticationFailed` – one or more nodes report `ACLApplied=False/AuthenticationFailed`: they reject the `_operator` password in the `valkey-<cluster>-system-passwords` Secret. The message names the nodes and the Secret. Those nodes are missing from the operator's view of the cluster, so the controller sets this reason ahead of the shard, replica and slot checks and makes no topology changes until every node accepts the password. Only Ready nodes count: a node that is not Ready is not re-checked, and the readiness checks already cover it. See [Recovering from `AuthenticationFailed`](#recovering-from-authenticationfailed)
 ---
 
 ### Valkey-specific conditions
@@ -216,6 +217,8 @@ Common reasons when `Ready=False`:
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
 - `NoParent` – the node has no controller ownerReference to a `valkey.io` `ValkeyCluster`. The operator creates or updates no workload, Service or ConfigMap for the node and leaves the existing ones and the pod as they are. It still manages the persistence finalizer, and deleting the node still runs its finalizers. A ValkeyNode created by hand, or left behind by `kubectl delete valkeycluster <name> --cascade=orphan`, gets this reason. If the cluster was paused when it was deleted, its nodes keep the `valkey.io/pause-reconciliation` annotation and stay paused. They report `NoParent` after someone removes the annotation.
+- `ConfigRevisionMismatch` – the node's ConfigMap has no `valkey-<rev>.conf` key for `spec.configRevision`, and the pinned file the node renders from its own spec hashes to a different revision. The node writes nothing and leaves the workload alone. Its status still follows the pod, and when the pod is up the node still applies live config, ACL and the trust bundle. It clears once the parent sets a revision the node's spec renders to. See [Config revisions](architecture.md#config-revisions).
+- `ConfigMapError` – the node could not write its ConfigMap `valkey-<node>`, or a ConfigMap of that name exists that the node does not own, such as another cluster's shared ConfigMap. The node leaves the ConfigMap and the workload alone. Its status still follows the pod, and when the pod is up the node still applies live config, ACL and the trust bundle.
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -287,7 +290,7 @@ Common reasons when `ACLApplied=True`:
 
 ##### Recovering from `AuthenticationFailed`
 
-The node's running ACL no longer accepts the `_operator` password in `internal-<cluster>-system-passwords`. Which fix applies depends on which side changed:
+The node's running ACL no longer accepts the `_operator` password in `valkey-<cluster>-system-passwords`. Which fix applies depends on which side changed:
 
 - The Secret changed, for example it was deleted and the operator generated new passwords. Write the previous `_operator` and `_replication` values back into the Secret. Running pods still hold them in the server container's `VALKEYCLI_AUTH` and `PRIMARY_AUTH` environment variables. Leave `_exporter` at its new value, since the exporter image has no shell to read its old one from. The operator then rewrites the internal ACL Secret and every node reloads it. With the exporter enabled, each pod's exporter reports `redis_up 0` until it restarts and reads the new `_exporter`. To restart it without restarting the server container, run `kubectl debug <pod> --image=busybox --target=metrics-exporter --profile=baseline -- kill 1` in each pod.
 - The server's password changed while the Secret did not, for example an `ACL SETUSER _operator` run by hand. Run `ACL LOAD` on the node as a user allowed to run it, or restart the pod. Either reloads the mounted aclfile. Unless `acl.users` declares an enabled `default`, the liveness probe also fails, because it authenticates as `_operator`, so the kubelet restarts the server container after the probe's failure threshold. On a primary, that restart fails the shard over.
@@ -414,6 +417,7 @@ These events are emitted during the creation and management of Kubernetes resour
 | `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
 | `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
 | `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |
+| `InitialSyncGateFailed` | Warning | The `valkey.io/initial-sync-complete` readiness gate could not be updated on a pod. |
 
 ### Cluster topology events
 

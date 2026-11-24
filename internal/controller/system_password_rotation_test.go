@@ -84,7 +84,7 @@ func TestSystemPasswordVolumeFollowsClusterLabel(t *testing.T) {
 }
 
 func TestTurningRotationOnDoesNotRollPods(t *testing.T) {
-	off := pinTestCluster(nil, false)
+	off := pinTestCluster(nil)
 	on := off.DeepCopy()
 	on.Spec.ACL = &valkeyiov1alpha1.ACLSpec{SystemUsers: &valkeyiov1alpha1.SystemUsersSpec{
 		PasswordRotation: &valkeyiov1alpha1.SystemPasswordRotationSpec{IntervalDays: 30},

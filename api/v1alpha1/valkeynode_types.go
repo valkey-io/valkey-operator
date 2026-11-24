@@ -91,10 +91,12 @@ type ValkeyNodeSpec struct {
 	// +optional
 	Exporter ExporterSpec `json:"exporter,omitempty"`
 
-	// ServerConfigMapName specifies the name of the ConfigMap that contains the
-	// scripts, and Valkey config for the ValkeyNode.
-	// +optional
-	ServerConfigMapName string `json:"serverConfigMapName,omitempty"`
+	// SharedConfigMapName names the ConfigMap the parent shares with its
+	// nodes. It holds the probe, init and primary handoff scripts. A pod does
+	// not start until all four script keys are present.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SharedConfigMapName string `json:"sharedConfigMapName,omitempty"`
 
 	// UsersACLSecretName is the name of the Secret containing the ACL user
 	// file. When set, mounts a users-acl volume from this Secret so the
@@ -116,7 +118,10 @@ type ValkeyNodeSpec struct {
 	// Config is the user-facing Valkey configuration, copied verbatim from the
 	// owning cluster's Spec.Config. The controller applies the subset of these
 	// keys that are live-settable (see the operator's allowlist) via CONFIG SET;
-	// the rest take effect on the next pod roll.
+	// the rest take effect on the next pod roll. Keys are lowercase, as the
+	// cluster's are.
+	// +kubebuilder:validation:MaxProperties=1000
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key == key.lowerAscii())",message="spec.config keys must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -152,6 +157,17 @@ type ValkeyNodeSpec struct {
 	// reconciled.
 	// +optional
 	WorkloadRevision string `json:"workloadRevision,omitempty"`
+
+	// ConfigRevision names the pinned config revision the pod template
+	// references: the first 12 hex characters of the SHA-256 of the rendered
+	// restart-only config. The parent sets it. It stays at the live workload's
+	// revision while only live-settable keys differ, so those changes roll
+	// nothing. The node writes the key valkey-<rev>.conf in its ConfigMap
+	// valkey-<node> only when its own spec renders to this revision. A node
+	// stored before the field existed has none until its parent sets it.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{12}$`
+	ConfigRevision string `json:"configRevision,omitempty"`
 
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
@@ -347,6 +363,24 @@ type ValkeyNodeStatus struct {
 	// container that started after it may hold an older password from the file.
 	// +optional
 	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
+
+	// AppliedLiveConfig holds the live-settable keys of spec.config that the
+	// server last accepted through CONFIG SET, recorded as LiveConfigApplied
+	// becomes True.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AppliedLiveConfig []AppliedLiveConfigEntry `json:"appliedLiveConfig,omitempty"`
+}
+
+// AppliedLiveConfigEntry is one live-settable directive the server accepted.
+type AppliedLiveConfigEntry struct {
+	// Name is the directive name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Value is the directive's value.
+	Value string `json:"value"`
 }
 
 const (
@@ -423,6 +457,12 @@ const (
 	ValkeyNodeReasonPodNotReady = "PodNotReady"
 	// ValkeyNodeReasonServiceError indicates the per-node Service could not be created or updated.
 	ValkeyNodeReasonServiceError = "ServiceError"
+	// ValkeyNodeReasonConfigMapError indicates the node's config ConfigMap
+	// could not be written, or exists and is not owned by the node.
+	ValkeyNodeReasonConfigMapError = "ConfigMapError"
+	// ValkeyNodeReasonConfigRevisionMismatch indicates spec.configRevision is
+	// not in the node's ConfigMap and the node's spec does not render to it.
+	ValkeyNodeReasonConfigRevisionMismatch = "ConfigRevisionMismatch"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

@@ -419,10 +419,10 @@ type ValkeyClusterSpec struct {
 
 	// Config holds additional Valkey configuration parameters.
 	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
-	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// Keys may contain only lowercase letters, digits, '.', '_' and '-'.
 	// +kubebuilder:validation:MaxProperties=1000
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
-	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-z0-9._-]+$'))",message="spec.config keys may contain only lowercase letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected. The operator matches keys as written, so they must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -975,6 +975,12 @@ const (
 	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
 	// while topology work continues.
 	ReasonUsersACLUnresolved = "UsersACLUnresolved"
+
+	// ReasonInitialSyncGateFailed names the Warning event when the operator
+	// cannot write the valkey.io/initial-sync-complete readiness gate on a pod,
+	// and is used with Ready and Progressing while such a failure holds the
+	// node walk.
+	ReasonInitialSyncGateFailed = "InitialSyncGateFailed"
 )
 
 // +kubebuilder:object:root=true

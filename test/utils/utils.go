@@ -268,6 +268,31 @@ func GetValkeyNodeStatus(name string) (*valkeyiov1alpha1.ValkeyNode, error) {
 	return &node, nil
 }
 
+// GetNodePinnedConfig returns the pinned valkey.conf a ValkeyNode boots on:
+// key valkey-<spec.configRevision>.conf of its valkey-<node> ConfigMap.
+func GetNodePinnedConfig(nodeName, namespace string) (string, error) {
+	rev, err := Run(exec.Command("kubectl", "get", "valkeynode", nodeName, "-n", namespace,
+		"-o", "jsonpath={.spec.configRevision}"))
+	if err != nil {
+		return "", err
+	}
+	rev = strings.TrimSpace(rev)
+	if rev == "" {
+		return "", fmt.Errorf("ValkeyNode %s/%s has no spec.configRevision", namespace, nodeName)
+	}
+	key := fmt.Sprintf("valkey-%s.conf", rev)
+	out, err := Run(exec.Command("kubectl", "get", "configmap", "valkey-"+nodeName, "-n", namespace,
+		"-o", fmt.Sprintf(`go-template={{index .data %q}}`, key)))
+	if err != nil {
+		return "", err
+	}
+	// go-template prints <no value> for a missing key.
+	if out == "<no value>" {
+		return "", fmt.Errorf("ConfigMap %s/valkey-%s has no key %s", namespace, nodeName, key)
+	}
+	return out, nil
+}
+
 // GetValkeyClusterNodes lists all ValkeyNodes belonging to a cluster, selected
 // by the valkey.io/cluster label.
 func GetValkeyClusterNodes(clusterName string) (*valkeyiov1alpha1.ValkeyNodeList, error) {

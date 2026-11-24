@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
@@ -52,44 +53,6 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 		}
 	}
 	return l
-}
-
-// buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, the init container script, the primary handoff
-// script, plus an empty valkey.conf.
-// The ConfigMap is named via config.go:getConfigMapName(node).
-func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
-	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded liveness-check.sh: %w", err)
-	}
-	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
-	}
-	initScript, err := scripts.ReadFile("scripts/init.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
-	}
-	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
-	}
-
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      GetServerConfigMapName(node.Name),
-			Namespace: node.Namespace,
-			Labels:    valkeyNodeLabels(node),
-		},
-		Data: map[string]string{
-			"valkey.conf":           generateValkeyNodeConfig(node),
-			"liveness-check.sh":     string(liveness),
-			"readiness-check.sh":    string(readiness),
-			initScriptKey:           string(initScript),
-			primaryHandoffScriptKey: string(primaryHandoff),
-		},
-	}, nil
 }
 
 // usesPrimaryHandoffScript reports whether the server container of the node starts
@@ -582,13 +545,10 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	return c[0]
 }
 
-// initContainerCommand runs script when it exists and exits 0 otherwise. An
-// external ConfigMap (spec.serverConfigMapName on a standalone ValkeyNode)
-// may predate init.sh, and its absence must not block the pod.
+// initContainerCommand runs script. The scripts volume mounts every script
+// key, so a pod whose ConfigMap lacks one does not start.
 func initContainerCommand(script string) []string {
-	return []string{shellPath, "-c", fmt.Sprintf(
-		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
-		script, shellPath)}
+	return []string{shellPath, script}
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
@@ -597,13 +557,6 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	containers, err := buildContainersDef(node)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, err
-	}
-
-	// Use the explicitly provided ConfigMap name, or fall back to the default
-	// resource name (which the controller creates automatically).
-	configMapName := node.Spec.ServerConfigMapName
-	if configMapName == "" {
-		configMapName = GetServerConfigMapName(node.Name)
 	}
 
 	podSpec := corev1.PodSpec{
@@ -631,18 +584,29 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: configMapName,
+							Name: node.Spec.SharedConfigMapName,
+						},
+						Items: []corev1.KeyToPath{
+							{Key: readinessScriptKey, Path: readinessScriptKey},
+							{Key: livenessScriptKey, Path: livenessScriptKey},
+							{Key: initScriptKey, Path: initScriptKey},
+							{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
 						},
 						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
 			},
 			{
+				// One volume, so kubelet swaps both files in one atomic write.
 				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: configMapName,
+							Name: nodeConfigMapName(node.Name),
+						},
+						Items: []corev1.KeyToPath{
+							{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: configFileKey},
+							{Key: liveConfigFileKey, Path: liveConfigFileKey},
 						},
 					},
 				},
@@ -703,6 +667,10 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 
 	if node.Spec.ServiceAccountName != "" {
 		podSpec.ServiceAccountName = node.Spec.ServiceAccountName
+	}
+
+	if usesInitialSyncGate(node) {
+		podSpec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: initialSyncGate}}
 	}
 
 	// Back /data with a PVC when persistence is set; otherwise an emptyDir so
@@ -832,7 +800,9 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			Template: tmpl,
 			// API-server defaults, set explicitly so the desired spec equals
 			// the stored one and ensureStatefulSet's wholesale spec assignment
-			// stops producing an Update on every reconcile (#315).
+			// does not send an Update on every reconcile. maxUnavailable is not
+			// set here since only some server versions default it; see
+			// matchServerDefaultedMaxUnavailable.
 			PodManagementPolicy: appsv1.OrderedReadyPodManagement,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
@@ -847,6 +817,18 @@ func buildValkeyNodeStatefulSet(node *valkeyiov1alpha1.ValkeyNode) (*appsv1.Stat
 			},
 		},
 	}, nil
+}
+
+// matchServerDefaultedMaxUnavailable sets the desired maxUnavailable to its
+// default, 1, only when the live StatefulSet has it: Kubernetes 1.35+ defaults
+// it and older servers drop it.
+func matchServerDefaultedMaxUnavailable(desired, live *appsv1.StatefulSetSpec) {
+	want, have := desired.UpdateStrategy.RollingUpdate, live.UpdateStrategy.RollingUpdate
+	if want == nil || want.MaxUnavailable != nil || have == nil || have.MaxUnavailable == nil {
+		return
+	}
+	one := intstr.FromInt32(1)
+	want.MaxUnavailable = &one
 }
 
 // tlsVolume is the volume mounted at tlsCertMountPath. Without a trust bundle

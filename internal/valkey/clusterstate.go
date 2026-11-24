@@ -23,14 +23,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	vclient "github.com/valkey-io/valkey-go"
+	"golang.org/x/sync/errgroup"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // DialFunc returns a client for the Valkey node at address (host:port). The
 // client belongs to whoever supplies the DialFunc; callers never call Close on
-// it.
+// it. It must be safe for concurrent calls: GetClusterState dials addresses in
+// parallel.
 type DialFunc func(ctx context.Context, address string) (vclient.Client, error)
 
 // NodeState represents the current state of an inspected cluster node.
@@ -105,6 +108,9 @@ type ShardState struct {
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
+
+	// targets are the pod addresses this pass set out to scrape.
+	targets map[string]struct{}
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -133,15 +139,21 @@ func FormatSlotsRanges(ranges []SlotsRange) string {
 }
 
 // GetClusterState connects to Valkey nodes and scrapes the current state.
+//
+// Nodes are dialled in parallel, so unreachable addresses cost about one dial
+// timeout in all rather than one each. The state is built in address order
+// whatever order the nodes answer in.
 func GetClusterState(ctx context.Context, addresses []string, port int, dial DialFunc) *ClusterState {
 	state := ClusterState{
 		Shards:       make([]*ShardState, 0),
 		PendingNodes: make([]*NodeState, 0),
+		targets:      make(map[string]struct{}, len(addresses)),
+	}
+	for _, address := range addresses {
+		state.targets[address] = struct{}{}
 	}
 
-	for _, address := range addresses {
-		// Attempt to connect to the Valkey node and extract information.
-		node := getNodeState(ctx, address, port, dial)
+	for _, node := range scrapeNodes(ctx, addresses, port, dial) {
 		if node != nil {
 			// Check if node is pending to be added. A primary carrying only a
 			// migration marker is mid-reshard and already part of the slot map,
@@ -176,6 +188,42 @@ func GetClusterState(ctx context.Context, addresses []string, port int, dial Dia
 	}
 	state.adoptDrainedPrimaries()
 	return &state
+}
+
+// scrapeConcurrency caps the dials in flight during one scrape. Correctness does
+// not need it; it bounds the burst of TCP and TLS handshakes when nothing is
+// pooled, as after an operator restart or a credential rotation.
+const scrapeConcurrency = 32
+
+// scrapeNodes scrapes each address in parallel and returns the results in
+// address order, nil where a node could not be reached. It waits for every
+// dial, even after ctx is cancelled: valkey-go dials a new client without the
+// caller's context.
+func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFunc) []*NodeState {
+	results := make([]*NodeState, len(addresses))
+	var g errgroup.Group
+	g.SetLimit(scrapeConcurrency)
+	var panicked any
+	var panicOnce sync.Once
+	for i, address := range addresses {
+		g.Go(func() error {
+			// Hand a panic back to the caller's goroutine, where controller-runtime
+			// recovers it. Here it would end the process.
+			defer func() {
+				if r := recover(); r != nil {
+					panicOnce.Do(func() { panicked = r })
+				}
+			}()
+			// Attempt to connect to the Valkey node and extract information.
+			results[i] = getNodeState(ctx, address, port, dial)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if panicked != nil {
+		panic(panicked)
+	}
+	return results
 }
 
 // adoptDrainedPrimaries moves a slot-less pending primary into the shard of a
@@ -218,6 +266,53 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 		}
 	}
 	return remaining
+}
+
+// AssignableSlots returns the unassigned slots a new primary can be given. It
+// leaves out ranges a scraped node's CLUSTER NODES table gives to a primary
+// this pass did not scrape, at one of the pod addresses it set out to scrape.
+// That primary can still be serving them, for example when only its CLUSTER
+// INFO failed, and a new primary given them would take them over with a
+// higher config epoch. A primary whose address answered as another id has
+// been replaced, so its ranges stay assignable. GetUnassignedSlots still
+// counts all of these as unassigned.
+func (s *ClusterState) AssignableSlots() []SlotsRange {
+	free := s.GetUnassignedSlots()
+	scraped := make(map[string]struct{})
+	liveByAddress := make(map[string]string)
+	for _, node := range s.AllNodes() {
+		if node.Id == "" {
+			continue
+		}
+		scraped[node.Id] = struct{}{}
+		if node.Address != "" {
+			liveByAddress[node.Address] = node.Id
+		}
+	}
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
+				continue
+			}
+			if _, found := scraped[entry.Id]; found {
+				continue
+			}
+			if _, isPod := s.targets[entry.Host]; !isPod {
+				continue
+			}
+			if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+				continue
+			}
+			for _, owned := range entry.Slots {
+				var next []SlotsRange //nolint:prealloc
+				for _, base := range free {
+					next = append(next, SubtractSlotsRange(base, owned)...)
+				}
+				free = next
+			}
+		}
+	}
+	return free
 }
 
 // FindShardForAddress returns the shard containing a node with the given IP
@@ -613,61 +708,90 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 	results := client.DoMulti(ctx,
 		client.B().ClusterMyid().Build(),
 		client.B().ClusterMyshardid().Build(),
-		client.B().Info().Build(),
+		client.B().Info().Section("persistence", "replication").Build(),
 		client.B().ClusterInfo().Build(),
 		client.B().ClusterNodes().Build(),
 	)
 
 	// The round trip can fail without a dial error: a pooled client may point
 	// at a server that went away since its last use, or the caller's context
-	// may have expired, as when an earlier node used up the role poller's pass
-	// budget. All five commands share one wire, so a transport-level failure
-	// on the first result means the whole round trip failed, not just one
-	// command.
+	// may have expired, as when the role poller's pass budget runs out. All
+	// five commands share one wire, so a transport-level failure on the first
+	// result means the whole round trip failed, not just one command.
 	if len(results) > 0 && results[0].NonValkeyError() != nil {
 		log.Error(results[0].NonValkeyError(), "failed to reach Valkey node")
 		return nil
 	}
-
-	if len(results) == 5 {
-		id, err := results[0].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYID")
-		}
-		node.Id = id
-
-		shardid, err := results[1].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER MYSHARDID")
-		}
-		node.ShardId = shardid
-
-		info, err := results[2].ToString()
-		if err != nil {
-			log.Error(err, "command failed: INFO")
-		}
-		node.Info = infoStringToMap(info)
-
-		cinfo, err := results[3].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER INFO")
-		}
-		node.ClusterInfo = infoStringToMap(cinfo)
-
-		cnodes, err := results[4].ToString()
-		if err != nil {
-			log.Error(err, "command failed: CLUSTER NODES")
-		}
-		// Remove the encoding string included in a verbatim string.
-		node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
-	} else {
+	if len(results) != 5 {
 		log.Error(fmt.Errorf("expected 5 results from DoMulti, got %d", len(results)), "failed to query node state")
+		return nil
 	}
 
-	if myself := node.Myself(); myself != nil {
-		node.Flags = myself.Flags
+	// Identity and topology have to come back whole. An empty id, shard id,
+	// or node table is not a node we can place: GetClusterState would group
+	// every such node into one shard, skip isolation, and may hand it slots.
+	// A Valkey error (BUSY, NOPERM, a renamed command) is that case. Drop the
+	// node for this pass, the same as a dial failure. Callers already requeue
+	// when a member is missing.
+	id, err := requiredScrapeString(results[0])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYID")
+		return nil
 	}
+	node.Id = id
+
+	shardid, err := requiredScrapeString(results[1])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER MYSHARDID")
+		return nil
+	}
+	node.ShardId = shardid
+
+	// INFO is different. A replica with no master_link_status counts as out
+	// of sync, and a primary's role comes from CLUSTER NODES, not from INFO.
+	// Keep the node and leave replication fields unknown.
+	info, err := results[2].ToString()
+	if err != nil {
+		log.Error(err, "command failed: INFO")
+	} else {
+		node.Info = infoStringToMap(info)
+	}
+
+	cinfo, err := requiredScrapeString(results[3])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER INFO")
+		return nil
+	}
+	node.ClusterInfo = infoStringToMap(cinfo)
+
+	cnodes, err := requiredScrapeString(results[4])
+	if err != nil {
+		log.Error(err, "command failed: CLUSTER NODES")
+		return nil
+	}
+	// Remove the encoding string included in a verbatim string.
+	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	myself := node.Myself()
+	if myself == nil {
+		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")
+		return nil
+	}
+	node.Flags = myself.Flags
 	return &node
+}
+
+// requiredScrapeString returns the reply of one scrape command. A Valkey
+// error and an empty reply are both failures: either one leaves a field the
+// caller would otherwise treat as known.
+func requiredScrapeString(res vclient.ValkeyResult) (string, error) {
+	s, err := res.ToString()
+	if err != nil {
+		return "", err
+	}
+	if s == "" {
+		return "", fmt.Errorf("empty reply")
+	}
+	return s, nil
 }
 
 // Convert a string containing INFO elements to a map.
@@ -685,40 +809,17 @@ func infoStringToMap(s string) map[string]string {
 	return m
 }
 
-// parseSlotsRange parses strings to find multiple SlotsRange's
-func parseSlotsRanges(s []string) ([]SlotsRange, error) {
-	ranges := []SlotsRange{}
-
-	for _, part := range s {
-		// During active slot migration, CLUSTER NODES appends entries like
-		// "[5461->-abc123]" (migrating) or "[5461-<-abc123]" (importing) to the
-		// slot fields. parseClusterNodesLine splits well-formed markers off
-		// before calling this, so a "[" field here is a malformed marker. Skip
-		// it rather than fail the whole line.
-		if strings.HasPrefix(part, "[") {
-			continue
-		}
-		r, err := parseSlotsRange(part)
-		if err != nil {
-			return nil, err
-		}
-		ranges = append(ranges, r)
-	}
-	return ranges, nil
-}
-
 // parseSlotsRange parses a string to find a single SlotsRange
 func parseSlotsRange(s string) (SlotsRange, error) {
-	if strings.Contains(s, "-") {
-		parts := strings.Split(s, "-")
-		if len(parts) != 2 {
+	if startText, endText, isRange := strings.Cut(s, "-"); isRange {
+		if strings.Contains(endText, "-") {
 			return SlotsRange{}, fmt.Errorf("invalid range: %s", s)
 		}
-		start, err := strconv.Atoi(parts[0])
+		start, err := strconv.Atoi(startText)
 		if err != nil {
 			return SlotsRange{}, err
 		}
-		end, err := strconv.Atoi(parts[1])
+		end, err := strconv.Atoi(endText)
 		if err != nil {
 			return SlotsRange{}, err
 		}

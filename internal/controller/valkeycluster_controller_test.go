@@ -468,7 +468,7 @@ var _ client.Reader = errorReader{}
 var _ = Describe("ValkeyCluster config hash propagation", func() {
 	ctx := context.Background()
 
-	It("should set configHashKey annotation on ValkeyNodes and update it when cluster config changes", func() {
+	It("should set spec.configRevision on ValkeyNodes and keep it when only a live key changes", func() {
 		cluster := &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "config-hash-test",
@@ -489,7 +489,7 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 			}
 			_ = k8sClient.Delete(ctx, cluster)
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
 				_ = k8sClient.Delete(ctx, cm)
 			}
 			secret := &corev1.Secret{}
@@ -512,12 +512,12 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 
 		By("reading the config hash from the cluster ConfigMap")
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		initialCMHash := cm.Annotations[configHashKey]
 		Expect(initialCMHash).NotTo(BeEmpty())
 
-		By("capturing each ValkeyNode's derived roll hash and authorized WorkloadRevision")
-		// The derived roll hash excludes live-settable keys so that changes to
+		By("capturing each ValkeyNode's config revision and authorized WorkloadRevision")
+		// The pinned config excludes live-settable keys so that changes to
 		// those keys do not trigger a pod roll.
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
@@ -526,10 +526,11 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 		initialRevisions := map[string]string{}
 		for i := range nodeList.Items {
 			n := &nodeList.Items[i]
-			Expect(nodeServerConfigRollHash(n)).NotTo(BeEmpty())
+			Expect(n.Spec.ConfigRevision).To(Equal(pinnedConfigRevision(renderPinnedConfig(n))),
+				"ValkeyNode %s must be created with the desired config revision", n.Name)
 			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty(),
 				"ValkeyNode %s must be created with an authorized WorkloadRevision", n.Name)
-			initialHashes[n.Name] = nodeServerConfigRollHash(n)
+			initialHashes[n.Name] = n.Spec.ConfigRevision
 			initialRevisions[n.Name] = n.Spec.WorkloadRevision
 		}
 
@@ -544,19 +545,19 @@ var _ = Describe("ValkeyCluster config hash propagation", func() {
 
 		By("verifying the ConfigMap has a new full hash (all keys changed)")
 		updatedCM := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, updatedCM)).To(Succeed())
 		newCMHash := updatedCM.Annotations[configHashKey]
 		Expect(newCMHash).NotTo(BeEmpty())
 		Expect(newCMHash).NotTo(Equal(initialCMHash), "CM full-config hash should change when cluster config changes")
 
-		By("verifying derived roll hash and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
+		By("verifying config revision and WorkloadRevision are unchanged (maxmemory is live-settable, no pod roll)")
 		updatedNodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, updatedNodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(updatedNodeList.Items).NotTo(BeEmpty())
 		for i := range updatedNodeList.Items {
 			n := &updatedNodeList.Items[i]
-			Expect(nodeServerConfigRollHash(n)).To(Equal(initialHashes[n.Name]),
-				"ValkeyNode %s roll hash must not change for live-settable key changes", n.Name)
+			Expect(n.Spec.ConfigRevision).To(Equal(initialHashes[n.Name]),
+				"ValkeyNode %s config revision must not change for live-settable key changes", n.Name)
 			Expect(n.Spec.WorkloadRevision).To(Equal(initialRevisions[n.Name]),
 				"ValkeyNode %s WorkloadRevision must not change for live-settable key changes (a change would roll the pod)", n.Name)
 		}
@@ -603,7 +604,7 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			}
 			_ = k8sClient.Delete(ctx, cluster)
 			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm); err == nil {
 				_ = k8sClient.Delete(ctx, cm)
 			}
 			secret := &corev1.Secret{}
@@ -626,10 +627,10 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 
 		By("reading the config hash the operator persisted to the ConfigMap")
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}, cm)).To(Succeed())
 		Expect(cm.Annotations[configHashKey]).NotTo(BeEmpty())
 
-		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a derived config-hash annotation")
+		By("verifying every ValkeyNode was created with an authorized WorkloadRevision and a config-revision annotation")
 		nodeList := &valkeyiov1alpha1.ValkeyNodeList{}
 		Expect(k8sClient.List(ctx, nodeList, client.InNamespace("default"), client.MatchingLabels{LabelCluster: cluster.Name})).To(Succeed())
 		Expect(nodeList.Items).NotTo(BeEmpty())
@@ -638,8 +639,9 @@ var _ = Describe("ValkeyCluster config hash on first reconcile", func() {
 			Expect(n.Spec.WorkloadRevision).NotTo(BeEmpty())
 			tmpl, err := buildNodePodTemplate(n)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(tmpl.Annotations[configHashKey]).To(Equal(nodeServerConfigRollHash(n)),
-				"ValkeyNode %s pod template must carry the derived config-hash annotation even when the ConfigMap is not yet visible in the cache", n.Name)
+			Expect(n.Spec.ConfigRevision).NotTo(BeEmpty())
+			Expect(tmpl.Annotations[configRevisionKey]).To(Equal(n.Spec.ConfigRevision),
+				"ValkeyNode %s pod template must carry the config-revision annotation even when the ConfigMap is not yet visible in the cache", n.Name)
 		}
 	})
 })
@@ -1039,9 +1041,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, secret) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred())
@@ -1103,9 +1106,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
 
 			reconciler := &ValkeyClusterReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
 			}
 
 			err := reconciler.reconcileUsersAcl(ctx, cluster)
@@ -1276,7 +1280,7 @@ var _ = Describe("UpdatingNodes topology status", func() {
 		}
 		_ = k8sClient.Delete(ctx, cluster)
 		_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: headlessServiceName(cluster.Name), Namespace: "default"}})
-		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(cluster.Name), Namespace: "default"}})
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetSharedConfigMapName(cluster.Name), Namespace: "default"}})
 		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName(cluster.Name), Namespace: "default"}})
 	}
 
@@ -1673,7 +1677,7 @@ var _ = Describe("EventRecorder", func() {
 
 			Expect(r.upsertConfigMap(ctx, cluster)).To(Succeed())
 			cm := &corev1.ConfigMap{}
-			cmKey := types.NamespacedName{Name: GetServerConfigMapName(cluster.Name), Namespace: cluster.Namespace}
+			cmKey := types.NamespacedName{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}
 			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
 			Expect(cm.Data).To(HaveKey(initScriptKey))
 

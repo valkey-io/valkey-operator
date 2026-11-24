@@ -65,6 +65,29 @@ spec:
                 description: ACL configures the Valkey access control the operator
                   manages.
                 properties:
+                  systemUsers:
+                    description: |-
+                      SystemUsers configures the operator's internal users (_operator,
+                      _replication, _exporter).
+                    properties:
+                      passwordRotation:
+                        description: |-
+                          PasswordRotation turns on rotation of the passwords the operator
+                          generates for its internal users. Unset leaves those passwords
+                          unchanged.
+                        properties:
+                          intervalDays:
+                            default: 30
+                            description: |-
+                              IntervalDays is how many days a password stays current before the
+                              operator generates the next one. The first rotation happens one
+                              interval after rotation is turned on.
+                            format: int32
+                            maximum: 3650
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
                   users:
                     description: Users managed by the operator
                     items:
@@ -135,8 +158,9 @@ spec:
                             rule: '!self.startsWith(''_'')'
                         password:
                           default: {}
-                          description: Password authentication; defaults to the passwords
-                            in the Secret <cluster>-users
+                          description: |-
+                            Password authentication. An enabled user whose type is Secret, the
+                            default, must name its Secret in secret.name.
                           properties:
                             secret:
                               description: Reference information to a Secret containing
@@ -150,8 +174,9 @@ spec:
                                     type: string
                                   type: array
                                 name:
-                                  description: Name of the referencing Secret; Defaults
-                                    to clustername-users
+                                  description: |-
+                                    Name of the Secret, in the cluster's namespace, that holds the passwords.
+                                    Required for an enabled user that authenticates with Secret passwords.
                                   type: string
                               type: object
                             type:
@@ -184,6 +209,16 @@ spec:
                       required:
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - fieldPath: .password.secret.name
+                        message: password.secret.name is required for an enabled user
+                          whose password.type is Secret, the default
+                        reason: FieldValueRequired
+                        rule: (has(self.state) && self.state == 'Disabled') || (has(self.password)
+                          && has(self.password.type) && self.password.type in ['Any',
+                          'Disabled']) || (has(self.password) && has(self.password.secret)
+                          && has(self.password.secret.name) && size(self.password.secret.name)
+                          > 0)
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -2332,10 +2367,10 @@ spec:
                     maxProperties: 1024
                     type: object
                     x-kubernetes-validations:
-                    - message: 'annotations must total at most 262059 characters (keys
-                        plus values): 256 KiB less the operator''s valkey.io/config-hash
+                    - message: 'annotations must total at most 262107 characters (keys
+                        plus values): 256 KiB less the operator''s valkey.io/config-revision
                         annotation'
-                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262059
+                      rule: self.map(k, size(k) + size(self[k])).sum() <= 262107
                     - message: annotation keys must be an optional DNS subdomain prefix
                         (at most 253 characters) and '/', followed by a name of at
                         most 63 alphanumerics, '-', '_' or '.', starting and ending
@@ -4123,8 +4158,9 @@ spec:
                             type: string
                           type: array
                         name:
-                          description: Name of the referencing Secret; Defaults to
-                            clustername-users
+                          description: |-
+                            Name of the Secret, in the cluster's namespace, that holds the passwords.
+                            Required for an enabled user that authenticates with Secret passwords.
                           type: string
                       type: object
                     permissions:
@@ -4139,6 +4175,15 @@ spec:
                   required:
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - fieldPath: .passwordSecret.name
+                    message: passwordSecret.name is required for an enabled user without
+                      nopass or resetpass
+                    reason: FieldValueRequired
+                    rule: (has(self.enabled) && !self.enabled) || (has(self.nopass)
+                      && self.nopass) || (has(self.resetpass) && self.resetpass) ||
+                      (has(self.passwordSecret) && has(self.passwordSecret.name) &&
+                      size(self.passwordSecret.name) > 0)
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

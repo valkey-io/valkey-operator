@@ -84,6 +84,8 @@ ValkeyNode is deliberately "dumb" — it reconciles infrastructure without makin
 - `podIP` — used by the parent to connect and issue Valkey commands
 - `podName` — name of the managed pod
 - `appliedACLRevision` — the revision of the operator-managed aclfile the running server was last confirmed to hold, recorded as `ACLApplied` becomes `True`
+- `appliedReplicationPasswordHash` and `replicationPasswordAppliedTime` — the sha256 of the replication password last given to the running server with `CONFIG SET primaryauth`, and when it was sent; during a system password rotation the parent keeps the previous password until every server has it
+- `appliedLiveConfig`: the live-settable keys of `spec.config` that the server last accepted through CONFIG SET, recorded as `LiveConfigApplied` becomes `True`
 
 Parent controllers are responsible for issuing Valkey commands (`REPLICAOF`, `CLUSTER MEET`, `CLUSTER ADDSLOTS`, `FAILOVER`, etc.) directly against `status.podIP`. ValkeyNode only observes the resulting state and reports it.
 
@@ -109,8 +111,8 @@ Child resources created by ValkeyNode have `valkey-` prepended to the ValkeyNode
 ## Lifecycle and Deletion Behaviour
 
 - **Workload**: Deleted via cascading owner references when the ValkeyNode is deleted.
-- **PVC**: PVCs are **not** deleted when a ValkeyNode is deleted. This mirrors StatefulSet semantics — volumes persist beyond pod lifecycle to survive restarts and rescheduling. PVCs must be explicitly deleted if storage reclamation is desired.
-- **Orphaned ValkeyNodes**: If a parent controller (e.g. ValkeyCluster) is deleted, its ValkeyNodes are garbage collected via owner references. PVCs are still retained.
+- **PVC**: `persistence.reclaimPolicy` decides what happens to the managed PVC when the ValkeyNode is deleted. `Retain` (the default) keeps it, as StatefulSets do, so data survives the node. `Delete` removes it through the node's finalizer.
+- **Orphaned ValkeyNodes**: If a parent controller (e.g. ValkeyCluster) is deleted with background or foreground cascading deletion, its ValkeyNodes are garbage collected via owner references, and each managed PVC follows the node's reclaim policy. With `--cascade=orphan` the ValkeyNodes lose their ownerReference and stay. They report `Ready=False` with reason `NoParent`, their pods keep running, and the operator no longer reconciles them.
 
 ## ValkeyCluster Integration
 

@@ -116,8 +116,8 @@ var _ = Describe("ValkeyCluster Controller", func() {
 				PrimaryId: "p",
 				Slots:     []valkey.SlotsRange{{Start: 10923, End: 16383}},
 				Nodes: []*valkey.NodeState{
-					{Address: "10.0.0.1", Id: "p", Flags: []string{"master"}},
-					{Address: "10.0.0.2", Id: "r", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
+					{Address: "10.0.0.1", Id: "p", Flags: valkey.FlagMaster},
+					{Address: "10.0.0.2", Id: "r", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "down"}},
 				},
 			}}}
 
@@ -2109,8 +2109,8 @@ var _ = Describe("reconcileValkeyNodes", func() {
 					PrimaryId: "node-0",
 					Slots:     nil,
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.0.1", Id: "node-0", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-1", Flags: []string{"slave"}},
+						{Address: "10.0.0.1", Id: "node-0", Flags: valkey.FlagMaster},
+						{Address: "10.0.0.2", Id: "node-1", Flags: valkey.FlagSlave},
 					},
 				},
 				{
@@ -2118,8 +2118,8 @@ var _ = Describe("reconcileValkeyNodes", func() {
 					PrimaryId: "node-2",
 					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}},
-						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
+						{Address: "10.0.1.1", Id: "node-2", Flags: valkey.FlagMaster},
+						{Address: "10.0.1.2", Id: "node-3", Flags: valkey.FlagSlave},
 					},
 				},
 			},
@@ -2167,8 +2167,8 @@ var _ = Describe("reconcileValkeyNodes", func() {
 					PrimaryId: "node-0",
 					Slots:     nil,
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.0.1", Id: "node-0", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-1", Flags: []string{"slave"}},
+						{Address: "10.0.0.1", Id: "node-0", Flags: valkey.FlagMaster},
+						{Address: "10.0.0.2", Id: "node-1", Flags: valkey.FlagSlave},
 					},
 				},
 				{
@@ -2176,8 +2176,8 @@ var _ = Describe("reconcileValkeyNodes", func() {
 					PrimaryId: "node-2",
 					Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.1.1", Id: "node-2", Flags: []string{"master"}},
-						{Address: "10.0.1.2", Id: "node-3", Flags: []string{"slave"}},
+						{Address: "10.0.1.1", Id: "node-2", Flags: valkey.FlagMaster},
+						{Address: "10.0.1.2", Id: "node-3", Flags: valkey.FlagSlave},
 					},
 				},
 			},

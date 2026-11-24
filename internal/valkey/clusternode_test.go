@@ -41,8 +41,8 @@ func TestParseClusterNodes(t *testing.T) {
 		if primary.Host != "10.0.0.1" {
 			t.Errorf("expected host 10.0.0.1, got %q", primary.Host)
 		}
-		if !reflect.DeepEqual(primary.Flags, []string{"myself", "master"}) {
-			t.Errorf("unexpected flags %v", primary.Flags)
+		if primary.Flags != FlagMyself|FlagMaster {
+			t.Errorf("unexpected flags %09b", primary.Flags)
 		}
 		if primary.PrimaryId != "-" {
 			t.Errorf("expected primary id -, got %q", primary.PrimaryId)
@@ -196,7 +196,7 @@ func TestParseClusterNodes_Memory(t *testing.T) {
 			return s != "" && p >= start && p < end
 		}
 		for _, node := range ParseClusterNodes(raw) {
-			texts := append([]string{node.Id, node.Host, node.PrimaryId}, node.Flags...)
+			texts := []string{node.Id, node.Host, node.PrimaryId}
 			for _, m := range node.Migrating {
 				texts = append(texts, m.Peer)
 			}
@@ -421,4 +421,63 @@ func BenchmarkParseClusterNodesMyself(b *testing.B) {
 			_ = ParseClusterNodesMyself(raw.String())
 		}
 	})
+}
+
+func TestParseNodeFlags(t *testing.T) {
+	t.Run("every flag Valkey writes", func(t *testing.T) {
+		var want NodeFlags
+		for _, nf := range nodeFlagNames {
+			if got := parseNodeFlags(nf.name); got != nf.flag {
+				t.Errorf("parseNodeFlags(%q) = %09b, want %09b", nf.name, got, nf.flag)
+			}
+			want |= nf.flag
+		}
+		all := "myself,master,slave,fail?,fail,handshake,noaddr,nofailover,noflags"
+		if got := parseNodeFlags(all); got != want {
+			t.Errorf("parseNodeFlags(%q) = %09b, want %09b", all, got, want)
+		}
+	})
+
+	// fail? and fail are distinct flags; the majority check reads them apart.
+	t.Run("pfail is not fail", func(t *testing.T) {
+		node := ClusterNode{Flags: parseNodeFlags("master,fail?")}
+		if !node.HasFlag(FlagPFail) || node.HasFlag(FlagFail) {
+			t.Errorf("got %09b, want fail? without fail", node.Flags)
+		}
+	})
+
+	t.Run("an unknown name is dropped", func(t *testing.T) {
+		got := parseNodeFlags("slave,future-flag,nofailover")
+		if want := FlagSlave | FlagNoFailover; got != want {
+			t.Errorf("got %09b, want %09b", got, want)
+		}
+	})
+}
+
+func TestNodeFlagsString(t *testing.T) {
+	for _, tc := range []struct {
+		flags NodeFlags
+		want  string
+	}{
+		{0, ""},
+		{FlagMaster, "master"},
+		{FlagMyself | FlagMaster, "myself,master"},
+		{FlagSlave | FlagPFail | FlagNoFailover, "slave,fail?,nofailover"},
+		// The output follows Valkey's order, not the order the bits are combined in.
+		{FlagNoFailover | FlagSlave | FlagMyself, "myself,slave,nofailover"},
+	} {
+		if got := tc.flags.String(); got != tc.want {
+			t.Errorf("NodeFlags(%09b).String() = %q, want %q", uint16(tc.flags), got, tc.want)
+		}
+	}
+}
+
+func TestNodeFlagsHas(t *testing.T) {
+	f := FlagSlave | FlagFail
+	if !f.Has(FlagFail) || !f.Has(FlagMaster|FlagSlave) {
+		t.Errorf("%v: want fail and one of master|slave", f)
+	}
+	if f.Has(FlagMaster) || f.Has(0) {
+		t.Errorf("%v: want neither master nor the empty set", f)
+	}
 }

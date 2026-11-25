@@ -56,6 +56,10 @@ var _ = Describe("deleteExcessValkeyNodes", func() {
 				Namespace: "default",
 				Labels:    labels,
 			},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+			},
 		}
 		Expect(k8sClient.Create(testCtx, node)).To(Succeed())
 	}

@@ -42,10 +42,33 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
-# Authenticate as the custom user when user and password are set.
+# Authenticate as _operator with the mounted password file, which updates when
+# the Secret rotates without a container restart. VALKEYCLI_USER and
+# VALKEYCLI_AUTH in the environment are for valkey-cli run in the pod and a user
+# may point them at another user, so the check does not use them. A pod created
+# before the operator mounted the file has none and still runs these scripts,
+# which update in place: it falls back to the VALKEY_USER and VALKEYCLI_AUTH
+# pair the operator set then, until it rolls. --user covers valkey-cli before
+# 9.2, which ignores VALKEYCLI_USER.
+legacy_user=${VALKEY_USER:-}
+legacy_pw=${VALKEYCLI_AUTH:-}
+unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+pw=""
+pwfile=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
+if [ -f "$pwfile" ]; then
+    # A file the process cannot read must not end the script under set -e.
+    pw=$(cat "$pwfile" 2>/dev/null) || true
+fi
 auth_args=""
-if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-    auth_args="--user $VALKEY_USER"
+if [ -n "$pw" ]; then
+    auth_args="--user _operator"
+elif [ -n "$legacy_user" ] && [ -n "$legacy_pw" ]; then
+    pw=$legacy_pw
+    auth_args="--user $legacy_user"
+fi
+if [ -n "$auth_args" ]; then
+    VALKEYCLI_AUTH=$pw
+    export VALKEYCLI_AUTH
 fi
 
 # Perform check

@@ -141,7 +141,7 @@ spec:
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(pref).To(ContainSubstring("hostname"))
 			slots, err := utils.Run(exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-				"valkey-cli", "CLUSTER", "SLOTS"))
+				"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS"))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(slots).To(ContainSubstring(slotsHostname))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())

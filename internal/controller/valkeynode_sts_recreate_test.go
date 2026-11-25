@@ -110,7 +110,7 @@ func TestOrphanAndRecreateStatefulSetAlreadyExistsThenAbsent(t *testing.T) {
 func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 	const legacyServiceName = "valkey-c-0-0"
 
-	setup := func(t *testing.T, clusterOwned, templateChanged, authorised bool) (*ValkeyNodeReconciler, client.Client, *valkeyiov1alpha1.ValkeyNode, *appsv1.StatefulSet) {
+	setup := func(t *testing.T, templateChanged, authorised bool) (*ValkeyNodeReconciler, client.Client, *valkeyiov1alpha1.ValkeyNode, *appsv1.StatefulSet) {
 		t.Helper()
 		scheme := runtime.NewScheme()
 		require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
@@ -120,16 +120,8 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 		node := newTestValkeyNode("c-0-0", "ns")
 		node.UID = "node-uid"
 		node.Labels = map[string]string{LabelCluster: "c"}
-		if clusterOwned {
-			ctrl := true
-			node.OwnerReferences = []metav1.OwnerReference{{
-				APIVersion: "valkey.io/v1alpha1",
-				Kind:       "ValkeyCluster",
-				Name:       "c",
-				UID:        "cluster-uid",
-				Controller: &ctrl,
-			}}
-		}
+		node.Spec.ConfigRevision = "aaaaaaaaaaaa"
+		node.OwnerReferences = testParentRefs()
 
 		desired, err := buildValkeyNodeStatefulSet(node)
 		require.NoError(t, err)
@@ -144,7 +136,7 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 		live := desired.DeepCopy()
 		live.Spec.ServiceName = legacyServiceName
 		if templateChanged {
-			live.Spec.Template.Annotations = map[string]string{configHashKey: "old"}
+			live.Spec.Template.Annotations = map[string]string{"example.com/changed": "old"}
 		}
 
 		c := fake.NewClientBuilder().
@@ -169,12 +161,12 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 	}
 
 	t.Run("unauthorised template roll leaves the legacy StatefulSet in place", func(t *testing.T) {
-		r, c, node, desired := setup(t, true, true, false)
+		r, c, node, desired := setup(t, true, false)
 		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
 
 		sts := stored(t, c, desired)
 		assert.Equal(t, legacyServiceName, sts.Spec.ServiceName)
-		assert.Equal(t, map[string]string{configHashKey: "old"}, sts.Spec.Template.Annotations)
+		assert.Equal(t, map[string]string{"example.com/changed": "old"}, sts.Spec.Template.Annotations)
 
 		got := &valkeyiov1alpha1.ValkeyNode{}
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(node), got))
@@ -182,7 +174,7 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 	})
 
 	t.Run("authorised template roll recreates and applies the desired template", func(t *testing.T) {
-		r, c, node, desired := setup(t, true, true, true)
+		r, c, node, desired := setup(t, true, true)
 		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
 
 		sts := stored(t, c, desired)
@@ -191,16 +183,7 @@ func TestEnsureStatefulSetServiceNameChange(t *testing.T) {
 	})
 
 	t.Run("no template roll recreates with the live template", func(t *testing.T) {
-		r, c, node, desired := setup(t, true, false, false)
-		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
-
-		sts := stored(t, c, desired)
-		assert.Equal(t, desired.Spec.ServiceName, sts.Spec.ServiceName)
-		assert.Equal(t, desired.Spec.Template.Annotations, sts.Spec.Template.Annotations)
-	})
-
-	t.Run("standalone node recreates and applies the desired template", func(t *testing.T) {
-		r, c, node, desired := setup(t, false, true, false)
+		r, c, node, desired := setup(t, false, false)
 		require.NoError(t, r.ensureStatefulSet(context.Background(), node))
 
 		sts := stored(t, c, desired)

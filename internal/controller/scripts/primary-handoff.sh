@@ -16,8 +16,8 @@
 #      Replicas reconnect by address, and the restarted container keeps the
 #      pod address, so a wiped server that started at once would be synced
 #      from before the failover. The wait is capped at six
-#      cluster-node-timeouts, at most 300s, which the startup probe allows
-#      for;
+#      cluster-node-timeouts, at most 300s, which the default startup probe
+#      allows for;
 #   2. then empties /data, so the server starts as a new, empty node, like a
 #      recreated pod, and the operator attaches it to the promoted primary.
 #      If a replica has not moved on by the cap, the identity and the
@@ -34,6 +34,10 @@ conf=$1
 data_dir=${VALKEY_DATA_DIR:-/data}
 nodes_conf="$data_dir/nodes.conf"
 role_timeout=3 # seconds one ROLE call may take, connection and reply included
+operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
+# Read before load_operator_auth unsets them. See load_operator_auth.
+legacy_user=${VALKEY_USER:-}
+legacy_pw=${VALKEYCLI_AUTH:-}
 
 case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
 
@@ -116,12 +120,40 @@ promotable_replicas() {
         }' "$nodes_conf"
 }
 
+# load_operator_auth sets the _operator credentials for the next ROLE call. As
+# in the probe scripts, the mounted file is the current password and updates
+# when the Secret rotates. It is read before every call, so a rotation during
+# the wait is picked up. VALKEYCLI_USER and VALKEYCLI_AUTH in the environment
+# are for valkey-cli run in the pod and may name another user, so they are not
+# used here. A pod created before the operator mounted the file has none: it
+# falls back to the VALKEY_USER and VALKEYCLI_AUTH pair the operator set then.
+load_operator_auth() {
+    unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+    pw=""
+    if [ -f "$operator_password_file" ]; then
+        # An unreadable file must not end the script; set -e would exit here.
+        pw=$(cat "$operator_password_file" 2>/dev/null) || true
+    fi
+    auth_args=""
+    if [ -n "$pw" ]; then
+        auth_args="--user _operator"
+    elif [ -n "$legacy_user" ] && [ -n "$legacy_pw" ]; then
+        pw=$legacy_pw
+        auth_args="--user $legacy_user"
+    fi
+    if [ -n "$auth_args" ]; then
+        VALKEYCLI_AUTH=$pw
+        export VALKEYCLI_AUTH
+    fi
+}
+
 # replica_moved_on IP PORT succeeds once the replica reports itself a primary
 # or a replica of another node. The reply goes through a file under the data
 # dir: the root filesystem may be read-only, and a call cut short by the
 # timeout must not hold a pipe open.
 replica_moved_on() {
     reply="$data_dir/.role-reply"
+    load_operator_auth
     if ! timeout_cmd "$role_timeout" valkey-cli -t "$role_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
         rm -f "$reply"
         return 1
@@ -159,12 +191,8 @@ if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
         address=$(own_address)
         my_ip=${address%% *}
         my_hostname=${address#* }
-        auth_args=""
-        if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-            auth_args="--user $VALKEY_USER"
-        fi
-        # Six cluster-node-timeouts, at most 300s, which the startup probe of
-        # the container allows for (startupFailureThreshold).
+        # Six cluster-node-timeouts, at most 300s, which the default startup
+        # probe of the container allows for (startupFailureThreshold).
         cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))
         [ "$cap" -lt 1 ] && cap=1
         echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2

@@ -31,7 +31,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
@@ -168,9 +167,7 @@ spec:
 				}
 			}
 
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(valkeyClusterName+"-0-0", "default")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(ContainSubstring("tls-auto-reload-interval 3600"))
 		})
@@ -192,10 +189,7 @@ spec:
 			Expect(tls.ClientAuthMode()).To(Equal(valkeyiov1alpha1.TLSAuthClientsOptional))
 			Expect(tls.ClientAuthCertificateUser()).To(Equal(valkeyiov1alpha1.TLSAuthClientsUserDisabled))
 
-			cmd := exec.Command("kubectl", "get", "configmap",
-				fmt.Sprintf("valkey-%s", valkeyClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(valkeyClusterName+"-0-0", "default")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(ContainSubstring("tls-auth-clients optional"))
 			Expect(output).NotTo(ContainSubstring("tls-auth-clients yes"))
@@ -434,9 +428,7 @@ spec:
 		})
 
 		It("drops the gated directive from the rendered config", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(gatedClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(gatedClusterName+"-0-0", "default")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).NotTo(ContainSubstring("tls-auto-reload-interval"))
 		})
@@ -651,10 +643,7 @@ spec:
 
 	It("renders the mTLS directives into valkey.conf", func() {
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap",
-				fmt.Sprintf("valkey-%s", clusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}")
-			out, err := utils.Run(cmd)
+			out, err := utils.GetNodePinnedConfig(clusterName+"-0-0", "default")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(ContainSubstring("tls-auth-clients yes"))
 			g.Expect(out).To(ContainSubstring("tls-auth-clients-user CN"))

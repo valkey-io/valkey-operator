@@ -79,7 +79,7 @@ func TestBuildValkeyNodePodTemplateSpec_TrustBundle(t *testing.T) {
 		require.NotNil(t, vol.Secret)
 		assert.Nil(t, vol.Projected)
 		assert.Equal(t, "server-tls", vol.Secret.SecretName)
-		assert.Equal(t, "/tls/ca.crt", envValue(t, pts.Spec.Containers[0], "VALKEY_TLS_CA_FILE"))
+		assert.Contains(t, envValue(t, pts.Spec.Containers[0], "VALKEY_TLS_ARGS"), "--cacert /tls/ca.crt")
 		assert.Equal(t, "/tls/ca.crt", envValue(t, pts.Spec.Containers[1], "REDIS_EXPORTER_TLS_CA_CERT_FILE"))
 	})
 
@@ -115,23 +115,16 @@ func TestBuildValkeyNodePodTemplateSpec_TrustBundle(t *testing.T) {
 		require.NoError(t, err)
 
 		server := pts.Spec.Containers[0]
-		assert.Equal(t, "/tls/server-ca.crt", envValue(t, server, "VALKEY_TLS_CA_FILE"))
 		assert.Contains(t, envValue(t, server, "VALKEY_TLS_ARGS"), "--cacert /tls/server-ca.crt")
 		assert.Contains(t, envValue(t, server, "VALKEY_TLS_ARGS"), "--cert /tls/tls.crt --key /tls/tls.key")
 		assert.Equal(t, "/tls/server-ca.crt", envValue(t, pts.Spec.Containers[1], "REDIS_EXPORTER_TLS_CA_CERT_FILE"))
 	})
 
-	t.Run("valkey.conf and the config roll hash do not change", func(t *testing.T) {
+	t.Run("the pinned config does not change", func(t *testing.T) {
 		without, with := trustTestNode(""), trustTestNode("valkey-c-tls-trust")
 
-		cmWithout, err := buildValkeyNodeConfigMap(without)
-		require.NoError(t, err)
-		cmWith, err := buildValkeyNodeConfigMap(with)
-		require.NoError(t, err)
-		assert.Equal(t, cmWithout.Data["valkey.conf"], cmWith.Data["valkey.conf"])
-		assert.Contains(t, cmWith.Data["valkey.conf"], "tls-ca-cert-file /tls/ca.crt")
-
-		assert.Equal(t, nodeServerConfigRollHash(without), nodeServerConfigRollHash(with))
+		assert.Equal(t, renderPinnedConfig(without), renderPinnedConfig(with))
+		assert.Contains(t, renderPinnedConfig(with), "tls-ca-cert-file /tls/ca.crt")
 	})
 }
 

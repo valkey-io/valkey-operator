@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -408,6 +409,12 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
+	// Probes tunes the startup, liveness and readiness probes of the server
+	// container. Unset fields keep the operator defaults, and a change rolls
+	// the pods. spec.containers patches are applied afterwards.
+	// +optional
+	Probes *ProbesSpec `json:"probes,omitempty"`
+
 	// The operator sets the reserved keys itself.
 	// A user value would be overridden, and the user would get no signal.
 	// Keys are compared in lowercase, because Valkey ignores key case.
@@ -418,10 +425,10 @@ type ValkeyClusterSpec struct {
 
 	// Config holds additional Valkey configuration parameters.
 	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
-	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// Keys may contain only lowercase letters, digits, '.', '_' and '-'.
 	// +kubebuilder:validation:MaxProperties=1000
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
-	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-z0-9._-]+$'))",message="spec.config keys may contain only lowercase letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected. The operator matches keys as written, so they must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -813,6 +820,15 @@ func (s ValkeyClusterSpec) ACLUsers() []ACLUserSpec {
 	return users
 }
 
+// SystemPasswordRotationInterval returns how long an internal user's password
+// stays current, or zero when spec.acl.systemUsers.passwordRotation is unset.
+func (s ValkeyClusterSpec) SystemPasswordRotationInterval() time.Duration {
+	if s.ACL == nil || s.ACL.SystemUsers == nil || s.ACL.SystemUsers.PasswordRotation == nil {
+		return 0
+	}
+	return time.Duration(s.ACL.SystemUsers.PasswordRotation.IntervalDays) * 24 * time.Hour
+}
+
 // ValkeyClusterStatus defines the observed state of ValkeyCluster.
 type ValkeyClusterStatus struct {
 	// State provides a high-level summary of the cluster's current state.
@@ -865,6 +881,10 @@ const (
 	// ConditionTLSEndpointWarning flags TLS with IP announce (including default
 	// IP). Non-blocking: Ready may stay True. Prefer Hostname announce with DNS SANs.
 	ConditionTLSEndpointWarning = "TLSEndpointWarning"
+	// ConditionExporterPasswordHeld is set while _exporter.previous is still
+	// accepted more than five minutes after the switch, and names the pods to
+	// restart. Non-blocking: the other system passwords keep rotating.
+	ConditionExporterPasswordHeld = "ExporterPasswordHeld"
 	// ConditionTLSConfigured reports whether the operator-managed TLS trust
 	// bundle is in place. Set only while spec.networking.tls.clientAuth.ca is
 	// non-empty.
@@ -901,10 +921,9 @@ const (
 	ReasonTrustBundleRejected = "TrustBundleRejected"
 )
 
-// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster, or
-// of a standalone ValkeyNode, while its value is exactly "true". The operator
-// copies it onto the ValkeyNodes of a paused cluster and removes it from them
-// when the cluster resumes.
+// AnnotationPauseReconciliation pauses reconciliation of a ValkeyCluster while
+// its value is exactly "true". The operator copies it onto the ValkeyNodes of a
+// paused cluster and removes it from them when the cluster resumes.
 const AnnotationPauseReconciliation = "valkey.io/pause-reconciliation"
 
 // ReasonPauseAnnotationSet is the reason of ConditionReconciliationPaused.
@@ -912,15 +931,17 @@ const ReasonPauseAnnotationSet = "PauseAnnotationSet"
 
 const (
 	// Common reasons for conditions
-	ReasonInitializing                  = "Initializing"
-	ReasonReconciling                   = "Reconciling"
-	ReasonClusterHealthy                = "ClusterHealthy"
-	ReasonServiceError                  = "ServiceError"
-	ReasonConfigMapError                = "ConfigMapError"
-	ReasonValkeyNodeError               = "ValkeyNodeError"
-	ReasonValkeyNodeListError           = "ValkeyNodeListError"
-	ReasonAddingNodes                   = "AddingNodes"
-	ReasonNodeAddFailed                 = "NodeAddFailed"
+	ReasonInitializing        = "Initializing"
+	ReasonReconciling         = "Reconciling"
+	ReasonClusterHealthy      = "ClusterHealthy"
+	ReasonServiceError        = "ServiceError"
+	ReasonConfigMapError      = "ConfigMapError"
+	ReasonValkeyNodeError     = "ValkeyNodeError"
+	ReasonValkeyNodeListError = "ValkeyNodeListError"
+	ReasonAddingNodes         = "AddingNodes"
+	ReasonNodeAddFailed       = "NodeAddFailed"
+	// ReasonExporterNotRestarted is used with ConditionExporterPasswordHeld.
+	ReasonExporterNotRestarted          = "ExporterNotRestarted"
 	ReasonMissingShards                 = "MissingShards"
 	ReasonMissingReplicas               = "MissingReplicas"
 	ReasonReconcileComplete             = "ReconcileComplete"
@@ -928,6 +949,7 @@ const (
 	ReasonAllSlotsAssigned              = "AllSlotsAssigned"
 	ReasonSlotsUnassigned               = "SlotsUnassigned"
 	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
+	ReasonStartupProbeTooShort          = "StartupProbeTooShort"
 	ReasonPrimaryLost                   = "PrimaryLost"
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"
@@ -960,6 +982,12 @@ const (
 	// is missing on a cluster with an aclfile. Nodes keep the last applied aclfile
 	// while topology work continues.
 	ReasonUsersACLUnresolved = "UsersACLUnresolved"
+
+	// ReasonInitialSyncGateFailed names the Warning event when the operator
+	// cannot write the valkey.io/initial-sync-complete readiness gate on a pod,
+	// and is used with Ready and Progressing while such a failure holds the
+	// node walk.
+	ReasonInitialSyncGateFailed = "InitialSyncGateFailed"
 )
 
 // +kubebuilder:object:root=true

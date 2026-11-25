@@ -80,7 +80,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 
 			By("validating the ConfigMap")
 			verifyConfigMapExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(valkeyClusterName))
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(valkeyClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -89,7 +89,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 			By("validating the system user ACLs")
 			verifySystemUserAcls := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secret",
-					"internal-"+valkeyClusterName+"-system-passwords",
+					"valkey-"+valkeyClusterName+"-system-passwords",
 					"-o", "jsonpath={.data}",
 				)
 				output, err := utils.Run(cmd)
@@ -361,7 +361,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),
@@ -439,6 +439,8 @@ spec:
 			verifyClusterAccess := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", singleNodeClusterName)
 
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
+
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
 					"valkey-cli", "-c", "-h", clusterFqdn, "CLUSTER", "INFO")
@@ -478,7 +480,7 @@ spec:
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),
@@ -538,11 +540,11 @@ spec:
 
 			By("validating internal secrets were created")
 			verifyInternalSecretExists := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-acl")
+				cmd := exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-acl")
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords")
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords")
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}
@@ -552,7 +554,7 @@ spec:
 			verifyCreatedUsers := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
+				cmd := exec.Command("kubectl", "get", "secrets", "sample-users", "-o", "jsonpath={.data.defaultpw}")
 				b64Password, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
@@ -560,6 +562,8 @@ spec:
 				decoded, err := base64.StdEncoding.DecodeString(b64Password)
 				g.Expect(err).NotTo(HaveOccurred())
 				operatorPassword := string(decoded)
+
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
 				cmd = exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -610,7 +614,7 @@ spec:
 			verifyAllowedPermissionsOfOperatorUser := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords",
 					"-o", "jsonpath={.data._operator}",
 				)
 
@@ -669,7 +673,7 @@ EOF`,
 			verifyDeniedPermissionsOfOperatorUser := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", withUserClusterName)
 
-				cmd = exec.Command("kubectl", "get", "secrets", "internal-"+withUserClusterName+"-system-passwords",
+				cmd = exec.Command("kubectl", "get", "secrets", "valkey-"+withUserClusterName+"-system-passwords",
 					"-o", "jsonpath={.data._operator}",
 				)
 
@@ -722,7 +726,7 @@ EOF`,
 
 			By("validating the _operator ACL covers every command the operator runs")
 			verifyOperatorAclCoverage := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secrets", "valkey-cluster-sample-users", "-o", "jsonpath={.data.defaultpw}")
+				cmd := exec.Command("kubectl", "get", "secrets", "sample-users", "-o", "jsonpath={.data.defaultpw}")
 
 				b64Password, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -747,7 +751,7 @@ EOF`,
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(commands).NotTo(BeEmpty())
 
-				valkeyCli := []string{"valkey-cli", "-a", defaultPassword}
+				valkeyCli := []string{"env", "-u", "VALKEYCLI_USER", "valkey-cli", "-a", defaultPassword}
 				arities, err := utils.CommandArities(podName, valkeyCli, commands)
 				g.Expect(err).NotTo(HaveOccurred())
 
@@ -826,7 +830,7 @@ spec:
 
 				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
-					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
+					fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seed writes should succeed across shards")
@@ -890,7 +894,7 @@ spec:
 
 				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
-					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
+					fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seeded keys should survive after rebalance")
@@ -1037,7 +1041,7 @@ spec:
 
 			By("validating that the ConfigMap does not exist")
 			verifyConfigMapRemoved := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(sampleClusterName))
+				cmd := exec.Command("kubectl", "get", "configmap", controller.GetSharedConfigMapName(sampleClusterName))
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred())
 			}
@@ -1431,6 +1435,8 @@ spec:
 			By("validating cluster access")
 			verifyClusterAccess := func(g Gomega) {
 				clusterFqdn := fmt.Sprintf("valkey-%s.default.svc.cluster.local", deploymentClusterName)
+
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "client", "--ignore-not-found=true", "--wait=true", "--timeout=30s"))
 
 				cmd := exec.Command("kubectl", "run", "client",
 					fmt.Sprintf("--image=%s", valkeyClientImage), "--restart=Never", "--",
@@ -2781,7 +2787,7 @@ spec:
 
 			By("promoting the replica with CLUSTER FAILOVER")
 			b64Password, err := utils.Run(exec.Command("kubectl", "get", "secret",
-				"internal-"+clusterName+"-system-passwords", "-o", "jsonpath={.data._operator}"))
+				"valkey-"+clusterName+"-system-passwords", "-o", "jsonpath={.data._operator}"))
 			Expect(err).NotTo(HaveOccurred())
 			decoded, err := base64.StdEncoding.DecodeString(b64Password)
 			Expect(err).NotTo(HaveOccurred())
@@ -2831,13 +2837,13 @@ const writerDurationSeconds = 20
 
 // execValkeyPodShell runs a shell script inside the pod's server container
 // with VALKEYCLI_AUTH set to the default user's password, so every valkey-cli
-// invocation in the script runs authenticated. The operator injects
-// VALKEYCLI_AUTH with the _operator user's password for the probe scripts;
-// it must be overridden here because valkey-cli auto-sends it as the default
-// user's AUTH credential.
+// invocation in the script runs authenticated. The operator sets
+// VALKEYCLI_USER and VALKEYCLI_AUTH to _operator for valkey-cli run in the
+// pod, so both are overridden here: valkey-cli 9.2+ would otherwise send
+// AUTH _operator with the default user's password.
 func execValkeyPodShell(pod string, script string) (string, error) {
 	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
+		"sh", "-c", fmt.Sprintf("unset VALKEYCLI_USER; export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
 	return utils.Run(cmd)
 }
 
@@ -2958,7 +2964,7 @@ func startContinuousWriter(pod string) *continuousWriter {
 			"i=$((i+1)); "+
 			"done; echo \"end - $(date +%%s.%%N)\"", writerDurationSeconds)
 	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
+		"sh", "-c", fmt.Sprintf("unset VALKEYCLI_USER; export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
 
 	w := &continuousWriter{cmd: cmd, output: &strings.Builder{}}
 	cmd.Stdout = w.output

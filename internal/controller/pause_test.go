@@ -76,7 +76,7 @@ var _ = Describe("Pause reconciliation", func() {
 		owned := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: nodeKey.Name, Namespace: nodeKey.Namespace,
 				Labels: map[string]string{LabelCluster: key.Name}},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(controllerutil.SetControllerReference(cluster, owned, k8sClient.Scheme())).To(Succeed())
 		Expect(k8sClient.Create(ctx, owned)).To(Succeed())
@@ -85,7 +85,7 @@ var _ = Describe("Pause reconciliation", func() {
 		Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: strayKey.Name, Namespace: strayKey.Namespace,
 				Labels: map[string]string{LabelCluster: key.Name}},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		})).To(Succeed())
 		DeferCleanup(func() {
 			deleteNode(nodeKey)
@@ -159,8 +159,8 @@ var _ = Describe("Pause reconciliation", func() {
 	It("skips a paused ValkeyNode without creating its workload", func() {
 		key := types.NamespacedName{Name: "paused-node", Namespace: "default"}
 		Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn, OwnerReferences: testParentRefs()},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		})).To(Succeed())
 		DeferCleanup(func() { deleteNode(key) })
 
@@ -179,9 +179,11 @@ var _ = Describe("Pause reconciliation", func() {
 	It("maintains persistence finalizers before pausing a node", func() {
 		key := types.NamespacedName{Name: "paused-persistent-node", Namespace: "default"}
 		node := &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: pauseOn, OwnerReferences: testParentRefs()},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("1Gi"), ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
 				},
@@ -239,7 +241,10 @@ var _ = Describe("Pause reconciliation", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations},
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards: 1,
-					ACL:    &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "app"}}},
+					ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+						Name:     "app",
+						Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "pause-app-password"}},
+					}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())

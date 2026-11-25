@@ -45,7 +45,7 @@ var _ = Describe("ValkeyCluster pause", Label("cluster-lifecycle", "pause"), fun
 		}
 		cli := func(g Gomega, args ...string) string {
 			command := []string{"exec", "valkey-" + name + "-0-0-0", "-c", "server", "--",
-				"env", "-u", "VALKEYCLI_AUTH", "-u", "REDISCLI_AUTH", "valkey-cli"}
+				"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "-u", "REDISCLI_AUTH", "valkey-cli"}
 			return kubectl(g, append(command, args...)...)
 		}
 		nodes := func(g Gomega) []valkeyiov1alpha1.ValkeyNode {
@@ -59,7 +59,7 @@ var _ = Describe("ValkeyCluster pause", Label("cluster-lifecycle", "pause"), fun
 				kubectl(g, "get", "pods", "-l", selector, "--sort-by=.metadata.name", "-o", "jsonpath={.items[*].metadata.uid}"),
 				kubectl(g, "get", "statefulsets", "-l", selector, "--sort-by=.metadata.name", "-o", "jsonpath={.items[*].metadata.generation}"),
 				kubectl(g, "get", "configmap", "valkey-"+name, "-o", "jsonpath={.metadata.resourceVersion}"),
-				kubectl(g, "get", "secret", "internal-"+name+"-acl", "-o", "jsonpath={.metadata.resourceVersion}"),
+				kubectl(g, "get", "secret", "valkey-"+name+"-acl", "-o", "jsonpath={.metadata.resourceVersion}"),
 			}
 		}
 		DeferCleanup(func() {

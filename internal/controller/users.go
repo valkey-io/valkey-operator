@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -419,8 +420,8 @@ func fetchUserPasswords(ctx context.Context, user valkeyiov1alpha1.ACLUserSpec, 
 		}
 
 		// Test if the string in the Secret is a pre-hashed sha256 password
-		if isPreHashedPassword(password) {
-			passwords = append(passwords, string(password[1:]))
+		if hash, ok := preHashedPassword(password); ok {
+			passwords = append(passwords, hash)
 			continue
 		}
 
@@ -455,10 +456,19 @@ func fetchSystemUserPassword(ctx context.Context, username string, apiClient cli
 	return string(systemSecret.Data[username]), nil
 }
 
-// Check if byte-string begins with # (byte 35) and is 65 total characters long.
-// If so, we assume this is a pre-hashed sha256 password.
-func isPreHashedPassword(password []byte) bool {
-	return len(password) == 65 && password[0] == '#'
+// preHashedPassword reports whether password is a pre-hashed sha256 password:
+// '#' followed by exactly 64 hex characters. It returns the hash lowercased,
+// because Valkey rejects the whole aclfile on any other form. Any other value,
+// including a 65-byte one that starts with '#', is a plaintext password.
+func preHashedPassword(password []byte) (string, bool) {
+	if len(password) != 65 || password[0] != '#' {
+		return "", false
+	}
+	hash := strings.ToLower(string(password[1:]))
+	if _, err := hex.DecodeString(hash); err != nil {
+		return "", false
+	}
+	return hash, true
 }
 
 // GeneratePassword creates a random (alphanumeric) n chars long password

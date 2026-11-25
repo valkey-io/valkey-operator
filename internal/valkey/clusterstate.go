@@ -44,7 +44,7 @@ type NodeState struct {
 	Address     string
 	Port        int
 	Id          string
-	Flags       []string
+	Flags       NodeFlags
 	ShardId     string
 	Info        map[string]string
 	ClusterInfo map[string]string
@@ -401,7 +401,7 @@ func (n *NodeState) GetSlots() []SlotsRange {
 
 // IsPrimary return true if this is a primary node.
 func (n *NodeState) IsPrimary() bool {
-	return slices.Contains(n.Flags, "master")
+	return n.Flags.Has(FlagMaster)
 }
 
 // CurrentEpoch returns the cluster's current epoch as reported by this node's
@@ -513,10 +513,10 @@ func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
 				if entry.Id != nodeId {
 					continue
 				}
-				if entry.HasFlag("fail") {
+				if entry.HasFlag(FlagFail) {
 					return true
 				}
-				if node.isVotingPrimary() && entry.HasFlag("fail?") {
+				if node.isVotingPrimary() && entry.HasFlag(FlagPFail) {
 					reports++
 				}
 				break
@@ -683,7 +683,7 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 		if entry.IsMyself() {
 			continue
 		}
-		if entry.HasFlag("fail") || entry.HasNoAddress() {
+		if entry.HasFlag(FlagFail) || entry.HasNoAddress() {
 			nodes = append(nodes, entry)
 		}
 	}

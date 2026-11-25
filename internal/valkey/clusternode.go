@@ -17,7 +17,6 @@ http://www.apache.org/licenses/LICENSE-2.0
 package valkey
 
 import (
-	"slices"
 	"strconv"
 	"strings"
 	"unique"
@@ -55,27 +54,100 @@ type SlotMigration struct {
 type ClusterNode struct {
 	Id        string
 	Host      string // bare host from the endpoint field, unbracketed for IPv6
-	Flags     []string
+	Flags     NodeFlags
 	PrimaryId string // "-" on a primary line, the primary's ID on a replica
 	Slots     []SlotsRange
 	Migrating []SlotMigration
 	Importing []SlotMigration
 }
 
-// HasFlag reports whether the line carries the given flag.
-func (c *ClusterNode) HasFlag(flag string) bool {
-	return slices.Contains(c.Flags, flag)
+// NodeFlags is the set of flags on a CLUSTER NODES line.
+type NodeFlags uint16
+
+const (
+	FlagMyself NodeFlags = 1 << iota
+	FlagMaster
+	FlagSlave
+	FlagPFail
+	FlagFail
+	FlagHandshake
+	FlagNoAddr
+	FlagNoFailover
+	FlagNoFlags
+)
+
+// Has reports whether f has any of the given flags.
+func (f NodeFlags) Has(flags NodeFlags) bool {
+	return f&flags != 0
+}
+
+// String returns the flag names as CLUSTER NODES writes them, e.g. "myself,master".
+func (f NodeFlags) String() string {
+	var b strings.Builder
+	for _, nf := range nodeFlagNames {
+		if f.Has(nf.flag) {
+			if b.Len() > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(nf.name)
+		}
+	}
+	return b.String()
+}
+
+// Keep Valkey's order so String writes names in correct order.
+var nodeFlagNames = [...]struct {
+	flag NodeFlags
+	name string
+}{
+	{FlagMyself, "myself"},
+	{FlagMaster, "master"},
+	{FlagSlave, "slave"},
+	{FlagPFail, "fail?"},
+	{FlagFail, "fail"},
+	{FlagHandshake, "handshake"},
+	{FlagNoAddr, "noaddr"},
+	{FlagNoFailover, "nofailover"},
+	{FlagNoFlags, "noflags"},
+}
+
+// flagNamed returns the flag with the given wire name, or 0 for a name Valkey
+// does not write.
+func flagNamed(name string) NodeFlags {
+	for _, f := range nodeFlagNames {
+		if f.name == name {
+			return f.flag
+		}
+	}
+	return 0
+}
+
+// parseNodeFlags reads the comma-separated flags field. A name outside the set
+// above is dropped; no caller reads one.
+func parseNodeFlags(s string) NodeFlags {
+	var flags NodeFlags
+	for s != "" {
+		var name string
+		name, s, _ = strings.Cut(s, ",")
+		flags |= flagNamed(name)
+	}
+	return flags
+}
+
+// HasFlag reports whether the node has any of the given flags.
+func (c *ClusterNode) HasFlag(flags NodeFlags) bool {
+	return c.Flags.Has(flags)
 }
 
 // IsMyself reports whether this line describes the node that produced the
 // output.
 func (c *ClusterNode) IsMyself() bool {
-	return c.HasFlag("myself")
+	return c.HasFlag(FlagMyself)
 }
 
 // IsPrimary reports whether this line describes a primary.
 func (c *ClusterNode) IsPrimary() bool {
-	return c.HasFlag("master")
+	return c.HasFlag(FlagMaster)
 }
 
 // IsFailing reports whether the viewer considers this node down. "fail?"
@@ -83,20 +155,20 @@ func (c *ClusterNode) IsPrimary() bool {
 // primaries, so an entry can stay at fail? indefinitely once that majority is
 // gone.
 func (c *ClusterNode) IsFailing() bool {
-	return c.HasFlag("fail") || c.HasFlag("fail?")
+	return c.HasFlag(FlagFail) || c.HasFlag(FlagPFail)
 }
 
 // HasNoAddress reports whether the viewer knows this node's ID but has no
 // address for it.
 func (c *ClusterNode) HasNoAddress() bool {
-	return c.HasFlag("noaddr")
+	return c.HasFlag(FlagNoAddr)
 }
 
 // IsAutomaticFailoverDisabled reports whether the node carries the nofailover
 // flag, set for example by cluster-replica-no-failover. Such a replica does not
 // promote itself, but still accepts CLUSTER FAILOVER TAKEOVER.
 func (c *ClusterNode) IsAutomaticFailoverDisabled() bool {
-	return c.HasFlag("nofailover")
+	return c.HasFlag(FlagNoFailover)
 }
 
 // HasSlotAssignment reports whether the line carries any slot field, either an
@@ -166,7 +238,7 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 	node := ClusterNode{
 		Id:        shared(head[0]),
 		Host:      shared(hostFromClusterNodesEndpoint(head[1])),
-		Flags:     splitFlags(head[2]),
+		Flags:     parseNodeFlags(head[2]),
 		PrimaryId: shared(head[3]),
 	}
 
@@ -267,13 +339,4 @@ func parseSlotMigration(field string) (SlotMigration, slotMigrationDirection, bo
 // entry would keep one copy per node and table.
 func shared(s string) string {
 	return unique.Make(s).Value()
-}
-
-// splitFlags splits the comma-separated flags of a CLUSTER NODES line.
-func splitFlags(s string) []string {
-	flags := strings.Split(s, ",")
-	for i, flag := range flags {
-		flags[i] = shared(flag)
-	}
-	return flags
 }

@@ -315,6 +315,28 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"%s", initialSyncGateFailedMessage(gateErr))
 	}
 
+	// A cluster with spec.bootstrap is bootstrapping until its own nodes own the
+	// slots, i.e. until cutover has happened. The check is derived from live
+	// state, so it survives operator restarts.
+	var bootstrap *bootstrapPlan
+	if cluster.Spec.Bootstrap != nil {
+		r.restoreReplicationAuth(ctx, cluster, state)
+		if clusterMigrated(state, cluster.Spec.Shards) {
+			finishBootstrapConditions(cluster)
+		} else {
+			bootstrap, err = r.planBootstrap(ctx, cluster)
+			if err != nil {
+				log.Error(err, "bootstrap source unusable")
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonBootstrapSourceInvalid, "Bootstrap", "%v", err)
+				setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapFailed, valkeyiov1alpha1.ReasonBootstrapSourceInvalid, err.Error(), metav1.ConditionTrue)
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonBootstrapSourceInvalid, err.Error(), metav1.ConditionFalse)
+				_ = r.updateStatus(ctx, cluster, state)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+			meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapFailed)
+		}
+	}
+
 	rollSkipped := false
 	// A held roll requeues like any roll in progress; only the message says
 	// which shard is waiting and why. It comes up as a typed error so the
@@ -370,10 +392,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
-	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
-		// Reports via an event, not status, so persist any conditions set above.
-		_ = r.updateStatus(ctx, cluster, state)
-		return result, nil
+	// Never while bootstrapping: the source's members are not ours to promote,
+	// and a TAKEOVER would be a cutover the user did not ask for.
+	if bootstrap == nil {
+		if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
+			// Reports via an event, not status, so persist any conditions set above.
+			_ = r.updateStatus(ctx, cluster, state)
+			return result, nil
+		}
 	}
 
 	// Re-introduce members whose addresses changed while every peer's
@@ -381,7 +407,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// persistence — #275). Must run before forgetStaleNodes: those same
 	// entries look failing, and CLUSTER FORGET would ban the live node
 	// from rejoining for a minute.
-	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+	healed := 0
+	if bootstrap == nil {
+		healed = r.healStaleAddressPeers(ctx, cluster, state)
+	}
+	if healed > 0 {
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
@@ -389,7 +419,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	r.forgetStaleNodes(ctx, cluster, state, nodes)
+	// Source members are never forgotten while bootstrapping.
+	if bootstrap == nil {
+		r.forgetStaleNodes(ctx, cluster, state, nodes)
+	}
 
 	// --- Phase 1: MEET all isolated nodes in one batch ---
 	// A node with cluster_known_nodes <= 1 hasn't been introduced to the
@@ -400,7 +433,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// After MEET, we requeue to let gossip propagate before proceeding
 	// to slot assignment or replication.
 	{
-		met, err := r.meetIsolatedNodes(ctx, cluster, state)
+		var met int
+		var err error
+		if bootstrap != nil {
+			met, err = r.meetIsolatedToSource(ctx, cluster, state, bootstrap)
+		} else {
+			met, err = r.meetIsolatedNodes(ctx, cluster, state)
+		}
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
 			_ = r.updateStatus(ctx, cluster, state)
@@ -420,7 +459,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// slot-owning primary. During scale-out (no unassigned slots), this
 	// is a no-op; new primaries stay in PendingNodes until the rebalancer
 	// migrates slots to them.
-	if len(state.PendingNodes) > 0 {
+	if len(state.PendingNodes) > 0 && bootstrap == nil {
 		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
@@ -442,7 +481,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// By this point all currently known primaries have slots and appear in state.Shards.
 	// CLUSTER REPLICATE for different replicas targets different primaries,
 	// so they can all be issued in one pass.
-	if len(state.PendingNodes) > 0 {
+	if len(state.PendingNodes) > 0 && bootstrap == nil {
 		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
@@ -456,6 +495,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+	}
+
+	// --- Bootstrap: attach to the source, wait for sync, cut over on request ---
+	// Everything below assumes the operator owns the whole topology, which is
+	// false until cutover, so a bootstrapping cluster stops here.
+	if bootstrap != nil {
+		result := r.reconcileBootstrap(ctx, cluster, state, nodes, bootstrap)
+		_ = r.updateStatus(ctx, cluster, state)
+		return result, nil
 	}
 
 	// Build the effective shard list: state.Shards plus any pending primaries
@@ -1612,6 +1660,14 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	}
 
 	log.V(1).Info("add a new replica", "primary IP", primaryIP, "primary Id", primaryNodeId, "replica address", node.Address, "shardIndex", shardIndex)
+	return r.issueReplicate(ctx, cluster, node, primaryNodeId, shardIndex)
+}
+
+// issueReplicate issues CLUSTER REPLICATE for node against primaryNodeId and
+// reports the outcome. Shared by the normal path and the bootstrap path, which
+// differ only in how the primary is chosen.
+func (r *ValkeyClusterReconciler) issueReplicate(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, node *valkey.NodeState, primaryNodeId string, shardIndex int) error {
+	log := logf.FromContext(ctx)
 	if err := node.Client.Do(ctx, node.Client.B().ClusterReplicate().NodeId(primaryNodeId).Build()).Error(); err != nil {
 		// "Unknown node" means gossip hasn't propagated the primary's ID to
 		// this replica yet. This is transient and will resolve on the next

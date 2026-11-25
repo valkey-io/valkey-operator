@@ -301,10 +301,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
 	}
-	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
-		c.Reason == valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	}
+	removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed)
 
 	// Before the walk, which returns early on many paths. A failure leaves
 	// each gate as it is until a later pass (initialSyncGateFailedMessage).
@@ -420,7 +417,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// slot-owning primary. During scale-out (no unassigned slots), this
 	// is a no-op; new primaries stay in PendingNodes until the rebalancer
 	// migrates slots to them.
-	if len(state.PendingNodes) > 0 {
+	{
 		assigned, err := r.assignSlotsToPendingPrimaries(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
@@ -442,7 +439,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// By this point all currently known primaries have slots and appear in state.Shards.
 	// CLUSTER REPLICATE for different replicas targets different primaries,
 	// so they can all be issued in one pass.
-	if len(state.PendingNodes) > 0 {
+	{
 		replicated, err := r.replicatePendingReplicas(ctx, cluster, state, nodes)
 		if err != nil {
 			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, err.Error(), metav1.ConditionTrue)
@@ -687,17 +684,14 @@ func podSchedulingIssueForPod(pod *corev1.Pod) *podSchedulingIssue {
 	if pod.DeletionTimestamp != nil {
 		return nil
 	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodScheduled &&
-			condition.Status == corev1.ConditionFalse &&
-			condition.Reason == corev1.PodReasonUnschedulable {
-			return &podSchedulingIssue{
-				podName: pod.Name,
-				message: condition.Message,
-			}
-		}
+	condition := podCondition(pod, corev1.PodScheduled)
+	if condition == nil || condition.Status != corev1.ConditionFalse || condition.Reason != corev1.PodReasonUnschedulable {
+		return nil
 	}
-	return nil
+	return &podSchedulingIssue{
+		podName: pod.Name,
+		message: condition.Message,
+	}
 }
 
 func headlessServiceName(clusterName string) string {
@@ -867,21 +861,17 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	}
 
 	// Load current node (if any) for the config revision and failover decisions.
+	// Nil when the node does not exist yet.
 	current := &valkeyiov1alpha1.ValkeyNode{}
-	currentExists := true
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), current); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nodeUnchanged, err
 		}
-		currentExists = false
+		current = nil
 	}
 
 	live := liveTemplates[desired.Name]
-	var existing *valkeyiov1alpha1.ValkeyNode
-	if currentExists {
-		existing = current
-	}
-	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
+	if err := r.setDesiredConfigRevision(ctx, cluster, desired, current, live.configRevision); err != nil {
 		if errors.Is(err, errLiveConfigRevisionNotCached) {
 			log.V(1).Info("live config revision not cached yet, waiting", "name", desired.Name, "revision", live.configRevision)
 			return nodeRequeued, nil
@@ -895,7 +885,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	liveHash := live.hash
 	// Proactive failover only when the Spec update implies a real pod template
 	// change, not pure WorkloadRevision backfill when live already matches.
-	needsFailover := currentExists && needsProactiveFailoverForRoll(current, desired, liveHash)
+	needsFailover := current != nil && needsProactiveFailoverForRoll(current, desired, liveHash)
 
 	if cause := r.maybeProactiveFailoverBeforeRoll(ctx, cluster, clusterState, current, needsFailover); cause != "" {
 		return nodeDeferred, &rollDeferredError{shardIndex: shardIndex, node: current.Name, cause: cause}
@@ -1155,9 +1145,6 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		scheduling = *cluster.Spec.Scheduling
 	}
 
-	// Only set the field when it differs from the Kubernetes default, so existing
-	// clusters that resolve to the default keep a nil value and are not rolled on
-	// operator upgrade.
 	// Store the user's value verbatim when set, so an explicit change (including
 	// back to the Kubernetes default) always propagates to the pod. When unset,
 	// only populate the field if the derived default deviates from the Kubernetes
@@ -1171,24 +1158,18 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 		gracePeriod = &d
 	}
 
-	// Curate node-axis scheduling primitives from node.spread, merged with the
-	// user's escape-hatch passthrough. Preserve nil when nothing is curated.
+	// Curate scheduling primitives from node.spread and zone.spread, merged with
+	// the user's escape-hatch passthrough. Preserve nil when nothing is curated.
 	shardMode, primariesMode, podsMode := effectiveNodeSpread(cluster.Spec.Scheduling)
 	affinity := withNodeShardAntiAffinity(scheduling.Affinity, cluster.Name, shardIndex, shardMode)
-	topologySpreadConstraints := scheduling.TopologySpreadConstraints
-	if curated := nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode); len(curated) > 0 {
-		topologySpreadConstraints = append(
-			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
-			curated...,
-		)
-	}
-
 	zoneShardMode, zonePrimariesMode, zonePodsMode := effectiveZoneSpread(cluster.Spec.Scheduling)
-	if curated := zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode); len(curated) > 0 {
-		topologySpreadConstraints = append(
-			append([]corev1.TopologySpreadConstraint{}, topologySpreadConstraints...),
-			curated...,
-		)
+	topologySpreadConstraints := scheduling.TopologySpreadConstraints
+	curated := append(
+		nodeSpreadTSCs(cluster.Name, nodeIndex, primariesMode, podsMode),
+		zoneSpreadTSCs(cluster.Name, shardIndex, nodeIndex, zoneShardMode, zonePrimariesMode, zonePodsMode)...,
+	)
+	if len(curated) > 0 {
+		topologySpreadConstraints = append(slices.Clone(topologySpreadConstraints), curated...)
 	}
 
 	// Pin the pod to its deterministic zone, ANDed with the user's passthrough
@@ -1300,7 +1281,6 @@ func nodeAddresses(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
 // don't count as met) so one unreachable node doesn't block healing the rest.
 func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
 	log := logf.FromContext(ctx)
-	healed := 0
 	met := map[string]bool{}
 	for _, pair := range state.FindStaleAddressPeers() {
 		viewer, live := pair.Viewer, pair.Live
@@ -1309,15 +1289,12 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 		}
 		log.Info("re-introducing peer whose address changed",
 			"viewer", viewer.Address, "peer", live.Address, "peerId", live.Id)
-		if err := viewer.Client.Do(ctx, viewer.Client.B().ClusterMeet().Ip(live.Address).Port(int64(live.Port)).Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER MEET failed", "from", viewer.Address, "to", live.Address)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", viewer.Address, live.Address, err)
+		if err := r.clusterMeet(ctx, cluster, viewer, live); err != nil {
 			continue
 		}
 		met[live.Id] = true
-		healed++
 	}
-	return healed
+	return len(met)
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -1427,19 +1404,26 @@ func (r *ValkeyClusterReconciler) meetIsolatedNodes(ctx context.Context, cluster
 		// node is guaranteed to appear in the target's node table
 		// immediately, not after gossip propagation.
 		log.V(1).Info("meet node", "node", node.Address, "target", meetTarget.Address)
-		if err := node.Client.Do(ctx, node.Client.B().ClusterMeet().Ip(meetTarget.Address).Port(int64(meetTarget.Port)).Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER MEET failed", "from", node.Address, "to", meetTarget.Address)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", node.Address, meetTarget.Address, err)
+		if err := r.clusterMeet(ctx, cluster, node, meetTarget); err != nil {
 			return met, err
 		}
-		if err := meetTarget.Client.Do(ctx, meetTarget.Client.B().ClusterMeet().Ip(node.Address).Port(int64(node.Port)).Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER MEET failed", "from", meetTarget.Address, "to", node.Address)
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", meetTarget.Address, node.Address, err)
+		if err := r.clusterMeet(ctx, cluster, meetTarget, node); err != nil {
 			return met, err
 		}
 		met++
 	}
 	return met, nil
+}
+
+// clusterMeet sends CLUSTER MEET from one node to another, logging and
+// recording an event on failure.
+func (r *ValkeyClusterReconciler) clusterMeet(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, from, to *valkey.NodeState) error {
+	err := from.Client.Do(ctx, from.Client.B().ClusterMeet().Ip(to.Address).Port(int64(to.Port)).Build()).Error()
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "CLUSTER MEET failed", "from", from.Address, "to", to.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ClusterMeetFailed", "ClusterMeet", "CLUSTER MEET %v -> %v failed: %v", from.Address, to.Address, err)
+	}
+	return err
 }
 
 // assignSlotsToPendingPrimaries assigns hash-slot ranges to non-isolated
@@ -1491,10 +1475,7 @@ func (r *ValkeyClusterReconciler) assignSlotsToPendingPrimaries(ctx context.Cont
 		return 0, nil
 	}
 
-	unassignedSlots := 0
-	for _, s := range slots {
-		unassignedSlots += s.End - s.Start + 1
-	}
+	unassignedSlots := countSlots(slots)
 
 	assigned := 0
 	for _, node := range primaries {
@@ -2201,18 +2182,7 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Ready is left out: its node reconcile stops before re-checking the password,
 // so the condition may be stale, and the readiness checks already cover it.
 func nodesRejectingOperator(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
-	var rejecting []string
-	for i := range nodes.Items {
-		if !nodes.Items[i].Status.Ready {
-			continue
-		}
-		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
-		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed {
-			rejecting = append(rejecting, nodes.Items[i].Name)
-		}
-	}
-	slices.Sort(rejecting)
-	return rejecting
+	return nodesWithACLAppliedFalse(nodes, valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed, true)
 }
 
 // reportOperatorLockout sets Degraded and Ready for nodes that reject the
@@ -2239,15 +2209,24 @@ func (r *ValkeyClusterReconciler) reportOperatorLockout(cluster *valkeyiov1alpha
 // the mounted aclfile catches up, so reporting it would take the cluster out of
 // healthy on every routine user change.
 func nodesWithFailedACL(nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
-	var failed []string
+	return nodesWithACLAppliedFalse(nodes, valkeyiov1alpha1.ValkeyNodeReasonApplyFailed, false)
+}
+
+// nodesWithACLAppliedFalse returns the sorted names of nodes whose ACLApplied
+// condition is False with reason, only Ready ones when readyOnly is set.
+func nodesWithACLAppliedFalse(nodes *valkeyiov1alpha1.ValkeyNodeList, reason string, readyOnly bool) []string {
+	var names []string
 	for i := range nodes.Items {
+		if readyOnly && !nodes.Items[i].Status.Ready {
+			continue
+		}
 		c := meta.FindStatusCondition(nodes.Items[i].Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
-		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == valkeyiov1alpha1.ValkeyNodeReasonApplyFailed {
-			failed = append(failed, nodes.Items[i].Name)
+		if c != nil && c.Status == metav1.ConditionFalse && c.Reason == reason {
+			names = append(names, nodes.Items[i].Name)
 		}
 	}
-	slices.Sort(failed)
-	return failed
+	slices.Sort(names)
+	return names
 }
 
 // aclNotAppliedSeparator joins the users ACL failure and the nodes that

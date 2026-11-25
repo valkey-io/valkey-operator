@@ -2646,6 +2646,7 @@ spec:
                   Deprecated: use replicasPerShard, which has the same meaning. A spec
                   cannot set both. A new or changed value is rejected. Removing it
                   requires replicasPerShard set to this same count in that update.
+                  An unset replicasPerShard counts as 0.
                 format: int32
                 minimum: 0
                 type: integer
@@ -4222,13 +4223,13 @@ spec:
             - fieldPath: .replicas
               message: 'spec.replicas is deprecated and cannot be added or changed:
                 set spec.replicasPerShard to the stored spec.replicas and remove spec.replicas
-                in the same update'
+                in the same update. An absent spec.replicasPerShard counts as 0'
               optionalOldSelf: true
               reason: FieldValueForbidden
-              rule: (!has(self.replicas) && (!oldSelf.hasValue() || !has(oldSelf.value().replicas)
-                || (has(self.replicasPerShard) && self.replicasPerShard == oldSelf.value().replicas)))
-                || (has(self.replicas) && oldSelf.hasValue() && has(oldSelf.value().replicas)
-                && self.replicas == oldSelf.value().replicas)
+              rule: '(!has(self.replicas) && (!oldSelf.hasValue() || !has(oldSelf.value().replicas)
+                || oldSelf.value().replicas == (has(self.replicasPerShard) ? self.replicasPerShard
+                : 0))) || (has(self.replicas) && oldSelf.hasValue() && has(oldSelf.value().replicas)
+                && self.replicas == oldSelf.value().replicas)'
             - fieldPath: .users
               message: 'spec.users is deprecated and cannot be added or changed: move
                 every user name to spec.acl.users and remove spec.users in the same

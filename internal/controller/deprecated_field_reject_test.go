@@ -28,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
 const (
@@ -132,8 +134,60 @@ var _ = Describe("rejected spec.replicas and spec.users", func() {
 		})
 		Expect(patch(name, `{"spec":{"shards":2}}`)).To(Succeed())
 		expectInvalid(patch(name, `{"spec":{"replicas":1}}`), replicasRejectMessage)
+		expectInvalid(patch(name, `{"spec":{"replicas":null}}`), replicasRejectMessage)
 		expectInvalid(patch(name, `{"spec":{"replicas":null,"replicasPerShard":1}}`), replicasRejectMessage)
 		Expect(patch(name, `{"spec":{"replicas":null,"replicasPerShard":3}}`)).To(Succeed())
+	})
+
+	It("accepts a typed update that drops a stored spec.replicas of 0", func() {
+		const name = "reject-replicas-zero-stored"
+		withDeprecatedFieldRulesRemoved(ctx, func() {
+			Expect(create(name, map[string]any{"shards": int64(1), "replicas": int64(0)})).To(Succeed())
+		})
+
+		before := &unstructured.Unstructured{}
+		before.SetAPIVersion("valkey.io/v1alpha1")
+		before.SetKind("ValkeyCluster")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, before)).To(Succeed())
+		replicas, found, err := unstructured.NestedInt64(before.Object, "spec", "replicas")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(replicas).To(Equal(int64(0)))
+		_, found, err = unstructured.NestedFieldNoCopy(before.Object, "spec", "replicasPerShard")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeFalse())
+
+		typed := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, typed)).To(Succeed())
+		typed.Spec.Shards = 2
+		Expect(k8sClient.Update(ctx, typed)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, typed)).To(Succeed())
+		Expect(typed.Spec.Shards).To(Equal(int32(2)))
+		Expect(typed.GetReplicasPerShard()).To(Equal(int32(0)))
+
+		after := &unstructured.Unstructured{}
+		after.SetAPIVersion("valkey.io/v1alpha1")
+		after.SetKind("ValkeyCluster")
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, after)).To(Succeed())
+		_, found, err = unstructured.NestedFieldNoCopy(after.Object, "spec", "replicas")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeFalse())
+		_, found, err = unstructured.NestedFieldNoCopy(after.Object, "spec", "replicasPerShard")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeFalse())
+	})
+
+	It("rejects a typed update that replaces a stored spec.replicas of 0 with replicasPerShard 1", func() {
+		const name = "reject-replicas-zero-to-one"
+		withDeprecatedFieldRulesRemoved(ctx, func() {
+			Expect(create(name, map[string]any{"shards": int64(1), "replicas": int64(0)})).To(Succeed())
+		})
+
+		typed := &valkeyiov1alpha1.ValkeyCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, typed)).To(Succeed())
+		typed.Spec.ReplicasPerShard = 1
+		expectInvalid(k8sClient.Update(ctx, typed), replicasRejectMessage)
 	})
 
 	It("keeps a stored spec.users and rejects a clear that drops a user name", func() {

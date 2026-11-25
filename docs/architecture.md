@@ -69,6 +69,7 @@ Each tick gets one client per node from the `ClientProvider` in `internal/contro
 - `internal/controller/secret_migration.go`: moves Secrets that earlier releases created under `internal-` names to their `valkey-` names
 - `internal/controller/failover.go`: proactive failover logic. Before rolling a primary, it promotes a healthy replica via CLUSTER FAILOVER TAKEOVER
 - `internal/controller/valkeynode_resources.go`: builds the StatefulSet/Deployment spec (containers, volumes, probes, affinity)
+- `internal/controller/probes.go`: builds the server container's startup, liveness and readiness probes from `spec.probes`
 - `internal/controller/status.go`: condition helpers (`setCondition`)
 
 ## Naming convention

@@ -98,19 +98,20 @@ pending; `GetSlots` answers the narrower one of which ranges are owned.
 
 ## Flag predicates differ on purpose
 
-Flags are read through named predicates rather than string comparisons, and the two
-failure-related ones deliberately disagree:
+Flags are read through named predicates, the `Is...` and `Has...` methods on
+`ClusterNode`, rather than raw flag checks, and the two failure-related readers
+deliberately disagree:
 
 - `IsFailing` covers `fail` **and** `fail?`. Promoting `fail?` (pfail) to `fail`
   needs gossip between a majority of primaries, so once that majority is gone an
   entry can sit at `fail?` indefinitely. Partition detection must treat it as down.
-- `GetFailingNodes` matches `fail` and `noaddr` but **not** `fail?`. Its caller
-  forgets these nodes and `CLUSTER FORGET` bans a node for a minute, while a pfail
-  entry may recover on its own.
+- `GetFailingNodes` returns the entries that carry `fail` or `noaddr`, but **not**
+  `fail?`. Its caller forgets these nodes and `CLUSTER FORGET` bans a node for a
+  minute, while a pfail entry may recover on its own.
 
-Each predicate names the question it answers, because the distinction is easy to get
-wrong. `HasFlag` remains available for the one caller that wants `fail` but not
-`fail?`.
+Each one names the question it answers, because the distinction is easy to get
+wrong. `HasFlag` is for the callers that need one flag on its own, such as
+`HasFlag(FlagFail)` without `fail?`.
 
 ## INFO sections
 

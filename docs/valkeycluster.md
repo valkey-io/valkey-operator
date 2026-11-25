@@ -62,7 +62,7 @@ Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clu
 
 #### Version-gated config
 
-Version gates use the final server image: a non-empty `server` container image in `spec.containers` overrides `spec.image`, which otherwise falls back to the operator default. The same image determines the config, system ACL rules and config roll hash. Correcting the version selected for an existing server image override can roll those pods once.
+Version gates use the final server image: a non-empty `server` container image in `spec.containers` overrides `spec.image`, which otherwise falls back to the operator default. The same image determines the pinned config revision and system ACL rules. Correcting the version selected for an existing server image override can roll those pods once.
 
 Some user-set `spec.config` directives are only valid on newer Valkey releases. When the operator cannot determine the image version (for example `latest` or a digest-pinned image), or the detected version does not support a directive, it drops that directive from the rendered `valkey.conf` and sets a `ConfigurationWarning` condition with reason `UnsupportedConfigDirective`.
 

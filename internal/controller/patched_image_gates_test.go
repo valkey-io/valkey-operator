@@ -57,7 +57,9 @@ func TestPatchedServerImageGates(t *testing.T) {
 			assert.Equal(t, tc.expected, containers[0].Image)
 			assert.Equal(t, renderPinnedConfig(referenceNode), renderPinnedConfig(node), "config must match the image the server runs")
 			wantRevision := pinnedConfigRevision(renderPinnedConfig(referenceNode))
-			assert.Equal(t, wantRevision, pinnedConfigRevision(renderPinnedConfig(node)))
+			r := &ValkeyClusterReconciler{}
+			require.NoError(t, r.setDesiredConfigRevision(context.Background(), cluster, node, nil, ""))
+			assert.Equal(t, wantRevision, node.Spec.ConfigRevision)
 			warnings := versionGateConfigWarnings(cluster)
 			assert.Len(t, warnings, len(versionGateConfigWarnings(reference)))
 			for _, warning := range warnings {
@@ -71,7 +73,7 @@ func TestPatchedServerImageGates(t *testing.T) {
 				passwords[user] = []byte("test-password")
 			}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, Data: passwords}
-			r := &ValkeyClusterReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()}
+			r.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 			acl, err := r.createSystemUsersAcl(context.Background(), cluster)
 			require.NoError(t, err)
 			expectedACL, err := r.createSystemUsersAcl(context.Background(), reference)

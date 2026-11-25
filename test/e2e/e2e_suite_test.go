@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,15 +148,24 @@ var _ = AfterSuite(func() {
 		"--ignore-not-found=true", "--wait=false")
 	_, _ = utils.Run(cmd)
 
+	// `kubectl wait --all` errors when nothing matches (all nodes already gone,
+	// or the CRD was never installed), so only wait when ValkeyNodes exist.
 	By("waiting for every ValkeyNode to be deleted")
-	cmd = exec.Command("kubectl", "wait", "valkeynodes.valkey.io", "--all", "-A",
-		"--for=delete", "--timeout=5m")
-	if _, err := utils.Run(cmd); err != nil {
-		// Do not fail teardown: report what is stuck and carry on.
-		_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes still present before undeploy: %v\n", err)
+	cmd = exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "name")
+	existing, listErr := utils.Run(cmd)
+	if listErr != nil || strings.TrimSpace(existing) == "" {
+		_, _ = fmt.Fprintf(GinkgoWriter, "No ValkeyNodes to wait for (list error: %v)\n", listErr)
+	} else if _, err := utils.Run(exec.Command("kubectl", "wait", "valkeynodes.valkey.io", "--all", "-A",
+		"--for=delete", "--timeout=5m")); err != nil {
+		// The operator is the only thing that can finish these deletes, so
+		// undeploying it now would just move the hang into `make undeploy`.
+		// Report what is stuck, leave the operator running, and fail the
+		// suite: a ValkeyNode that cannot finish deleting is an operator bug.
+		_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes still present; skipping undeploy to avoid hanging: %v\n", err)
 		stuck := exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "wide")
 		out, _ := utils.Run(stuck)
 		_, _ = fmt.Fprintf(GinkgoWriter, "%s\n", out)
+		Fail("ValkeyNodes were not deleted within 5m; skipped undeploy so the operator can still clear their finalizers")
 	}
 
 	By("undeploying the controller-manager")

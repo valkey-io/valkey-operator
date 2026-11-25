@@ -903,9 +903,13 @@ func TestStartupFailureThreshold(t *testing.T) {
 	// that would roll the pod on a change of the value.
 	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
 	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
-	assert.Equal(t, int32(80), startupFailureThreshold(node))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
-	assert.Equal(t, int32(20), startupFailureThreshold(node))
+	containers, err = buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_PersistentClusterNodeSkipsPrimaryHandoffScript(t *testing.T) {

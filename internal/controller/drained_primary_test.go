@@ -28,8 +28,8 @@ import (
 // A drained primary leads its shard in the scraped state but owns no slots:
 // the shard is not counted as ready and the primary has no live role yet.
 func TestDrainedPrimaryShardIsNotServing(t *testing.T) {
-	primary := &valkey.NodeState{Id: "p1", Address: "10.0.1.1", Flags: []string{"master"}}
-	replica := &valkey.NodeState{Id: "r1", Address: "10.0.1.2", Flags: []string{"slave"},
+	primary := &valkey.NodeState{Id: "p1", Address: "10.0.1.1", Flags: valkey.FlagMaster}
+	replica := &valkey.NodeState{Id: "r1", Address: "10.0.1.2", Flags: valkey.FlagSlave,
 		Info: map[string]string{"master_link_status": "up"}}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Id: "s1", PrimaryId: "p1", Nodes: []*valkey.NodeState{primary, replica}}}}
 

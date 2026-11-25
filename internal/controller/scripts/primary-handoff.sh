@@ -16,8 +16,8 @@
 #      Replicas reconnect by address, and the restarted container keeps the
 #      pod address, so a wiped server that started at once would be synced
 #      from before the failover. The wait is capped at six
-#      cluster-node-timeouts, at most 300s, which the startup probe allows
-#      for;
+#      cluster-node-timeouts, at most 300s, which the default startup probe
+#      allows for;
 #   2. then empties /data, so the server starts as a new, empty node, like a
 #      recreated pod, and the operator attaches it to the promoted primary.
 #      If a replica has not moved on by the cap, the identity and the
@@ -191,8 +191,8 @@ if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
         address=$(own_address)
         my_ip=${address%% *}
         my_hostname=${address#* }
-        # Six cluster-node-timeouts, at most 300s, which the startup probe of
-        # the container allows for (startupFailureThreshold).
+        # Six cluster-node-timeouts, at most 300s, which the default startup
+        # probe of the container allows for (startupFailureThreshold).
         cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))
         [ "$cap" -lt 1 ] && cap=1
         echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2

@@ -90,7 +90,11 @@ var _ = Describe("ValkeyNode updateStatus with a terminating pod", func() {
 				Namespace: "default",
 				Labels:    map[string]string{LabelCluster: "terminating-pod-cluster", LabelShardIndex: "0", LabelNodeIndex: "0"},
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		r = &ValkeyNodeReconciler{

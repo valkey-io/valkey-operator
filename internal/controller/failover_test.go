@@ -144,9 +144,9 @@ func TestFindFailoverShard(t *testing.T) {
 					Id:        "shard-1",
 					PrimaryId: "node-1",
 					Nodes: []*valkey.NodeState{
-						{Address: "10.0.0.1", Id: "node-1", Flags: []string{"master"}},
-						{Address: "10.0.0.2", Id: "node-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
-						{Address: "10.0.0.3", Id: "node-3", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.1", Id: "node-1", Flags: valkey.FlagMaster},
+						{Address: "10.0.0.2", Id: "node-2", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
+						{Address: "10.0.0.3", Id: "node-3", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
 					},
 				},
 			},

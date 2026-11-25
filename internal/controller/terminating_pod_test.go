@@ -211,10 +211,10 @@ func TestTerminatingPodIsStillTheShardPrimary(t *testing.T) {
 	}}
 	state := &valkey.ClusterState{
 		Shards: []*valkey.ShardState{{Id: "s0", PrimaryId: "p0", Slots: []valkey.SlotsRange{{Start: 0, End: 16383}},
-			Nodes: []*valkey.NodeState{{Id: "p0", Address: "10.0.0.1", Flags: []string{"master"}}}}},
+			Nodes: []*valkey.NodeState{{Id: "p0", Address: "10.0.0.1", Flags: valkey.FlagMaster}}}},
 		PendingNodes: []*valkey.NodeState{
-			{Id: "n11", Address: "10.0.0.11", Flags: []string{"master"}},
-			{Id: "n12", Address: "10.0.0.12", Flags: []string{"master"}},
+			{Id: "n11", Address: "10.0.0.11", Flags: valkey.FlagMaster},
+			{Id: "n12", Address: "10.0.0.12", Flags: valkey.FlagMaster},
 		},
 	}
 

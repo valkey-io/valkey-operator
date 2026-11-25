@@ -347,6 +347,7 @@ func TestInitContainerCommand(t *testing.T) {
 
 func TestBuildValkeyNodePodTemplateSpec_PreStopHook(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "cluster", LabelShardIndex: "0", LabelNodeIndex: "0"}
 
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
@@ -356,7 +357,14 @@ func TestBuildValkeyNodePodTemplateSpec_PreStopHook(t *testing.T) {
 	require.NotNil(t, server.Lifecycle.PreStop)
 	require.NotNil(t, server.Lifecycle.PreStop.Exec)
 	assert.Equal(t, preStopCommand("/scripts/prestop-failover.sh"), server.Lifecycle.PreStop.Exec.Command)
-
+	for _, volume := range pts.Spec.Volumes {
+		if volume.Name == scriptsVolumeName {
+			require.NotNil(t, volume.ConfigMap)
+			assert.Contains(t, volume.ConfigMap.Items, corev1.KeyToPath{Key: preStopScriptKey, Path: preStopScriptKey})
+			return
+		}
+	}
+	t.Fatal("missing scripts volume")
 }
 
 func TestBuildValkeyNodePodTemplateSpec_UserPreStopReplacesDefault(t *testing.T) {

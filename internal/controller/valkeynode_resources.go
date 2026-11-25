@@ -591,6 +591,16 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 		return corev1.PodTemplateSpec{}, err
 	}
 
+	scriptItems := []corev1.KeyToPath{
+		{Key: readinessScriptKey, Path: readinessScriptKey},
+		{Key: livenessScriptKey, Path: livenessScriptKey},
+		{Key: initScriptKey, Path: initScriptKey},
+		{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+	}
+	if usesInitialSyncGate(node) {
+		scriptItems = append(scriptItems, corev1.KeyToPath{Key: preStopScriptKey, Path: preStopScriptKey})
+	}
+
 	podSpec := corev1.PodSpec{
 		Containers:                    containers,
 		ImagePullSecrets:              node.Spec.ImagePullSecrets,
@@ -618,12 +628,7 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 						LocalObjectReference: corev1.LocalObjectReference{
 							Name: node.Spec.SharedConfigMapName,
 						},
-						Items: []corev1.KeyToPath{
-							{Key: readinessScriptKey, Path: readinessScriptKey},
-							{Key: livenessScriptKey, Path: livenessScriptKey},
-							{Key: initScriptKey, Path: initScriptKey},
-							{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
-						},
+						Items:       scriptItems,
 						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},

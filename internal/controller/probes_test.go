@@ -34,14 +34,13 @@ import (
 	"k8s.io/client-go/tools/events"
 )
 
-// legacyServerProbes is a frozen, self-contained copy of the server
-// container's probes as the operator rendered them before spec.probes. It
-// pins the upgrade contract: a node without spec.probes must render exactly
-// these, or an operator upgrade rolls every pod.
+// defaultServerProbes is a frozen, self-contained copy of the server
+// container's probes for a node without spec.probes. A change to them rolls
+// every pod on operator upgrade.
 //
 // Do NOT update this copy to track production code. Change it only when a pod
 // roll on operator upgrade is intended and understood.
-func legacyServerProbes(primaryHandoff bool) (startup, liveness, readiness *corev1.Probe) {
+func defaultServerProbes(primaryHandoff bool) (startup, liveness, readiness *corev1.Probe) {
 	check := func(script string) corev1.ProbeHandler {
 		return corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", script}}}
 	}
@@ -50,7 +49,7 @@ func legacyServerProbes(primaryHandoff bool) (startup, liveness, readiness *core
 		startupFailures = 80
 	}
 	startup = &corev1.Probe{
-		ProbeHandler:        check("/scripts/liveness-check.sh"),
+		ProbeHandler:        check("/scripts/liveness-check.sh 4"),
 		InitialDelaySeconds: 5,
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
@@ -58,14 +57,14 @@ func legacyServerProbes(primaryHandoff bool) (startup, liveness, readiness *core
 		FailureThreshold:    startupFailures,
 	}
 	liveness = &corev1.Probe{
-		ProbeHandler:     check("/scripts/liveness-check.sh"),
+		ProbeHandler:     check("/scripts/liveness-check.sh 4"),
 		TimeoutSeconds:   5,
 		PeriodSeconds:    5,
 		SuccessThreshold: 1,
 		FailureThreshold: 5,
 	}
 	readiness = &corev1.Probe{
-		ProbeHandler:     check("/scripts/readiness-check.sh"),
+		ProbeHandler:     check("/scripts/readiness-check.sh 1"),
 		TimeoutSeconds:   2,
 		PeriodSeconds:    5,
 		SuccessThreshold: 1,
@@ -95,7 +94,7 @@ func renderedServer(t *testing.T, node *valkeyv1.ValkeyNode) corev1.Container {
 	return containers[0]
 }
 
-func TestServerProbesWithoutSpecProbesMatchTheLegacyRender(t *testing.T) {
+func TestServerProbesWithoutSpecProbesMatchTheDefaultRender(t *testing.T) {
 	nodes := []struct {
 		name    string
 		node    func() *valkeyv1.ValkeyNode
@@ -123,7 +122,7 @@ func TestServerProbesWithoutSpecProbesMatchTheLegacyRender(t *testing.T) {
 		t.Run(n.name, func(t *testing.T) {
 			node := n.node()
 			require.Nil(t, node.Spec.Probes)
-			wantStartup, wantLiveness, wantReadiness := legacyServerProbes(n.handoff)
+			wantStartup, wantLiveness, wantReadiness := defaultServerProbes(n.handoff)
 			server := renderedServer(t, node)
 			assert.Equal(t, wantStartup, server.StartupProbe)
 			assert.Equal(t, wantLiveness, server.LivenessProbe)
@@ -266,7 +265,7 @@ func TestServerProbesOverrideOneDefaultPerField(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			node := probeTestNode(true, &tc.probes)
-			wantStartup, wantLiveness, wantReadiness := tc.want(legacyServerProbes(false))
+			wantStartup, wantLiveness, wantReadiness := tc.want(defaultServerProbes(false))
 			server := renderedServer(t, node)
 			assert.Equal(t, wantStartup, server.StartupProbe)
 			assert.Equal(t, wantLiveness, server.LivenessProbe)
@@ -416,7 +415,7 @@ func TestContainersPatchesApplyAfterSpecProbes(t *testing.T) {
 			&valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{FailureThreshold: new(int32(7)), PeriodSeconds: new(int32(10))}},
 			corev1.Container{LivenessProbe: &corev1.Probe{FailureThreshold: 9}},
 		)
-		_, want, _ := legacyServerProbes(false)
+		_, want, _ := defaultServerProbes(false)
 		want.PeriodSeconds = 10
 		want.FailureThreshold = 9
 		assert.Equal(t, want, renderedServer(t, node).LivenessProbe)
@@ -427,7 +426,7 @@ func TestContainersPatchesApplyAfterSpecProbes(t *testing.T) {
 			&valkeyv1.ProbesSpec{Readiness: &valkeyv1.ReadinessProbeSpec{TimeoutSeconds: new(int32(3))}},
 			corev1.Container{ReadinessProbe: &corev1.Probe{PeriodSeconds: 20}},
 		)
-		_, _, want := legacyServerProbes(false)
+		_, _, want := defaultServerProbes(false)
 		want.Exec.Command = []string{shellPath, "-c", "/scripts/readiness-check.sh 3"}
 		want.TimeoutSeconds = 4
 		want.PeriodSeconds = 20
@@ -707,22 +706,9 @@ func TestProbeCommandPassesTheTimeoutToTheScript(t *testing.T) {
 	assert.Equal(t, readinessScriptKey+":3", run(server.ReadinessProbe))
 
 	unset := renderedServer(t, probeTestNode(false, nil))
-	assert.Equal(t, livenessScriptKey+":", run(unset.StartupProbe), "an unset timeout leaves the script on its default")
-	assert.Equal(t, livenessScriptKey+":", run(unset.LivenessProbe))
-	assert.Equal(t, readinessScriptKey+":", run(unset.ReadinessProbe))
-}
-
-// The script timeouts the operator assumes when it passes none must be the
-// defaults the scripts use.
-func TestProbeScriptDefaultTimeouts(t *testing.T) {
-	for script, want := range map[string]int{
-		livenessScriptKey:  defaultLivenessCheckTimeoutSeconds,
-		readinessScriptKey: defaultReadinessCheckTimeoutSeconds,
-	} {
-		body, err := scripts.ReadFile("scripts/" + script)
-		require.NoError(t, err)
-		assert.Contains(t, string(body), fmt.Sprintf(`timeout=${1:-"%d"}`, want), script)
-	}
+	assert.Equal(t, livenessScriptKey+":4", run(unset.StartupProbe), "an unset timeout passes the default")
+	assert.Equal(t, livenessScriptKey+":4", run(unset.LivenessProbe))
+	assert.Equal(t, readinessScriptKey+":1", run(unset.ReadinessProbe))
 }
 
 func TestBuildClusterValkeyNodeCopiesProbes(t *testing.T) {

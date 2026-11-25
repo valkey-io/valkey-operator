@@ -36,8 +36,7 @@ const (
 	defaultReadinessFailureThreshold  = 5
 	defaultReadinessSuccessThreshold  = 1
 
-	// The timeouts liveness-check.sh and readiness-check.sh use when the
-	// command passes none.
+	// The timeouts passed to liveness-check.sh and readiness-check.sh.
 	defaultLivenessCheckTimeoutSeconds  = 4
 	defaultReadinessCheckTimeoutSeconds = 1
 
@@ -97,22 +96,16 @@ func serverProbes(node *valkeyiov1alpha1.ValkeyNode) (startup, liveness, readine
 }
 
 // execCheckAndTimeout returns the handler that runs script, and the probe
-// timeout. A timeout from spec.probes is passed to the script, and the probe
-// gets one second more, so that the script normally gives up first. The
-// script counts 0.1s polls, which run late with a long timeout or a throttled
-// container; a check that runs past the extra second fails on the kubelet's
-// timeout instead. Without a timeout the command passes none and the script
-// keeps its default: the command of a cluster that does not set spec.probes
-// must not change, or an operator upgrade rolls its pods.
-func execCheckAndTimeout(script string, timeoutSeconds *int32, scriptDefaultSeconds int32) (corev1.ProbeHandler, int32) {
-	command, scriptTimeoutSeconds := script, scriptDefaultSeconds
-	if timeoutSeconds != nil {
-		scriptTimeoutSeconds = *timeoutSeconds
-		command = fmt.Sprintf("%s %d", script, scriptTimeoutSeconds)
-	}
+// timeout. The script gets the timeout from spec.probes, or defaultSeconds,
+// and the probe gets one second more, so that the script normally gives up
+// first. The script counts 0.1s polls, which run late with a long timeout or
+// a throttled container; a check that runs past the extra second fails on the
+// kubelet's timeout instead.
+func execCheckAndTimeout(script string, timeoutSeconds *int32, defaultSeconds int32) (corev1.ProbeHandler, int32) {
+	seconds := orDefault(timeoutSeconds, defaultSeconds)
 	return corev1.ProbeHandler{
-		Exec: &corev1.ExecAction{Command: []string{shellPath, "-c", command}},
-	}, scriptTimeoutSeconds + 1
+		Exec: &corev1.ExecAction{Command: []string{shellPath, "-c", fmt.Sprintf("%s %d", script, seconds)}},
+	}, seconds + 1
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe.

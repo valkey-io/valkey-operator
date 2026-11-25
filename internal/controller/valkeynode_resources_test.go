@@ -136,7 +136,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(5), c.StartupProbe.PeriodSeconds)
 	assert.Equal(t, int32(20), c.StartupProbe.FailureThreshold)
 	assert.Equal(t, int32(5), c.StartupProbe.TimeoutSeconds)
-	assert.Contains(t, c.StartupProbe.Exec.Command, "/scripts/liveness-check.sh")
+	assert.Contains(t, c.StartupProbe.Exec.Command, "/scripts/liveness-check.sh 4")
 
 	// LivenessProbe
 	require.NotNil(t, c.LivenessProbe)
@@ -144,7 +144,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(5), c.LivenessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.FailureThreshold)
 	assert.Equal(t, int32(5), c.LivenessProbe.TimeoutSeconds)
-	assert.Contains(t, c.LivenessProbe.Exec.Command, "/scripts/liveness-check.sh")
+	assert.Contains(t, c.LivenessProbe.Exec.Command, "/scripts/liveness-check.sh 4")
 
 	// ReadinessProbe
 	require.NotNil(t, c.ReadinessProbe)
@@ -152,7 +152,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, int32(5), c.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.FailureThreshold)
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
-	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
+	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh 1")
 
 	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence) + init output
 	require.Len(t, c.VolumeMounts, 4)

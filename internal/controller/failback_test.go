@@ -62,7 +62,7 @@ func failbackState(primaryIP, link string) *valkey.ClusterState {
 // its primary and reporting uptime seconds.
 func failbackStateFollowing(primaryIP, link, follows string, uptime int) *valkey.ClusterState {
 	other := map[string]string{"10.0.0.1": "10.0.0.2", "10.0.0.2": "10.0.0.1"}[primaryIP]
-	replica := &valkey.NodeState{Address: other, Id: "replica", Flags: []string{"slave"},
+	replica := &valkey.NodeState{Address: other, Id: "replica", Flags: valkey.FlagSlave,
 		Info: map[string]string{"master_link_status": link, "uptime_in_seconds": strconv.Itoa(uptime)}}
 	replica.SetClusterNodesForTesting("replica " + other + ":6379@16379 myself,slave " + follows + " 0 0 1 connected\n")
 	return &valkey.ClusterState{
@@ -71,7 +71,7 @@ func failbackStateFollowing(primaryIP, link, follows string, uptime int) *valkey
 			PrimaryId: "primary",
 			Slots:     []valkey.SlotsRange{{Start: 0, End: 16383}},
 			Nodes: []*valkey.NodeState{
-				{Address: primaryIP, Id: "primary", Flags: []string{"master"}},
+				{Address: primaryIP, Id: "primary", Flags: valkey.FlagMaster},
 				replica,
 			},
 		}},

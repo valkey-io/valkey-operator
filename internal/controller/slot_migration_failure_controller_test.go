@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Valkey Contributors.
+Copyright 2026 Valkey Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -208,8 +208,8 @@ func stateEntry(state, targetNode, message string, lastUpdate time.Time) []strin
 
 // scriptedSrcNode builds a NodeState whose client dials the scripted server.
 // The peer table stays empty, so KnowsNode reports false; the failure branch
-// under test is reached before the gossip gate, and no destination dial is
-// ever made: MIGRATESLOTS is issued on the source client.
+// under test is reached before the gossip gate. No destination dial is ever
+// made: MIGRATESLOTS is issued on the source client.
 func scriptedSrcNode(t *testing.T, s *migrationStateServer, id string) *valkey.NodeState {
 	t.Helper()
 	client, err := vclient.NewClient(vclient.ClientOption{
@@ -626,6 +626,7 @@ func TestRebalanceSlotsRetriesAfterWindow(t *testing.T) {
 	server.setClock(func() time.Time { return nodeNow })
 	src, dst := rebalanceFixture(t, server)
 	knowDestination(src)
+	knowSource(dst)
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
@@ -652,6 +653,7 @@ func TestDrainExcessShardsRetriesAfterWindow(t *testing.T) {
 	server.setClock(func() time.Time { return nodeNow })
 	cluster, state, nodes := scaleInFixture(t, server)
 	knowDestination(state.Shards[0])
+	knowSource(state.Shards[1])
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 	drained, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
@@ -663,5 +665,61 @@ func TestDrainExcessShardsRetriesAfterWindow(t *testing.T) {
 	}
 	if !sentMigrateSlots(server) {
 		t.Fatalf("expected CLUSTER MIGRATESLOTS, got %q", server.commands())
+	}
+}
+
+// knowSource gives the destination a peer table that lists the source. The
+// destination refuses the migration handshake from a source it does not know.
+func knowSource(dst *valkey.ShardState) {
+	dst.Nodes[0].SetClusterNodesForTesting(
+		"dst-primary-id 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n" +
+			"src-primary-id 127.0.0.1:6379@16379 master - 0 0 1 connected 0-16383\n")
+}
+
+// TestRebalanceSlotsWaitsForDestinationToKnowSource: a source that knows the
+// destination is not enough; until the destination knows the source, the
+// handshake would fail, so the move waits.
+func TestRebalanceSlotsWaitsForDestinationToKnowSource(t *testing.T) {
+	server := newMigrationStateServer(t, func() [][]string { return nil })
+	src, dst := rebalanceFixture(t, server)
+	knowDestination(src)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = 2
+
+	move, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	if err != nil {
+		t.Fatalf("waiting on gossip must not error, got %v", err)
+	}
+	if move == nil {
+		t.Fatal("expected the rebalance to report the pending move")
+	}
+	if sentMigrateSlots(server) {
+		t.Fatalf("MIGRATESLOTS must wait until the destination knows the source, got %q", server.commands())
+	}
+	want := "Waiting for 10.0.0.2 to learn node " + src.Nodes[0].Address
+	if got := recorderEvents(r.Recorder); !slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, want) }) {
+		t.Fatalf("expected an event containing %q, got %q", want, got)
+	}
+}
+
+// TestDrainExcessShardsWaitsForDestinationToKnowSource: the same for a
+// scale-in drain.
+func TestDrainExcessShardsWaitsForDestinationToKnowSource(t *testing.T) {
+	server := newMigrationStateServer(t, func() [][]string { return nil })
+	cluster, state, nodes := scaleInFixture(t, server)
+	knowDestination(state.Shards[0])
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	drained, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
+	if err != nil {
+		t.Fatalf("waiting on gossip must not error, got %v", err)
+	}
+	if !drained {
+		t.Fatal("expected the drain to report work pending")
+	}
+	if sentMigrateSlots(server) {
+		t.Fatalf("MIGRATESLOTS must wait until the destination knows the source, got %q", server.commands())
 	}
 }

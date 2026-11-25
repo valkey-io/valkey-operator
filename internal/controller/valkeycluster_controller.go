@@ -1913,6 +1913,20 @@ func migrationPending(ctx context.Context, move *valkey.SlotMove, ranges []valke
 	return false, nil
 }
 
+// unknownPeer returns the side of the move that has not yet learned the other
+// through gossip, and the node it is missing, or nil once both know each
+// other. The source cannot address an unknown destination, and the
+// destination refuses the handshake from an unknown source.
+func unknownPeer(move *valkey.SlotMove) (node, peer *valkey.NodeState) {
+	if !move.Src.KnowsNode(move.Dst.Id) {
+		return move.Src, move.Dst
+	}
+	if !move.Dst.KnowsNode(move.Src.Id) {
+		return move.Dst, move.Src
+	}
+	return nil, nil
+}
+
 // rebalanceSlots plans one slot move and starts it. It returns the move while
 // the rebalance has work left, whether this pass migrated a batch or waited
 // for one in flight, and nil once the slots are balanced.
@@ -1933,9 +1947,9 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		return move, nil
 	}
 
-	if !move.Src.KnowsNode(move.Dst.Id) {
-		log.V(1).Info("destination not yet visible to source via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
+	if node, peer := unknownPeer(move); node != nil {
+		log.V(1).Info("source and destination do not yet know each other via gossip; will retry", "node", node.Address, "peer", peer.Address, "peerId", peer.Id)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", node.Address, peer.Address)
 		return move, nil
 	}
 
@@ -2101,8 +2115,8 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return true, nil
 	}
 
-	if !move.Src.KnowsNode(move.Dst.Id) {
-		log.V(1).Info("drain destination not yet known to source", "src", move.Src.Address, "dst", move.Dst.Address)
+	if node, peer := unknownPeer(move); node != nil {
+		log.V(1).Info("drain source and destination do not yet know each other", "node", node.Address, "peer", peer.Address)
 		return true, nil
 	}
 

@@ -441,7 +441,7 @@ These events are emitted during scale-out slot rebalancing.
 | Event Type | Type | Description |
 |---|---|---|
 | `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
-| `SlotsRebalancePending` | Normal | Waiting for a shard to learn its migration target before moving slots |
+| `SlotsRebalancePending` | Normal | Waiting for the migration source and target to learn each other through gossip before moving slots |
 | `SlotRebalanceFailed` | Warning | Slot rebalancing failed, including an asynchronous `CLUSTER MIGRATESLOTS` job failure read back from `CLUSTER GETSLOTMIGRATIONS`; a scale-in drain whose migration failed asynchronously emits this event too |
 
 ### Scale-in events

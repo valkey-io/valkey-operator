@@ -161,15 +161,22 @@ var _ = AfterSuite(func() {
 		_, _ = fmt.Fprintln(GinkgoWriter, "No ValkeyNodes to wait for")
 	} else if _, err := utils.Run(exec.Command("kubectl", "wait", "valkeynodes.valkey.io", "--all", "-A",
 		"--for=delete", "--timeout=5m")); err != nil {
-		// The operator is the only thing that can finish these deletes, so
-		// undeploying it now would just move the hang into `make undeploy`.
-		// Report what is stuck, leave the operator running, and fail the
-		// suite: a ValkeyNode that cannot finish deleting is an operator bug.
-		_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes still present; skipping undeploy to avoid hanging: %v\n", err)
-		stuck := exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "wide")
-		out, _ := utils.Run(stuck)
-		_, _ = fmt.Fprintf(GinkgoWriter, "%s\n", out)
-		Fail("ValkeyNodes were not deleted within 5m; skipped undeploy so the operator can still clear their finalizers")
+		// The last node can vanish between the list and the wait, which makes
+		// kubectl wait report "no matching resources". Re-list before failing.
+		remaining, relistErr := listValkeyNodes()
+		if relistErr == nil && remaining == "" {
+			_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes are gone (wait reported: %v)\n", err)
+		} else {
+			// The operator is the only thing that can finish these deletes, so
+			// undeploying it now would just move the hang into `make undeploy`.
+			// Report what is stuck, leave the operator running, and fail the
+			// suite: a ValkeyNode that cannot finish deleting is an operator bug.
+			_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes still present; skipping undeploy to avoid hanging: %v\n", err)
+			stuck := exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "wide")
+			out, _ := utils.Run(stuck)
+			_, _ = fmt.Fprintf(GinkgoWriter, "%s\n", out)
+			Fail("ValkeyNodes were not deleted within 5m; skipped undeploy so the operator can still clear their finalizers")
+		}
 	}
 
 	By("undeploying the controller-manager")
@@ -243,7 +250,16 @@ func listValkeyNodes() (string, error) {
 		var out string
 		out, err = utils.Run(exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "name"))
 		if err == nil {
-			return strings.TrimSpace(out), nil
+			// utils.Run merges stderr into the output, so keep only the
+			// resource names (valkeynode.valkey.io/<name>) and ignore notices
+			// such as "No resources found" or deprecation warnings.
+			var names []string
+			for _, line := range strings.Split(out, "\n") {
+				if line = strings.TrimSpace(line); strings.HasPrefix(line, "valkeynode") {
+					names = append(names, line)
+				}
+			}
+			return strings.Join(names, "\n"), nil
 		}
 		msg := err.Error()
 		if strings.Contains(msg, "doesn't have a resource type") ||

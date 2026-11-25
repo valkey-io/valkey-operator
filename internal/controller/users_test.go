@@ -383,3 +383,27 @@ func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
 		})
 	}
 }
+
+func TestPreHashedPassword(t *testing.T) {
+	const hash = "a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+		wantHash bool
+	}{
+		{"lowercase hash", "#" + hash, hash, true},
+		{"uppercase hash is lowercased", "#" + strings.ToUpper(hash), hash, true},
+		{"65 bytes but not hex is plaintext", "#" + strings.Repeat("z", 64), "", false},
+		{"hash with trailing newline is plaintext", "#" + hash + "\n", "", false},
+		{"no leading #", "x" + hash, "", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := preHashedPassword([]byte(tc.in))
+			assert.Equal(t, tc.wantHash, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

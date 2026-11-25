@@ -305,7 +305,7 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts(t *t
 		assert.True(t, slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == path }),
 			"init container must mount %s", path)
 	}
-	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ENABLED", "VALKEYCLI_AUTH"} {
+	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ARGS", "VALKEYCLI_AUTH"} {
 		assert.True(t, hasEnvVar(ic.Env, name), "init container must have env %s", name)
 	}
 }

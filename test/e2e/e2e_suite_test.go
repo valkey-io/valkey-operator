@@ -137,6 +137,27 @@ var _ = AfterSuite(func() {
 	cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
 	_, _ = utils.Run(cmd)
 
+	// Specs delete their ValkeyCluster with --wait=false, so a ValkeyNode can
+	// still hold the persistent-volume-cleanup finalizer here. Only the
+	// operator clears it, and `make undeploy` removes the operator and then
+	// blocks on the valkeynodes CRD until the go test timeout. Let the
+	// operator finish the deletes first.
+	By("deleting any remaining ValkeyClusters")
+	cmd = exec.Command("kubectl", "delete", "valkeyclusters.valkey.io", "--all", "-A",
+		"--ignore-not-found=true", "--wait=false")
+	_, _ = utils.Run(cmd)
+
+	By("waiting for every ValkeyNode to be deleted")
+	cmd = exec.Command("kubectl", "wait", "valkeynodes.valkey.io", "--all", "-A",
+		"--for=delete", "--timeout=5m")
+	if _, err := utils.Run(cmd); err != nil {
+		// Do not fail teardown: report what is stuck and carry on.
+		_, _ = fmt.Fprintf(GinkgoWriter, "ValkeyNodes still present before undeploy: %v\n", err)
+		stuck := exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "wide")
+		out, _ := utils.Run(stuck)
+		_, _ = fmt.Fprintf(GinkgoWriter, "%s\n", out)
+	}
+
 	By("undeploying the controller-manager")
 	cmd = exec.Command("make", "undeploy")
 	_, _ = utils.Run(cmd)

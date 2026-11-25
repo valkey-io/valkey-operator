@@ -971,6 +971,33 @@ func TestMergePatchContainers(t *testing.T) {
 		require.Len(t, out, 1)
 		assert.Equal(t, "server", out[0].Name)
 	})
+
+	t.Run("patch env var replaces the base one of the same name", func(t *testing.T) {
+		secretRef := func(name, key string) *corev1.EnvVarSource {
+			return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}}
+		}
+		baseEnv := []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", Value: "_operator"},
+			{Name: "VALKEYCLI_AUTH", ValueFrom: secretRef("system", "_operator")},
+		}
+		base := []corev1.Container{{Name: "server", Env: baseEnv}}
+		patches := []corev1.Container{{Name: "server", Env: []corev1.EnvVar{
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}}}
+		out, err := mergePatchContainers(base, patches)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.ElementsMatch(t, []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}, out[0].Env)
+		assert.Len(t, base[0].Env, 3, "base env must not be modified")
+		assert.Equal(t, baseEnv[1], corev1.EnvVar{Name: "VALKEYCLI_USER", Value: "_operator"})
+	})
 }
 
 func TestBuildContainersDef_WithContainerPatches(t *testing.T) {

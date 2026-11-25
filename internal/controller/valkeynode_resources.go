@@ -138,6 +138,14 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 			output = append(output, c)
 			continue
 		}
+		// A patch env var replaces the base one of the same name. A merge
+		// would keep the base valueFrom next to a patch value, or the reverse,
+		// and the API rejects an env var with both.
+		if len(patch.Env) > 0 {
+			c.Env = slices.DeleteFunc(slices.Clone(c.Env), func(e corev1.EnvVar) bool {
+				return slices.ContainsFunc(patch.Env, func(p corev1.EnvVar) bool { return p.Name == e.Name })
+			})
+		}
 		baseBytes, err := json.Marshal(c)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal JSON for container %s: %w", c.Name, err)

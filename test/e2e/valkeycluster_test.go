@@ -361,7 +361,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),
@@ -480,7 +480,7 @@ spec:
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),

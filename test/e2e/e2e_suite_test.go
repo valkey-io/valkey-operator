@@ -151,10 +151,14 @@ var _ = AfterSuite(func() {
 	// `kubectl wait --all` errors when nothing matches (all nodes already gone,
 	// or the CRD was never installed), so only wait when ValkeyNodes exist.
 	By("waiting for every ValkeyNode to be deleted")
-	cmd = exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "name")
-	existing, listErr := utils.Run(cmd)
-	if listErr != nil || strings.TrimSpace(existing) == "" {
-		_, _ = fmt.Fprintf(GinkgoWriter, "No ValkeyNodes to wait for (list error: %v)\n", listErr)
+	existing, listErr := listValkeyNodes()
+	if listErr != nil {
+		// A failed list does not show that no nodes remain, so do not risk
+		// undeploying the operator under a node that still has a finalizer.
+		Fail(fmt.Sprintf("could not list ValkeyNodes; skipped undeploy so the operator keeps running: %v", listErr))
+	}
+	if existing == "" {
+		_, _ = fmt.Fprintln(GinkgoWriter, "No ValkeyNodes to wait for")
 	} else if _, err := utils.Run(exec.Command("kubectl", "wait", "valkeynodes.valkey.io", "--all", "-A",
 		"--for=delete", "--timeout=5m")); err != nil {
 		// The operator is the only thing that can finish these deletes, so
@@ -227,4 +231,26 @@ func teardownCertManager() {
 
 	By("uninstalling CertManager")
 	utils.UninstallCertManager()
+}
+
+// listValkeyNodes returns the names of all ValkeyNodes, or "" when there are
+// none. A missing valkeynodes CRD counts as none. Any other list error is
+// retried a few times, then returned.
+func listValkeyNodes() (string, error) {
+	const attempts = 5
+	var err error
+	for i := 0; i < attempts; i++ {
+		var out string
+		out, err = utils.Run(exec.Command("kubectl", "get", "valkeynodes.valkey.io", "-A", "-o", "name"))
+		if err == nil {
+			return strings.TrimSpace(out), nil
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "doesn't have a resource type") ||
+			strings.Contains(msg, "the server could not find the requested resource") {
+			return "", nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return "", err
 }

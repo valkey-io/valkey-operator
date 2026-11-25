@@ -305,7 +305,7 @@ func TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts(t *t
 		assert.True(t, slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == path }),
 			"init container must mount %s", path)
 	}
-	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ENABLED", "VALKEYCLI_AUTH"} {
+	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ARGS", "VALKEYCLI_AUTH"} {
 		assert.True(t, hasEnvVar(ic.Env, name), "init container must have env %s", name)
 	}
 }
@@ -903,9 +903,13 @@ func TestStartupFailureThreshold(t *testing.T) {
 	// that would roll the pod on a change of the value.
 	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
 	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
-	assert.Equal(t, int32(80), startupFailureThreshold(node))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
-	assert.Equal(t, int32(20), startupFailureThreshold(node))
+	containers, err = buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
 }
 
 func TestBuildContainersDef_PersistentClusterNodeSkipsPrimaryHandoffScript(t *testing.T) {
@@ -970,6 +974,33 @@ func TestMergePatchContainers(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, out, 1)
 		assert.Equal(t, "server", out[0].Name)
+	})
+
+	t.Run("patch env var replaces the base one of the same name", func(t *testing.T) {
+		secretRef := func(name, key string) *corev1.EnvVarSource {
+			return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}}
+		}
+		baseEnv := []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", Value: "_operator"},
+			{Name: "VALKEYCLI_AUTH", ValueFrom: secretRef("system", "_operator")},
+		}
+		base := []corev1.Container{{Name: "server", Env: baseEnv}}
+		patches := []corev1.Container{{Name: "server", Env: []corev1.EnvVar{
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}}}
+		out, err := mergePatchContainers(base, patches)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.ElementsMatch(t, []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}, out[0].Env)
+		assert.Len(t, base[0].Env, 3, "base env must not be modified")
+		assert.Equal(t, baseEnv[1], corev1.EnvVar{Name: "VALKEYCLI_USER", Value: "_operator"})
 	})
 }
 
@@ -1577,8 +1608,8 @@ func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
 		envByName[server.Env[i].Name] = server.Env[i]
 	}
 
-	user, ok := envByName["VALKEY_USER"]
-	require.True(t, ok, "VALKEY_USER env should be set")
+	user, ok := envByName["VALKEYCLI_USER"]
+	require.True(t, ok, "VALKEYCLI_USER env should be set")
 	assert.Equal(t, "_operator", user.Value)
 
 	e, ok := envByName["VALKEYCLI_AUTH"]
@@ -1596,47 +1627,70 @@ func TestBuildValkeyNodePodTemplateSpec_NoOperatorUserProbeEnv(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 	for _, e := range pts.Spec.Containers[0].Env {
-		assert.NotEqual(t, "VALKEY_USER", e.Name)
+		assert.NotEqual(t, "VALKEYCLI_USER", e.Name)
 		assert.NotEqual(t, "VALKEYCLI_AUTH", e.Name)
 	}
 }
 
-// TestProbeScriptOperatorUserArgs verifies the probe scripts pass --user for the
-// probe user when set, while the password itself never appears on the command line.
+// TestProbeScriptOperatorUserArgs verifies the probe scripts authenticate as
+// _operator with the mounted password file, ignore VALKEYCLI_USER and
+// VALKEYCLI_AUTH from the environment, and keep the password off the command line.
 func TestProbeScriptOperatorUserArgs(t *testing.T) {
 	for _, name := range []string{"liveness-check.sh", "readiness-check.sh"} {
 		t.Run(name, func(t *testing.T) {
 			scriptPath := filepath.Join("scripts", name)
 			binDir := t.TempDir()
 			argsFile := filepath.Join(binDir, "args.txt")
-			stub := "#!/bin/sh\nprintf '%s' \"$*\" > \"" + argsFile + "\"\necho PONG\n"
+			stub := "#!/bin/sh\nprintf '%s|%s|%s' \"${VALKEYCLI_USER:-}\" \"${VALKEYCLI_AUTH:-}\" \"$*\" > \"" + argsFile + "\"\necho PONG\n"
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
 			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+			userEnv := []string{"VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw", "REDISCLI_AUTH=alice-pw"}
+			// A pod created before the system-password mount.
+			legacyEnv := []string{"VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw"}
+			run := func(passwordFile string, env []string) string {
+				cmd := exec.Command(scriptPath)
+				cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile)
+				cmd.Env = append(cmd.Env, env...)
+				require.NoError(t, cmd.Run())
+				got, err := os.ReadFile(argsFile)
+				require.NoError(t, err)
+				return string(got)
+			}
 
-			// With probe user + auth env: --user present, password absent from argv.
-			cmd := exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=s3cr3t")
-			require.NoError(t, cmd.Run())
-			got, err := os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.Contains(t, string(got), "-user _operator")
-			assert.NotContains(t, string(got), "s3cr3t", "password must not be passed on the command line")
+			// With the mounted password: _operator and the file's password, never the user's.
+			passwordFile := filepath.Join(binDir, operatorUser)
+			require.NoError(t, os.WriteFile(passwordFile, []byte("s3cr3t\n"), 0o644))
+			got := run(passwordFile, userEnv)
+			fields := strings.SplitN(got, "|", 3)
+			require.Len(t, fields, 3)
+			assert.Empty(t, fields[0], "VALKEYCLI_USER must not reach valkey-cli")
+			assert.Equal(t, "s3cr3t", fields[1])
+			assert.Contains(t, fields[2], "--user _operator")
+			assert.NotContains(t, fields[2], "s3cr3t", "password must not be passed on the command line")
+			assert.NotContains(t, got, "alice")
 
-			// Without any probe env: no --user.
-			cmd = exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=", "VALKEYCLI_AUTH=")
-			require.NoError(t, cmd.Run())
-			got, err = os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.NotContains(t, string(got), "-user")
+			// The file wins over the legacy pair.
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|s3cr3t|"), got)
 
-			// With probe user but empty auth env: no --user.
-			cmd = exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=")
-			require.NoError(t, cmd.Run())
-			got, err = os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.NotContains(t, string(got), "-user")
+			// Without the file, the legacy pair authenticates.
+			got = run(filepath.Join(binDir, "missing"), legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			assert.Contains(t, got, "--user _operator")
+
+			// Without the file or VALKEY_USER: no credentials at all.
+			got = run(filepath.Join(binDir, "missing"), userEnv)
+			assert.Equal(t, "||", got[:2])
+			assert.NotContains(t, got, "-user")
+			assert.NotContains(t, got, "alice")
+
+			// With an empty file, the legacy pair authenticates, else nothing does.
+			require.NoError(t, os.WriteFile(passwordFile, nil, 0o644))
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			got = run(passwordFile, userEnv)
+			assert.Equal(t, "||", got[:2])
+			assert.NotContains(t, got, "-user")
 		})
 	}
 }

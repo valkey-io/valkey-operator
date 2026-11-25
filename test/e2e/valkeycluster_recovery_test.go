@@ -205,7 +205,7 @@ spec:
 		// credentials unset, so valkey-cli uses the declared open default user.
 		shell := func(pod, script string) (string, error) {
 			return utils.Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-				"sh", "-c", "unset VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
+				"sh", "-c", "unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
 		}
 
 		// ownedSlots counts the slots the node owns, from its own line of

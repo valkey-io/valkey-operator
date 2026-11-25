@@ -45,7 +45,7 @@ var _ = Describe("ValkeyCluster pause", Label("cluster-lifecycle", "pause"), fun
 		}
 		cli := func(g Gomega, args ...string) string {
 			command := []string{"exec", "valkey-" + name + "-0-0-0", "-c", "server", "--",
-				"env", "-u", "VALKEYCLI_AUTH", "-u", "REDISCLI_AUTH", "valkey-cli"}
+				"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "-u", "REDISCLI_AUTH", "valkey-cli"}
 			return kubectl(g, append(command, args...)...)
 		}
 		nodes := func(g Gomega) []valkeyiov1alpha1.ValkeyNode {

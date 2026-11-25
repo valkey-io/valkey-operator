@@ -810,6 +810,33 @@ A rotation step that fails, for example because the operator cannot list the pod
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
 
+#### `valkey-cli` in a node's pod
+
+The server container sets `VALKEYCLI_USER` to `_operator` and `VALKEYCLI_AUTH` to its password. On Valkey 9.2 and later, `valkey-cli` reads both, so `kubectl exec <pod> -c server -- valkey-cli` logs in as `_operator`. Older versions ignore `VALKEYCLI_USER` and send the password as `default`, so pass `--user _operator` there. With TLS, run `kubectl exec <pod> -c server -- sh -c 'valkey-cli $VALKEY_TLS_ARGS'`.
+
+`_operator` can run only the cluster, config and ACL commands the operator needs and has no key access. To log in as your own user instead, set both variables on the server container:
+
+```yaml
+containers:
+  - name: server
+    env:
+      - name: VALKEYCLI_USER
+        value: admin
+      - name: VALKEYCLI_AUTH
+        valueFrom:
+          secretKeyRef:
+            name: my-users-secret
+            key: admin
+```
+
+The probes and the startup script read the `_operator` password from the mounted file and ignore both variables, so this override does not affect them. Changing it rolls the pods.
+
+`VALKEYCLI_AUTH` is set when the container starts and does not change after that. A [system password rotation](#system-password-rotation) keeps the old `_operator` password valid for at least five minutes after the switch, then removes it. From then on, `valkey-cli` in a pod that started before the rotation fails to authenticate until the container restarts. To use the current password, read it from the mounted file:
+
+```sh
+VALKEYCLI_AUTH=$(cat /etc/valkey/system-passwords/_operator) valkey-cli --user _operator
+```
+
 ### Operator-managed Secrets
 
 The operator creates these Secrets in the cluster's namespace. The ValkeyCluster controls them, so they are deleted with it.

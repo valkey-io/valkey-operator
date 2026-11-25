@@ -383,7 +383,7 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 			return true, ctrl.Result{}, condErr
 		}
 	} else {
-		// Nothing to apply (no allowlisted keys in spec.config). Clear any
+		// No allowlisted keys remain in spec.config and any resets succeeded. Clear any
 		// stale condition so it reverts to absent, which the cluster
 		// controller treats the same as True. Without this, a prior False
 		// (e.g. from a CONFIG SET failure) would persist after the offending
@@ -1556,12 +1556,22 @@ func (r *ValkeyNodeReconciler) reloadTrustBundle(ctx context.Context, node *valk
 }
 
 // applyLiveConfig applies the live-settable subset of the node's desired config
-// via CONFIG SET and returns what it applied. It returns an empty map when
-// there is nothing to apply, and (nil, err) on failure.
+// via CONFIG SET and resets previously applied keys removed from spec.config.
+// It returns only the desired live values so successful resets are dropped
+// from status.appliedLiveConfig. On failure the previous status is retained.
 func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (map[string]string, error) {
-	params := liveConfigToApply(node.Spec.Config)
+	desired := liveConfigToApply(node.Spec.Config)
+	params := maps.Clone(desired)
+	for _, entry := range node.Status.AppliedLiveConfig {
+		if _, stillManaged := desired[entry.Name]; stillManaged {
+			continue
+		}
+		if value, supported := liveConfigDefaults[entry.Name]; supported {
+			params[entry.Name] = value
+		}
+	}
 	if len(params) == 0 {
-		return params, nil
+		return desired, nil
 	}
 
 	c, err := r.newConfigClient(ctx, r, node)
@@ -1572,7 +1582,7 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 	if err := c.SetConfig(ctx, params); err != nil {
 		return nil, err
 	}
-	return params, nil
+	return desired, nil
 }
 
 // parseClusterEnabled reports whether the node runs in cluster mode, from the

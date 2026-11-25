@@ -857,10 +857,10 @@ var _ = Describe("reconcileUsersAcl", func() {
 		declaredUserLines := func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []string {
 			// A new spec.users is rejected. The function reads the object it is
 			// given, so store the cluster without that field and put it back.
-			legacy := cluster.Spec.Users
-			cluster.Spec.Users = nil
+			legacy := cluster.Spec.Users //nolint:staticcheck // legacy spec.users
+			cluster.Spec.Users = nil     //nolint:staticcheck // legacy spec.users
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-			cluster.Spec.Users = legacy
+			cluster.Spec.Users = legacy //nolint:staticcheck // legacy spec.users
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
 
 			reconciler := &ValkeyClusterReconciler{

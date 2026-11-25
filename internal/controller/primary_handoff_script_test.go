@@ -476,11 +476,14 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
-		require.Len(t, lines, 3)
+		// Three ROLE answers, then the CLUSTER NODES call the slot-assignment
+		// check sends once ROLE reports a primary.
+		require.Len(t, lines, 4)
 		for _, line := range lines {
 			assert.True(t, strings.HasPrefix(line, "env-pw "), line)
 			assert.Contains(t, line, "--user "+operatorUser)
 		}
+		assert.Contains(t, lines[3], "CLUSTER NODES")
 	})
 }
 

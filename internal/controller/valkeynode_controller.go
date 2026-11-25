@@ -246,11 +246,12 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	pinned := node.Spec.ConfigRevision != ""
 	// The pinned file and live.conf go in before the workload that mounts them.
 	// A ConfigMap error leaves the workload alone but not the status: the pod
-	// may still serve, so its role and IP are kept current.
-	var configErr *readyError
+	// may still serve, so its role and IP are kept current. A pod template
+	// that checkPodTemplate refuses is held the same way.
+	var held *readyError
 	if pinned {
-		configErr = r.ensureNodeConfigReady(ctx, node)
-		if configErr != nil && errors.Is(configErr, errTransientRequeue) {
+		held = r.ensureNodeConfigReady(ctx, node)
+		if held != nil && errors.Is(held, errTransientRequeue) {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	}
@@ -263,8 +264,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// as Ready=False, so the cluster stops copying spec to later nodes.
 	serviceErr := r.ensureNodeService(ctx, node)
 
-	if pinned && configErr == nil {
-		if err := r.ensureWorkload(ctx, node); err != nil {
+	if pinned && held == nil {
+		if err := r.ensureWorkload(ctx, node); err != nil && !errors.As(err, &held) {
 			if errors.Is(err, errTransientRequeue) {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
@@ -277,8 +278,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	notReady := serviceErr
-	if configErr != nil {
-		notReady = configErr
+	if held != nil {
+		notReady = held
 	}
 	roleResolveFailed, err := r.updateStatus(ctx, node, notReady)
 	if err != nil {
@@ -289,18 +290,19 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// A ConfigMap or Service error sets status.ready false while the pod can
-	// still be up. Apply live config, ACL and the trust bundle in that case,
-	// so a removed user loses access, then requeue. A pod that is not up has
-	// nothing to dial, so that path returns the error.
+	// A ConfigMap or Service error, or a held pod template, sets status.ready
+	// false while the pod can still be up. Apply live config, ACL and the
+	// trust bundle in that case, so a removed user loses access, then
+	// requeue. A pod that is not up has nothing to dial, so that path returns
+	// the error.
 	if notReady != nil {
 		up, err := r.podUp(ctx, node)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if !up {
-			if configErr != nil {
-				return configErr.result()
+			if held != nil {
+				return held.result()
 			}
 			return ctrl.Result{}, serviceErr
 		}
@@ -312,8 +314,8 @@ func (r *ValkeyNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if stop, result, err := r.applyLiveSettings(ctx, node); stop {
 		return result, err
 	}
-	if configErr != nil {
-		return configErr.result()
+	if held != nil {
+		return held.result()
 	}
 	if serviceErr != nil {
 		log.Error(serviceErr, "per-node Service not ready, requeuing")
@@ -697,11 +699,34 @@ func buildPodTemplateAnnotations(node *valkeyiov1alpha1.ValkeyNode) map[string]s
 	return nil
 }
 
+// checkPodTemplate returns a readyError with reason InvalidPodTemplate when a
+// container probe of tmpl has no handler or more than one, and emits a
+// warning event unless the node already reports the same problem. Such a
+// template is never written: the API server refuses it in a Deployment, and
+// in a StatefulSet from Kubernetes 1.34, while earlier releases accept the
+// StatefulSet, whose roll then deletes the pod and cannot create its
+// replacement.
+func (r *ValkeyNodeReconciler) checkPodTemplate(node *valkeyiov1alpha1.ValkeyNode, tmpl *corev1.PodTemplateSpec) error {
+	problems := probeHandlerProblems(tmpl.Spec.Containers)
+	if len(problems) == 0 {
+		return nil
+	}
+	held := &readyError{reason: valkeyiov1alpha1.ValkeyNodeReasonInvalidPodTemplate, err: errors.New(strings.Join(problems, "; "))}
+	if ready := meta.FindStatusCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady); ready == nil ||
+		ready.Reason != held.reason || ready.Message != held.Error() {
+		r.Recorder.Eventf(node, nil, corev1.EventTypeWarning, held.reason, "CheckPodTemplate", "Pod template not applied: %v", held)
+	}
+	return held
+}
+
 // ensureStatefulSet creates or updates the StatefulSet for the ValkeyNode.
 func (r *ValkeyNodeReconciler) ensureStatefulSet(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	log := logf.FromContext(ctx)
 	desired, err := buildValkeyNodeStatefulSet(node)
 	if err != nil {
+		return err
+	}
+	if err := r.checkPodTemplate(node, &desired.Spec.Template); err != nil {
 		return err
 	}
 	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node)
@@ -857,6 +882,9 @@ func (r *ValkeyNodeReconciler) ensureDeployment(ctx context.Context, node *valke
 	log := logf.FromContext(ctx)
 	desired, err := buildValkeyNodeDeployment(node)
 	if err != nil {
+		return err
+	}
+	if err := r.checkPodTemplate(node, &desired.Spec.Template); err != nil {
 		return err
 	}
 	desired.Spec.Template.Annotations = buildPodTemplateAnnotations(node)
@@ -1044,9 +1072,11 @@ func (e *readyError) Error() string { return e.err.Error() }
 func (e *readyError) Unwrap() error { return e.err }
 
 // result ends the reconcile after the status write. A config revision
-// mismatch waits for the parent; any other error retries with backoff.
+// mismatch or an invalid pod template waits for the parent; any other error
+// retries with backoff.
 func (e *readyError) result() (ctrl.Result, error) {
-	if e.reason == valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch {
+	switch e.reason {
+	case valkeyiov1alpha1.ValkeyNodeReasonConfigRevisionMismatch, valkeyiov1alpha1.ValkeyNodeReasonInvalidPodTemplate:
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	return ctrl.Result{}, e.err

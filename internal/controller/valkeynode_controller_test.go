@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1256,6 +1257,126 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			Expect(testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionWorkloadRollPending)).To(BeNil())
 		})
+
+		It("keeps the StatefulSet and reports InvalidPodTemplate until the probe patch is fixed", func() {
+			withWatch, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			stsUpdates := 0
+			recorder := events.NewFakeRecorder(10)
+			r := &ValkeyNodeReconciler{
+				Client: interceptor.NewClient(withWatch, interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*appsv1.StatefulSet); ok {
+							stsUpdates++
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				}),
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  recorder,
+				resolveRoleFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) string {
+					return RolePrimary
+				},
+			}
+
+			By("creating the StatefulSet, whose pod then runs")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			template := sts.Spec.Template.DeepCopy()
+			generation := sts.Generation
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + "-template-pod",
+					Namespace: "default",
+					Labels:    valkeyNodeLabels(node),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: serverContainerName, Image: "valkey/valkey:9.0.0"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			pod.Status.PodIP = "10.0.0.12"
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			By("disabling liveness with a livenessProbe patch that sets only timings")
+			node.Spec.Probes = &valkeyiov1alpha1.ProbesSpec{Liveness: &valkeyiov1alpha1.LivenessProbeSpec{Mode: valkeyiov1alpha1.LivenessProbeModeDisabled}}
+			node.Spec.Containers = []corev1.Container{{Name: serverContainerName, LivenessProbe: &corev1.Probe{FailureThreshold: 10}}}
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			for range 2 {
+				result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+			}
+
+			const noHandler = `container "server" livenessProbe has no handler`
+			Expect(stsUpdates).To(BeZero(), "before Kubernetes 1.34 the API server accepts the template, and the roll deletes the pod")
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(sts.Generation).To(Equal(generation))
+			Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(podTemplateRollHash(*template)))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			readyCond := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonInvalidPodTemplate))
+			Expect(readyCond.Message).To(Equal(noHandler))
+			Expect(node.Status.Ready).To(BeFalse())
+			Expect(node.Status.ObservedGeneration).To(Equal(node.Generation))
+			Expect(node.Status.PodIP).To(Equal("10.0.0.12"), "the status keeps following the pod, which still serves")
+			Expect(recorder.Events).To(HaveLen(1), "one event for the problem, not one per reconcile")
+			Expect(<-recorder.Events).To(Equal("Warning InvalidPodTemplate Pod template not applied: " + noHandler))
+
+			By("giving the livenessProbe patch a handler")
+			node.Spec.Containers[0].LivenessProbe.Exec = &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "valkey-cli ping"}}
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(stsUpdates).To(Equal(1))
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(node.Spec.WorkloadRevision))
+			Expect(sts.Spec.Template.Spec.Containers[0].LivenessProbe.Exec.Command).To(ContainElement("valkey-cli ping"))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			readyCond = testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonPodNotReady), "the rolled StatefulSet has not finished in envtest")
+		})
+
+		It("creates no StatefulSet for a new node whose probe patch adds a second handler", func() {
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Containers: []corev1.Container{{Name: serverContainerName, LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(DefaultPort)}},
+				}}},
+			})
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+			}
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, statefulSetName, &appsv1.StatefulSet{}))).To(BeTrue())
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			readyCond := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonInvalidPodTemplate))
+			Expect(readyCond.Message).To(Equal(`container "server" livenessProbe has 2 handlers (exec, tcpSocket)`))
+		})
 	})
 
 	Context("When WorkloadType is Deployment", func() {
@@ -1449,6 +1570,39 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
 			Expect(mountedConfigRevision(&dep2.Spec.Template.Spec)).To(Equal(revB),
 				"a new config revision must reach the template to roll the pod")
+		})
+
+		It("keeps the Deployment while a probe patch adds a second handler", func() {
+			r := &ValkeyNodeReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, childName, deploy)).To(Succeed())
+			generation := deploy.Generation
+
+			By("patching an httpGet handler into the readiness probe")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.Containers = []corev1.Container{{Name: serverContainerName, ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)}},
+			}}}
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+
+			Expect(k8sClient.Get(ctx, childName, deploy)).To(Succeed())
+			Expect(deploy.Generation).To(Equal(generation))
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			readyCond := testutils.FindCondition(node.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonInvalidPodTemplate))
+			Expect(readyCond.Message).To(Equal(`container "server" readinessProbe has 2 handlers (exec, httpGet)`))
 		})
 	})
 

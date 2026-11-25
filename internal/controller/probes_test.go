@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/events"
 )
 
 // legacyServerProbes is a frozen, self-contained copy of the server
@@ -457,6 +458,219 @@ func TestContainersPatchesApplyAfterSpecProbes(t *testing.T) {
 		require.NotNil(t, got.TCPSocket)
 		assert.Equal(t, int32(10), got.PeriodSeconds)
 	})
+}
+
+func TestProbeHandlerProblems(t *testing.T) {
+	execAction := &corev1.ExecAction{Command: []string{"true"}}
+	httpGetAction := &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}
+	tcpSocketAction := &corev1.TCPSocketAction{Port: intstr.FromInt32(DefaultPort)}
+	grpcAction := &corev1.GRPCAction{Port: 9090}
+	cases := []struct {
+		name       string
+		containers []corev1.Container
+		want       []string
+	}{
+		{name: "no probes", containers: []corev1.Container{{Name: "server"}}},
+		{
+			name: "one handler of each kind",
+			containers: []corev1.Container{
+				{
+					Name:           "server",
+					LivenessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: execAction}},
+					ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: httpGetAction}},
+					StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: tcpSocketAction}},
+				},
+				{Name: "sidecar", LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: grpcAction}}},
+			},
+		},
+		{
+			name:       "a liveness probe with timings only",
+			containers: []corev1.Container{{Name: "server", LivenessProbe: &corev1.Probe{FailureThreshold: 10}}},
+			want:       []string{`container "server" livenessProbe has no handler`},
+		},
+		{
+			name: "a readiness probe with two handlers",
+			containers: []corev1.Container{{Name: "server",
+				ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: execAction, HTTPGet: httpGetAction}}}},
+			want: []string{`container "server" readinessProbe has 2 handlers (exec, httpGet)`},
+		},
+		{
+			name: "a startup probe with every handler",
+			containers: []corev1.Container{{Name: "server",
+				StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: execAction, HTTPGet: httpGetAction, TCPSocket: tcpSocketAction, GRPC: grpcAction,
+				}}}},
+			want: []string{`container "server" startupProbe has 4 handlers (exec, httpGet, tcpSocket, grpc)`},
+		},
+		{
+			name:       "a sidecar probe without a handler",
+			containers: []corev1.Container{{Name: "server"}, {Name: "log-shipper", ReadinessProbe: &corev1.Probe{PeriodSeconds: 10}}},
+			want:       []string{`container "log-shipper" readinessProbe has no handler`},
+		},
+		{
+			name: "every problem, in container and field order",
+			containers: []corev1.Container{
+				{
+					Name:           "server",
+					StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: execAction, GRPC: grpcAction}},
+					LivenessProbe:  &corev1.Probe{},
+					ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: execAction}},
+				},
+				{Name: "log-shipper", LivenessProbe: &corev1.Probe{PeriodSeconds: 10}},
+			},
+			want: []string{
+				`container "server" livenessProbe has no handler`,
+				`container "server" startupProbe has 2 handlers (exec, grpc)`,
+				`container "log-shipper" livenessProbe has no handler`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, probeHandlerProblems(tc.containers))
+		})
+	}
+}
+
+// spec.containers patches are merged into the operator's probes field by
+// field, so the check has to run on the merged containers.
+func TestProbeHandlerProblemsAfterContainersPatches(t *testing.T) {
+	builtIn := &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: valkeyv1.LivenessProbeModeBuiltIn}}
+	disabled := &valkeyv1.ProbesSpec{Liveness: &valkeyv1.LivenessProbeSpec{Mode: valkeyv1.LivenessProbeModeDisabled}}
+	httpGet := corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}}
+	server := func(c corev1.Container) corev1.Container {
+		c.Name = serverContainerName
+		return c
+	}
+	cases := []struct {
+		name    string
+		probes  *valkeyv1.ProbesSpec
+		patches []corev1.Container
+		want    []string
+	}{
+		{name: "the operator's probes"},
+		{name: "liveness disabled", probes: disabled},
+		{
+			name:    "liveness disabled with a timings-only livenessProbe patch",
+			probes:  disabled,
+			patches: []corev1.Container{server(corev1.Container{LivenessProbe: &corev1.Probe{FailureThreshold: 10}})},
+			want:    []string{`container "server" livenessProbe has no handler`},
+		},
+		{
+			name:    "liveness disabled with a complete livenessProbe patch",
+			probes:  disabled,
+			patches: []corev1.Container{server(corev1.Container{LivenessProbe: &corev1.Probe{ProbeHandler: httpGet, FailureThreshold: 10}})},
+		},
+		{
+			name:    "liveness BuiltIn with an httpGet livenessProbe patch",
+			probes:  builtIn,
+			patches: []corev1.Container{server(corev1.Container{LivenessProbe: &corev1.Probe{ProbeHandler: httpGet}})},
+			want:    []string{`container "server" livenessProbe has 2 handlers (exec, httpGet)`},
+		},
+		{
+			name:   "liveness BuiltIn with an exec livenessProbe patch, whose command replaces the operator's",
+			probes: builtIn,
+			patches: []corev1.Container{server(corev1.Container{LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "/custom/check.sh"}}},
+			}})},
+		},
+		{
+			name:    "a timings-only readinessProbe patch",
+			patches: []corev1.Container{server(corev1.Container{ReadinessProbe: &corev1.Probe{PeriodSeconds: 20}})},
+		},
+		{
+			name: "a tcpSocket readinessProbe patch",
+			patches: []corev1.Container{server(corev1.Container{ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(DefaultPort)}},
+			}})},
+			want: []string{`container "server" readinessProbe has 2 handlers (exec, tcpSocket)`},
+		},
+		{
+			name: "a grpc startupProbe patch",
+			patches: []corev1.Container{server(corev1.Container{StartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: 9090}},
+			}})},
+			want: []string{`container "server" startupProbe has 2 handlers (exec, grpc)`},
+		},
+		{
+			name:    "a timings-only readinessProbe patch on the metrics exporter",
+			patches: []corev1.Container{{Name: metricsExporterContainerName, ReadinessProbe: &corev1.Probe{PeriodSeconds: 10}}},
+		},
+		{
+			name:    "a timings-only startupProbe patch on the metrics exporter, which has no startup probe",
+			patches: []corev1.Container{{Name: metricsExporterContainerName, StartupProbe: &corev1.Probe{PeriodSeconds: 10}}},
+			want:    []string{`container "metrics-exporter" startupProbe has no handler`},
+		},
+		{
+			name: "a sidecar probe without a handler",
+			patches: []corev1.Container{{
+				Name: "log-shipper", Image: "example/log-shipper:1.0", LivenessProbe: &corev1.Probe{PeriodSeconds: 10},
+			}},
+			want: []string{`container "log-shipper" livenessProbe has no handler`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := probeTestNode(true, tc.probes)
+			node.Spec.Containers = tc.patches
+			containers, err := buildContainersDef(node)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, probeHandlerProblems(containers))
+		})
+	}
+}
+
+func TestCheckPodTemplateWarnsOncePerProblem(t *testing.T) {
+	const noHandler = `container "server" livenessProbe has no handler`
+	template := func(liveness *corev1.Probe) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: serverContainerName, LivenessProbe: liveness},
+		}}}
+	}
+	invalid := template(&corev1.Probe{FailureThreshold: 10})
+	ready := func(reason, message string) []metav1.Condition {
+		return []metav1.Condition{{Type: valkeyv1.ValkeyNodeConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message}}
+	}
+	cases := []struct {
+		name       string
+		conditions []metav1.Condition
+		tmpl       *corev1.PodTemplateSpec
+		wantEvent  bool
+	}{
+		{name: "a valid template", tmpl: template(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}})},
+		{name: "a node without a Ready condition", tmpl: invalid, wantEvent: true},
+		{name: "a node that reports another reason", conditions: ready(valkeyv1.ValkeyNodeReasonPodNotReady, "Pod is not ready"), tmpl: invalid, wantEvent: true},
+		{name: "a node that reports the same problem", conditions: ready(valkeyv1.ValkeyNodeReasonInvalidPodTemplate, noHandler), tmpl: invalid},
+		{
+			name:       "a node that reports another problem",
+			conditions: ready(valkeyv1.ValkeyNodeReasonInvalidPodTemplate, `container "server" livenessProbe has 2 handlers (exec, httpGet)`),
+			tmpl:       invalid,
+			wantEvent:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := events.NewFakeRecorder(10)
+			r := &ValkeyNodeReconciler{Recorder: recorder}
+			node := &valkeyv1.ValkeyNode{Status: valkeyv1.ValkeyNodeStatus{Conditions: tc.conditions}}
+			err := r.checkPodTemplate(node, tc.tmpl)
+			if tc.tmpl != invalid {
+				require.NoError(t, err)
+				assert.Empty(t, recorder.Events)
+				return
+			}
+			var held *readyError
+			require.ErrorAs(t, err, &held)
+			assert.Equal(t, valkeyv1.ValkeyNodeReasonInvalidPodTemplate, held.reason)
+			assert.EqualError(t, held, noHandler)
+			if !tc.wantEvent {
+				assert.Empty(t, recorder.Events)
+				return
+			}
+			require.Len(t, recorder.Events, 1)
+			assert.Equal(t, "Warning InvalidPodTemplate Pod template not applied: "+noHandler, <-recorder.Events)
+		})
+	}
 }
 
 // The probe command is run by a shell, so the timeout must reach the script

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -179,6 +180,57 @@ func startupChecksCovering(windowSeconds int64, initialDelaySeconds, periodSecon
 	period := int64(max(periodSeconds, 1))
 	rest := max(windowSeconds-int64(initialDelaySeconds), 0)
 	return 1 + (rest+period-1)/period
+}
+
+// probeHandlerProblems describes each probe of containers that does not have
+// exactly one handler, which the API server rejects. A spec.containers patch
+// is merged into the operator's probe field by field, so a patch that sets
+// only timings on a probe the operator leaves out has no handler, and one
+// with an httpGet, tcpSocket or grpc handler adds a second handler to the
+// operator's exec check.
+func probeHandlerProblems(containers []corev1.Container) []string {
+	var problems []string
+	for _, c := range containers {
+		for _, p := range []struct {
+			field string
+			probe *corev1.Probe
+		}{
+			{"livenessProbe", c.LivenessProbe},
+			{"readinessProbe", c.ReadinessProbe},
+			{"startupProbe", c.StartupProbe},
+		} {
+			if p.probe == nil {
+				continue
+			}
+			switch handlers := probeHandlers(p.probe.ProbeHandler); len(handlers) {
+			case 0:
+				problems = append(problems, fmt.Sprintf("container %q %s has no handler", c.Name, p.field))
+			case 1:
+			default:
+				problems = append(problems, fmt.Sprintf("container %q %s has %d handlers (%s)",
+					c.Name, p.field, len(handlers), strings.Join(handlers, ", ")))
+			}
+		}
+	}
+	return problems
+}
+
+// probeHandlers returns the field names of the handlers set on h.
+func probeHandlers(h corev1.ProbeHandler) []string {
+	var names []string
+	if h.Exec != nil {
+		names = append(names, "exec")
+	}
+	if h.HTTPGet != nil {
+		names = append(names, "httpGet")
+	}
+	if h.TCPSocket != nil {
+		names = append(names, "tcpSocket")
+	}
+	if h.GRPC != nil {
+		names = append(names, "grpc")
+	}
+	return names
 }
 
 // probesOrEmpty returns probes with every probe set, empty where unset.

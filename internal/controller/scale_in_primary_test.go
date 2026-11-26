@@ -466,6 +466,45 @@ func TestDeleteExcessValkeyNodesPrimaryOnNodeOneToZeroReplicas(t *testing.T) {
 	assert.False(t, nodeExists(t, r.Client, n01))
 }
 
+func TestDeleteExcessValkeyNodesDeletesPendingNodeDuringScaleOut(t *testing.T) {
+	// Shard 1 is new and its leader has no slots yet, so both of its nodes
+	// are pending. replicasPerShard 1 -> 0 makes wedge-1-1 excess: it owns
+	// no slots, so it is deleted without waiting on the rebalance.
+	failoverCalls, restore := stubFailoverCounter()
+	t.Cleanup(restore)
+
+	n00, n10, n11 := wedgeNode(0, 0, "10.0.0.1"), wedgeNode(1, 0, "10.0.1.1"), wedgeNode(1, 1, "10.0.1.2")
+	nodes := &valkeyv1.ValkeyNodeList{Items: []valkeyv1.ValkeyNode{*n00, *n10, *n11}}
+	cluster := &valkeyv1.ValkeyCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "wedge", Namespace: "ns"},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 2, ReplicasPerShard: 0},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyv1.AddToScheme(scheme))
+	r := &ValkeyClusterReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(n00, n10, n11).Build(),
+		Recorder: events.NewFakeRecorder(32),
+	}
+	state := &valkey.ClusterState{
+		Shards: []*valkey.ShardState{{Id: "shard-0", PrimaryId: "node-0-0", Nodes: []*valkey.NodeState{
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
+		}}},
+		PendingNodes: []*valkey.NodeState{
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
+			{Address: "10.0.1.2", Id: "node-1-1", Flags: []string{"master"}},
+		},
+	}
+
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	require.NoError(t, err)
+	assert.Empty(t, kept)
+	assert.True(t, deleted)
+	assert.False(t, deferred)
+	assert.Zero(t, *failoverCalls)
+	assert.False(t, nodeExists(t, r.Client, n11))
+	assert.True(t, nodeExists(t, r.Client, n10))
+}
+
 // shard0WithPrimaryAt returns shard 0 of scaleInFixture without node-index 2,
 // with primaryID as its primary.
 func shard0WithPrimaryAt(primaryID string) *valkey.ShardState {

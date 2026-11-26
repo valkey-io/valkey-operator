@@ -2102,6 +2102,10 @@ func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, clust
 	if shard != nil {
 		primary = shard.GetPrimaryNode()
 	}
+	if shard == nil && node.Status.PodIP != "" && state.HasAddress(node.Status.PodIP) {
+		// It answered but is in no shard: a pending node owns no slots.
+		return true
+	}
 	if primary == nil {
 		// The scrape cannot show this node's role. Another visible primary
 		// for the shard means it is not the primary.

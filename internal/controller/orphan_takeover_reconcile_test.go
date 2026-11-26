@@ -124,17 +124,42 @@ func TestReconcileOrphanTakeoverDuringNodeUpdate(t *testing.T) {
 			name = "unschedulable primary and unready replica in another shard"
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newOrphanReconcileFixture(t, "p1", true, unschedulable, false)
+			f := newOrphanReconcileFixture(t, "p1", true, unschedulable, true)
 			key := client.ObjectKeyFromObject(f.cluster)
 			result, err := f.reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 			require.NoError(t, err)
 			assert.Equal(t, 2*time.Second, result.RequeueAfter)
 			assert.Equal(t, 1, f.client.takeovers, "authorization must be processed before node-update or scheduling returns")
+			assert.Equal(t, []string{"CLUSTER FAILOVER TAKEOVER"}, f.client.commands, "approved takeover must precede stale address repair")
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			require.NoError(t, f.reconciler.Get(context.Background(), key, stored))
 			assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
 		})
 	}
+}
+
+func TestReconcileOrphanTakeoverWaitsForAuthentication(t *testing.T) {
+	ctx := context.Background()
+	f := newOrphanReconcileFixture(t, "p1,p2", false, false, false)
+	replica := &valkeyiov1alpha1.ValkeyNode{}
+	require.NoError(t, f.reconciler.Get(ctx, client.ObjectKey{Namespace: f.cluster.Namespace, Name: "c-0-1"}, replica))
+	meta.SetStatusCondition(&replica.Status.Conditions, metav1.Condition{
+		Type:   valkeyiov1alpha1.ValkeyNodeConditionACLApplied,
+		Status: metav1.ConditionFalse,
+		Reason: valkeyiov1alpha1.ValkeyNodeReasonAuthenticationFailed,
+	})
+	require.NoError(t, f.reconciler.Status().Update(ctx, replica))
+
+	key := client.ObjectKeyFromObject(f.cluster)
+	_, err := f.reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	stored := &valkeyiov1alpha1.ValkeyCluster{}
+	require.NoError(t, f.reconciler.Get(ctx, key, stored))
+	assert.Equal(t, "p1,p2", stored.Annotations[forceTakeoverAnnotation], "keep approvals while the topology is incomplete")
+	assert.Zero(t, f.client.takeovers)
+	condition := meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	require.NotNil(t, condition)
+	assert.Equal(t, valkeyiov1alpha1.ReasonOperatorAuthenticationFailed, condition.Reason)
 }
 
 func TestReconcileOrphanWaitHealsStaleAddresses(t *testing.T) {
@@ -267,20 +292,23 @@ func TestManualTakeoverWarningIgnoresChangingObservations(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	f.reconciler.Recorder = recorder
 	f.candidates[0].replica.Info = map[string]string{
-		"slave_repl_offset": "100", "master_sync_in_progress": "1", "master_link_down_since_seconds": "10",
+		"slave_repl_offset": "100", "master_sync_in_progress": "1", "master_link_status": "down", "master_link_down_since_seconds": "10",
 	}
 	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, f.candidates)
 	<-recorder.Events
+	previous := manualTakeoverMessage(f.cluster, f.nodes, f.candidates)
+	f.candidates[0].replica.Info["master_link_down_since_seconds"] = "40"
+	assert.Equal(t, previous, manualTakeoverMessage(f.cluster, f.nodes, f.candidates))
+	f.cluster.Annotations[forceTakeoverAnnotation] = "p1"
 	f.candidates[0].replica.Info["slave_repl_offset"] = "200"
 	f.candidates[0].replica.Info["master_sync_in_progress"] = "0"
-	f.candidates[0].replica.Info["master_link_down_since_seconds"] = "40"
 	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, f.candidates)
 	condition := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	require.NotNil(t, condition)
-	assert.Contains(t, condition.Message, "offset 200, sync in progress: no, primary link down: 40s")
+	assert.Contains(t, condition.Message, "offset 200, sync in progress: no, primary link: down")
 	select {
 	case event := <-recorder.Events:
-		t.Fatalf("changed observations repeated a warning: %s", event)
+		t.Fatalf("approval or changed observations repeated a warning: %s", event)
 	default:
 	}
 	f.candidates[0].primaryId = "another-primary"

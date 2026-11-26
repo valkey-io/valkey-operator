@@ -276,8 +276,7 @@ func TestPromoteOrphanedReplicas(t *testing.T) {
 		f.client.beforeCall = func() {
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-			assert.Equal(t, " stale, p1 , later ", stored.Annotations[forceTakeoverAnnotation], "keep approval until TAKEOVER succeeds")
-			assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation], "pin the attempt to its selected replica")
+			assert.Equal(t, "later,stale", stored.Annotations[forceTakeoverAnnotation], "consume only the failed primary ID before TAKEOVER")
 		}
 		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
 		assert.True(t, handled)
@@ -304,21 +303,22 @@ func TestPromoteOrphanedReplicas(t *testing.T) {
 		assert.Equal(t, 1, f.client.takeovers)
 	})
 
-	t.Run("failed takeover keeps authorization", func(t *testing.T) {
+	t.Run("failed takeover requires fresh approval", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "p1", errors.New("boom"))
 		f.client.beforeCall = func() {
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-			assert.Equal(t, "p1", stored.Annotations[forceTakeoverAnnotation])
-			assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation])
+			assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
 		}
 		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
 		assert.True(t, handled)
 		assert.Equal(t, 1, f.client.takeovers)
 		stored := &valkeyiov1alpha1.ValkeyCluster{}
 		assert.NoError(t, f.reconciler.Get(context.Background(), client.ObjectKeyFromObject(f.cluster), stored))
-		assert.Equal(t, "p1", stored.Annotations[forceTakeoverAnnotation])
-		assert.Equal(t, "p1/r1", stored.Annotations[forceTakeoverAttemptAnnotation])
+		assert.NotContains(t, stored.Annotations, forceTakeoverAnnotation)
+		_, handled = f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
+		assert.True(t, handled)
+		assert.Equal(t, 1, f.client.takeovers, "do not repeat a failed command without fresh approval")
 	})
 }
 
@@ -359,10 +359,10 @@ func TestManualTakeoverMessage(t *testing.T) {
 	t.Run("reports replication state before approval", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "", nil)
 		f.candidates[0].replica.Info = map[string]string{
-			"slave_repl_offset": "18432", "master_sync_in_progress": "1", "master_link_down_since_seconds": "67",
+			"slave_repl_offset": "18432", "master_sync_in_progress": "1", "master_link_status": "down",
 		}
 		message := manualTakeoverMessage(f.cluster, f.nodes, f.candidates)
-		assert.Contains(t, message, "offset 18432, sync in progress: yes, primary link down: 67s")
+		assert.Contains(t, message, "offset 18432, sync in progress: yes, primary link: down")
 		assert.Contains(t, message, "shard 0 primary p1")
 		assert.Contains(t, message, "force-takeover=p1")
 		assert.NotContains(t, message, "--overwrite replaces")
@@ -370,7 +370,7 @@ func TestManualTakeoverMessage(t *testing.T) {
 	t.Run("reports missing observations and omits unknown shard", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "", nil)
 		message := manualTakeoverMessage(f.cluster, &valkeyiov1alpha1.ValkeyNodeList{}, f.candidates)
-		assert.Contains(t, message, "offset unknown, sync in progress: unknown, primary link down: unknown")
+		assert.Contains(t, message, "offset unknown, sync in progress: unknown, primary link: unknown")
 		assert.NotContains(t, message, "shard -1")
 	})
 	t.Run("zero offset is reported without implying missing data", func(t *testing.T) {
@@ -378,25 +378,28 @@ func TestManualTakeoverMessage(t *testing.T) {
 		f.candidates[0].replica.Info = map[string]string{
 			"slave_repl_offset": "0", "master_sync_in_progress": "0", "master_link_status": "up",
 		}
-		assert.Contains(t, manualTakeoverMessage(f.cluster, f.nodes, f.candidates), "offset 0, sync in progress: no, primary link down: 0s")
+		assert.Contains(t, manualTakeoverMessage(f.cluster, f.nodes, f.candidates), "offset 0, sync in progress: no, primary link: up")
 	})
-	t.Run("refreshes pinned progress after a failed command", func(t *testing.T) {
+	t.Run("requests fresh approval after a failed command", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "p1", errors.New("command rejected"))
 		_, handled := f.reconciler.promoteOrphanedReplicas(context.Background(), f.cluster, f.state, f.nodes, f.candidates)
 		assert.True(t, handled)
 		condition := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 		if assert.NotNil(t, condition) {
-			assert.Contains(t, condition.Message, "authorized and pinned to replica r1")
+			assert.Contains(t, condition.Message, "force-takeover=p1")
 			assert.NotContains(t, condition.Message, "awaiting an attempt")
 		}
 	})
-	t.Run("does not attribute sibling observations to a pinned replica", func(t *testing.T) {
-		f := newOrphanTakeoverFixture(t, true, "p1", nil)
-		f.cluster.Annotations[forceTakeoverAttemptAnnotation] = "p1/other-replica"
-		f.candidates[0].replica.Info = map[string]string{"slave_repl_offset": "999"}
-		message := manualTakeoverMessage(f.cluster, f.nodes, f.candidates)
-		assert.Contains(t, message, "pinned to replica other-replica (replication state unknown in this snapshot)")
-		assert.NotContains(t, message, "999")
+	t.Run("warns when the replication source has a different node ID", func(t *testing.T) {
+		f := newOrphanTakeoverFixture(t, true, "", nil)
+		f.candidates[0].replica.Info = map[string]string{"master_host": "10.0.0.1", "master_port": "6379"}
+		source := &valkey.NodeState{Id: "p1", Address: "10.0.0.1", Port: 6379}
+		f.state.PendingNodes = []*valkey.NodeState{source}
+		noteReplacementPrimaries(f.state, f.candidates)
+		assert.NotContains(t, manualTakeoverMessage(f.cluster, f.nodes, f.candidates), "different node")
+		source.Id = "new-primary"
+		noteReplacementPrimaries(f.state, f.candidates)
+		assert.Contains(t, manualTakeoverMessage(f.cluster, f.nodes, f.candidates), "different node (new-primary)")
 	})
 	t.Run("warns once about replacing multiple approvals", func(t *testing.T) {
 		f := newOrphanTakeoverFixture(t, true, "", nil)

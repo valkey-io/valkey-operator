@@ -228,7 +228,7 @@ kubectl get pods,pvc -n <namespace>
 kubectl get events -n <namespace> --sort-by=.metadata.creationTimestamp
 ```
 
-Use the `AwaitingManualTakeover` message to identify the failed primary and candidate replica. The message includes the replica's replication offset, whether a full sync is in progress, and how long its link to the primary has been down. Missing values are reported as unknown. An offset of zero can describe an empty dataset; an unknown offset or a replica still syncing needs investigation. These values do not prove that the replica has every acknowledged write. Check the candidate's `INFO replication` and `INFO persistence`, its logs, and the primary pod's phase and readiness before deciding to promote it.
+Use the `AwaitingManualTakeover` message to identify the failed primary and candidate replica. The message includes the replica's replication offset, whether a full sync is in progress, and whether its link to the primary is up or down. Missing values are reported as unknown. An offset of zero can describe an empty dataset; an unknown offset or a replica still syncing needs investigation. These values do not prove that the replica has every acknowledged write. Check the candidate's `INFO replication` for the link-down duration, along with its persistence status and logs. Check the primary pod's phase and readiness before approving. If the replica points to a different node at the old primary's address, a full sync from that node can replace the replica's data. Check what the replica still holds before promoting it.
 
 Check whether the primary's pod or storage can return, and whether the problem is a network partition. An unschedulable pod or an unreachable server does not prove its durable data is lost. Compare the available copies before choosing recovery: with RDB snapshots alone, a restarted primary can be older than its replica, and a full resync from that primary can discard the replica's newer writes. Check `appendonly`, `appendfsync`, and `save` in the effective configuration, and inspect persistence status and logs. AOF can narrow the loss window, but its presence alone is not proof that all writes reached disk. See [Failure handling](#failure-handling).
 
@@ -240,19 +240,13 @@ To accept the possible data loss, annotate the ValkeyCluster with the failed pri
 kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
 ```
 
-The annotation is honored only when the named primary is already an unreachable orphan eligible for takeover. A primary reached by the topology scrape cannot be taken over through this annotation. The operator removes the ID after TAKEOVER succeeds; a failed command retains the authorization and retries the same replica. Multiple IDs can be supplied as a comma-separated list. An ID not eligible in the current scrape is ignored and preserved through incomplete scrapes; the operator clears it after it observes that primary reachable again. If the primary returns, `AwaitingManualTakeover` clears; how much data it recovers depends on its persistence configuration and the files it can load.
+The annotation applies only to an eligible orphan whose primary is unreachable in the current scrape. The operator removes that primary's ID before sending TAKEOVER, preserving any other IDs in the annotation. Each approval authorizes one attempt. If the command fails or the operator stops after consuming the approval, check the live topology before approving another attempt. A missing response does not establish that promotion failed.
 
-After recovery, check the node roles and application data, confirm that the successful primary ID was removed from the annotation, and inspect any remaining conditions. `AwaitingManualTakeover` clearing means that takeover is no longer pending; the cluster may still need its missing pods or replicas restored before it becomes `Ready`.
+To approve more than one primary, use a comma-separated list. Include any existing approvals you want to keep when using `--overwrite`. To cancel one pending approval, edit the ValkeyCluster and remove only that ID. Remove the annotation only if you intend to cancel all pending approvals. Consuming an approval commits the operator to the attempt, so removing the annotation after that point cannot cancel the command.
 
-The operator pins each uncertain attempt to its selected replica so it cannot promote a sibling using the same approval. If that replica becomes unavailable before the result can be confirmed, the operator waits on that primary while continuing recovery on other approved shards. To cancel the pinned attempt and choose again, remove the approval, wait until that primary's entry disappears from `valkey.io/force-takeover-attempt`, then annotate the failed primary ID again:
+While an orphan remains unresolved, the operator pauses later topology repairs, including repairs in other shards. It can still repair stale peer addresses while waiting. If the primary returns, `AwaitingManualTakeover` clears. How much data it recovers depends on its persistence configuration and the files it can load.
 
-```sh
-kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover-
-# Wait until <primary-node-id>/<replica-node-id> is absent from valkey.io/force-takeover-attempt.
-kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
-```
-
-Removing the approval cancels the attempt; no takeover happens until it is re-applied.
+After takeover, check the node roles and application data, then inspect any remaining conditions. The cluster may still need missing pods or replicas restored before it becomes `Ready`.
 
 #### Constraints
 

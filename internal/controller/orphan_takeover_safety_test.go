@@ -182,7 +182,10 @@ func TestManualTakeoverReplicaOffsetTie(t *testing.T) {
 	first := f.candidates[0].replica
 	for _, order := range [][]*valkey.NodeState{{first, &sibling}, {&sibling, first}} {
 		f.state.Shards[0].Nodes = order
-		require.Equal(t, "r1", orphansToTakeOver(f.state)[0].replica.Id)
+		candidates := orphansToTakeOver(f.state)
+		require.Equal(t, order[0].Id, candidates[0].replica.Id, "automatic recovery preserves list order")
+		stabilizeManualTakeoverReplicas(f.state, candidates)
+		require.Equal(t, "r1", candidates[0].replica.Id)
 	}
 }
 

@@ -317,6 +317,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	orphanCandidates := orphansToTakeOver(state)
 	manualTakeover := cluster.Spec.Persistence != nil && !state.HasFailoverQuorum()
+	if manualTakeover {
+		stabilizeManualTakeoverReplicas(state, orphanCandidates)
+	}
 	awaitingManualTakeover := manualTakeover && len(orphanCandidates) > 0
 	if cluster.Spec.Persistence != nil {
 		if err := r.pruneRecoveredForceTakeoverIDs(ctx, cluster, state); err != nil {
@@ -2040,18 +2043,9 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 	slices.Sort(deadPrimaries)
 
 	quorum := state.HasFailoverQuorum()
-	// Keep tied replicas stable across API list ordering changes.
-	nodes := state.AllNodes()
-	slices.SortFunc(nodes, func(a, b *valkey.NodeState) int { return strings.Compare(a.Id, b.Id) })
 	var orphans []orphan
 	for _, primaryId := range deadPrimaries {
-		var replicas []*valkey.NodeState
-		for _, node := range nodes {
-			if node.PrimaryIdFromSelf() == primaryId {
-				replicas = append(replicas, node)
-			}
-		}
-		replica := valkey.HighestOffsetReplica(replicas)
+		replica := state.BestReplicaOf(primaryId)
 		if replica == nil {
 			continue
 		}
@@ -2061,6 +2055,23 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 		}
 	}
 	return orphans
+}
+
+// Stabilize manual recovery instructions when replicas have equal offsets.
+// Automatic recovery keeps BestReplicaOf's existing selection order.
+func stabilizeManualTakeoverReplicas(state *valkey.ClusterState, candidates []orphan) {
+	for i := range candidates {
+		candidate := &candidates[i]
+		for _, shard := range state.Shards {
+			for _, node := range shard.Nodes {
+				if node.PrimaryIdFromSelf() == candidate.primaryId &&
+					node.ReplicationOffset() == candidate.replica.ReplicationOffset() &&
+					node.Id < candidate.replica.Id {
+					candidate.replica = node
+				}
+			}
+		}
+	}
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

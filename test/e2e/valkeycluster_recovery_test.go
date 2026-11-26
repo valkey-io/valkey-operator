@@ -809,6 +809,15 @@ spec:
 			// deleted primary's replicas still follow it. If a replica wins the
 			// race, the test would pass without exercising it, so stop instead.
 			Eventually(func(g Gomega) {
+				for shard := 1; shard < shards; shard++ {
+					nodes, err := utils.ValkeyCLI(podFor(clusterName, shard, 0), cliOpts, "CLUSTER", "NODES")
+					g.Expect(err).NotTo(HaveOccurred(), nodes)
+					g.Expect(replicaIDs).To(ContainElement(Satisfy(func(id string) bool {
+						return strings.Contains(nodes, id)
+					})), "shard %d's primary has not joined the cluster yet", shard)
+				}
+				// Read the roles after the joins, so a replica still following
+				// here was not promoted before any of them.
 				for _, pod := range replicas {
 					info, err := utils.ValkeyCLI(pod, cliOpts, "INFO", "replication")
 					g.Expect(err).NotTo(HaveOccurred(), info)
@@ -816,13 +825,6 @@ spec:
 						StopTrying(fmt.Sprintf("replica %s was promoted before the new shards joined the cluster; "+
 							"raise cluster-node-timeout", pod)).Now()
 					}
-				}
-				for shard := 1; shard < shards; shard++ {
-					nodes, err := utils.ValkeyCLI(podFor(clusterName, shard, 0), cliOpts, "CLUSTER", "NODES")
-					g.Expect(err).NotTo(HaveOccurred(), nodes)
-					g.Expect(replicaIDs).To(ContainElement(Satisfy(func(id string) bool {
-						return strings.Contains(nodes, id)
-					})), "shard %d's primary has not joined the cluster yet", shard)
 				}
 			}, 2*time.Minute, time.Second).Should(Succeed())
 

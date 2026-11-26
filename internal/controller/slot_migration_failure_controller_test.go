@@ -430,7 +430,7 @@ func recorderEvents(recorder events.EventRecorder) []string {
 	return got
 }
 
-func scaleInFixture(t *testing.T, server *migrationStateServer) (*valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
+func migrationScaleInFixture(t *testing.T, server *migrationStateServer) (*valkeyiov1alpha1.ValkeyCluster, *valkey.ClusterState, *valkeyiov1alpha1.ValkeyNodeList) {
 	t.Helper()
 	if server != nil {
 		src, dst := rebalanceFixture(t, server)
@@ -478,7 +478,7 @@ func TestHandleScaleInMigrationFailureEmitsSlotRebalanceFailed(t *testing.T) {
 	server := newMigrationStateServer(t, func() [][]string {
 		return [][]string{stateEntry("failed", "dst-primary-id", "transfer failed: ERR drain", time.Now())}
 	})
-	cluster, state, nodes := scaleInFixture(t, server)
+	cluster, state, nodes := migrationScaleInFixture(t, server)
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 
@@ -525,7 +525,7 @@ func TestHandleScaleInDrainPlanErrorEmitsDrainFailed(t *testing.T) {
 	// Drain failures that are not asynchronous migration failures keep
 	// the DrainFailed event: here the drain plan cannot find a
 	// destination primary, which fails before any migration state is read.
-	cluster, state, nodes := scaleInFixture(t, nil)
+	cluster, state, nodes := migrationScaleInFixture(t, nil)
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
 
@@ -569,7 +569,7 @@ func TestHandleScaleInDrainedKeepsRebalanceFailed(t *testing.T) {
 			server := newMigrationStateServer(t, func() [][]string {
 				return [][]string{stateEntry("running", "dst-primary-id", "", time.Now())}
 			})
-			cluster, state, nodes := scaleInFixture(t, server)
+			cluster, state, nodes := migrationScaleInFixture(t, server)
 			since := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 				Type: valkeyiov1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
@@ -651,7 +651,7 @@ func TestDrainExcessShardsRetriesAfterWindow(t *testing.T) {
 		return [][]string{stateEntry("failed", "dst-primary-id", "transfer failed", nodeNow.Add(-3*time.Minute))}
 	})
 	server.setClock(func() time.Time { return nodeNow })
-	cluster, state, nodes := scaleInFixture(t, server)
+	cluster, state, nodes := migrationScaleInFixture(t, server)
 	knowDestination(state.Shards[0])
 	knowSource(state.Shards[1])
 
@@ -708,7 +708,7 @@ func TestRebalanceSlotsWaitsForDestinationToKnowSource(t *testing.T) {
 // scale-in drain.
 func TestDrainExcessShardsWaitsForDestinationToKnowSource(t *testing.T) {
 	server := newMigrationStateServer(t, func() [][]string { return nil })
-	cluster, state, nodes := scaleInFixture(t, server)
+	cluster, state, nodes := migrationScaleInFixture(t, server)
 	knowDestination(state.Shards[0])
 
 	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}

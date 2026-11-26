@@ -208,6 +208,9 @@ func TestPromoteOrphanedReplicasRequiresDurableAuthorization(t *testing.T) {
 			stored := &valkeyiov1alpha1.ValkeyCluster{}
 			require.NoError(t, f.reconciler.Get(ctx, client.ObjectKeyFromObject(f.cluster), stored))
 			assert.Equal(t, "p1", stored.Annotations[forceTakeoverAnnotation])
+			condition := meta.FindStatusCondition(f.cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+			require.NotNil(t, condition)
+			assert.Contains(t, condition.Message, "takeover is authorized")
 		})
 	}
 

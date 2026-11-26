@@ -1884,17 +1884,17 @@ func (r *ValkeyClusterReconciler) removeTakeoverApprovals(ctx context.Context, c
 	if len(remaining) == len(requested) {
 		return false, nil
 	}
-	base := current.DeepCopy()
+	updated := current.DeepCopy()
 	if len(remaining) == 0 {
-		delete(current.Annotations, forceTakeoverAnnotation)
+		delete(updated.Annotations, forceTakeoverAnnotation)
 	} else {
 		slices.Sort(remaining)
-		current.Annotations[forceTakeoverAnnotation] = strings.Join(remaining, ",")
+		updated.Annotations[forceTakeoverAnnotation] = strings.Join(remaining, ",")
 	}
-	if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+	if err := r.Patch(ctx, updated, client.MergeFromWithOptions(current, client.MergeFromWithOptimisticLock{})); err != nil {
 		return false, err
 	}
-	cluster.Annotations = current.Annotations
+	cluster.Annotations = updated.Annotations
 	return true, nil
 }
 

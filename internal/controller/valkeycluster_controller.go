@@ -1732,7 +1732,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		if err := candidate.replica.Client.Do(ctx, candidate.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
 			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", candidate.replica.Address)
 			if manual {
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverFailed", "FailoverTakeover",
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverFailed", "ForceTakeover/"+candidate.primaryId+"/"+candidate.replica.Id,
 					"TAKEOVER for primary %s via replica %s failed: %v. Check the topology before approving another attempt.", candidate.primaryId, candidate.replica.Id, err)
 				// A lost reply can hide a promotion that restored quorum.
 				r.setAwaitingManualTakeover(cluster, nodes, candidates)
@@ -1792,14 +1792,13 @@ func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1a
 	previous, seen := r.takeoverWarnings.Swap(client.ObjectKeyFromObject(cluster), key)
 	warningChanged := !seen || previous != key
 	if warningChanged {
-		if len(message) <= 1024 {
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ReconcileValkeyCluster", "%s", message)
-		} else {
-			for _, candidate := range candidates {
-				item := manualTakeoverInstructions(cluster, nodes, []orphan{candidate})[0]
-				// The broadcaster groups by action and ignores the message.
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ManualTakeover/"+candidate.primaryId, "%s", item)
-			}
+		for _, candidate := range candidates {
+			single := []orphan{candidate}
+			item := manualTakeoverInstructions(cluster, nodes, single)[0]
+			// The broadcaster ignores the message when grouping events.
+			// Include the recovery target so changed instructions survive.
+			action := fmt.Sprintf("ManualTakeover/%x", takeoverWarningKey(cluster, nodes, single))
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, action, "%s", item)
 		}
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonAwaitingManualTakeover, message, metav1.ConditionTrue)

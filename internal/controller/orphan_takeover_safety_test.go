@@ -90,6 +90,52 @@ func TestManualTakeoverRecordsSeparateShardEvents(t *testing.T) {
 		}
 		require.True(t, found, "missing instructions for %s", candidate.primaryId)
 	}
+	// A single orphan fits in the old short-message path. Its new target
+	// and replacement warning must each survive the broadcaster's cache.
+	changed := *candidates[0].replica
+	changed.Id = "new-replica"
+	candidates[0].replica = &changed
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates[:1])
+	require.Eventually(t, func() bool {
+		list, err := kube.EventsV1().Events(f.cluster.Namespace).List(ctx, metav1.ListOptions{})
+		return err == nil && len(list.Items) == len(candidates)+1
+	}, 3*time.Second, 10*time.Millisecond)
+	candidates[0].replacementID = "replacement-primary"
+	f.reconciler.setAwaitingManualTakeover(f.cluster, f.nodes, candidates[:1])
+	require.Eventually(t, func() bool {
+		list, err := kube.EventsV1().Events(f.cluster.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		for _, event := range list.Items {
+			if strings.Contains(event.Note, "replacement-primary") && strings.Contains(event.Note, "new-replica") {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond)
+
+	f.cluster.Annotations[forceTakeoverAnnotation] = "p1,p2"
+	require.NoError(t, f.reconciler.Update(ctx, f.cluster))
+	f.client.err = io.EOF
+	failed := []orphan{f.candidates[0], {primaryId: "p2", replica: f.candidates[0].replica}}
+	for range 2 {
+		f.reconciler.promoteOrphanedReplicas(ctx, f.cluster, f.state, f.nodes, failed)
+	}
+	require.Eventually(t, func() bool {
+		list, err := kube.EventsV1().Events(f.cluster.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		var failures int
+		for _, event := range list.Items {
+			if event.Reason == "ForceTakeoverFailed" {
+				failures++
+			}
+		}
+		return failures == 2
+	}, 3*time.Second, 10*time.Millisecond)
+
 }
 
 func TestManualTakeoverPrecedesDeferredRollRepairs(t *testing.T) {

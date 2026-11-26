@@ -122,7 +122,8 @@ func (s *migrationStateServer) respond(cmd []string) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "*%d\r\n", len(entries))
 		for _, entry := range entries {
-			fmt.Fprintf(&b, "*%d\r\n", len(entry))
+			// Over RESP3 the server sends each entry as a map.
+			fmt.Fprintf(&b, "%%%d\r\n", len(entry)/2)
 			for _, field := range entry {
 				if _, err := strconv.Atoi(field); err == nil {
 					fmt.Fprintf(&b, ":%s\r\n", field)
@@ -186,10 +187,9 @@ func readStateCommand(r *bufio.Reader) ([]string, error) {
 // for some other move.
 const foreignTargetID = "4b4f12fdfb58d5e30fef7b9ad3f1651dacbbaba9"
 
-// stateEntry builds one GETSLOTMIGRATIONS entry: flat field/value pairs,
-// numeric fields as RESP integers, matching the server wire format. An
-// empty targetNode omits the field, modeling a server that does not
-// report the migration destination.
+// stateEntry builds one GETSLOTMIGRATIONS entry as field/value pairs, with
+// numeric fields as RESP integers. An empty targetNode omits the field,
+// modeling a server that does not report the migration destination.
 func stateEntry(state, targetNode, message string, lastUpdate time.Time) []string {
 	entry := []string{
 		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",

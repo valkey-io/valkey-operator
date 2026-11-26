@@ -35,9 +35,8 @@ import (
 // migrationServer is a scripted RESP server: it completes the valkey-go
 // client init handshake (HELLO 3 and friends) and then answers
 // CLUSTER GETSLOTMIGRATIONS with the entries produced by the reply
-// callback, recording every command it receives. Entries use the flat
-// field/value array form CLUSTER GETSLOTMIGRATIONS returns, so both RESP 3
-// maps and flat arrays parse through AsMap, matching production.
+// callback, recording every command it receives. Each entry is a RESP3 map,
+// the form the server sends the operator after HELLO 3.
 type migrationServer struct {
 	listener net.Listener
 	commands chan []string
@@ -128,7 +127,8 @@ func (s *migrationServer) respond(cmd []string) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "*%d\r\n", len(entries))
 		for _, entry := range entries {
-			fmt.Fprintf(&b, "*%d\r\n", len(entry))
+			// Over RESP3 the server sends each entry as a map.
+			fmt.Fprintf(&b, "%%%d\r\n", len(entry)/2)
 			for _, field := range entry {
 				if _, err := strconv.Atoi(field); err == nil {
 					fmt.Fprintf(&b, ":%s\r\n", field)
@@ -222,8 +222,8 @@ const (
 	migTargetB = "c3b1e5a9f0d8472b91e6a3f5d2c8b0a4e7f91234"
 )
 
-// migrationEntry builds one GETSLOTMIGRATIONS entry: field/value pairs in
-// the flat array form, with numeric fields as RESP integers.
+// migrationEntry builds one GETSLOTMIGRATIONS entry as field/value pairs,
+// with numeric fields as RESP integers.
 func migrationEntry(state, targetNode, slotRanges, message string, lastUpdate time.Time) []string {
 	entry := []string{
 		"name", "5371b28997de6fd0bbe813ad8ebdfdf2faadb308",

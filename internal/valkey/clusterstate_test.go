@@ -1234,7 +1234,7 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	stale.EXPECT().
 		DoMulti(gomock.Any(),
 			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
-			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("INFO", "server", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
 			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{vmock.ErrorResult(errors.New("io: read/write on closed pipe"))})
 
@@ -1249,16 +1249,17 @@ func TestGetClusterStateSkipsAStaleClientThatFailsTheRoundTrip(t *testing.T) {
 	}
 }
 
-func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
+func TestGetClusterStateKeepsServerPersistenceAndReplicationInfo(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	client := vmock.NewClient(ctrl)
 	// A Valkey 9 replica reply, trimmed. Valkey orders the sections itself.
-	info := "# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
+	info := "# Server\r\nuptime_in_seconds:12\r\n\r\n" +
+		"# Persistence\r\nloading:1\r\nasync_loading:0\r\n\r\n" +
 		"# Replication\r\nrole:slave\r\nmaster_link_status:down\r\nmaster_sync_in_progress:0\r\nslave_repl_offset:3108\r\n"
 	client.EXPECT().
 		DoMulti(gomock.Any(),
 			vmock.Match("CLUSTER", "MYID"), vmock.Match("CLUSTER", "MYSHARDID"),
-			vmock.Match("INFO", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
+			vmock.Match("INFO", "server", "persistence", "replication"), vmock.Match("CLUSTER", "INFO"),
 			vmock.Match("CLUSTER", "NODES")).
 		Return([]vclient.ValkeyResult{
 			vmock.Result(vmock.ValkeyString("r1")),
@@ -1278,6 +1279,7 @@ func TestGetClusterStateKeepsPersistenceAndReplicationInfo(t *testing.T) {
 	}
 	got := state.Shards[0].Nodes[0].Info
 	want := map[string]string{
+		"uptime_in_seconds":       "12",
 		"loading":                 "1",
 		"master_link_status":      "down",
 		"master_sync_in_progress": "0",

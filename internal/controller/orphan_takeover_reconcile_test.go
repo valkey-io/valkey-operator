@@ -138,6 +138,38 @@ func TestReconcileOrphanTakeoverDuringNodeUpdate(t *testing.T) {
 	}
 }
 
+func TestReconcileOrphanWaitDuringNodeUpdate(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		unschedulable  bool
+		requeueAfter   time.Duration
+		progressReason string
+	}{
+		{"unready replica", false, 2 * time.Second, valkeyiov1alpha1.ReasonUpdatingNodes},
+		{"unschedulable primary", true, 10 * time.Second, valkeyiov1alpha1.ReasonReconciling},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newOrphanReconcileFixture(t, "", true, tt.unschedulable, false)
+			key := client.ObjectKeyFromObject(f.cluster)
+			result, err := f.reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			require.NoError(t, err)
+			assert.Equal(t, tt.requeueAfter, result.RequeueAfter)
+			assert.Zero(t, f.client.takeovers)
+
+			stored := &valkeyiov1alpha1.ValkeyCluster{}
+			require.NoError(t, f.reconciler.Get(ctx, key, stored))
+			ready := meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, metav1.ConditionFalse, ready.Status)
+			assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, ready.Reason)
+			progressing := meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
+			require.NotNil(t, progressing)
+			assert.Equal(t, tt.progressReason, progressing.Reason)
+		})
+	}
+}
+
 func TestReconcileOrphanTakeoverWaitsForAuthentication(t *testing.T) {
 	ctx := context.Background()
 	f := newOrphanReconcileFixture(t, "p1,p2", false, false, false)
@@ -182,6 +214,9 @@ func TestReconcileOrphanWaitHealsStaleAddresses(t *testing.T) {
 			require.NotNil(t, condition)
 			assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, condition.Reason)
 			assert.Contains(t, condition.Message, forceTakeoverAnnotation+"=p1")
+			ready := meta.FindStatusCondition(stored.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, valkeyiov1alpha1.ReasonAwaitingManualTakeover, ready.Reason)
 		})
 	}
 }

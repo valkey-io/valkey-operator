@@ -129,8 +129,6 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
 //     primary cannot be identified has its roll skipped; other shards still roll,
 //     and once none is mid-roll the phases below run to repair it.
-//   - Build the Valkey cluster state by connecting to each node and scraping
-//     CLUSTER INFO / CLUSTER NODES.
 //   - Handle orphaned replicas with native failover where possible. Persistent
 //     clusters without quorum require valkey.io/force-takeover before the
 //     operator issues CLUSTER FAILOVER TAKEOVER (promoteOrphanedReplicas).
@@ -319,12 +317,13 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	orphanCandidates := orphansToTakeOver(state)
 	manualTakeover := cluster.Spec.Persistence != nil && !state.HasFailoverQuorum()
+	awaitingManualTakeover := manualTakeover && len(orphanCandidates) > 0
 	if cluster.Spec.Persistence != nil {
 		if err := r.pruneRecoveredForceTakeoverIDs(ctx, cluster, state); err != nil {
 			return ctrl.Result{}, fmt.Errorf("clear recovered takeover approvals: %w", err)
 		}
 	}
-	if manualTakeover && len(orphanCandidates) > 0 {
+	if awaitingManualTakeover {
 		noteReplacementPrimaries(state, orphanCandidates)
 		r.setAwaitingManualTakeover(cluster, nodes, orphanCandidates)
 	} else {
@@ -393,17 +392,15 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.updateStatus(ctx, cluster, state)
 			return ctrl.Result{}, err
 		} else if handled {
-			if manualTakeover && len(orphanCandidates) > 0 {
-				r.setAwaitingManualTakeover(cluster, nodes, orphanCandidates)
-				_ = r.updateStatus(ctx, cluster, state)
-			}
 			return result, nil
 		}
 		msg := "Updating ValkeyNodes"
 		if deferred != nil {
 			msg = fmt.Sprintf("%s: %s", msg, deferred.Error())
 		}
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
+		if !awaitingManualTakeover {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
+		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -693,8 +690,11 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 		message = fmt.Sprintf("%s: %s", message, issue.message)
 	}
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PodUnschedulable", "SchedulePod", "%s", message)
-	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
-	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		return ctrl.Result{}, false, err
@@ -1363,7 +1363,9 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 func (r *ValkeyClusterReconciler) recordStaleAddressesHealed(cluster *valkeyiov1alpha1.ValkeyCluster, healed int) {
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
-	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+	if ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady); ready == nil || ready.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+	}
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
@@ -1701,13 +1703,10 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 // quorum require approval; persistent clusters with quorum are left to Valkey.
 // Returns true when recovery is pending or a takeover ran.
 func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil && state.HasFailoverQuorum() {
-		return ctrl.Result{}, false
-	}
-	if len(candidates) == 0 {
-		return ctrl.Result{}, false
-	}
 	manual := cluster.Spec.Persistence != nil
+	if len(candidates) == 0 || (manual && state.HasFailoverQuorum()) {
+		return ctrl.Result{}, false
+	}
 	log := logf.FromContext(ctx)
 	for _, candidate := range candidates {
 		if manual {
@@ -1747,17 +1746,16 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
-	if manual {
-		r.setAwaitingManualTakeover(cluster, nodes, candidates)
-		if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
-			r.recordStaleAddressesHealed(cluster, healed)
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, true
-		}
-		// Keep the slot map intact while an orphan is unresolved. The later
-		// topology repair phases could change other shards or forget the primary.
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	if !manual {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
-	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	r.setAwaitingManualTakeover(cluster, nodes, candidates)
+	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+		r.recordStaleAddressesHealed(cluster, healed)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+	// Keep the slot map intact until takeover or the primary's return.
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, true
 }
 
 func (r *ValkeyClusterReconciler) clearAwaitingManualTakeover(cluster *valkeyiov1alpha1.ValkeyCluster) {
@@ -1858,12 +1856,9 @@ func manualTakeoverReplicaDetails(replica *valkey.NodeState) string {
 	case "1":
 		syncing = yes
 	}
-	link := unknown
-	switch replica.Info["master_link_status"] {
-	case "up":
-		link = "up"
-	case "down":
-		link = "down"
+	link := replica.Info["master_link_status"]
+	if link != "up" && link != "down" {
+		link = unknown
 	}
 	return fmt.Sprintf("offset %s, sync in progress: %s, primary link: %s", offset, syncing, link)
 }

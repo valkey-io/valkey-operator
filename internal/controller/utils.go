@@ -344,6 +344,13 @@ func primaryNodeIndexForShard(shardIndex, nodesPerShard int, nodes *valkeyv1.Val
 	return idx
 }
 
+// shardPrimaryOnExcessNode reports whether the shard's slot-bearing primary is
+// a ValkeyNode whose node index is at or past nodesPerShard.
+func shardPrimaryOnExcessNode(shardIndex, nodesPerShard int, nodes *valkeyv1.ValkeyNodeList, clusterState *valkey.ClusterState) bool {
+	_, ip := findShardPrimary(clusterState, shardIndex, nodes)
+	return ip != "" && nodeIndexForAddress(ip, nodes) >= nodesPerShard
+}
+
 // replicaFirstNodeOrder returns the node indices for a shard ordered so that
 // replicas are processed before the primary. The primary is identified via
 // clusterState — the live cluster topology — rather than by node-index convention,

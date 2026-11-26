@@ -103,7 +103,7 @@ spec:
 		writeCanary := func(g Gomega) {
 			cmd := exec.Command("kubectl", "exec", fmt.Sprintf("valkey-%s-0-0-0", clusterName), "-c", "server", "--",
 				"sh", "-c",
-				fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli -c set %s %s", canaryKey, canaryValue))
+				fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli -c set %s %s", canaryKey, canaryValue))
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("OK"))
@@ -201,7 +201,7 @@ spec:
 		verifyDataSurvived := func(g Gomega) {
 			cmd := exec.Command("kubectl", "exec", fmt.Sprintf("valkey-%s-0-0-0", clusterName), "-c", "server", "--",
 				"sh", "-c",
-				fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli cluster info | head -1; valkey-cli -c get %s", canaryKey))
+				fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; valkey-cli cluster info | head -1; valkey-cli -c get %s", canaryKey))
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("cluster_state:ok"))

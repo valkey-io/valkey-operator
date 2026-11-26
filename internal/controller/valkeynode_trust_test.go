@@ -79,7 +79,7 @@ func TestBuildValkeyNodePodTemplateSpec_TrustBundle(t *testing.T) {
 		require.NotNil(t, vol.Secret)
 		assert.Nil(t, vol.Projected)
 		assert.Equal(t, "server-tls", vol.Secret.SecretName)
-		assert.Equal(t, "/tls/ca.crt", envValue(t, pts.Spec.Containers[0], "VALKEY_TLS_CA_FILE"))
+		assert.Contains(t, envValue(t, pts.Spec.Containers[0], "VALKEY_TLS_ARGS"), "--cacert /tls/ca.crt")
 		assert.Equal(t, "/tls/ca.crt", envValue(t, pts.Spec.Containers[1], "REDIS_EXPORTER_TLS_CA_CERT_FILE"))
 	})
 
@@ -115,7 +115,6 @@ func TestBuildValkeyNodePodTemplateSpec_TrustBundle(t *testing.T) {
 		require.NoError(t, err)
 
 		server := pts.Spec.Containers[0]
-		assert.Equal(t, "/tls/server-ca.crt", envValue(t, server, "VALKEY_TLS_CA_FILE"))
 		assert.Contains(t, envValue(t, server, "VALKEY_TLS_ARGS"), "--cacert /tls/server-ca.crt")
 		assert.Contains(t, envValue(t, server, "VALKEY_TLS_ARGS"), "--cert /tls/tls.crt --key /tls/tls.key")
 		assert.Equal(t, "/tls/server-ca.crt", envValue(t, pts.Spec.Containers[1], "REDIS_EXPORTER_TLS_CA_CERT_FILE"))

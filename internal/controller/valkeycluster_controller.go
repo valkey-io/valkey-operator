@@ -790,8 +790,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// If rolls are in progress but the primary of an active shard cannot be
 		// identified from cluster state, skip it rather than roll in an unknown order.
 		// New shards (not yet in the topology) are exempt — they need creation, not rolling.
+		// A primary on an excess node-index is identified: every in-spec node is a
+		// replica, and scale-in needs one of them synced before it can fail over.
 		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
-			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 {
+			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 &&
+			!shardPrimaryOnExcessNode(shardIndex, nodesPerShard, nodes, clusterState) {
 			// Skip this shard only, never the whole reconcile: the later phases
 			// (MEET/ADDSLOTSRANGE/REPLICATE, forgetStaleNodes, handleScaleIn,
 			// rebalance) are what make an unidentifiable primary identifiable
@@ -1324,16 +1327,39 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 }
 
 // findMeetTarget picks the best node to MEET all isolated nodes against.
-// Priority: (1) a shard primary, it owns slots and is an established cluster
-// member even if cluster_known_nodes is 1 (e.g. a single-node cluster being
-// scaled up); (2) a non-isolated pending node from a previous MEET batch;
-// (3) the first isolated node as a bootstrap seed when every single node is
-// isolated (fresh bootstrap, first reconcile).
+// Priority:
+//  1. a live shard primary, it owns slots and is an established cluster
+//     member even if cluster_known_nodes is 1 (e.g. a single-node cluster
+//     being scaled up)
+//  2. a shard member whose failure is not confirmed, e.g. a replica when every
+//     primary is down, since an isolated seed would start a separate cluster
+//  3. any shard member: it just answered the operator, so a peer's failure
+//     report is likely stale, and it is still in the cluster that owns the
+//     slots
+//  4. a non-isolated pending node from a previous MEET batch
+//  5. the first isolated node as a bootstrap seed when every single node is
+//     isolated (fresh bootstrap, first reconcile)
 func findMeetTarget(state *valkey.ClusterState, isolated []*valkey.NodeState) *valkey.NodeState {
+	var healthy, member *valkey.NodeState
 	for _, shard := range state.Shards {
-		if p := shard.GetPrimaryNode(); p != nil {
+		p := shard.GetPrimaryNode()
+		if p != nil && len(p.GetSlots()) > 0 && !state.IsNodeFailedByMajority(p.Id) {
 			return p
 		}
+		for _, n := range shard.Nodes {
+			if member == nil {
+				member = n
+			}
+			if healthy == nil && !state.IsNodeFailedByMajority(n.Id) {
+				healthy = n
+			}
+		}
+	}
+	if healthy != nil {
+		return healthy
+	}
+	if member != nil {
+		return member
 	}
 	for _, node := range state.PendingNodes {
 		if !node.IsIsolated() {
@@ -2029,7 +2055,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 	// Delete the ValkeyNodes of drained shards, and leftovers from a previous
 	// scale-in where drained primaries became replicas before their
 	// ValkeyNodes could be deleted.
-	deleted, kept, err := r.deleteExcessValkeyNodes(ctx, cluster, state, nodes)
+	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(ctx, cluster, state, nodes)
 	if err != nil {
 		log.Error(err, "failed to delete excess ValkeyNodes")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -2038,7 +2064,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		setScaleInBlocked(cluster, fmt.Sprintf("Keeping excess ValkeyNode(s) %s until their slots are accounted for", strings.Join(kept, ", ")))
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, true
 	}
-	if deleted {
+	if deleted || deferred {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
 	return ctrl.Result{}, false
@@ -2138,7 +2164,9 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 // deleteExcessValkeyNodes removes ValkeyNode CRs that are outside the desired
 // spec: shard-index >= spec.Shards OR node-index >= 1 + replicasPerShard. An
 // excess shard's node that may still own slots is kept, and its name returned.
-func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted bool, kept []string, err error) {
+// A kept shard's excess node that is still its primary is not deleted, and
+// deferred reports it.
+func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted, deferred bool, kept []string, err error) {
 	log := logf.FromContext(ctx)
 	owners := slotOwningPrimaryAddresses(state)
 	// Slots no scraped primary owns may belong to a node we could not reach.
@@ -2171,10 +2199,13 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 				kept = append(kept, node.Name)
 				continue
 			}
+		} else if !r.excessNodeDeletable(ctx, cluster, state, nodes, node, shardIndex, nodeIndex) {
+			deferred = true
+			continue
 		}
 		if err := r.Delete(ctx, node); err != nil {
 			if !apierrors.IsNotFound(err) {
-				return false, nil, fmt.Errorf("delete excess ValkeyNode %s: %w", node.Name, err)
+				return false, false, nil, fmt.Errorf("delete excess ValkeyNode %s: %w", node.Name, err)
 			}
 		} else {
 			log.V(1).Info("deleted excess ValkeyNode", "name", node.Name, "shard", shardIndex, "node", nodeIndex)
@@ -2182,7 +2213,83 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 			deleted = true
 		}
 	}
-	return deleted, kept, nil
+	return deleted, deferred, kept, nil
+}
+
+// excessNodeDeletable reports whether an excess node of a kept shard can be
+// deleted this pass. A node that is still its shard's primary first hands the
+// role to a synced replica the new count keeps, and is deleted only once a
+// later scrape shows it as a replica.
+func (r *ValkeyClusterReconciler) excessNodeDeletable(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, node *valkeyiov1alpha1.ValkeyNode, shardIndex, nodeIndex int) bool {
+	log := logf.FromContext(ctx)
+	var shard *valkey.ShardState
+	if node.Status.PodIP != "" {
+		shard = state.FindShardForAddress(node.Status.PodIP)
+	}
+	var primary *valkey.NodeState
+	if shard != nil {
+		primary = shard.GetPrimaryNode()
+	}
+	if shard == nil && node.Status.PodIP != "" && state.HasAddress(node.Status.PodIP) {
+		// It answered but is in no shard: a pending node owns no slots.
+		return true
+	}
+	if primary == nil {
+		// The scrape cannot show this node's role. Another visible primary
+		// for the shard means it is not the primary.
+		if shardHasOtherPrimary(state, nodes, shardIndex, node.Status.PodIP) {
+			return true
+		}
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("this scrape cannot tell whether it is the primary of shard %d", shardIndex))
+		return false
+	}
+	if primary.Address != node.Status.PodIP {
+		return true
+	}
+
+	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
+	var targets []*valkey.NodeState
+	for _, replica := range shard.GetSyncedReplicas(state) {
+		if i := nodeIndexForAddress(replica.Address, nodes); i >= 0 && i < nodesPerShard {
+			targets = append(targets, replica)
+		}
+	}
+	if len(targets) == 0 {
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("it is the primary of shard %d and no kept replica is synced", shardIndex))
+		return false
+	}
+	log.Info("failing over excess primary before deleting its ValkeyNode",
+		"name", node.Name, "shard", shardIndex, "node", nodeIndex, "targets", len(targets))
+	if err := proactiveFailoverFn(ctx, r.Recorder, cluster, shard, targets); err != nil {
+		log.Info("failover of excess primary did not complete, deferring deletion", "name", node.Name, "err", err)
+		deferExcessNodeDeletion(cluster, node, fmt.Sprintf("failover did not complete: %v", err))
+		return false
+	}
+	// This pass's scrape predates the failover.
+	return false
+}
+
+// shardHasOtherPrimary reports whether the scrape shows a primary at an address
+// other than address whose ValkeyNode has shard-index shardIndex.
+func shardHasOtherPrimary(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, shardIndex int, address string) bool {
+	for _, shard := range state.Shards {
+		p := shard.GetPrimaryNode()
+		if p == nil || p.Address == address {
+			continue
+		}
+		if _, idx := nodeRoleAndShard(p.Address, nodes); idx == shardIndex {
+			return true
+		}
+	}
+	return false
+}
+
+// deferExcessNodeDeletion records in the conditions why an excess node of a
+// kept shard is not deleted yet.
+func deferExcessNodeDeletion(cluster *valkeyiov1alpha1.ValkeyCluster, node *valkeyiov1alpha1.ValkeyNode, reason string) {
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots,
+		fmt.Sprintf("Scale-in is waiting to delete ValkeyNode %s: %s", node.Name, reason), metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 }
 
 // mayOwnSlots reports whether a node the scrape did not reach could be a

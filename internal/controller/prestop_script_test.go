@@ -44,6 +44,10 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
+if [ -n "${STUB_CURRENT_PASSWORD:-}" ] && [ "${VALKEYCLI_AUTH:-}" != "$STUB_CURRENT_PASSWORD" ]; then
+    printf 'WRONGPASS invalid username-password pair\n' >&2
+    exit 1
+fi
 echo "$host $port $*" >> "$STUB_DIR/calls"
 if [ -n "${STUB_BLOCK:-}" ] && [ "$*" = "$STUB_BLOCK" ]; then exec sleep 30; fi
 case "$*" in
@@ -102,6 +106,9 @@ func runPreStopScript(t *testing.T, info, timeoutMs string, promote bool, block 
 }
 
 func TestPreStopFailoverScript(t *testing.T) {
+	t.Setenv("VALKEY_OPERATOR_PASSWORD_FILE", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("STUB_CURRENT_PASSWORD", "")
+
 	primary := "# Replication\r\nrole:master\r\nconnected_slaves:3\r\n" +
 		"slave0:ip=10.0.0.2,port=6379,state=online,offset=90,lag=0\r\n" +
 		"slave1:ip=10.0.0.3,port=6379,state=online,offset=120,lag=0\r\n" +
@@ -122,6 +129,18 @@ func TestPreStopFailoverScript(t *testing.T) {
 		run := runPreStopScript(t, primary, "5000", true)
 		assert.Equal(t, []string{"10.0.0.3 6379"}, run.failovers)
 		assert.Less(t, run.elapsed, 3*time.Second, "returns as soon as the node reports a replica")
+	})
+
+	t.Run("uses the rotated operator password", func(t *testing.T) {
+		passwordFile := filepath.Join(t.TempDir(), "operator-password")
+		require.NoError(t, os.WriteFile(passwordFile, []byte("current"), 0o600))
+		t.Setenv("VALKEY_OPERATOR_PASSWORD_FILE", passwordFile)
+		t.Setenv("VALKEYCLI_AUTH", "stale")
+		t.Setenv("VALKEY_USER", "_operator")
+		t.Setenv("STUB_CURRENT_PASSWORD", "current")
+
+		run := runPreStopScript(t, primary, "5000", true)
+		assert.Equal(t, []string{"10.0.0.3 6379"}, run.failovers)
 	})
 
 	t.Run("an IPv6 replica address stays whole", func(t *testing.T) {

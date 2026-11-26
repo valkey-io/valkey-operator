@@ -14,6 +14,7 @@
 
 port=${1:-"6379"}
 started=$(date +%s)
+operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
 
 # Run a command with a DURATION (seconds) timeout. Polls every 0.1s; on timeout
 # sends SIGTERM then SIGKILL. Returns the command's exit code, or 124 on timeout.
@@ -50,13 +51,20 @@ if [ -n "${VALKEY_TLS_ARGS:-}" ]; then
     tls_args="$VALKEY_TLS_ARGS"
 fi
 
-auth_args=""
-if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-    auth_args="--user $VALKEY_USER"
-fi
-
 cli() {
     host=$1; cport=$2; shift 2
+    # The mounted password follows Secret rotation. The environment is the fallback.
+    if [ -f "$operator_password_file" ]; then
+        pw=$(cat "$operator_password_file" 2>/dev/null) || pw=""
+        if [ -n "$pw" ]; then
+            VALKEYCLI_AUTH=$pw
+            export VALKEYCLI_AUTH
+        fi
+    fi
+    auth_args=""
+    if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
+        auth_args="--user $VALKEY_USER"
+    fi
     timeout_cmd 2 valkey-cli -h "$host" -p "$cport" $tls_args $auth_args "$@"
 }
 

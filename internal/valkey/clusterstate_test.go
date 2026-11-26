@@ -1372,6 +1372,69 @@ func TestAssignableSlotsLeavesOutAnUnscrapedPrimarysRanges(t *testing.T) {
 	}
 }
 
+// A scraped replica that still follows a primary this pass did not reach holds
+// that primary's keys and can still be promoted with its slots, so the ranges
+// are not assignable whatever happened to the primary's address. A replica of
+// another primary does not hold them.
+func TestAssignableSlotsHoldsTheRangesOfAPrimaryAReplicaFollows(t *testing.T) {
+	viewer := func(ghiHost string) []vclient.ValkeyResult {
+		r := healthyScrape()
+		r[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 4096-16383\n" +
+			"ghi " + ghiHost + ":6379@16379 master - 0 0 2 connected 0-4095\n" +
+			"def 10.0.0.2:6379@16379 slave ghi 0 0 2 connected\n")
+		return r
+	}
+	replicaOf := func(primary, ghiHost string) []vclient.ValkeyResult {
+		return []vclient.ValkeyResult{
+			blobResult("def"),
+			blobResult("shard-2"),
+			blobResult("role:slave\r\nmaster_link_status:down\r\n"),
+			blobResult("cluster_known_nodes:3\r\ncluster_current_epoch:3\r\n"),
+			blobResult("def 10.0.0.2:6379@16379 myself,slave " + primary + " 0 0 2 connected\n" +
+				"ghi " + ghiHost + ":6379@16379 master - 0 0 2 connected 0-4095\n" +
+				"abc 10.0.0.1:6379@16379 master - 0 0 1 connected 4096-16383\n"),
+		}
+	}
+	replacement := healthyScrape()
+	replacement[0] = blobResult("new")
+	replacement[1] = blobResult("shard-9")
+	replacement[4] = blobResult("new 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n")
+
+	for _, tc := range []struct {
+		name       string
+		addresses  []string
+		byAddr     map[string][]vclient.ValkeyResult
+		assignable []SlotsRange
+	}{
+		{"held once the primary's pod is gone", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": replicaOf("ghi", "10.0.0.3"),
+			}, nil},
+		{"held once the primary's address answered as another id", []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": replicaOf("ghi", "10.0.0.3"),
+				"10.0.0.3:6379": replacement,
+			}, nil},
+		{"assignable when the replica follows another primary", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": replicaOf("abc", "10.0.0.3"),
+			}, []SlotsRange{{0, 4095}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := GetClusterState(context.Background(), tc.addresses, 6379, dialScrapeByAddress(t, tc.byAddr))
+			if got, want := state.GetUnassignedSlots(), []SlotsRange{{0, 4095}}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("unassigned slots = %v, want %v", got, want)
+			}
+			if got := state.AssignableSlots(); !reflect.DeepEqual(got, tc.assignable) {
+				t.Fatalf("assignable slots = %v, want %v", got, tc.assignable)
+			}
+		})
+	}
+}
+
 func dialScrape(t *testing.T, results []vclient.ValkeyResult) DialFunc {
 	t.Helper()
 	ctrl := gomock.NewController(t)

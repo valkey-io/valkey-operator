@@ -274,12 +274,16 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 // That primary can still be serving them, for example when only its CLUSTER
 // INFO failed, and a new primary given them would take them over with a
 // higher config epoch. A primary whose address answered as another id has
-// been replaced, so its ranges stay assignable. GetUnassignedSlots still
-// counts all of these as unassigned.
+// been replaced, so its ranges stay assignable, unless a scraped replica still
+// follows it. A followed primary's ranges are also left out once its pod is
+// gone: the replica holds the keys and can be promoted with the slots.
+// GetUnassignedSlots still counts all of these as unassigned.
 func (s *ClusterState) AssignableSlots() []SlotsRange {
 	free := s.GetUnassignedSlots()
 	scraped := make(map[string]struct{})
 	liveByAddress := make(map[string]string)
+	// Map the scraped nodes by id and by address. A scraped node always has
+	// both; the empty checks only guard a hand-built state.
 	for _, node := range s.AllNodes() {
 		if node.Id == "" {
 			continue
@@ -289,6 +293,9 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 			liveByAddress[node.Address] = node.Id
 		}
 	}
+	// Hold back the slots of each primary a peer table lists but this pass did
+	// not scrape, while a scraped replica follows it or it is still at a pod
+	// address no other node answered.
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
 			if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
@@ -297,11 +304,13 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 			if _, found := scraped[entry.Id]; found {
 				continue
 			}
-			if _, isPod := s.targets[entry.Host]; !isPod {
-				continue
-			}
-			if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
-				continue
+			if !s.HasReplicaOf(entry.Id) {
+				if _, isPod := s.targets[entry.Host]; !isPod {
+					continue
+				}
+				if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+					continue
+				}
 			}
 			for _, owned := range entry.Slots {
 				var next []SlotsRange //nolint:prealloc

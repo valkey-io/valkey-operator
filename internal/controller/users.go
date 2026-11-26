@@ -264,10 +264,10 @@ func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []co
 	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-			message: "spec.users is deprecated: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+			message: "spec.users is deprecated: move the users to spec.acl.users and remove spec.users in the same update, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
 		})
 	}
-	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // legacy spec.replicas
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
 			message: fmt.Sprintf("spec.replicas is deprecated; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),

@@ -104,7 +104,7 @@ var _ = Describe("Users ACL with an unresolvable password Secret", func() {
 		for _, name := range append(secrets, getInternalSecretName(cluster.Name), getSystemPasswordSecretName(cluster.Name)) {
 			_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}})
 		}
-		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetServerConfigMapName(cluster.Name), Namespace: ns}})
+		_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetSharedConfigMapName(cluster.Name), Namespace: ns}})
 	}
 
 	It("keeps the last aclfile and still scales out while a user Secret is missing", func() {

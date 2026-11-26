@@ -409,6 +409,12 @@ type ValkeyClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
 
+	// Probes tunes the startup, liveness and readiness probes of the server
+	// container. Unset fields keep the operator defaults, and a change rolls
+	// the pods. spec.containers patches are applied afterwards.
+	// +optional
+	Probes *ProbesSpec `json:"probes,omitempty"`
+
 	// The operator sets the reserved keys itself.
 	// A user value would be overridden, and the user would get no signal.
 	// Keys are compared in lowercase, because Valkey ignores key case.
@@ -419,10 +425,10 @@ type ValkeyClusterSpec struct {
 
 	// Config holds additional Valkey configuration parameters.
 	// Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
-	// Keys may contain only letters, digits, '.', '_' and '-'.
+	// Keys may contain only lowercase letters, digits, '.', '_' and '-'.
 	// +kubebuilder:validation:MaxProperties=1000
 	// +kubebuilder:validation:XValidation:rule="self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))",message="spec.config must not set operator-owned keys: the operator sets these itself and a user value would be ignored or would break its connection to the nodes. See docs/valkeycluster.md for the full list"
-	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-zA-Z0-9._-]+$'))",message="spec.config keys may contain only letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, key.matches('^[a-z0-9._-]+$'))",message="spec.config keys may contain only lowercase letters, digits, '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or padded keys are rejected. The operator matches keys as written, so they must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 
@@ -943,6 +949,7 @@ const (
 	ReasonAllSlotsAssigned              = "AllSlotsAssigned"
 	ReasonSlotsUnassigned               = "SlotsUnassigned"
 	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
+	ReasonStartupProbeTooShort          = "StartupProbeTooShort"
 	ReasonPrimaryLost                   = "PrimaryLost"
 	ReasonAwaitingManualTakeover        = "AwaitingManualTakeover"
 	ReasonNoSlots                       = "NoSlotsAvailable"

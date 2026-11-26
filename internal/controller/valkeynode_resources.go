@@ -55,44 +55,6 @@ func valkeyNodeLabels(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	return l
 }
 
-// buildValkeyNodeConfigMap builds a ConfigMap containing the embedded liveness
-// and readiness probe scripts, the init container script, the primary handoff
-// script, plus an empty valkey.conf.
-// The ConfigMap is named via config.go:getConfigMapName(node).
-func buildValkeyNodeConfigMap(node *valkeyiov1alpha1.ValkeyNode) (*corev1.ConfigMap, error) {
-	liveness, err := scripts.ReadFile("scripts/liveness-check.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded liveness-check.sh: %w", err)
-	}
-	readiness, err := scripts.ReadFile("scripts/readiness-check.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded readiness-check.sh: %w", err)
-	}
-	initScript, err := scripts.ReadFile("scripts/init.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded init.sh: %w", err)
-	}
-	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
-	if err != nil {
-		return nil, fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
-	}
-
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      GetServerConfigMapName(node.Name),
-			Namespace: node.Namespace,
-			Labels:    valkeyNodeLabels(node),
-		},
-		Data: map[string]string{
-			"valkey.conf":           generateValkeyNodeConfig(node),
-			"liveness-check.sh":     string(liveness),
-			"readiness-check.sh":    string(readiness),
-			initScriptKey:           string(initScript),
-			primaryHandoffScriptKey: string(primaryHandoff),
-		},
-	}, nil
-}
-
 // usesPrimaryHandoffScript reports whether the server container of the node starts
 // through primary-handoff.sh: a cluster member without persistence. /data is then
 // an emptyDir that outlives a restart of the container while the dataset does
@@ -116,18 +78,6 @@ func serverCommand(node *valkeyiov1alpha1.ValkeyNode, announceArgs []string) []s
 	args = append(args, shellPath, "-c", replicationAuthShell(usesPrimaryHandoffScript(node)), "valkey-server", "/config/valkey.conf")
 	args = append(args, announceArgs...)
 	return append(args, "--primaryuser", replicationUser)
-}
-
-// startupFailureThreshold returns the failure threshold of the startup probe,
-// in periods of 5s: about 100s, or about 300s where primary-handoff.sh runs, since
-// the script may hold the server back for up to 300s for a replica hand-off.
-// The value is fixed so that a change of cluster-node-timeout, which the script
-// reads from the config, never rolls the pod.
-func startupFailureThreshold(node *valkeyiov1alpha1.ValkeyNode) int32 {
-	if usesPrimaryHandoffScript(node) {
-		return 80
-	}
-	return 20
 }
 
 func valkeyNodePVCName(node *valkeyiov1alpha1.ValkeyNode) string {
@@ -175,6 +125,14 @@ func mergePatchContainers(base, patches []corev1.Container) ([]corev1.Container,
 		if !ok {
 			output = append(output, c)
 			continue
+		}
+		// A patch env var replaces the base one of the same name. A merge
+		// would keep the base valueFrom next to a patch value, or the reverse,
+		// and the API rejects an env var with both.
+		if len(patch.Env) > 0 {
+			c.Env = slices.DeleteFunc(slices.Clone(c.Env), func(e corev1.EnvVar) bool {
+				return slices.ContainsFunc(patch.Env, func(p corev1.EnvVar) bool { return p.Name == e.Name })
+			})
 		}
 		baseBytes, err := json.Marshal(c)
 		if err != nil {
@@ -298,6 +256,7 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 	}
 
 	announceArgs, announceEnv := valkeyAnnounceArgsAndEnv(node)
+	startupProbe, livenessProbe, readinessProbe := serverProbes(node)
 
 	containers := []corev1.Container{
 		{
@@ -326,52 +285,9 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 					ContainerPort: DefaultClusterBusPort,
 				},
 			},
-			StartupProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				PeriodSeconds:       5,
-				FailureThreshold:    startupFailureThreshold(node),
-				TimeoutSeconds:      5,
-				SuccessThreshold:    1,
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{
-						Command: []string{
-							shellPath,
-							"-c",
-							"/scripts/liveness-check.sh",
-						},
-					},
-				},
-			},
-			LivenessProbe: &corev1.Probe{
-				PeriodSeconds:    5,
-				FailureThreshold: 5,
-				TimeoutSeconds:   5,
-				SuccessThreshold: 1,
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{
-						Command: []string{
-							shellPath,
-							"-c",
-							"/scripts/liveness-check.sh",
-						},
-					},
-				},
-			},
-			ReadinessProbe: &corev1.Probe{
-				PeriodSeconds:    5,
-				FailureThreshold: 5,
-				TimeoutSeconds:   2,
-				SuccessThreshold: 1,
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{
-						Command: []string{
-							shellPath,
-							"-c",
-							"/scripts/readiness-check.sh",
-						},
-					},
-				},
-			},
+			StartupProbe:   startupProbe,
+			LivenessProbe:  livenessProbe,
+			ReadinessProbe: readinessProbe,
 			VolumeMounts: []corev1.VolumeMount{
 				{
 					Name:      scriptsVolumeName,
@@ -407,21 +323,17 @@ func buildContainersDef(node *valkeyiov1alpha1.ValkeyNode) ([]corev1.Container, 
 			tlsArgs = fmt.Sprintf("%s --cert %s --key %s", tlsArgs,
 				tlsCertMountPath+"/"+tlsSecretKeyCert, tlsCertMountPath+"/"+tlsSecretKeyKey)
 		}
-		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "VALKEY_TLS_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "VALKEY_TLS_CA_FILE", Value: nodeServerCAPath(node.Spec.TLS)},
-			corev1.EnvVar{Name: "VALKEY_TLS_CERT_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyCert},
-			corev1.EnvVar{Name: "VALKEY_TLS_KEY_FILE", Value: tlsCertMountPath + "/" + tlsSecretKeyKey},
-			corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: tlsArgs},
-		)
+		containers[0].Env = append(containers[0].Env, corev1.EnvVar{Name: "VALKEY_TLS_ARGS", Value: tlsArgs})
 	}
 
-	// Use operator-managed custom user for probes
+	// Log valkey-cli run in the pod in as _operator by default (VALKEYCLI_USER
+	// needs valkey-cli 9.2+). Users may point both at their own user through
+	// spec.containers: the scripts read the mounted password file instead.
 	clusterName := node.Labels[LabelCluster]
 	probeUserSecret := operatorUserPasswordSecret(clusterName)
 	if probeUserSecret != nil && probeUserSecret.Name != "" {
 		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "VALKEY_USER", Value: operatorUser},
+			corev1.EnvVar{Name: "VALKEYCLI_USER", Value: operatorUser},
 			corev1.EnvVar{Name: "VALKEYCLI_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: probeUserSecret}},
 		)
 	}
@@ -581,13 +493,10 @@ func buildInitContainer(server corev1.Container) corev1.Container {
 	return c[0]
 }
 
-// initContainerCommand runs script when it exists and exits 0 otherwise. An
-// external ConfigMap (spec.serverConfigMapName on a standalone ValkeyNode)
-// may predate init.sh, and its absence must not block the pod.
+// initContainerCommand runs script. The scripts volume mounts every script
+// key, so a pod whose ConfigMap lacks one does not start.
 func initContainerCommand(script string) []string {
-	return []string{shellPath, "-c", fmt.Sprintf(
-		`if [ -f %[1]s ]; then exec %[2]s %[1]s; fi; echo "%[1]s not found, skipping"`,
-		script, shellPath)}
+	return []string{shellPath, script}
 }
 
 // buildValkeyNodePodTemplateSpec constructs a PodTemplateSpec for a single
@@ -596,13 +505,6 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 	containers, err := buildContainersDef(node)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, err
-	}
-
-	// Use the explicitly provided ConfigMap name, or fall back to the default
-	// resource name (which the controller creates automatically).
-	configMapName := node.Spec.ServerConfigMapName
-	if configMapName == "" {
-		configMapName = GetServerConfigMapName(node.Name)
 	}
 
 	podSpec := corev1.PodSpec{
@@ -630,18 +532,29 @@ func buildValkeyNodePodTemplateSpec(node *valkeyiov1alpha1.ValkeyNode, labels ma
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: configMapName,
+							Name: node.Spec.SharedConfigMapName,
+						},
+						Items: []corev1.KeyToPath{
+							{Key: readinessScriptKey, Path: readinessScriptKey},
+							{Key: livenessScriptKey, Path: livenessScriptKey},
+							{Key: initScriptKey, Path: initScriptKey},
+							{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
 						},
 						DefaultMode: func(i int32) *int32 { return &i }(0755),
 					},
 				},
 			},
 			{
+				// One volume, so kubelet swaps both files in one atomic write.
 				Name: configVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: configMapName,
+							Name: nodeConfigMapName(node.Name),
+						},
+						Items: []corev1.KeyToPath{
+							{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: configFileKey},
+							{Key: liveConfigFileKey, Path: liveConfigFileKey},
 						},
 					},
 				},

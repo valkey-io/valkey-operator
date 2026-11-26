@@ -375,7 +375,7 @@ func TestReconcileTrustBundle(t *testing.T) {
 
 	aclAt := func(revision string) *corev1.Secret {
 		return &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "internal-c-acl", Namespace: "ns"},
+			ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-acl", Namespace: "ns"},
 			Data:       map[string][]byte{aclFilename: []byte("user " + aclRevisionUser + " off resetchannels -@all #" + revision + "\n")},
 		}
 	}
@@ -1039,6 +1039,79 @@ func TestReconcileTrustBundleConfigMapSources(t *testing.T) {
 			assert.NotContains(t, cond.Message, "trust source invalid", "the sentinel prefix is not shown to users")
 		})
 	}
+}
+
+func TestPodReferencesSecret(t *testing.T) {
+	secretEnv := func(name string) corev1.EnvVar {
+		return corev1.EnvVar{Name: "PW", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: "k",
+		}}}
+	}
+	for desc, tc := range map[string]struct {
+		spec corev1.PodSpec
+		want bool
+	}{
+		"a secret volume": {want: true, spec: corev1.PodSpec{Volumes: []corev1.Volume{
+			{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s"}}},
+		}}},
+		"a projected volume source": {want: true, spec: corev1.PodSpec{Volumes: []corev1.Volume{
+			{Name: "v", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+				{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}}},
+			}}}},
+		}}},
+		"an env secretKeyRef": {want: true, spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "server", Env: []corev1.EnvVar{{Name: "A", Value: "x"}, secretEnv("s")}},
+		}}},
+		"an init container env secretKeyRef": {want: true, spec: corev1.PodSpec{InitContainers: []corev1.Container{
+			{Name: "init", Env: []corev1.EnvVar{secretEnv("s")}},
+		}}},
+		"envFrom": {want: true, spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "sidecar", EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}}}}},
+		}}},
+		"another Secret": {spec: corev1.PodSpec{
+			Volumes:    []corev1.Volume{{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "other"}}}},
+			Containers: []corev1.Container{{Name: "server", Env: []corev1.EnvVar{secretEnv("other")}}},
+		}},
+		"a ConfigMap of the same name": {spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "server",
+			EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}}}},
+			Env: []corev1.EnvVar{{Name: "C", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "k",
+			}}}},
+		}}}},
+		"nothing": {},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			assert.Equal(t, tc.want, podReferencesSecret(&tc.spec, "s"))
+		})
+	}
+}
+
+func TestSecretsInUse(t *testing.T) {
+	ctx := context.Background()
+	inCluster := metav1.ObjectMeta{Namespace: "ns", Labels: map[string]string{LabelCluster: "c"}}
+	node := &valkeyiov1alpha1.ValkeyNode{ObjectMeta: inCluster, Spec: valkeyiov1alpha1.ValkeyNodeSpec{UsersACLSecretName: "acl"}}
+	node.Name = "c-0-0"
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-0-0", Namespace: "ns"},
+		Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "server",
+			Env: []corev1.EnvVar{{Name: "PRIMARY_AUTH", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "passwords"}, Key: replicationUser,
+			}}}},
+		}}}}},
+	}
+	otherCluster := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "elsewhere", Namespace: "ns", Labels: map[string]string{LabelCluster: "d"}},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{
+			{Name: "v", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "unused"}}},
+		}},
+	}
+	r, _, _ := newTrustReconciler(t, node, sts, otherCluster)
+
+	inUse, err := r.secretsInUse(ctx, trustTestCluster(), "acl", "passwords", "unused")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"acl": true, "passwords": true}, inUse,
+		"the node spec names acl, its StatefulSet reads passwords, and only another cluster's pod mounts unused")
 }
 
 func TestWithoutNewRoots(t *testing.T) {

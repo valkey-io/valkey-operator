@@ -70,8 +70,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      "valkey-" + resourceName,
 			Namespace: "default",
 		}
-		configName := types.NamespacedName{
-			Name:      GetServerConfigMapName(resourceName),
+		nodeConfigName := types.NamespacedName{
+			Name:      nodeConfigMapName(resourceName),
 			Namespace: "default",
 		}
 		secretName := types.NamespacedName{
@@ -103,7 +103,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
 
-			Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+			node = &valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
@@ -113,7 +113,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 					OwnerReferences: testParentRefs(),
 				},
 				Spec: spec,
-			})).To(Succeed())
+			}
+			if spec.ConfigRevision == "" {
+				withParentFields(node)
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		}
 
 		BeforeEach(func() {
@@ -131,10 +135,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 						OwnerReferences: testParentRefs(),
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-						WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+						SharedConfigMapName: testSharedConfigMapName,
+						ConfigRevision:      testConfigRevision,
+						WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 					},
 				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+				Expect(k8sClient.Create(ctx, withParentFields(resource))).To(Succeed())
 			}
 			By("creating the ACL secret")
 			secret := &corev1.Secret{}
@@ -153,12 +159,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		AfterEach(func() {
 			// Delete owned resources explicitly — envtest does not run garbage collection.
-			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, configName, cm); err == nil {
-				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
-				Eventually(func() bool {
-					return apierrors.IsNotFound(k8sClient.Get(ctx, configName, &corev1.ConfigMap{}))
-				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+			for _, name := range []types.NamespacedName{nodeConfigName} {
+				cm := &corev1.ConfigMap{}
+				if err := k8sClient.Get(ctx, name, cm); err == nil {
+					Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+					Eventually(func() bool {
+						return apierrors.IsNotFound(k8sClient.Get(ctx, name, &corev1.ConfigMap{}))
+					}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+				}
 			}
 			sts := &appsv1.StatefulSet{}
 			if err := k8sClient.Get(ctx, statefulSetName, sts); err == nil {
@@ -188,7 +196,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			}
 		})
 
-		It("should create a ConfigMap and StatefulSet on first reconcile", func() {
+		It("should create the node ConfigMap and StatefulSet on first reconcile", func() {
 			By("Reconciling the created resource")
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -199,12 +207,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the ConfigMap was created with probe scripts")
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, configName, cm)).To(Succeed())
-			Expect(cm.Data).To(HaveKey("valkey.conf"))
-			Expect(cm.Data).To(HaveKey("liveness-check.sh"))
-			Expect(cm.Data).To(HaveKey("readiness-check.sh"))
+			By("verifying the node ConfigMap holds the pinned revision and live.conf")
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			nodeCM := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, nodeConfigName, nodeCM)).To(Succeed())
+			Expect(nodeCM.Data).To(HaveKey(configRevisionFileKey(node.Spec.ConfigRevision)))
+			Expect(nodeCM.Data).To(HaveKey(liveConfigFileKey))
+			Expect(metav1.IsControlledBy(nodeCM, node)).To(BeTrue())
 
 			By("verifying the StatefulSet was created with correct labels")
 			sts := &appsv1.StatefulSet{}
@@ -215,7 +225,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("applies podMetadata to the pod template and keeps it out of the selector", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				PodMetadata: &valkeyiov1alpha1.EmbeddedObjectMetadata{
 					Labels:      map[string]valkeyiov1alpha1.LabelValue{"team": "data"},
 					Annotations: map[string]string{"example.com/owner": "data"},
@@ -326,8 +337,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should reconcile the StatefulSet and set Ready=false when the Service name is taken", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Service:      &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:             &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
 			})
 			foreign := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: statefulSetName.Name, Namespace: statefulSetName.Namespace},
@@ -366,10 +378,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 			const aclSecret = "taken-service-acl"
 			const aclFile = "user alice on #aaa ~* +@all\n"
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
-				UsersACLSecretName: aclSecret,
-				Config:             map[string]string{"maxmemory-policy": "allkeys-lru"},
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:             &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName:  aclSecret,
+				Config:              map[string]string{"maxmemory-policy": "allkeys-lru"},
 			})
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
@@ -441,12 +454,88 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
 		})
 
+		It("should apply live config and ACL when the node's ConfigMap name is taken and the pod is up", func() {
+			const aclSecret = "taken-configmap-acl"
+			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				UsersACLSecretName:  aclSecret,
+				Config:              map[string]string{"maxmemory-policy": "allkeys-lru"},
+			})
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
+				Data:       map[string][]byte{aclFilename: []byte("user alice on #aaa ~* +@all\n")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, secret) }()
+
+			foreign := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeConfigName.Name, Namespace: nodeConfigName.Namespace},
+				Data:       map[string]string{"readiness-check.sh": "echo ok"},
+			}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + "-cm-pod",
+					Namespace: "default",
+					Labels:    valkeyNodeLabels(node),
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}}},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+			pod.Status.PodIP = "10.0.0.10"
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			fake := &fakeConfigClient{aclOnLoad: map[string][]string{"alice": {"aaa"}}}
+			r := &ValkeyNodeReconciler{
+				Client:    k8sClient,
+				APIReader: k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(100),
+				resolveRoleFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNode) string {
+					return RolePrimary
+				},
+				newConfigClient: func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+					return fake, nil
+				},
+			}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(MatchError(ContainSubstring("is not owned by ValkeyNode")))
+			Expect(fake.aclLoads).To(Equal(1))
+			Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
+
+			got := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, nodeConfigName, got)).To(Succeed())
+			Expect(got.Data).To(Equal(foreign.Data))
+			Expect(k8sClient.Get(ctx, statefulSetName, &appsv1.StatefulSet{})).NotTo(Succeed())
+
+			updated := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Ready).To(BeFalse())
+			readyCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonConfigMapError))
+			aclCond := testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionACLApplied)
+			Expect(aclCond).NotTo(BeNil())
+			Expect(aclCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
 		It("should reload ACL after the Secret changes while the Service name stays taken", func() {
 			const aclSecret = "taken-service-acl-retry"
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
-				UsersACLSecretName: aclSecret,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:             &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName:  aclSecret,
 			})
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
@@ -534,10 +623,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 		It("should not apply live config or ACL when the Service name is taken and the pod is not up", func() {
 			const aclSecret = "taken-service-acl-down"
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Service:            &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
-				UsersACLSecretName: aclSecret,
-				Config:             map[string]string{"maxmemory-policy": "allkeys-lru"},
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Service:             &valkeyiov1alpha1.ValkeyNodeServiceSpec{},
+				UsersACLSecretName:  aclSecret,
+				Config:              map[string]string{"maxmemory-policy": "allkeys-lru"},
 			})
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: aclSecret, Namespace: "default"},
@@ -581,7 +671,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should surface pending PVC status before the pod is ready when persistence is enabled", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("10Gi"),
 				},
@@ -665,8 +756,9 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should settle when serviceAccountName is set", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType:       valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				ServiceAccountName: "my-sa",
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				ServiceAccountName:  "my-sa",
 			})
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -698,7 +790,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should create a PVC before reconciling the StatefulSet when persistence is enabled", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("10Gi"),
 				},
@@ -722,7 +815,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should add a finalizer when persistence reclaim policy is Delete", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size:          resource.MustParse("10Gi"),
 					ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
@@ -745,7 +839,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should delete the managed PVC before allowing ValkeyNode deletion when reclaim policy is Delete", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size:          resource.MustParse("10Gi"),
 					ReclaimPolicy: valkeyiov1alpha1.PersistenceReclaimPolicyDelete,
@@ -814,7 +909,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should not fail when persistence size changes before the PVC is bound", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("10Gi"),
 				},
@@ -844,7 +940,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should ignore shrink requests when the existing PVC is already larger", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("10Gi"),
 				},
@@ -879,7 +976,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should surface resize progress when the PVC is still expanding", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("20Gi"),
 				},
@@ -921,7 +1019,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should surface resize failures when the PVC cannot expand further", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("20Gi"),
 				},
@@ -963,7 +1062,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 
 		It("should reject shrinking persistence size after creation", func() {
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size: resource.MustParse("20Gi"),
 				},
@@ -981,7 +1081,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 		It("should reject changing persistence storage class after creation", func() {
 			storageClassName := "gp3"
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 				Persistence: &valkeyiov1alpha1.PersistenceSpec{
 					Size:             resource.MustParse("20Gi"),
 					StorageClassName: &storageClassName,
@@ -998,13 +1099,16 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("persistence.storageClassName is immutable"))
 		})
 
-		It("derives the config hash annotation on the StatefulSet pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and Config set (simulating a cluster-managed node)")
+		It("stamps spec.configRevision on the StatefulSet pod template", func() {
+			By("recreating the ValkeyNode with SharedConfigMapName and ConfigRevision set (simulating a cluster-managed node)")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
 				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				ServerConfigMapName: "ext-config",
+				SharedConfigMapName: "ext-config",
 				Config:              map[string]string{"appendfsync": "everysec"},
 			})
+			node := &valkeyiov1alpha1.ValkeyNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			revA := node.Spec.ConfigRevision
 
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -1016,63 +1120,83 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the StatefulSet pod template carries the derived config hash annotation")
-			node := &valkeyiov1alpha1.ValkeyNode{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			initialHash := nodeServerConfigRollHash(node)
+			By("verifying the StatefulSet pod template carries the config revision")
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
-				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revA))
+			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey("valkey.io/config-hash"))
 
-			By("changing a non-live-settable config key")
+			By("changing a restart-only key without a new config revision")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
 			node.Spec.Config["appendfsync"] = "always"
 			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
 			Expect(k8sClient.Update(ctx, node)).To(Succeed())
-
-			By("reconciling after the config change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revA),
+				"only the parent's config revision moves the template")
 
-			By("verifying the annotation moved to the new derived hash, causing a rolling update")
-			updated := &valkeyiov1alpha1.ValkeyNode{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			newHash := nodeServerConfigRollHash(updated)
-			Expect(newHash).NotTo(Equal(initialHash))
-			sts2 := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, statefulSetName, sts2)).To(Succeed())
-			Expect(sts2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
-				"updated config hash must be propagated to trigger pod restart")
+			By("setting a new config revision")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			revB := withParentFields(node).Spec.ConfigRevision
+			Expect(revB).NotTo(Equal(revA))
+			Expect(setDesiredWorkloadRevision(node)).To(Succeed())
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
+			Expect(mountedConfigRevision(&sts.Spec.Template.Spec)).To(Equal(revB),
+				"a new config revision must reach the template to roll the pod")
 		})
 
-		It("does not add a config hash annotation for nodes without ServerConfigMapName", func() {
-			By("recreating a ValkeyNode with Config but no ServerConfigMapName")
-			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Config:       map[string]string{"appendfsync": "everysec"},
-			})
-
-			r := &ValkeyNodeReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: events.NewFakeRecorder(100),
+		It("rejects a ValkeyNode without the fields its parent sets", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "no-parent-fields", Namespace: "default"},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 			}
+			err := k8sClient.Create(ctx, node)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+			Expect(err.Error()).To(ContainSubstring("sharedConfigMapName"))
+			Expect(err.Error()).To(ContainSubstring("configRevision"))
+		})
 
-			By("reconciling to create the StatefulSet")
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
+		It("rejects a spec.config key that is not lowercase", func() {
+			node := &valkeyiov1alpha1.ValkeyNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "upper-config-key", Namespace: "default"},
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+					ConfigRevision:      testConfigRevision,
+					SharedConfigMapName: testSharedConfigMapName,
+					WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+					Config:              map[string]string{"MAXMEMORY": "40mb"},
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+			Expect(err.Error()).To(ContainSubstring("spec.config keys must be lowercase"))
+		})
 
-			By("verifying the pod template has no config hash annotation")
-			sts := &appsv1.StatefulSet{}
-			Expect(k8sClient.Get(ctx, statefulSetName, sts)).To(Succeed())
-			Expect(sts.Spec.Template.Annotations).NotTo(HaveKey(configHashKey))
+		It("rejects a spec.configRevision that is not 12 lowercase hex characters", func() {
+			for _, rev := range []string{"../Not_Hex!", "ABCDEF012345", "0123456789a", "0123456789abc"} {
+				node := &valkeyiov1alpha1.ValkeyNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "bad-config-revision", Namespace: "default"},
+					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+						ConfigRevision: rev,
+						WorkloadType:   valkeyiov1alpha1.WorkloadTypeStatefulSet,
+					},
+				}
+				err := k8sClient.Create(ctx, node)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%q: got %v", rev, err)
+				Expect(err.Error()).To(ContainSubstring("configRevision"))
+			}
 		})
 
 		It("should defer rolling template updates for cluster-owned nodes until Spec.WorkloadRevision matches", func() {
 			By("recreating a cluster-owned ValkeyNode with matching WorkloadRevision")
 			recreateNode(valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-				Image:        "valkey/valkey:9.0.0",
+				SharedConfigMapName: testSharedConfigMapName,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				Image:               "valkey/valkey:9.0.0",
 			})
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
@@ -1147,8 +1271,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Name:      "valkey-" + resourceName,
 			Namespace: "default",
 		}
-		configName := types.NamespacedName{
-			Name:      GetServerConfigMapName(resourceName),
+		nodeConfigName := types.NamespacedName{
+			Name:      nodeConfigMapName(resourceName),
 			Namespace: "default",
 		}
 		secretName := types.NamespacedName{
@@ -1160,7 +1284,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			err := k8sClient.Get(ctx, typeNamespacedName, node)
 			if err != nil && apierrors.IsNotFound(err) {
-				Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+				Expect(k8sClient.Create(ctx, withParentFields(&valkeyiov1alpha1.ValkeyNode{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -1170,12 +1294,14 @@ var _ = Describe("ValkeyNode Controller", func() {
 						OwnerReferences: testParentRefs(),
 					},
 					Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-						WorkloadType: valkeyiov1alpha1.WorkloadTypeDeployment,
+						SharedConfigMapName: testSharedConfigMapName,
+						ConfigRevision:      testConfigRevision,
+						WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
 						// Keep the pod to the server container so the assertions
 						// below are about the workload, not the exporter.
 						Exporter: valkeyiov1alpha1.ExporterSpec{Enabled: new(false)},
 					},
-				})).To(Succeed())
+				}))).To(Succeed())
 			}
 			secret := &corev1.Secret{}
 			err = k8sClient.Get(ctx, secretName, secret)
@@ -1189,9 +1315,11 @@ var _ = Describe("ValkeyNode Controller", func() {
 		})
 
 		AfterEach(func() {
-			cm := &corev1.ConfigMap{}
-			if err := k8sClient.Get(ctx, configName, cm); err == nil {
-				Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+			for _, name := range []types.NamespacedName{nodeConfigName} {
+				cm := &corev1.ConfigMap{}
+				if err := k8sClient.Get(ctx, name, cm); err == nil {
+					Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+				}
 			}
 			deploy := &appsv1.Deployment{}
 			if err := k8sClient.Get(ctx, childName, deploy); err == nil {
@@ -1259,8 +1387,8 @@ var _ = Describe("ValkeyNode Controller", func() {
 			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:8.0.0"))
 		})
 
-		It("derives the config hash annotation on the Deployment pod template when ServerConfigMapName is set", func() {
-			By("recreating the ValkeyNode with ServerConfigMapName and Config set")
+		It("stamps spec.configRevision on the Deployment pod template", func() {
+			By("recreating the ValkeyNode with SharedConfigMapName and ConfigRevision set")
 			node := &valkeyiov1alpha1.ValkeyNode{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, node); err == nil {
 				node.Finalizers = nil
@@ -1270,7 +1398,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 					return apierrors.IsNotFound(k8sClient.Get(ctx, typeNamespacedName, &valkeyiov1alpha1.ValkeyNode{}))
 				}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}
-			Expect(k8sClient.Create(ctx, &valkeyiov1alpha1.ValkeyNode{
+			Expect(k8sClient.Create(ctx, withParentFields(&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
@@ -1281,10 +1409,12 @@ var _ = Describe("ValkeyNode Controller", func() {
 				},
 				Spec: valkeyiov1alpha1.ValkeyNodeSpec{
 					WorkloadType:        valkeyiov1alpha1.WorkloadTypeDeployment,
-					ServerConfigMapName: "ext-config",
+					SharedConfigMapName: "ext-config",
 					Config:              map[string]string{"appendfsync": "everysec"},
 				},
-			})).To(Succeed())
+			}))).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			revA := node.Spec.ConfigRevision
 
 			r := &ValkeyNodeReconciler{
 				Client:   k8sClient,
@@ -1296,35 +1426,29 @@ var _ = Describe("ValkeyNode Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the Deployment pod template carries the derived config hash annotation")
+			By("verifying the Deployment pod template carries the config revision")
 			deploymentName := types.NamespacedName{Name: "valkey-" + resourceName, Namespace: "default"}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
-			initialHash := nodeServerConfigRollHash(node)
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep)).To(Succeed())
-			Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, initialHash),
-				"pod template must include config hash so Kubernetes triggers a rolling update on config change")
+			Expect(mountedConfigRevision(&dep.Spec.Template.Spec)).To(Equal(revA))
 
-			By("changing a non-live-settable config key")
+			By("setting a new config revision")
 			updated := &valkeyiov1alpha1.ValkeyNode{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
 			updated.Spec.Config["appendfsync"] = "always"
+			revB := withParentFields(updated).Spec.ConfigRevision
 			Expect(setDesiredWorkloadRevision(updated)).To(Succeed())
 			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
 
-			By("reconciling after the config change")
+			By("reconciling after the revision change")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the annotation moved to the new derived hash, causing a rolling update")
-			updated2 := &valkeyiov1alpha1.ValkeyNode{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated2)).To(Succeed())
-			newHash := nodeServerConfigRollHash(updated2)
-			Expect(newHash).NotTo(Equal(initialHash))
+			By("verifying the annotation moved to the new revision, causing a rolling update")
 			dep2 := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, deploymentName, dep2)).To(Succeed())
-			Expect(dep2.Spec.Template.Annotations).To(HaveKeyWithValue(configHashKey, newHash),
-				"updated config hash must be propagated to trigger pod restart")
+			Expect(mountedConfigRevision(&dep2.Spec.Template.Spec)).To(Equal(revB),
+				"a new config revision must reach the template to roll the pod")
 		})
 	})
 
@@ -1336,7 +1460,7 @@ var _ = Describe("ValkeyNode Controller", func() {
 				Recorder: events.NewFakeRecorder(100),
 			}
 			node := &valkeyiov1alpha1.ValkeyNode{
-				Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: "DaemonSet"},
+				Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: "DaemonSet"},
 			}
 			Expect(r.ensureWorkload(context.Background(), node)).To(MatchError(ContainSubstring("unsupported workload type")))
 		})
@@ -1360,7 +1484,7 @@ var _ = Describe("isWorkloadRolledOut", func() {
 	makeNode := func(name string, wt valkeyiov1alpha1.WorkloadType) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: wt},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: wt},
 		}
 	}
 
@@ -1726,7 +1850,9 @@ var _ = Describe("ValkeyNode updateStatus", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1837,7 +1963,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 					LabelNodeIndex:  "0",
 				},
 			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 	})
@@ -2019,61 +2145,7 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 	})
 })
 
-var _ = Describe("clearLiveConfigCondition", func() {
-	var (
-		node *valkeyiov1alpha1.ValkeyNode
-		r    *ValkeyNodeReconciler
-		ctx  context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-		node = &valkeyiov1alpha1.ValkeyNode{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "clearcond-test",
-				Namespace: "default",
-			},
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		r = &ValkeyNodeReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
-		}
-	})
-
-	AfterEach(func() {
-		Expect(k8sClient.Delete(ctx, node)).To(Succeed())
-	})
-
-	It("removes a stale False condition so it reverts to absent", func() {
-		By("setting LiveConfigApplied=False, as a CONFIG SET failure would")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "boom")).To(Succeed())
-
-		By("clearing the condition, as happens once the offending key is removed")
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(testutils.FindCondition(updated.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeNil())
-	})
-
-	It("does not write status when the condition is already absent", func() {
-		updated := &valkeyiov1alpha1.ValkeyNode{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		rvBefore := updated.ResourceVersion
-
-		Expect(r.clearLiveConfigCondition(ctx, node)).To(Succeed())
-
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
-		Expect(updated.ResourceVersion).To(Equal(rvBefore), "status write should be skipped when condition is absent")
-	})
-})
-
-var _ = Describe("setLiveConfigCondition", func() {
+var _ = Describe("setLiveConfigFailed", func() {
 	var (
 		node *valkeyiov1alpha1.ValkeyNode
 		r    *ValkeyNodeReconciler
@@ -2088,7 +2160,9 @@ var _ = Describe("setLiveConfigCondition", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2104,15 +2178,15 @@ var _ = Describe("setLiveConfigCondition", func() {
 	})
 
 	It("does not write status when the condition is unchanged", func() {
-		By("setting LiveConfigApplied=True for the first time")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+		By("setting LiveConfigApplied=False for the first time")
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "ERR unknown option")).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
 		By("setting the identical condition again")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionTrue, "Applied", "Live config applied")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "ERR unknown option")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "status write should be skipped when the condition is unchanged")
@@ -2120,14 +2194,14 @@ var _ = Describe("setLiveConfigCondition", func() {
 
 	It("does not write status when only the local port changes", func() {
 		By("setting LiveConfigApplied=False with a first failure message")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		rvAfterFirst := updated.ResourceVersion
 
 		By("failing again with the same error shape but a different local port")
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", "read tcp 10.244.2.13:34552->10.244.2.15:6379: read: connection reset by peer")).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 		Expect(updated.ResourceVersion).To(Equal(rvAfterFirst), "changing only the local port must not rewrite status")
@@ -2135,7 +2209,7 @@ var _ = Describe("setLiveConfigCondition", func() {
 
 	It("writes status when the message changes beyond the local address", func() {
 		firstMessage := "read tcp 10.244.2.13:60104->10.244.2.15:6379: read: connection reset by peer"
-		Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", firstMessage)).To(Succeed())
+		Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", firstMessage)).To(Succeed())
 
 		updated := &valkeyiov1alpha1.ValkeyNode{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
@@ -2145,7 +2219,7 @@ var _ = Describe("setLiveConfigCondition", func() {
 			"write tcp 10.244.2.13:60104->10.244.2.15:6379: write: broken pipe",
 			"write tcp 10.244.2.13:60104->10.244.2.16:6379: write: broken pipe",
 		} {
-			Expect(r.setLiveConfigCondition(ctx, node, metav1.ConditionFalse, "ApplyFailed", message)).To(Succeed())
+			Expect(r.setLiveConfigFailed(ctx, node, "ApplyFailed", message)).To(Succeed())
 
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
 			Expect(updated.ResourceVersion).NotTo(Equal(rvBefore), "a message change beyond the local address must be written")
@@ -2172,7 +2246,9 @@ var _ = Describe("setACLCondition", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
-				WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
+				WorkloadType:        valkeyiov1alpha1.WorkloadTypeStatefulSet,
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2332,7 +2408,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 	nodeWith := func(secretName string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "live-acl-node", Namespace: "default"},
-			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{UsersACLSecretName: secretName},
+			Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, UsersACLSecretName: secretName},
 		}
 	}
 	reconcilerFor := func(fake *fakeConfigClient) *ValkeyNodeReconciler {
@@ -2601,7 +2677,7 @@ var _ = Describe("applyLiveACL", Label("liveacl"), func() {
 
 var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 	nodeWith := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
-		return &valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: cfg}}
+		return &valkeyiov1alpha1.ValkeyNode{Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, Config: cfg}}
 	}
 
 	ctx := context.Background()
@@ -2618,7 +2694,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 			"appendonly":       "yes",
 		}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeTrue())
+		Expect(applied).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(fake.params).To(Equal(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 	})
 
@@ -2631,7 +2707,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"maxmemory-policy": "allkeys-lru"}))
 		Expect(err).To(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 	})
 
 	It("does not open a client when no allowlisted keys are present", func() {
@@ -2644,7 +2720,7 @@ var _ = Describe("applyLiveConfig", Label("liveconfig"), func() {
 		}
 		applied, err := r.applyLiveConfig(ctx, nodeWith(map[string]string{"appendonly": "yes"}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(applied).To(BeFalse())
+		Expect(applied).To(BeEmpty())
 		Expect(called).To(BeFalse())
 	})
 })

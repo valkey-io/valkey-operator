@@ -18,9 +18,7 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
-	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -94,7 +92,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 			},
 			&valkeyiov1alpha1.ValkeyNode{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-n", Namespace: "default"},
-				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{PodMetadata: pm},
+				Spec:       valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, PodMetadata: pm},
 			},
 		}
 	}
@@ -162,7 +160,7 @@ var _ = Describe("podMetadata CEL validation", func() {
 		})
 	}
 
-	for i, key := range []string{configHashKey, "valkey.io/anything"} {
+	for i, key := range []string{"valkey.io/config-hash", "valkey.io/anything"} {
 		It(fmt.Sprintf("rejects the operator's annotation key %q", key), func() {
 			expectAdmission(fmt.Sprintf("pm-ra-%d", i),
 				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: map[string]string{key: "v"}},
@@ -183,20 +181,16 @@ var _ = Describe("podMetadata CEL validation", func() {
 			true, "")
 	})
 
-	// The pod also carries the operator's config-hash annotation, so the limit
-	// is checked against the final map, as the API server will see it.
-	operatorAnnotations := map[string]string{configHashKey: strings.Repeat("0", sha256.Size*2)}
-	operatorSize := len(configHashKey) + sha256.Size*2
+	// The operator adds no annotation of its own, so the limit is the API
+	// server's.
 	for _, total := range []int{apivalidation.TotalAnnotationSizeLimitB, apivalidation.TotalAnnotationSizeLimitB + 1} {
 		annotations := map[string]string{"example.com/a": "x"}
-		annotations["example.com/b"] = strings.Repeat("x", total-operatorSize-len("example.com/a")-len("x")-len("example.com/b"))
-		final := maps.Clone(annotations)
-		maps.Copy(final, operatorAnnotations)
-		accepted := len(apivalidation.ValidateAnnotations(final, field.NewPath("annotations"))) == 0
+		annotations["example.com/b"] = strings.Repeat("x", total-len("example.com/a")-len("x")-len("example.com/b"))
+		accepted := len(apivalidation.ValidateAnnotations(annotations, field.NewPath("annotations"))) == 0
 		It(fmt.Sprintf("annotations totalling %d bytes on the pod: accepted=%t, like the API server", total, accepted), func() {
 			expectAdmission(fmt.Sprintf("pm-as-%d", total),
 				&valkeyiov1alpha1.EmbeddedObjectMetadata{Annotations: annotations},
-				accepted, "annotations must total at most 262059 characters")
+				accepted, "annotations must total at most 262144 characters")
 		})
 	}
 })

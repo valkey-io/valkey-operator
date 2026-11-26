@@ -69,16 +69,16 @@ func scaleInFixture(t *testing.T, linkByAddress map[string]string) (*ValkeyClust
 		Id:        "shard-0",
 		PrimaryId: "node-0-2",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.1"]}},
-			{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.2"]}},
-			{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"master"}},
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.1"]}},
+			{Address: "10.0.0.2", Id: "node-0-1", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": linkByAddress["10.0.0.2"]}},
+			{Address: "10.0.0.3", Id: "node-0-2", Flags: valkey.FlagMaster},
 		},
 	}
 	shard1 := &valkey.ShardState{
 		Id:        "shard-1",
 		PrimaryId: "node-1-0",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: valkey.FlagMaster},
 		},
 	}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard1}}
@@ -129,9 +129,9 @@ func TestDeleteExcessValkeyNodesDefersPrimaryDeletion(t *testing.T) {
 			Id:        "shard-0",
 			PrimaryId: "node-0-0",
 			Nodes: []*valkey.NodeState{
-				{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
-				{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
-				{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+				{Address: "10.0.0.1", Id: "node-0-0", Flags: valkey.FlagMaster},
+				{Address: "10.0.0.2", Id: "node-0-1", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
+				{Address: "10.0.0.3", Id: "node-0-2", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
 			},
 		},
 		state.Shards[1],
@@ -183,8 +183,8 @@ func TestDeleteExcessValkeyNodesReplicaDeletedWithoutFailover(t *testing.T) {
 	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
 	// Fresh scrape reports the primary at node-index 0.
 	state.Shards[0].PrimaryId = "node-0-0"
-	state.Shards[0].Nodes[0].Flags = []string{"master"}
-	state.Shards[0].Nodes[2].Flags = []string{"slave"}
+	state.Shards[0].Nodes[0].Flags = valkey.FlagMaster
+	state.Shards[0].Nodes[2].Flags = valkey.FlagSlave
 	state.Shards[0].Nodes[2].Info = map[string]string{"master_link_status": "up"}
 
 	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
@@ -250,16 +250,16 @@ func TestDeleteExcessValkeyNodesHighShardFailoverDoesNotStall(t *testing.T) {
 		Id:        "shard-2",
 		PrimaryId: "node-2-2",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.2.1", Id: "node-2-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
-			{Address: "10.0.2.2", Id: "node-2-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
-			{Address: "10.0.2.3", Id: "node-2-2", Flags: []string{"master"}},
+			{Address: "10.0.2.1", Id: "node-2-0", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.2.2", Id: "node-2-1", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.2.3", Id: "node-2-2", Flags: valkey.FlagMaster},
 		},
 	}
 	shard0 := &valkey.ShardState{
 		Id:        "shard-0",
 		PrimaryId: "node-0-0",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: valkey.FlagMaster},
 		},
 	}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard2}}
@@ -284,9 +284,9 @@ func TestDeleteExcessValkeyNodesHighShardFailoverDoesNotStall(t *testing.T) {
 		Id:        "shard-2",
 		PrimaryId: "node-2-1",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.2.1", Id: "node-2-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
-			{Address: "10.0.2.2", Id: "node-2-1", Flags: []string{"master"}},
-			{Address: "10.0.2.3", Id: "node-2-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.2.1", Id: "node-2-0", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.2.2", Id: "node-2-1", Flags: valkey.FlagMaster},
+			{Address: "10.0.2.3", Id: "node-2-2", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
 		},
 	}}}
 
@@ -337,17 +337,17 @@ func TestDeleteExcessValkeyNodesNeverFailsOverToAnExcessReplica(t *testing.T) {
 		Id:        "shard-0",
 		PrimaryId: "node-0-3",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "down"}},
-			{Address: "10.0.0.2", Id: "node-0-1", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
-			{Address: "10.0.0.3", Id: "node-0-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}},
-			{Address: "10.0.0.4", Id: "node-0-3", Flags: []string{"master"}},
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "down"}},
+			{Address: "10.0.0.2", Id: "node-0-1", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.0.3", Id: "node-0-2", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}},
+			{Address: "10.0.0.4", Id: "node-0-3", Flags: valkey.FlagMaster},
 		},
 	}
 	shard1 := &valkey.ShardState{
 		Id:        "shard-1",
 		PrimaryId: "node-1-0",
 		Nodes: []*valkey.NodeState{
-			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: valkey.FlagMaster},
 		},
 	}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0, shard1}}
@@ -407,7 +407,7 @@ func TestDeleteExcessValkeyNodesFailoverErrorContinuesLoop(t *testing.T) {
 	require.NoError(t, r.Create(context.Background(), n12))
 	nodes.Items = append(nodes.Items, *n12)
 	state.Shards[1].Nodes = append(state.Shards[1].Nodes,
-		&valkey.NodeState{Address: "10.0.1.3", Id: "node-1-2", Flags: []string{"slave"}, Info: map[string]string{"master_link_status": "up"}})
+		&valkey.NodeState{Address: "10.0.1.3", Id: "node-1-2", Flags: valkey.FlagSlave, Info: map[string]string{"master_link_status": "up"}})
 
 	deleted, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
@@ -487,11 +487,11 @@ func TestDeleteExcessValkeyNodesDeletesPendingNodeDuringScaleOut(t *testing.T) {
 	}
 	state := &valkey.ClusterState{
 		Shards: []*valkey.ShardState{{Id: "shard-0", PrimaryId: "node-0-0", Nodes: []*valkey.NodeState{
-			{Address: "10.0.0.1", Id: "node-0-0", Flags: []string{"master"}},
+			{Address: "10.0.0.1", Id: "node-0-0", Flags: valkey.FlagMaster},
 		}}},
 		PendingNodes: []*valkey.NodeState{
-			{Address: "10.0.1.1", Id: "node-1-0", Flags: []string{"master"}},
-			{Address: "10.0.1.2", Id: "node-1-1", Flags: []string{"master"}},
+			{Address: "10.0.1.1", Id: "node-1-0", Flags: valkey.FlagMaster},
+			{Address: "10.0.1.2", Id: "node-1-1", Flags: valkey.FlagMaster},
 		},
 	}
 
@@ -563,7 +563,7 @@ func TestDeleteExcessValkeyNodesKeepsNodeWithEmptyFlags(t *testing.T) {
 	// of shard 0 is known to be the primary.
 	r, cluster, state, nodes := scaleInFixture(t, map[string]string{"10.0.0.1": "up", "10.0.0.2": "up"})
 	state.Shards[0].PrimaryId = ""
-	state.Shards[0].Nodes[2].Flags = nil
+	state.Shards[0].Nodes[2].Flags = 0
 
 	_, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)

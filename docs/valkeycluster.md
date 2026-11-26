@@ -232,7 +232,7 @@ kubectl get pods,pvc -n <namespace>
 kubectl get events -n <namespace> --sort-by=.metadata.creationTimestamp
 ```
 
-Use the `AwaitingManualTakeover` message to identify the failed primary and candidate replica. The message includes the replica's replication offset, whether a full sync is in progress, and whether its link to the primary is up or down. Missing values are reported as unknown. An offset of zero can describe an empty dataset; an unknown offset or a replica still syncing needs investigation. These values do not prove that the replica has every acknowledged write. Check the candidate's `INFO replication` for the link-down duration, along with its persistence status and logs. Check the primary pod's phase and readiness before approving. If the replica points to a different node at the old primary's address, a full sync from that node can replace the replica's data. Check what the replica still holds before promoting it.
+Use the `AwaitingManualTakeover` message to identify the failed primary and candidate replica. The message includes the replica's replication offset, whether a full sync is in progress, and whether its link to the primary is up or down. Missing values are reported as unknown. An offset of zero can describe an empty dataset; an unknown offset or a replica still syncing needs investigation. These values do not prove that the replica has every acknowledged write. Approval names the failed primary. The candidate can change as replicas become available or their offsets advance, so inspect every replica you would accept as the new primary. Check the candidate's `INFO replication` for the link-down duration, along with its persistence status and logs. Check the primary pod's phase and readiness before approving. If the replica points to a different node at the old primary's address, a full sync from that node can replace the replica's data. Check what the replica still holds before promoting it.
 
 Check whether the primary's pod or storage can return, and whether the problem is a network partition. An unschedulable pod or an unreachable server does not prove its durable data is lost. Compare the available copies before choosing recovery: with RDB snapshots alone, a restarted primary can be older than its replica, and a full resync from that primary can discard the replica's newer writes. Check `appendonly`, `appendfsync`, and `save` in the effective configuration, and inspect persistence status and logs. AOF can narrow the loss window, but its presence alone is not proof that all writes reached disk. See [Failure handling](#failure-handling).
 
@@ -241,12 +241,14 @@ Before approving takeover, stop the old primary or isolate it from clients that 
 To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:
 
 ```sh
-kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<primary-node-id> --overwrite
+kubectl get valkeycluster <name> -n <namespace> -o yaml
+# Read metadata.resourceVersion and the current approval list from this output.
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<updated-primary-id-list> --resource-version=<resourceVersion> --overwrite
 ```
 
 The annotation applies only to an eligible orphan whose primary is unreachable in the current scrape. The operator removes that primary's ID before sending TAKEOVER, preserving any other IDs in the annotation. Each approval authorizes one attempt. If the command fails or the operator stops after consuming the approval, check the live topology before approving another attempt. A missing response does not establish that promotion failed.
 
-To approve more than one primary, use a comma-separated list. Include any existing approvals you want to keep when using `--overwrite`. To cancel one pending approval, edit the ValkeyCluster and remove only that ID. Remove the annotation only if you intend to cancel all pending approvals. Consuming an approval commits the operator to the attempt, so removing the annotation after that point cannot cancel the command.
+To approve more than one primary, use a comma-separated list. Include any existing approvals you want to keep. To cancel one pending approval, read the current list and resourceVersion together, then use the version-checked command above with only that ID removed. To cancel the last approval, use `valkey.io/force-takeover-` with the same resourceVersion check. If the write conflicts, read the object again and recompute the list. A stale edit or an overwrite without a version check can restore an approval the operator already consumed. Consuming an approval commits the operator to the attempt, so removing the annotation after that point cannot cancel the command.
 
 While an orphan remains unresolved, the operator pauses later topology repairs, including repairs in other shards. It can still repair stale peer addresses while waiting. If the primary returns, `AwaitingManualTakeover` clears. How much data it recovers depends on its persistence configuration and the files it can load.
 

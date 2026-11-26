@@ -852,6 +852,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			}
 			switch result {
 			case nodeDeferred:
+				// Manual recovery must run before MEET or replication can change
+				// the data or topology the user is inspecting.
+				if cluster.Spec.Persistence != nil && !clusterState.HasFailoverQuorum() && len(orphansToTakeOver(clusterState)) > 0 {
+					return true, deferred
+				}
 				// Roll deferred; MEET and REPLICATE isolated nodes so they
 				// rejoin the shard before next reconcile.
 				if _, meetErr := r.meetIsolatedNodes(ctx, cluster, clusterState); meetErr != nil {
@@ -1729,6 +1734,9 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			if manual {
 				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverFailed", "FailoverTakeover",
 					"TAKEOVER for primary %s via replica %s failed: %v. Check the topology before approving another attempt.", candidate.primaryId, candidate.replica.Id, err)
+				// A lost reply can hide a promotion that restored quorum.
+				r.setAwaitingManualTakeover(cluster, nodes, candidates)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 			}
 			continue
 		}
@@ -1740,6 +1748,7 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 			})
 			if len(remaining) == 0 {
 				r.clearAwaitingManualTakeover(cluster)
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for topology after manual takeover", metav1.ConditionFalse)
 			} else {
 				r.setAwaitingManualTakeover(cluster, nodes, remaining)
 			}
@@ -1786,8 +1795,10 @@ func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1a
 		if len(message) <= 1024 {
 			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ReconcileValkeyCluster", "%s", message)
 		} else {
-			for _, item := range manualTakeoverInstructions(cluster, nodes, candidates) {
-				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ReconcileValkeyCluster", "%s", item)
+			for _, candidate := range candidates {
+				item := manualTakeoverInstructions(cluster, nodes, []orphan{candidate})[0]
+				// The broadcaster groups by action and ignores the message.
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, "ManualTakeover/"+candidate.primaryId, "%s", item)
 			}
 		}
 	}
@@ -1832,8 +1843,8 @@ func manualTakeoverInstructions(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *
 			items = append(items, fmt.Sprintf("%s takeover is authorized via replica %s (%s); awaiting an attempt", primary, replica, details))
 			continue
 		}
-		command := fmt.Sprintf("kubectl annotate valkeycluster %s -n %s %s=%s --overwrite", cluster.Name, cluster.Namespace, forceTakeoverAnnotation, candidate.primaryId)
-		items = append(items, fmt.Sprintf("%s can be recovered by replica %s (%s); to accept possible data loss, run: %s", primary, replica, details, command))
+		command := fmt.Sprintf("kubectl annotate valkeycluster %s -n %s %s=%s --resource-version=<resourceVersion> --overwrite", cluster.Name, cluster.Namespace, forceTakeoverAnnotation, candidate.primaryId)
+		items = append(items, fmt.Sprintf("%s can be recovered by replica %s (%s); read current approvals and resourceVersion before accepting possible data loss: %s", primary, replica, details, command))
 	}
 	slices.Sort(items)
 	if len(items) > 0 && (len(candidates) > 1 || len(requested) > 0) {
@@ -2030,9 +2041,18 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 	slices.Sort(deadPrimaries)
 
 	quorum := state.HasFailoverQuorum()
+	// Keep tied replicas stable across API list ordering changes.
+	nodes := state.AllNodes()
+	slices.SortFunc(nodes, func(a, b *valkey.NodeState) int { return strings.Compare(a.Id, b.Id) })
 	var orphans []orphan
 	for _, primaryId := range deadPrimaries {
-		replica := state.BestReplicaOf(primaryId)
+		var replicas []*valkey.NodeState
+		for _, node := range nodes {
+			if node.PrimaryIdFromSelf() == primaryId {
+				replicas = append(replicas, node)
+			}
+		}
+		replica := valkey.HighestOffsetReplica(replicas)
 		if replica == nil {
 			continue
 		}

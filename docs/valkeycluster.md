@@ -324,6 +324,8 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
    kubectl patch valkeycluster <name> --type=merge -p "{\"spec\":{\"replicas\":null,\"replicasPerShard\":${n:?spec.replicas is not set}}}"
    ```
 
+To change the replica count of a cluster that still stores `replicas`, migrate first, then set the new count on `replicasPerShard` in a second update. A single update that removes `replicas` and sets a different `replicasPerShard` is rejected.
+
 Applying an edited manifest works only if the apply removes `replicas`. Two cases keep it, and the API server rejects the update: client side `kubectl apply` on a cluster that was not created with `kubectl apply`, and server side apply when another field manager owns `spec.replicas`, for example after a `kubectl patch`. The merge patch works in both cases.
 
 A Go program built against an older `api/v1alpha1` drops `replicasPerShard` when it reads and then updates a ValkeyCluster, because its type does not have the field. Update such programs before you migrate.

@@ -1766,7 +1766,8 @@ func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, c
 		r.recordStaleAddressesHealed(cluster, healed)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
-	// Keep the slot map intact until takeover or the primary's return.
+	// Hold later topology repairs in every shard until takeover or the
+	// primary's return, preserving the slot map while approval is pending.
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true
 }
 

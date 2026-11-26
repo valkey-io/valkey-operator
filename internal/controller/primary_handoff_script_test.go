@@ -45,19 +45,22 @@ type scriptRun struct {
 	cliCalls int    // all valkey-cli calls the replica stub answered
 }
 
-// stubCLI controls the stub valkey-cli: ROLE reports a replica of 10.0.0.1
-// (or of primaryHost when set) promotedAfter times, then a primary. A
-// negative promotedAfter keeps it a replica forever, and hang makes every
-// call sleep past the script's per-call timeout.
+// stubCLI controls the stub valkey-cli: every call is a CLUSTER NODES call.
+// With no explicit response, the first promotedAfter polls answer a replica
+// entry that follows primaryNodeID (primaryID when empty), then a primary
+// with slots. A negative promotedAfter never promotes, and hang makes every
+// call sleep past the script's per-call timeout. Explicit clusterNodes
+// overrides the simulation; clusterNodesSecond overrides the second and
+// later polls.
 type stubCLI struct {
 	promotedAfter      int
-	primaryHost        string
+	primaryNodeID      string // empty defaults to primaryID
 	hang               bool
-	clusterNodes       *string // nil returns a promoted primary with slots
+	clusterNodes       *string
 	clusterError       bool
-	clusterHang        bool     // hang only the CLUSTER NODES calls
-	clusterNodesSecond *string  // non-nil: second and later CLUSTER NODES answers
-	seedFiles          []string // extra files to create in the data dir
+	clusterHang        bool    // hang only the CLUSTER NODES calls
+	clusterNodesSecond *string // non-nil: second and later CLUSTER NODES answers
+	seedFiles          []string
 }
 
 // runPrimaryHandoffScript runs the script with the given nodes.conf and valkey.conf.
@@ -88,9 +91,12 @@ func primaryHandoffTestCommand(t *testing.T, nodesConf, valkeyConf string, cli s
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
 	calls = filepath.Join(dir, "calls")
-	primaryHost := cli.primaryHost
-	if primaryHost == "" {
-		primaryHost = "10.0.0.1"
+	quote := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	}
+	parentID := cli.primaryNodeID
+	if parentID == "" {
+		parentID = primaryID
 	}
 	// The stub logs the password and arguments of each call to calls.auth.
 	// With ROTATE_TO set it rewrites the password file after the first call,
@@ -108,6 +114,10 @@ func primaryHandoffTestCommand(t *testing.T, nodesConf, valkeyConf string, cli s
 	}
 	nodesFile := filepath.Join(dir, "cluster-nodes")
 	require.NoError(t, os.WriteFile(nodesFile, []byte(nodes), 0o644))
+	// The simulated replica answer: a myself,slave entry following parentID.
+	replicaNodes := replicaID + " 10.0.0.2:6379@16379 myself,slave " + parentID + " 0 0 2 connected\n"
+	replicaNodesFile := filepath.Join(dir, "replica-nodes")
+	require.NoError(t, os.WriteFile(replicaNodesFile, []byte(replicaNodes), 0o644))
 	nodesSecondFile := ""
 	if cli.clusterNodesSecond != nil {
 		nodesSecondFile = filepath.Join(dir, "cluster-nodes-2")
@@ -117,18 +127,21 @@ func primaryHandoffTestCommand(t *testing.T, nodesConf, valkeyConf string, cli s
 	if cli.clusterError {
 		clusterExit = 1
 	}
+	// Every call must be a CLUSTER NODES call; anything else fails the stub.
 	script += "previous=; last=\nfor arg do previous=$last; last=$arg; done\n" +
-		"if [ \"$previous $last\" = 'CLUSTER NODES' ]; then " +
-		"c=$(cat " + calls + "-cluster 2>/dev/null || echo 0); c=$((c+1)); echo $c > " + calls + "-cluster; "
+		"[ \"$previous $last\" = 'CLUSTER NODES' ] || exit 97\n" +
+		"c=$(cat " + calls + "-cluster 2>/dev/null || echo 0); c=$((c+1)); echo $c > " + calls + "-cluster\n"
 	if cli.clusterHang {
-		script += "exec sleep 30; fi\n"
-	} else {
-		script += "if [ $c -ge 2 ] && [ -n '" + nodesSecondFile + "' ] && [ -f '" + nodesSecondFile + "' ]; then cat '" + nodesSecondFile + "'; else cat " + nodesFile + "; fi; " +
-			"exit " + strconv.Itoa(clusterExit) + "; fi\n"
+		script += "exec sleep 30\n"
 	}
-	script += "[ \"$last\" = ROLE ] || exit 1\n"
-	script += "if [ " + strconv.Itoa(cli.promotedAfter) + " -ge 0 ] && [ $n -gt " + strconv.Itoa(cli.promotedAfter) + " ]; then printf 'master\\n0\\n'; " +
-		"else printf 'slave\\n" + primaryHost + "\\n6379\\nconnected\\n5\\n'; fi\n"
+	script += "nodes=" + quote(nodesFile) + "\n"
+	if cli.clusterNodes == nil {
+		script += "if [ " + strconv.Itoa(cli.promotedAfter) + " -lt 0 ] || [ \"$c\" -le " + strconv.Itoa(cli.promotedAfter) + " ]; then nodes=" + quote(replicaNodesFile) + "; fi\n"
+	}
+	if nodesSecondFile != "" {
+		script += "if [ $c -ge 2 ] && [ -f " + quote(nodesSecondFile) + " ]; then nodes=" + quote(nodesSecondFile) + "; fi\n"
+	}
+	script += "cat \"$nodes\"\nexit " + strconv.Itoa(clusterExit) + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(script), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "valkey.conf"), []byte(valkeyConf), 0o644))
 	if nodesConf != "" {
@@ -206,11 +219,14 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		assert.Regexp(t, `Replica hand-off done after [0-9]+s; starting as a new node`, r.out)
 		assert.Contains(t, r.out, serverLine)
 		assert.False(t, r.nodeKept)
-		assert.Equal(t, 4, r.cliCalls)
+		assert.Equal(t, 3, r.cliCalls)
 		assertSnapshotKept(t, r, false)
 	})
 
 	self := replicaID + " 10.0.0.2:6379@16379 master,myself - 0 0 2 connected"
+	replicaSelf := func(parentID string) string {
+		return replicaID + " 10.0.0.2:6379@16379 slave,myself " + parentID + " 0 0 2 connected\n"
+	}
 	for _, tt := range []struct {
 		name, nodes        string
 		kept, clusterError bool
@@ -227,17 +243,25 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		{"a truncated myself line keeps the identity", replicaID + " 10.0.0.2:6379@16379 myself,master - 0\n" + other, true, false},
 		{"an invalid CLUSTER NODES keeps the identity", other + self + " invalid\n", true, false},
 		{"invalid owned slots are discarded together", other + self + " 5461 invalid\n", true, false},
-		{"a malformed bracket field is not an assignment", other + self + " 5461 [garbage]\n", true, false},
-		{"a migration marker with a malformed field keeps the identity", other + self + " [5461->-" + otherID + "] garbage\n", true, false},
-		{"a malformed field before a migration marker keeps the identity", other + self + " garbage [5461->-" + otherID + "]\n", true, false},
-		{"a migration marker with a reversed range keeps the identity", other + self + " 10922-5461 [5461->-" + otherID + "]\n", true, false},
+		{"a malformed bracket field alone is not an assignment", self + " [garbage]\n", true, false},
+		{"an unknown bracket field preserves owned slots", other + self + " 5461 [garbage]\n", false, false},
+		{"an unknown bracket field before a slot is skipped", self + " [garbage] 5461\n", false, false},
+		{"a migration marker survives a malformed plain field", other + self + " [5461->-" + otherID + "] garbage\n", false, false},
+		{"a migration marker survives a preceding malformed plain field", other + self + " garbage [5461->-" + otherID + "]\n", false, false},
+		{"a migration marker survives a reversed range", other + self + " 10922-5461 [5461->-" + otherID + "]\n", false, false},
+		{"an invalid plain field also discards later owned slots", self + " invalid 5461\n", true, false},
+		{"an importing marker survives an invalid plain field", self + " invalid [1-<-" + otherID + "]\n", false, false},
+		{"an incomplete bracket field does not erase an owned slot", self + " 5461 [unfinished\n", false, false},
 		{"a reversed slot range keeps the identity", other + self + " 10922-5461\n", true, false},
 		{"an unreadable CLUSTER NODES keeps the identity", other + self + " 5461\n", true, true},
 		{"slot 0 completes the handoff", self + " 0\n", false, false},
 		{"slot 16383 completes the handoff", self + " 16383\n", false, false},
 		{"the full slot range completes the handoff", self + " 0-16383\n", false, false},
 		{"a migrating marker at slot 0 completes the handoff", self + " [0->-" + otherID + "]\n", false, false},
+		{"a migrating marker with a two-digit slot completes the handoff", self + " [10->-" + otherID + "]\n", false, false},
+		{"a migrating marker with a three-digit slot completes the handoff", self + " [100-<-" + otherID + "]\n", false, false},
 		{"an importing marker at slot 16383 completes the handoff", self + " [16383-<-" + otherID + "]\n", false, false},
+		{"an uppercase hex peer completes the handoff", self + " [1->-" + strings.ToUpper(otherID) + "]\n", false, false},
 		{"a leading-zero slot 16383 completes the handoff", self + " 00016383\n", false, false},
 		{"many leading zeros preserve a valid slot", self + " " + strings.Repeat("0", 400) + "16383\n", false, false},
 		{"slot 16384 keeps the identity", self + " 16384\n", true, false},
@@ -250,31 +274,53 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		{"slot 16384 before a valid slot keeps the identity", self + " 16384 0\n", true, false},
 		{"a valid slot before an out-of-range range keeps the identity", self + " 0 0-16384\n", true, false},
 		{"an out-of-range range before a valid slot keeps the identity", self + " 0-16384 0\n", true, false},
-		{"a valid slot before an out-of-range marker keeps the identity", self + " 0 [16384->-" + otherID + "]\n", true, false},
-		{"an out-of-range marker before a valid slot keeps the identity", self + " [16384->-" + otherID + "] 0\n", true, false},
-		{"a valid marker before slot 16384 keeps the identity", self + " [0->-" + otherID + "] 16384\n", true, false},
-		{"slot 16384 before a valid marker keeps the identity", self + " 16384 [0->-" + otherID + "]\n", true, false},
+		{"a valid slot before an out-of-range marker completes the handoff", self + " 0 [16384->-" + otherID + "]\n", false, false},
+		{"an out-of-range marker before a valid slot completes the handoff", self + " [16384->-" + otherID + "] 0\n", false, false},
+		{"a valid marker before slot 16384 completes the handoff", self + " [0->-" + otherID + "] 16384\n", false, false},
+		{"slot 16384 before a valid marker completes the handoff", self + " 16384 [0->-" + otherID + "]\n", false, false},
 		{"an overflowing slot keeps the identity", self + " " + strings.Repeat("9", 400) + "\n", true, false},
 		{"an overflowing range endpoint keeps the identity", self + " 0-" + strings.Repeat("9", 400) + "\n", true, false},
 		{"an overflowing marker slot keeps the identity", self + " [" + strings.Repeat("9", 400) + "->-" + otherID + "]\n", true, false},
 		{"a migration marker with a malformed peer ID keeps the identity", self + " [1->-x]\n", true, false},
 		{"a migration marker with a short peer ID keeps the identity", self + " [5461->-67ed2db8]\n", true, false},
+		{"a 39-character migrating peer keeps the identity", self + " [1->-" + otherID[:39] + "]\n", true, false},
+		{"a 41-character migrating peer keeps the identity", self + " [1->-" + otherID + "a]\n", true, false},
+		{"a 39-character importing peer keeps the identity", self + " [1-<-" + otherID[:39] + "]\n", true, false},
+		{"a 41-character importing peer keeps the identity", self + " [1-<-" + otherID + "a]\n", true, false},
+		{"a nonhex 40-character peer keeps the identity", self + " [1->-" + strings.Repeat("g", 40) + "]\n", true, false},
+		{"a malformed marker does not erase an owned slot", self + " 5461 [1->-" + otherID[:39] + "]\n", false, false},
 		{"a nonnumeric config epoch keeps the identity", strings.Replace(self, " 0 0 2 ", " 0 0 zero ", 1) + " 5461\n", true, false},
 		{"a short node ID keeps the identity", strings.Replace(self, "e7d1", "e7", 1) + " 5461\n", true, false},
+		{"a nonhex node ID keeps the identity", strings.Replace(self, replicaID, strings.Repeat("g", 40), 1) + " 5461\n", true, false},
+		{"a node without a role keeps the identity", strings.Replace(self, "master,myself", "myself", 1) + " 5461\n", true, false},
+		{"a master flag substring keeps the identity", strings.Replace(self, "master,myself", "notmaster,myself", 1) + " 5461\n", true, false},
+		{"conflicting role flags keep the identity", strings.Replace(replicaSelf(otherID), "slave,myself", "master,slave,myself", 1), true, false},
+		{"a replica following the old primary keeps the identity", replicaSelf(primaryID), true, false},
+		{"a replica following another primary completes the handoff", replicaSelf(otherID), false, false},
+		{"a replica following the old primary cannot pass using slot fields", strings.TrimSuffix(replicaSelf(primaryID), "\n") + " 5461\n", true, false},
+		{"a replica without a primary ID keeps the identity", replicaSelf("-"), true, false},
+		{"a replica with a short primary ID keeps the identity", replicaSelf(otherID[:39]), true, false},
+		{"a replica with a long primary ID keeps the identity", replicaSelf(otherID + "a"), true, false},
+		{"a replica with a nonhex primary ID keeps the identity", replicaSelf(strings.Repeat("g", 40)), true, false},
+		{"a primary host is not a primary node ID", replicaSelf("10.0.0.3"), true, false},
+		{"a slave flag substring keeps the identity", strings.Replace(replicaSelf(otherID), "slave,myself", "notslave,myself", 1), true, false},
+		{"a replica with a malformed epoch keeps the identity", strings.Replace(replicaSelf(otherID), " 0 0 2 ", " 0 0 zero ", 1), true, false},
+		{"a failed command cannot confirm another primary", replicaSelf(otherID), true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := runPrimaryHandoffScript(t, primary+replica+other+vars, "cluster-node-timeout 1\n", stubCLI{clusterNodes: &tt.nodes, clusterError: tt.clusterError})
 			assert.Equal(t, tt.kept, r.nodeKept, r.out)
 			assertSnapshotKept(t, r, tt.kept)
 			assert.Contains(t, r.out, serverLine)
-			assert.LessOrEqual(t, r.cliCalls, 4, "the handoff wait stays bounded")
+			assert.LessOrEqual(t, r.cliCalls, 2, "the handoff wait stays bounded")
+			assert.NoFileExists(t, filepath.Join(r.dataDir, ".cluster-reply"))
 			if tt.kept {
 				assert.Contains(t, r.out, "still follows this node")
 				assert.Contains(t, r.out, "Keeping the previous identity")
 				assert.NotContains(t, r.out, "starting as a new node")
 			} else {
 				assert.Contains(t, r.out, "starting as a new node")
-				assert.Equal(t, 2, r.cliCalls, "ROLE and CLUSTER NODES both confirm promotion")
+				assert.Equal(t, 1, r.cliCalls, "one CLUSTER NODES reply confirms the handoff")
 			}
 		})
 	}
@@ -295,17 +341,19 @@ func TestPrimaryHandoffScript(t *testing.T) {
 	}
 
 	t.Run("a replica that follows another primary counts as moved on", func(t *testing.T) {
-		r := runPrimaryHandoffScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "10.0.0.3", clusterError: true})
+		r := runPrimaryHandoffScript(t, primary+replica+other+vars, conf, stubCLI{promotedAfter: -1, primaryNodeID: otherID})
 		assert.Contains(t, r.out, "starting as a new node")
 		assert.False(t, r.nodeKept)
-		assert.Equal(t, 1, r.cliCalls, "a replica following another primary needs only ROLE")
+		assert.Equal(t, 1, r.cliCalls, "one CLUSTER NODES reply shows the replica following another primary")
+		assertSnapshotKept(t, r, false)
 	})
 
-	t.Run("a hung CLUSTER NODES after a master ROLE is bounded and keeps the identity", func(t *testing.T) {
+	t.Run("a hung CLUSTER NODES is bounded and keeps the identity", func(t *testing.T) {
 		r := runPrimaryHandoffScript(t, primary+replica+vars, "cluster-node-timeout 500\n", stubCLI{clusterHang: true})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
 		assert.LessOrEqual(t, r.cliCalls, 6, "each hung call is cut after the per-call timeout")
+		assert.NoFileExists(t, filepath.Join(r.dataDir, ".cluster-reply"))
 	})
 
 	t.Run("a transient master that gains slots on a later poll completes the handoff", func(t *testing.T) {
@@ -315,6 +363,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		r := runPrimaryHandoffScript(t, primary+replica+other+vars, "cluster-node-timeout 1000\n", stubCLI{clusterNodes: &empty, clusterNodesSecond: &assigned})
 		assert.Contains(t, r.out, "starting as a new node")
 		assert.False(t, r.nodeKept)
+		assert.Equal(t, 2, r.cliCalls, "the second poll sees the assignment")
 		assertSnapshotKept(t, r, false)
 	})
 
@@ -362,13 +411,19 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		assert.LessOrEqual(t, r.cliCalls, 3, "each hung call is cut after the per-call timeout")
 	})
 
-	t.Run("an IPv6 address keeps its colons when matched against ROLE", func(t *testing.T) {
+	t.Run("an IPv6 replica following the old node ID keeps the identity", func(t *testing.T) {
 		me := primaryID + " fd00::1:6379@16379,,tls-port=0,shard-id=abc myself,master - 0 1760000000000 1 connected 0-5460\n"
 		them := replicaID + " fd00::2:6379@16379,,tls-port=0,shard-id=abc slave " + primaryID + " 0 1760000000000 1 connected\n"
-		// The stub keeps following fd00::1, which must not pass as another primary.
-		r := runPrimaryHandoffScript(t, me+them+vars, conf, stubCLI{promotedAfter: -1, primaryHost: "fd00::1"})
+		reply := replicaID + " fd00::2:6379@16379 myself,slave " + primaryID + " 0 0 2 connected\n"
+		// The reply keeps following this node's ID, which must not pass as
+		// another primary, and the IPv6 endpoint must reach the CLI intact.
+		r := runPrimaryHandoffScript(t, me+them+vars, "cluster-node-timeout 1\n", stubCLI{clusterNodes: &reply})
 		assert.Contains(t, r.out, "Keeping the previous identity")
 		assert.True(t, r.nodeKept)
+		auth, err := os.ReadFile(filepath.Join(filepath.Dir(r.dataDir), "calls.auth"))
+		require.NoError(t, err)
+		assert.Contains(t, string(auth), "-h fd00::2 -p 6379")
+		assert.NotContains(t, string(auth), " ROLE")
 	})
 
 	t.Run("the whole data dir is emptied, custom and hidden snapshot names included", func(t *testing.T) {
@@ -414,7 +469,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		assert.True(t, r.nodeKept)
 	})
 
-	t.Run("ROLE calls send the mounted operator password and pick up a rotation", func(t *testing.T) {
+	t.Run("CLUSTER NODES calls send the mounted operator password and pick up a rotation", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
 		passwordFile := filepath.Join(filepath.Dir(calls), operatorUser)
 		require.NoError(t, os.WriteFile(passwordFile, []byte("op-mounted\n"), 0o644))
@@ -425,17 +480,21 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
-		// The third ROLE reports a master, and the slot check that follows sends
-		// the rotated password with CLUSTER NODES too.
-		require.Len(t, lines, 4)
-		for i, want := range []string{"op-mounted", "op-rotated", "op-rotated", "op-rotated"} {
+		// The third poll reports a primary, and every call after the first
+		// reads the rotated password.
+		require.Len(t, lines, 3)
+		for i, want := range []string{"op-mounted", "op-rotated", "op-rotated"} {
 			assert.True(t, strings.HasPrefix(lines[i], want+" "), lines[i])
 			assert.Contains(t, lines[i], "--user "+operatorUser)
+			assert.True(t, strings.HasSuffix(lines[i], " CLUSTER NODES"), lines[i])
 		}
 	})
 
-	t.Run("the slot check reloads the operator password after a rotation", func(t *testing.T) {
-		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
+	t.Run("each CLUSTER NODES poll reloads the operator password", func(t *testing.T) {
+		self := replicaID + " 10.0.0.2:6379@16379 master,myself - 0 0 2 connected"
+		empty := other + self + "\n"
+		assigned := other + self + " 5461\n"
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{clusterNodes: &empty, clusterNodesSecond: &assigned})
 		passwordFile := filepath.Join(filepath.Dir(calls), operatorUser)
 		require.NoError(t, os.WriteFile(passwordFile, []byte("op-mounted\n"), 0o644))
 		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
@@ -445,17 +504,18 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
-		// The first ROLE already reports a master, so the rotation lands between
-		// that ROLE and the CLUSTER NODES the slot check sends.
+		// The first master reply has no slots. The next poll must reload
+		// the rotated password before confirming its assignment.
 		require.Len(t, lines, 2)
 		for i, want := range []string{"op-mounted", "op-rotated"} {
 			assert.True(t, strings.HasPrefix(lines[i], want+" "), lines[i])
 			assert.Contains(t, lines[i], "--user "+operatorUser)
-			assert.NotContains(t, lines[i], "alice")
+			assert.True(t, strings.HasSuffix(lines[i], " CLUSTER NODES"), lines[i])
+			assert.NotContains(t, lines[i], "op-env")
 		}
 	})
 
-	t.Run("ROLE calls ignore VALKEYCLI_USER and VALKEYCLI_AUTH without the mount", func(t *testing.T) {
+	t.Run("CLUSTER NODES calls ignore VALKEYCLI_USER and VALKEYCLI_AUTH without the mount", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
 		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
@@ -465,9 +525,12 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, strings.HasPrefix(string(auth), " "), string(auth))
 		assert.NotContains(t, string(auth), "--user")
+		lines := strings.Split(strings.TrimSuffix(string(auth), "\n"), "\n")
+		require.Len(t, lines, 1)
+		assert.True(t, strings.HasSuffix(lines[0], " CLUSTER NODES"), lines[0])
 	})
 
-	t.Run("ROLE calls use VALKEY_USER and VALKEYCLI_AUTH in a pod without the mount", func(t *testing.T) {
+	t.Run("CLUSTER NODES calls use VALKEY_USER and VALKEYCLI_AUTH in a pod without the mount", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
 		cmd.Env = append(cmd.Env, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
@@ -476,14 +539,13 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
-		// Three ROLE answers, then the CLUSTER NODES call the slot-assignment
-		// check sends once ROLE reports a primary.
-		require.Len(t, lines, 4)
+		// Three polls: the first two report a replica, the third a primary.
+		require.Len(t, lines, 3)
 		for _, line := range lines {
 			assert.True(t, strings.HasPrefix(line, "env-pw "), line)
 			assert.Contains(t, line, "--user "+operatorUser)
+			assert.True(t, strings.HasSuffix(line, " CLUSTER NODES"), line)
 		}
-		assert.Contains(t, lines[3], "CLUSTER NODES")
 	})
 }
 

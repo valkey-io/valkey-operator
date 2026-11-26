@@ -12,12 +12,12 @@
 # could then full-sync to that older or empty dataset. When the previous run
 # was a primary with a replica that can be promoted, this script:
 #
-#   1. waits until every such replica is a primary or follows another node.
-#      Replicas reconnect by address, and the restarted container keeps the
-#      pod address, so a wiped server that started at once would be synced
-#      from before the failover. The wait is capped at six
-#      cluster-node-timeouts, at most 300s, which the default startup probe
-#      allows for;
+#   1. waits until every such replica is a primary with a slot assignment or
+#      follows another node. Replicas reconnect by address, and the restarted
+#      container keeps the pod address, so a wiped server that started at
+#      once would be synced from before the failover. The wait is capped at
+#      six cluster-node-timeouts, at most 300s, which the default startup
+#      probe allows for;
 #   2. then empties /data, so the server starts as a new, empty node, like a
 #      recreated pod, and the operator attaches it to the promoted primary.
 #      If a replica has not moved on by the cap, the identity and the
@@ -90,18 +90,6 @@ previous_primary_id() {
     awk '$3 ~ /myself/ && $3 ~ /master/ { print $1 }' "$nodes_conf"
 }
 
-# own_address prints this node's ip and hostname, space separated. The port is
-# cut at the last colon, so an IPv6 address keeps its own.
-own_address() {
-    awk '$3 ~ /myself/ {
-        split($2, parts, "@")                 # ip:port | cport,hostname,...
-        endpoint = parts[1]
-        sub(/:[0-9]+$/, "", endpoint)         # drop the port
-        n = split(parts[2], extra, ",")       # extra[2] is the hostname, if any
-        print endpoint, (n >= 2 ? extra[2] : "")
-    }' "$nodes_conf"
-}
-
 # promotable_replicas ID prints the replicas of primary ID that can take over,
 # as ip:port per line: not flagged fail or noaddr (unreachable). A nofailover
 # replica counts too: the operator promotes it with TAKEOVER.
@@ -147,10 +135,14 @@ load_operator_auth() {
     fi
 }
 
-# node_owns_slots IP PORT checks the node's own CLUSTER NODES assignment,
-# including in-flight migration markers, as resolveRole does. A restarting
-# replica can report master before rejoining its primary, without owning slots.
-node_owns_slots() {
+# replica_moved_on IP PORT succeeds once the replica reports itself a primary
+# with a slot assignment, or a replica of another node. One CLUSTER NODES
+# reply supplies the role, the primary ID and the assignment from the same
+# view, as resolveRole does. A restarting replica can report master before
+# rejoining its primary, without owning slots.
+# Replies use the data dir: the root filesystem may be read-only, and a call
+# cut short by the timeout must not hold a pipe open.
+replica_moved_on() {
     reply="$data_dir/.cluster-reply"
     load_operator_auth
     if ! timeout_cmd "$cli_timeout" valkey-cli -t "$cli_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} CLUSTER NODES > "$reply" 2>/dev/null; then
@@ -158,49 +150,42 @@ node_owns_slots() {
         return 1
     fi
     rc=0
-    awk '
+    awk -v me="$me" '
         { sub(/\r$/, "") }
         $3 ~ /(^|,)myself(,|$)/ {
             # A malformed self entry must not count as a slot assignment: the
             # node ID is 40 hex characters and the config epoch is numeric.
-            if (NF < 8 || $1 !~ /^[0-9a-fA-F]{40}$/ || $7 !~ /^[0-9]+$/) exit
+            if (NF < 8 || length($1) != 40 || $1 ~ /[^0-9a-fA-F]/ || $7 !~ /^[0-9]+$/) exit
+            is_master = ($3 ~ /(^|,)master(,|$)/)
+            is_slave = ($3 ~ /(^|,)slave(,|$)/)
+            if (is_master == is_slave) exit
+            if (is_slave) {
+                # The fourth field is the primary node ID. Prefixes keep the
+                # comparison textual when both IDs are all digits.
+                found = (length($4) == 40 && $4 !~ /[^0-9a-fA-F]/ && ("id:" $4) != ("id:" me))
+                exit
+            }
             for (i = 9; i <= NF; i++) {
-                if ($i ~ /^\[[0-9]+-(>|<)-[0-9a-fA-F]{40}\]$/ && substr($i, 2) + 0 <= 16383) marker = 1
-                else if ($i ~ /^[0-9]+$/ && $i + 0 <= 16383) owned = 1
-                else if ($i ~ /^[0-9]+-[0-9]+$/) {
+                if ($i ~ /^\[[0-9]+-[<>]-[0-9a-fA-F]+\]$/ && length($i) - index($i, "-") == 43 && substr($i, 2) + 0 <= 16383) marker = 1
+                else if (substr($i, 1, 1) == "[") continue
+                else if ($i ~ /^[0-9]+$/) {
+                    if ($i + 0 <= 16383) owned = 1
+                    else ranges_invalid = 1
+                } else if ($i ~ /^[0-9]+-[0-9]+$/) {
                     split($i, bounds, "-")
                     if (bounds[1] + 0 <= bounds[2] + 0 && bounds[2] + 0 <= 16383) owned = 1
-                    else invalid = 1
-                } else invalid = 1
+                    else ranges_invalid = 1
+                } else ranges_invalid = 1
             }
-            found = !invalid && (marker || owned)
+            # An invalid plain field discards the owned ranges of the line,
+            # not the markers, as the Go parser does.
+            found = marker || (owned && !ranges_invalid)
             exit
         }
         END { exit !found }
     ' "$reply" || rc=$?
     rm -f "$reply"
     return "$rc"
-}
-
-# replica_moved_on IP PORT succeeds once the replica reports itself a primary
-# with a slot assignment, or a replica of another node. Replies use the data
-# dir: the root filesystem may be read-only, and a call cut short by the
-# timeout must not hold a pipe open.
-replica_moved_on() {
-    reply="$data_dir/.role-reply"
-    load_operator_auth
-    if ! timeout_cmd "$cli_timeout" valkey-cli -t "$cli_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} ROLE > "$reply" 2>/dev/null; then
-        rm -f "$reply"
-        return 1
-    fi
-    role=$(sed -n 1p "$reply" | tr -d '\r')
-    primary=$(sed -n 2p "$reply" | tr -d '\r')
-    rm -f "$reply"
-    case $role in
-        master) node_owns_slots "$1" "$2" ;;
-        slave) [ -n "$primary" ] && [ "$primary" != "$my_ip" ] && [ "$primary" != "$my_hostname" ] ;;
-        *) return 1 ;;
-    esac
 }
 
 # wait_for_handoff SECONDS succeeds once every replica in $replicas has moved
@@ -223,9 +208,6 @@ wait_for_handoff() {
 if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
     replicas=$(promotable_replicas "$me")
     if [ -n "$replicas" ]; then
-        address=$(own_address)
-        my_ip=${address%% *}
-        my_hostname=${address#* }
         # Six cluster-node-timeouts, at most 300s, which the default startup
         # probe of the container allows for (startupFailureThreshold).
         cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))

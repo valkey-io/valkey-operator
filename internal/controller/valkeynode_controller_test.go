@@ -2257,11 +2257,18 @@ var _ = Describe("ValkeyNode updateStatus role", func() {
 		Expect(updated.Status.ClusterNodeID).To(Equal("id-1"))
 		Expect(updated.Status.DataVolumeUID).To(Equal(string(pod.UID)))
 
-		By("replacing the pod with an unready one of a new UID")
+		By("keeping both while the pod is missing")
 		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
 		Eventually(func() bool {
 			return apierrors.IsNotFound(k8sClient.Get(ctx, podKey, &corev1.Pod{}))
 		}).Should(BeTrue())
+		_, err = r.updateStatus(ctx, node, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), updated)).To(Succeed())
+		Expect(updated.Status.ClusterNodeID).To(Equal("id-1"))
+		Expect(updated.Status.DataVolumeUID).To(Equal(string(pod.UID)))
+
+		By("replacing the pod with an unready one of a new UID")
 		replacement := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: podKey.Name, Namespace: podKey.Namespace, Labels: pod.Labels},
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "valkey/valkey:9.0.0"}}},

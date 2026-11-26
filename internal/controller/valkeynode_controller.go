@@ -1136,6 +1136,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 	role := ""
 	readID := ""
 	volumeUID := dataVolumeUID(node, pvc, pod)
+	// Without persistence the pod is the volume. A pod not found may still be
+	// running where getPod no longer selects it, so the recorded ID is kept
+	// until a pod with another UID shows the volume was replaced.
+	volumeUnknown := node.Spec.Persistence == nil && pod == nil
 	if ready {
 		target := node.DeepCopy()
 		target.Status.PodName = pod.Name
@@ -1160,8 +1164,10 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 
 		// Read the recorded values before overwriting them: the ID is kept
 		// only while the volume is the one it was recorded against.
-		current.Status.ClusterNodeID, current.Status.DataVolumeUID = nextClusterNodeID(
-			current.Status.ClusterNodeID, current.Status.DataVolumeUID, volumeUID, readID), volumeUID
+		if !volumeUnknown {
+			current.Status.ClusterNodeID, current.Status.DataVolumeUID = nextClusterNodeID(
+				current.Status.ClusterNodeID, current.Status.DataVolumeUID, volumeUID, readID), volumeUID
+		}
 
 		if node.Spec.Persistence != nil {
 			pvcStatus, pvcReason, pvcMessage := pvcStatusCondition(pvc)

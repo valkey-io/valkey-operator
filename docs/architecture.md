@@ -44,7 +44,7 @@ Both are triggers only: the ValkeyNode controller re-reads its own state on ever
 
 The role follows the pod, not the workload: it is cleared when the pod is not ready, kept at its last-known value on a transient read failure, and preserved while the node's StatefulSet/Deployment rolls (`status.ready` still reports the rollout).
 
-The controller also records `status.clusterNodeID` from the same CLUSTER NODES read and `status.dataVolumeUID`, the UID of the PVC with persistence or of the pod without. It is the only writer of both. The recorded ID survives a read failure while the volume UID is unchanged and is cleared when the volume is replaced or missing, since the node then comes back with a new ID.
+The controller also records `status.clusterNodeID` from the same CLUSTER NODES read and `status.dataVolumeUID`, the UID of the PVC with persistence or of the pod without. It is the only writer of both. The recorded ID survives a read failure while the volume UID is unchanged and is cleared when the volume is replaced or the PVC is missing, since the node then comes back with a new ID. Without persistence, a missing pod leaves both unchanged: `getPod` can miss a pod that is still running, for example after a label edit.
 
 ### RolePoller
 

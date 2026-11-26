@@ -556,8 +556,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Clear any stale Degraded condition from earlier phases (e.g.
 		// NodeAddFailed set when replicas couldn't attach to primaries
 		// that hadn't received slots yet during scale-out). A users ACL
-		// failure is not stale: only the ACL step clears it.
-		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		// failure is not stale: only the ACL step clears it. Nor is a
+		// failed migration: this pass may be its retry, which can fail
+		// again; the healthy branch clears it once the slots are balanced.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded,
+			valkeyiov1alpha1.ReasonUsersACLUnresolved, valkeyiov1alpha1.ReasonRebalanceFailed)
 		// Name the shard receiving this batch. With more than one shard
 		// under its share, the name changes as each one fills.
 		msg := "Rebalancing slots across primaries"
@@ -1904,6 +1907,54 @@ func (r *ValkeyClusterReconciler) countReadyShards(state *valkey.ClusterState, c
 
 const rebalanceSlotBatchSize = 400
 
+// slotMigrationFailedError marks an error surfaced for a slot migration
+// that failed asynchronously after CLUSTER MIGRATESLOTS accepted it.
+// Callers that report drain or rebalance failures can use it to keep
+// this failure class distinguishable from other errors.
+type slotMigrationFailedError struct{ err error }
+
+func (e *slotMigrationFailedError) Error() string { return e.err.Error() }
+func (e *slotMigrationFailedError) Unwrap() error { return e.err }
+
+// asyncSlotMigrationFailed builds the surfaced error for a migration the
+// operator issued earlier that failed asynchronously.
+func asyncSlotMigrationFailed(src, dst, message string) error {
+	return &slotMigrationFailedError{err: fmt.Errorf("slot migration from %s to %s failed: %s", src, dst, message)}
+}
+
+// migrationPending reports whether a migration is still running on the
+// move's source. A recent asynchronous failure of this move comes back as a
+// slotMigrationFailedError, so it reaches the same Degraded and Warning path
+// as a synchronous MIGRATESLOTS error instead of being re-issued every
+// reconcile.
+func migrationPending(ctx context.Context, move *valkey.SlotMove, ranges []valkey.SlotsRange) (bool, error) {
+	inProgress, failed, err := valkey.SlotMigrationState(ctx, move.Src, ranges, move.Dst.Id)
+	if err != nil {
+		return false, err
+	}
+	if inProgress {
+		return true, nil
+	}
+	if failed != nil {
+		return false, asyncSlotMigrationFailed(move.Src.Address, move.Dst.Address, failed.Message)
+	}
+	return false, nil
+}
+
+// unknownPeer returns the side of the move that has not yet learned the other
+// through gossip, and the node it is missing, or nil once both know each
+// other. The source cannot address an unknown destination, and the
+// destination refuses the handshake from an unknown source.
+func unknownPeer(move *valkey.SlotMove) (node, peer *valkey.NodeState) {
+	if !move.Src.KnowsNode(move.Dst.Id) {
+		return move.Src, move.Dst
+	}
+	if !move.Dst.KnowsNode(move.Src.Id) {
+		return move.Dst, move.Src
+	}
+	return nil, nil
+}
+
 // rebalanceSlots plans one slot move and starts it. It returns the move while
 // the rebalance has work left, whether this pass migrated a batch or waited
 // for one in flight, and nil once the slots are balanced.
@@ -1914,7 +1965,8 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 
 	log := logf.FromContext(ctx)
-	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+	ranges := valkey.SlotsToRanges(move.Slots)
+	inProgress, err := migrationPending(ctx, move, ranges)
 	if err != nil {
 		return nil, err
 	}
@@ -1923,16 +1975,15 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 		return move, nil
 	}
 
-	if !move.Src.KnowsNode(move.Dst.Id) {
-		log.V(1).Info("destination not yet visible to source via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address, "dstId", move.Dst.Id)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", move.Src.Address, move.Dst.Address)
+	if node, peer := unknownPeer(move); node != nil {
+		log.V(1).Info("source and destination do not yet know each other via gossip; will retry", "node", node.Address, "peer", peer.Address, "peerId", peer.Id)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", node.Address, peer.Address)
 		return move, nil
 	}
 
 	log.V(1).Info("rebalancing slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancing", "RebalanceSlots", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
 
-	ranges := valkey.SlotsToRanges(move.Slots)
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			log.V(1).Info("slots no longer served by source; will retry with fresh state", "src", move.Src.Address, "dst", move.Dst.Address)
@@ -1978,13 +2029,24 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, true
 	case err != nil:
 		log.Error(err, "scale-in draining failed")
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
+		// A migration that failed asynchronously after MIGRATESLOTS
+		// accepted it is the same failure class as the rebalance
+		// path's, so surface it with the same event; other drain
+		// errors keep the DrainFailed event.
+		if _, ok := errors.AsType[*slotMigrationFailedError](err); ok {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SlotRebalanceFailed", "ScaleIn", "Draining excess shards: %v", err)
+		} else {
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DrainFailed", "ScaleIn", "Failed to drain excess shards: %v", err)
+		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed, err.Error(), metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	case drained:
-		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
+		// Keep a failed migration's Degraded, as the rebalance does: this
+		// pass may be its retry.
+		removeConditionUnlessReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded,
+			valkeyiov1alpha1.ReasonUsersACLUnresolved, valkeyiov1alpha1.ReasonRebalanceFailed)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Scaling in cluster", metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonRebalancingSlots, "Rebalancing slots for scale-in", metav1.ConditionTrue)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
@@ -2016,23 +2078,31 @@ func setScaleInBlocked(cluster *valkeyiov1alpha1.ValkeyCluster, msg string) {
 }
 
 // splitShardsForScaleIn returns the in-spec shards, emptiest first, and the
-// excess shards that still own slots. Shards whose index is unknown are in
-// neither list. PlanDrainMove sends slots to the first destination, so putting
-// the emptiest first keeps them from being moved twice by the rebalance.
+// excess shards that still own slots, both with ties in shard index order.
+// Shards whose index is unknown are in neither list. PlanDrainMove sends slots
+// to the first destination, so putting the emptiest first keeps them from
+// being moved twice by the rebalance. The scrape lists shards in no fixed
+// order; sorting by index keeps a failed move's source and destination the
+// same on the next pass.
 func splitShardsForScaleIn(shards []*valkey.ShardState, nodes *valkeyiov1alpha1.ValkeyNodeList, expectedShards int) (remaining, draining []*valkey.ShardState) {
+	index := make(map[*valkey.ShardState]int, len(shards))
 	for _, shard := range shards {
 		shardIndex := shardIndexFromState(shard, nodes)
 		if shardIndex < 0 {
 			continue
 		}
+		index[shard] = shardIndex
 		if shardIndex < expectedShards {
 			remaining = append(remaining, shard)
 		} else if len(shard.Slots) > 0 {
 			draining = append(draining, shard)
 		}
 	}
-	slices.SortStableFunc(remaining, func(a, b *valkey.ShardState) int {
-		return cmp.Compare(countSlots(a.Slots), countSlots(b.Slots))
+	slices.SortFunc(remaining, func(a, b *valkey.ShardState) int {
+		return cmp.Or(cmp.Compare(countSlots(a.Slots), countSlots(b.Slots)), cmp.Compare(index[a], index[b]))
+	})
+	slices.SortFunc(draining, func(a, b *valkey.ShardState) int {
+		return cmp.Compare(index[a], index[b])
 	})
 	return remaining, draining
 }
@@ -2063,7 +2133,8 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return false, err
 	}
 
-	inProgress, err := valkey.SlotMigrationInProgress(ctx, move.Src)
+	ranges := valkey.SlotsToRanges(move.Slots)
+	inProgress, err := migrationPending(ctx, move, ranges)
 	if err != nil {
 		return false, err
 	}
@@ -2072,15 +2143,14 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 		return true, nil
 	}
 
-	if !move.Src.KnowsNode(move.Dst.Id) {
-		log.V(1).Info("drain destination not yet known to source", "src", move.Src.Address, "dst", move.Dst.Address)
+	if node, peer := unknownPeer(move); node != nil {
+		log.V(1).Info("drain source and destination do not yet know each other", "node", node.Address, "peer", peer.Address)
 		return true, nil
 	}
 
 	log.V(1).Info("draining slots", "src", move.Src.Address, "dst", move.Dst.Address, "slots", len(move.Slots))
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsDraining", "ScaleIn", "Moving %d slots from %s to %s", len(move.Slots), move.Src.Address, move.Dst.Address)
 
-	ranges := valkey.SlotsToRanges(move.Slots)
 	if err := valkey.MigrateSlotsAtomic(ctx, move.Src, move.Dst, ranges); err != nil {
 		if valkey.IsSlotsNotServedByNode(err) {
 			return true, nil

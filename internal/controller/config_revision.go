@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 
@@ -58,31 +57,21 @@ func (r *ValkeyClusterReconciler) setDesiredConfigRevision(ctx context.Context,
 	return nil
 }
 
-// errLiveConfigRevisionNotCached means the parent's cache does not hold the
-// content of a node's live config revision yet, while the API server does.
-// The parent requeues rather than treat it as unknown, which would roll the
-// node to the desired revision.
-var errLiveConfigRevisionNotCached = errors.New("live config revision not in cache")
-
 // liveRevisionContent returns the content of the pinned config revision rev
 // that node's live workload references, from key valkey-<rev>.conf of the
-// node's ConfigMap. A cache miss is confirmed through the APIReader. If the
-// API server has the key, the cache trails it and errLiveConfigRevisionNotCached
-// is returned. If the ConfigMap or the key is gone, found is false and the
-// caller uses the desired revision, so the node rolls through the usual gate.
+// node's ConfigMap. A cache miss is confirmed through the APIReader. The node
+// writes a revision key only when it is missing and only with content that
+// hashes to the revision, so a lagging cache can miss the key but never hold
+// other content for it. If the ConfigMap or the key is gone, found is false
+// and the caller uses the desired revision, so the node rolls through the
+// usual gate.
 func (r *ValkeyClusterReconciler) liveRevisionContent(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode,
 	rev string) (content string, found bool, err error) {
 	content, found, err = readConfigRevision(ctx, r.Client, node, rev)
 	if err != nil || found {
 		return content, found, err
 	}
-	if _, found, err = readConfigRevision(ctx, r.uncachedReader(), node, rev); err != nil {
-		return "", false, err
-	}
-	if found {
-		return "", false, errLiveConfigRevisionNotCached
-	}
-	return "", false, nil
+	return readConfigRevision(ctx, r.uncachedReader(), node, rev)
 }
 
 // readConfigRevision reads key valkey-<rev>.conf of the node's ConfigMap.

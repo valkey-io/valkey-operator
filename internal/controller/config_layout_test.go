@@ -632,19 +632,22 @@ var _ = Describe("config layout", func() {
 		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonConfigMapError))
 	})
 
-	It("requeues the parent while its cache lacks the live revision", func() {
+	It("reads the live revision from the API server when its cache lacks it", func() {
 		newCluster("cfg-cache", 1, map[string]string{"appendfsync": "everysec"})
 		settle()
 		name := valkeyNodeName(cluster.Name, 0, 0)
 		rev := getNode(name).Spec.ConfigRevision
-		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["appendfsync"] = "always" })
-
 		pr.Client = staleConfigMapClient{Client: k8sClient}
-		Expect(parentPass()).To(BeTrue())
-		Expect(getNode(name).Spec.ConfigRevision).To(Equal(rev), "an unread live revision must not roll the node")
 
-		pr.Client = k8sClient
-		Expect(parentPass()).To(BeTrue())
+		By("keeping the live revision when only a live key changes")
+		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["maxmemory"] = "100mb" })
+		parentPass()
+		Expect(getNode(name).Spec.Config).To(HaveKeyWithValue("maxmemory", "100mb"))
+		Expect(getNode(name).Spec.ConfigRevision).To(Equal(rev), "the uncached read must not roll the node")
+
+		By("naming the desired revision when a restart-only key changes")
+		updateCluster(func(c *valkeyiov1alpha1.ValkeyCluster) { c.Spec.Config["appendfsync"] = "always" })
+		parentPass()
 		Expect(getNode(name).Spec.ConfigRevision).NotTo(Equal(rev))
 	})
 

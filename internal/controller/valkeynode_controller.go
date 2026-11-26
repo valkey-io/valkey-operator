@@ -377,21 +377,9 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 		result, err = liveApplyResult(reason, err)
 		return true, result, err
 	}
-	if len(applied) > 0 {
-		if condErr := r.setLiveConfigApplied(ctx, node, applied); condErr != nil {
-			log.Error(condErr, "failed to set LiveConfigApplied condition")
-			return true, ctrl.Result{}, condErr
-		}
-	} else {
-		// No allowlisted keys remain in spec.config and any resets succeeded. Clear any
-		// stale condition so it reverts to absent, which the cluster
-		// controller treats the same as True. Without this, a prior False
-		// (e.g. from a CONFIG SET failure) would persist after the offending
-		// key is removed and block cluster progress indefinitely.
-		if condErr := r.clearLiveConfigApplied(ctx, node); condErr != nil {
-			log.Error(condErr, "failed to clear LiveConfigApplied condition")
-			return true, ctrl.Result{}, condErr
-		}
+	if condErr := r.setLiveConfigApplied(ctx, node, applied); condErr != nil {
+		log.Error(condErr, "failed to record applied live config")
+		return true, ctrl.Result{}, condErr
 	}
 
 	// Apply the ACL live too, before the WorkloadRollPending requeue: ACL is no
@@ -571,16 +559,19 @@ func (r *ValkeyNodeReconciler) clearTrustBundleCondition(ctx context.Context, no
 	return nil
 }
 
-// setLiveConfigApplied sets LiveConfigApplied=True and records applied as
-// status.appliedLiveConfig in the same write, so the two cannot disagree.
+// setLiveConfigApplied records the values the server accepted. The condition
+// is present only while spec.config contains a live-settable key.
 func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode, applied map[string]string) error {
 	entries := configEntries(applied)
 	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
 		changed := false
-		if !shouldSkipConditionUpdate(current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+		condition := valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied
+		if len(specLiveKeys(current.Spec.Config)) == 0 {
+			changed = meta.RemoveStatusCondition(&current.Status.Conditions, condition)
+		} else if !shouldSkipConditionUpdate(current.Status.Conditions, condition,
 			metav1.ConditionTrue, valkeyiov1alpha1.ValkeyNodeReasonApplied, liveConfigAppliedMessage, current.Generation) {
 			changed = meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied,
+				Type:               condition,
 				Status:             metav1.ConditionTrue,
 				Reason:             valkeyiov1alpha1.ValkeyNodeReasonApplied,
 				Message:            liveConfigAppliedMessage,
@@ -589,24 +580,6 @@ func (r *ValkeyNodeReconciler) setLiveConfigApplied(ctx context.Context, node *v
 		}
 		if !slices.Equal(current.Status.AppliedLiveConfig, entries) {
 			current.Status.AppliedLiveConfig = entries
-			changed = true
-		}
-		return changed
-	})
-	if err != nil {
-		return fmt.Errorf("patch LiveConfigApplied condition: %w", err)
-	}
-	return nil
-}
-
-// clearLiveConfigApplied removes the LiveConfigApplied condition and clears
-// status.appliedLiveConfig in one write. It runs when spec.config holds no
-// allowlisted key.
-func (r *ValkeyNodeReconciler) clearLiveConfigApplied(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
-	_, err := r.patchStatus(ctx, node, r.Client, func(current *valkeyiov1alpha1.ValkeyNode) bool {
-		changed := meta.RemoveStatusCondition(&current.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)
-		if current.Status.AppliedLiveConfig != nil {
-			current.Status.AppliedLiveConfig = nil
 			changed = true
 		}
 		return changed
@@ -1557,13 +1530,12 @@ func (r *ValkeyNodeReconciler) reloadTrustBundle(ctx context.Context, node *valk
 
 // applyLiveConfig applies the live-settable subset of the node's desired config
 // via CONFIG SET and resets previously applied keys removed from spec.config.
-// It returns only the desired live values so successful resets are dropped
-// from status.appliedLiveConfig. On failure the previous status is retained.
+// It returns both desired values and resets. Keeping the defaults in status
+// lets us reapply them after a restart that booted with a stale live.conf.
 func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) (map[string]string, error) {
-	desired := liveConfigToApply(node.Spec.Config)
-	params := maps.Clone(desired)
+	params := liveConfigToApply(node.Spec.Config)
 	for _, entry := range node.Status.AppliedLiveConfig {
-		if _, stillManaged := desired[entry.Name]; stillManaged {
+		if _, stillManaged := params[entry.Name]; stillManaged {
 			continue
 		}
 		if value, supported := liveConfigDefaults[entry.Name]; supported {
@@ -1571,7 +1543,7 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 		}
 	}
 	if len(params) == 0 {
-		return desired, nil
+		return params, nil
 	}
 
 	c, err := r.newConfigClient(ctx, r, node)
@@ -1582,7 +1554,7 @@ func (r *ValkeyNodeReconciler) applyLiveConfig(ctx context.Context, node *valkey
 	if err := c.SetConfig(ctx, params); err != nil {
 		return nil, err
 	}
-	return desired, nil
+	return params, nil
 }
 
 // parseClusterEnabled reports whether the node runs in cluster mode, from the

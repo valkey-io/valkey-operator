@@ -43,7 +43,7 @@ maxmemory         # There are no safeguards, ensure you do not exceed your conta
 maxmemory-policy
 ```
 
-Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. A pod that restarts before the new file reaches it boots with the previous value, and the operator sets the current value with CONFIG SET once the pod is ready. Changing any other key rolls the pods one at a time.
+Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. A pod that restarts before the new file reaches it boots with the previous value, and the operator sets the current value with CONFIG SET once the pod is ready. For a removed setting, the node records and reapplies the default even if the mounted file still contains the old value. Changing any other key rolls the pods one at a time.
 
 #### Failover tuning
 

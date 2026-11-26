@@ -3690,9 +3690,9 @@ spec:
                 type: string
               appliedLiveConfig:
                 description: |-
-                  AppliedLiveConfig holds the live-settable keys of spec.config that the
-                  server last accepted through CONFIG SET, recorded as LiveConfigApplied
-                  becomes True.
+                  AppliedLiveConfig holds the live-settable settings the server last accepted
+                  through CONFIG SET. It retains defaults for settings removed from spec.config
+                  so they can be reapplied if the server restarts with a stale live.conf.
                 items:
                   description: AppliedLiveConfigEntry is one live-settable directive
                     the server accepted.

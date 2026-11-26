@@ -364,9 +364,9 @@ type ValkeyNodeStatus struct {
 	// +optional
 	ReplicationPasswordAppliedTime *metav1.Time `json:"replicationPasswordAppliedTime,omitempty"`
 
-	// AppliedLiveConfig holds the live-settable keys of spec.config that the
-	// server last accepted through CONFIG SET, recorded as LiveConfigApplied
-	// becomes True.
+	// AppliedLiveConfig holds the live-settable settings the server last accepted
+	// through CONFIG SET. It retains defaults for settings removed from spec.config
+	// so they can be reapplied if the server restarts with a stale live.conf.
 	// +listType=map
 	// +listMapKey=name
 	// +optional

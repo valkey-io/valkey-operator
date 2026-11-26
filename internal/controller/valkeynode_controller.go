@@ -404,7 +404,7 @@ func (r *ValkeyNodeReconciler) applyLiveSettings(ctx context.Context, node *valk
 	// requeues the node, and ensureNodeConfig writes live.conf again and
 	// reports ConfigMapError if it still fails.
 	if current.Spec.ConfigRevision != "" {
-		if err := r.ensureLiveConfig(ctx, current); err != nil {
+		if err := r.ensureLiveConfig(ctx, current); err != nil && !errors.Is(err, errTransientRequeue) {
 			log.Error(err, "failed to write live.conf")
 		}
 	}

@@ -188,7 +188,9 @@ func hasValue(data map[string]string, key, want string) bool {
 // ensureLiveConfig patches live.conf in the node's ConfigMap when it differs
 // from the node's status. It writes nothing else. A missing ConfigMap or one
 // the node does not control is left to ensureNodeConfig, which runs earlier
-// in the reconcile and again on the requeue.
+// in the reconcile and again on the requeue. A conflict means the cache lags
+// a write ensureNodeConfig made earlier in the reconcile, and returns
+// errTransientRequeue.
 func (r *ValkeyNodeReconciler) ensureLiveConfig(ctx context.Context, node *valkeyiov1alpha1.ValkeyNode) error {
 	cm := &corev1.ConfigMap{}
 	if err := r.Get(ctx, client.ObjectKey{Name: nodeConfigMapName(node.Name), Namespace: node.Namespace}, cm); err != nil {
@@ -207,6 +209,9 @@ func (r *ValkeyNodeReconciler) ensureLiveConfig(ctx context.Context, node *valke
 	}
 	cm.Data[liveConfigFileKey] = live
 	if err := r.Patch(ctx, cm, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return errTransientRequeue
+		}
 		return err
 	}
 	logf.FromContext(ctx).V(1).Info("updated node ConfigMap", "name", cm.Name, "keys", []string{liveConfigFileKey})

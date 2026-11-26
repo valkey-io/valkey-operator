@@ -236,6 +236,19 @@ func TestEnsureLiveConfigWritesOnlyLiveConf(t *testing.T) {
 		assert.Equal(t, "maxmemory 100mb\n", cm.Data[liveConfigFileKey], "live.conf is left for the requeue")
 	})
 
+	t.Run("returns errTransientRequeue when the patch conflicts", func(t *testing.T) {
+		node := newNode()
+		// The cache lags a write ensureNodeConfig made earlier in the
+		// reconcile, so the optimistic lock rejects the patch.
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(newConfigMap(node, true)).WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return apierrors.NewConflict(corev1.Resource("configmaps"), obj.GetName(), errors.New("stale"))
+			},
+		}).Build()
+		r := &ValkeyNodeReconciler{Client: c, APIReader: c, Scheme: scheme}
+		require.ErrorIs(t, r.ensureLiveConfig(context.Background(), node), errTransientRequeue)
+	})
+
 	t.Run("creates no ConfigMap", func(t *testing.T) {
 		r, c := reconciler()
 		require.NoError(t, r.ensureLiveConfig(context.Background(), newNode()))

@@ -1399,6 +1399,14 @@ func TestAssignableSlotsHoldsTheRangesOfAPrimaryAReplicaFollows(t *testing.T) {
 	replacement[0] = blobResult("new")
 	replacement[1] = blobResult("shard-9")
 	replacement[4] = blobResult("new 10.0.0.3:6379@16379 myself,master - 0 0 3 connected\n")
+	// The follower's own scrape fails, so only the viewer's table lists it.
+	followerUnscraped := replicaOf("ghi", "10.0.0.3")
+	followerUnscraped[3] = valkeyErrorResult("NOPERM this user has no permissions to run the 'cluster|info' command")
+	// A node that answers at the follower's address under another id.
+	followerReplaced := healthyScrape()
+	followerReplaced[0] = blobResult("xyz")
+	followerReplaced[1] = blobResult("shard-8")
+	followerReplaced[4] = blobResult("xyz 10.0.0.2:6379@16379 myself,master - 0 0 4 connected\n")
 
 	for _, tc := range []struct {
 		name       string
@@ -1406,6 +1414,25 @@ func TestAssignableSlotsHoldsTheRangesOfAPrimaryAReplicaFollows(t *testing.T) {
 		byAddr     map[string][]vclient.ValkeyResult
 		assignable []SlotsRange
 	}{
+		{"held while the follower's own scrape fails", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": followerUnscraped,
+			}, nil},
+		{"assignable once the unscraped follower's address is no longer a pod", []string{"10.0.0.1"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+			}, []SlotsRange{{0, 4095}}},
+		{"assignable once the follower's address answered as another id", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": followerReplaced,
+			}, []SlotsRange{{0, 4095}}},
+		{"a scraped follower's own view wins over a peer's table", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.3"),
+				"10.0.0.2:6379": replicaOf("abc", "10.0.0.3"),
+			}, []SlotsRange{{0, 4095}}},
 		{"held once the primary's pod is gone", []string{"10.0.0.1", "10.0.0.2"},
 			map[string][]vclient.ValkeyResult{
 				"10.0.0.1:6379": viewer("10.0.0.3"),

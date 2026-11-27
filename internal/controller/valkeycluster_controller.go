@@ -2537,6 +2537,8 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 					why = "is kept while the scrape reaches no node"
 				case holdUnseen:
 					why = "has a node the scrape does not show"
+				case holdUnknownSlots:
+					why = "has an unreachable node that may own slots no scraped node lists"
 				case holdUnreachable:
 					why = "owns slots and its primary is unreachable"
 				}
@@ -2705,10 +2707,11 @@ func candidateIDs(node *valkeyiov1alpha1.ValkeyNode, known []string, views map[s
 type shardHold int
 
 const (
-	holdBlind       shardHold = iota + 1 // no node answered the scrape
-	holdUnseen                           // a recorded ID is in no scraped table
-	holdUnreachable                      // a slot owner did not answer
-	holdAnswered                         // a slot owner answered
+	holdBlind        shardHold = iota + 1 // no node answered the scrape
+	holdUnseen                            // a recorded ID is in no scraped table
+	holdUnknownSlots                      // an unreachable node may own slots no table lists
+	holdUnreachable                       // a slot owner did not answer
+	holdAnswered                          // a slot owner answered
 )
 
 // shardsHoldingSlots maps the shard index of every ValkeyNode that may hold
@@ -2722,7 +2725,10 @@ const (
 // keep a node, not to rule a primary out. A recorded ID that no scraped table
 // lists also keeps the shard: the forget hold keeps a recorded ID in the
 // tables, so the scrape missed the nodes that know it. When no node answered,
-// every shard is kept: a node with no recorded ID may still own slots.
+// every shard is kept: a node with no recorded ID may still own slots. A node
+// learns a primary's slots only from that primary, so while some slot is in no
+// table, an unreachable primary listed without slots may own it and keeps its
+// shard too. After a drain every slot is listed under another primary.
 func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) map[int]shardHold {
 	views := state.NodeViews()
 	type member struct {
@@ -2757,6 +2763,12 @@ func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valk
 		}
 	}
 	blind := len(state.AllNodes()) == 0
+	unlisted := len(state.UnlistedSlots()) > 0
+	// An ID no table lists is holdUnseen's case.
+	unknownSlots := func(id string) bool {
+		v, listed := views[id]
+		return unlisted && listed && !v.Scraped && !v.ListedWithSlots
+	}
 	for _, m := range members {
 		shard := m.shard
 		if blind {
@@ -2769,13 +2781,19 @@ func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valk
 			v := views[id]
 			if v.ListedWithSlots {
 				hold(shard, v)
+			} else if len(v.PrimaryIDs) == 0 && unknownSlots(id) {
+				keep(shard, holdUnknownSlots)
 			}
 			for _, p := range v.PrimaryIDs {
 				primary := views[p]
-				if !primary.ListedWithSlots || slices.ContainsFunc(shardsOfID[p], func(s int) bool { return s != shard }) {
+				if slices.ContainsFunc(shardsOfID[p], func(s int) bool { return s != shard }) {
 					continue
 				}
-				hold(shard, primary)
+				if primary.ListedWithSlots {
+					hold(shard, primary)
+				} else if unknownSlots(p) {
+					keep(shard, holdUnknownSlots)
+				}
 			}
 		}
 	}

@@ -1655,3 +1655,38 @@ func TestNodeViews(t *testing.T) {
 		}
 	})
 }
+
+func TestUnlistedSlots(t *testing.T) {
+	node := func(id, address, table string) *NodeState {
+		n := &NodeState{Id: id, Address: address}
+		n.SetClusterNodesForTesting(table)
+		return n
+	}
+	for _, tc := range []struct {
+		name  string
+		nodes []*NodeState
+		want  []SlotsRange
+	}{
+		{"every slot listed", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383\n"),
+		}, nil},
+		{"a range no table lists", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"x 10.0.0.9:6379@16379 master,fail? - 0 0 3 connected\n"),
+		}, []SlotsRange{{8192, 16383}}},
+		{"a failed peer's slots count as listed", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"),
+			node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n"+
+				"x 10.0.0.9:6379@16379 master,fail - 0 0 3 disconnected 8192-16383\n"),
+		}, nil},
+		{"no node answered", nil, []SlotsRange{{0, 16383}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &ClusterState{PendingNodes: tc.nodes}
+			if got := state.UnlistedSlots(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("unlisted slots = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -268,6 +268,25 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	return remaining
 }
 
+// UnlistedSlots returns the slots that no entry in any scraped CLUSTER NODES
+// table lists, failed owners included. A node learns a primary's slots only
+// from that primary's own messages, so a slot can be owned and still unlisted.
+func (s *ClusterState) UnlistedSlots() []SlotsRange {
+	remaining := []SlotsRange{{0, 16383}}
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			for _, slot := range entry.Slots {
+				var next []SlotsRange //nolint:prealloc
+				for _, base := range remaining {
+					next = append(next, SubtractSlotsRange(base, slot)...)
+				}
+				remaining = next
+			}
+		}
+	}
+	return remaining
+}
+
 // AssignableSlots returns the unassigned slots a new primary can be given. It
 // leaves out ranges a scraped node's CLUSTER NODES table gives to a primary
 // this pass did not scrape, at one of the pod addresses it set out to scrape.

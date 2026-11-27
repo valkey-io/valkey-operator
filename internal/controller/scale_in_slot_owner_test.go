@@ -401,6 +401,72 @@ func TestDeleteExcessValkeyNodesKeepsEveryExcessNodeWhenNoNodeAnswered(t *testin
 	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping excess ValkeyNode c-3-0: shard 3 is kept while the scrape reaches no node")
 }
 
+// TestDeleteExcessValkeyNodesKeepsShardWhosePrimarySlotsNoTableLists: the only
+// node that answered joined after the excess primary went down. It learned the
+// primary through gossip, which carries no slots, so it lists the primary
+// without them while their range has no owner.
+func TestDeleteExcessValkeyNodesKeepsShardWhosePrimarySlotsNoTableLists(t *testing.T) {
+	unknownP3 := clusterNodesLine("p3", "10.0.0.3", "master,fail?", "-")
+	for name, withReplica := range map[string]bool{"with a replica": true, "without a replica": false} {
+		t.Run(name, func(t *testing.T) {
+			inSpec, primary, replica := primaryNode(0), primaryNode(3), replicaNode(3)
+			primary.Status.ClusterNodeID = "p3"
+			replica.Status.ClusterNodeID = "r3"
+			shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
+			objs, members, want := []client.Object{inSpec, primary}, nodeList(inSpec, primary), []string{"c-3-0"}
+			if withReplica {
+				withPeers(shard0.Nodes[0], unknownP3, clusterNodesLine("r3", "10.0.1.3", "slave,fail?", "p3"))
+				objs, members, want = append(objs, replica), nodeList(inSpec, primary, replica), []string{"c-3-0", "c-3-1"}
+			} else {
+				withPeers(shard0.Nodes[0], unknownP3)
+			}
+			r, cluster, recorder := scaleInReconciler(t, objs...)
+			state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0}}
+
+			deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, members)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			assert.Equal(t, want, kept)
+			assert.True(t, nodeExists(t, r.Client, primary))
+			assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping excess ValkeyNode c-3-0: shard 3 has an unreachable node that may own slots no scraped node lists")
+		})
+	}
+}
+
+// TestDeleteExcessValkeyNodesDeletesDrainedShardWithUnreachablePrimary: every
+// slot is listed under an in-spec primary, so the excess primary listed
+// without slots was drained, even though it does not answer.
+func TestDeleteExcessValkeyNodesDeletesDrainedShardWithUnreachablePrimary(t *testing.T) {
+	drainedP3 := clusterNodesLine("p3", "10.0.0.3", "master,fail?", "-")
+	for name, withReplica := range map[string]bool{"replica answered": true, "no replica, pod pending": false} {
+		t.Run(name, func(t *testing.T) {
+			inSpec, primary, replica := primaryNode(0), primaryNode(3), replicaNode(3)
+			primary.Status.ClusterNodeID = "p3"
+			replica.Status.ClusterNodeID = "r3"
+			shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383})
+			withPeers(shard0.Nodes[0], drainedP3)
+			shards := []*valkey.ShardState{shard0}
+			objs, members := []client.Object{inSpec, primary}, nodeList(inSpec, primary)
+			if withReplica {
+				shards = append(shards, &valkey.ShardState{Id: "s3", PrimaryId: "p3", Nodes: []*valkey.NodeState{
+					withPeers(scrapedNode("r3", "10.0.1.3", "myself,slave", "p3"), drainedP3),
+				}})
+				objs, members = append(objs, replica), nodeList(inSpec, primary, replica)
+			} else {
+				primary.Status.PodIP = ""
+			}
+			r, cluster, _ := scaleInReconciler(t, objs...)
+			state := &valkey.ClusterState{Shards: shards}
+
+			deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, members)
+			require.NoError(t, err)
+			assert.True(t, deleted)
+			assert.Empty(t, kept)
+			assert.False(t, nodeExists(t, r.Client, primary))
+		})
+	}
+}
+
 // TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID: a node that
 // was down when the operator was upgraded has no recorded ID.
 func TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID(t *testing.T) {

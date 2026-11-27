@@ -2896,7 +2896,9 @@ spec:
               replicas:
                 description: |-
                   Deprecated: use replicasPerShard, which has the same meaning. A spec
-                  cannot set both. This field is removed in v1beta1.
+                  cannot set both. A new or changed value is rejected. Removing it
+                  requires replicasPerShard set to this same count in that update.
+                  An unset replicasPerShard counts as 0.
                 format: int32
                 minimum: 0
                 type: integer
@@ -4319,11 +4321,12 @@ spec:
                 description: |-
                   Valkey users managed by the operator.
 
-                  Deprecated: use spec.acl.users; removed in v1beta1.
+                  Deprecated: use spec.acl.users. A new or changed value is rejected.
+                  Removing it requires every user name on spec.acl.users in that update.
                 items:
                   description: |-
                     An UserAclSpec contains user, authorization, and permissions-related configurations.
-                    It is the legacy spec.users entry, replaced by ACLUserSpec and removed in v1beta1.
+                    It is the legacy spec.users entry, replaced by ACLUserSpec.
                   properties:
                     channels:
                       description: Channel restrictions
@@ -4477,6 +4480,28 @@ spec:
               message: bootstrap cannot be removed once set
               reason: FieldValueForbidden
               rule: '!has(oldSelf.bootstrap) || has(self.bootstrap)'
+            - fieldPath: .replicas
+              message: 'spec.replicas is deprecated and cannot be added or changed:
+                set spec.replicasPerShard to the stored spec.replicas and remove spec.replicas
+                in the same update. An absent spec.replicasPerShard counts as 0'
+              optionalOldSelf: true
+              reason: FieldValueForbidden
+              rule: '(!has(self.replicas) && (!oldSelf.hasValue() || !has(oldSelf.value().replicas)
+                || oldSelf.value().replicas == (has(self.replicasPerShard) ? self.replicasPerShard
+                : 0))) || (has(self.replicas) && oldSelf.hasValue() && has(oldSelf.value().replicas)
+                && self.replicas == oldSelf.value().replicas)'
+            - fieldPath: .users
+              message: 'spec.users is deprecated and cannot be added or changed: move
+                every user name to spec.acl.users and remove spec.users in the same
+                update'
+              optionalOldSelf: true
+              reason: FieldValueForbidden
+              rule: ((!has(self.users) || size(self.users) == 0) && (!oldSelf.hasValue()
+                || !has(oldSelf.value().users) || size(oldSelf.value().users) == 0
+                || (has(self.acl) && has(self.acl.users) && oldSelf.value().users.all(u,
+                self.acl.users.exists(a, a.name == u.name))))) || (oldSelf.hasValue()
+                && has(oldSelf.value().users) && has(self.users) && self.users ==
+                oldSelf.value().users)
             - fieldPath: .persistence
               message: persistence cannot be removed once set
               reason: FieldValueForbidden

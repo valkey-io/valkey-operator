@@ -106,6 +106,7 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;patch
 // +kubebuilder:rbac:groups="apps",resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="apps",resources=replicasets,verbs=get
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
@@ -283,7 +284,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// One cluster-state snapshot per reconcile, shared throughout reconcile
+	// The main cluster-state snapshot is shared throughout reconcile. The
+	// narrow recovery path takes a fresh snapshot before deleting a Pod.
 	dial, err := r.ValkeyClients.ForCluster(ctx, cluster)
 	if err != nil {
 		log.Error(err, "failed to retrieve system user password")
@@ -315,6 +317,22 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
 		c.Reason == valkeyiov1alpha1.ReasonOperatorAuthenticationFailed {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	}
+
+	// Run before the node walk because the walk may requeue before topology
+	// repair gets a chance to replace the disconnected replica.
+	if requeue, blocked, recoveryErr := r.recoverDisconnectedReplica(ctx, cluster, nodes, state, dial); recoveryErr != nil {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, recoveryErr.Error(), metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{}, recoveryErr
+	} else if requeue {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Recovering disconnected replica", metav1.ConditionFalse)
+		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonAddingNodes, "Recovering disconnected replica", metav1.ConditionTrue)
+		_ = r.updateStatus(ctx, cluster, state)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	} else if blocked != "" {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonNodeAddFailed, blocked, metav1.ConditionTrue)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "DisconnectedReplicaRecoveryBlocked", "RecoverReplica", "%s", blocked)
 	}
 
 	orphanCandidates := orphansToTakeOver(state)
@@ -813,7 +831,7 @@ func (r *ValkeyClusterReconciler) upsertService(ctx context.Context, cluster *va
 //	mycluster-1-0, mycluster-1-1, mycluster-1-2,
 //	mycluster-2-0, mycluster-2-1, mycluster-2-2.
 //
-// clusterState is the reconcile's single live-topology snapshot (see Reconcile).
+// clusterState is the reconcile's main live-topology snapshot (see Reconcile).
 // It drives replica-first ordering and proactive failover. It is safe to reuse
 // across the loop: after an update we requeue immediately, re-scraping fresh
 // state before any further rolls.

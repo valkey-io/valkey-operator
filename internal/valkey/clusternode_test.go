@@ -346,6 +346,31 @@ func TestParseClusterNodes_ViewersDisagree(t *testing.T) {
 	}
 }
 
+func TestClusterNodeIsConnected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"healthy", "peer 10.0.0.2:6379@16379 master - 0 0 1 connected", true},
+		{"link disconnected", "peer 10.0.0.2:6379@16379 master - 0 0 1 disconnected", false},
+		{"pfail", "peer 10.0.0.2:6379@16379 master,fail? - 0 0 1 connected", false},
+		{"failed", "peer 10.0.0.2:6379@16379 master,fail - 0 0 1 connected", false},
+		{"handshake", "peer 10.0.0.2:6379@16379 handshake - 0 0 1 connected", false},
+		{"no address", "peer :0@0 master,noaddr - 0 0 1 connected", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := ParseClusterNodes(tc.line)
+			if len(nodes) != 1 {
+				t.Fatalf("expected one node, got %d", len(nodes))
+			}
+			if got := nodes[0].IsConnected(); got != tc.want {
+				t.Errorf("IsConnected() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFindMyself(t *testing.T) {
 	t.Run("finds the myself line", func(t *testing.T) {
 		raw := "def456 10.0.0.2:6379@16379 master - 0 0 1 connected 0-5460\n" +

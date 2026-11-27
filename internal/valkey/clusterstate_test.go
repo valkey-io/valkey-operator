@@ -878,6 +878,57 @@ func TestNodeState_KnowsNode(t *testing.T) {
 	}
 }
 
+func TestNodeStateHealthyPeers(t *testing.T) {
+	node := &NodeState{nodes: ParseClusterNodes(
+		"self 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n" +
+			"healthy 10.0.0.2:6379@16379 master - 0 0 2 connected 101-200\n" +
+			"down 10.0.0.3:6379@16379 master - 0 0 3 disconnected 201-300\n" +
+			"failed 10.0.0.4:6379@16379 master,fail - 0 0 4 connected 301-400\n" +
+			"joining 10.0.0.5:6379@16379 handshake - 0 0 5 connected\n")}
+
+	if !node.HasHealthyPeer("healthy") {
+		t.Error("expected the connected peer to be healthy")
+	}
+	for _, id := range []string{"down", "failed", "joining", "missing"} {
+		if node.HasHealthyPeer(id) {
+			t.Errorf("expected %s not to be a healthy peer", id)
+		}
+	}
+	if got, want := node.HealthyPeerIDs(), []string{"healthy"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("HealthyPeerIDs() = %v, want %v", got, want)
+	}
+}
+
+func TestNodeStateHasExactSlotOwnerView(t *testing.T) {
+	expected := map[string][]SlotsRange{
+		"primary-a": {{Start: 0, End: 8191}},
+		"primary-b": {{Start: 8192, End: 16383}},
+	}
+	matching := "primary-a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n" +
+		"primary-b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383\n" +
+		"replica 10.0.0.3:6379@16379 slave primary-a 0 0 3 connected\n"
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"matching", matching, true},
+		{"missing owner", strings.ReplaceAll(matching, "primary-b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383\n", ""), false},
+		{"unknown owner", matching + "foreign 192.0.2.1:6379@16379 master - 0 0 4 connected 42\n", false},
+		{"divergent range", strings.ReplaceAll(matching, "8192-16383", "8193-16383"), false},
+		{"disconnected owner", strings.ReplaceAll(matching, "primary-b 10.0.0.2:6379@16379 master - 0 0 2 connected", "primary-b 10.0.0.2:6379@16379 master - 0 0 2 disconnected"), false},
+		{"failed owner", strings.ReplaceAll(matching, "primary-b 10.0.0.2:6379@16379 master", "primary-b 10.0.0.2:6379@16379 master,fail"), false},
+		{"migration marker", strings.ReplaceAll(matching, "primary-b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383", "primary-b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383 [9000->-replica]"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &NodeState{nodes: ParseClusterNodes(tc.raw)}
+			if got := node.HasExactSlotOwnerView(expected); got != tc.want {
+				t.Errorf("HasExactSlotOwnerView() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNodeState_GetFailingNodes(t *testing.T) {
 	// fail and noaddr are reported; fail? is not, because the caller forgets
 	// these nodes and a pfail entry may still recover.
@@ -1514,6 +1565,19 @@ func TestGetClusterStateKeepsACompleteScrape(t *testing.T) {
 	shard := state.Shards[0]
 	if shard.Id != "shard-1" || shard.PrimaryId != "abc" {
 		t.Fatalf("shard id %q primary %q", shard.Id, shard.PrimaryId)
+	}
+}
+
+func TestNodeStateHasKnownReplica(t *testing.T) {
+	node := &NodeState{Id: "primary"}
+	node.SetClusterNodesForTesting("primary 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n" +
+		"replica 10.0.0.2:6379@16379 slave primary 0 0 1 connected\n")
+	if !node.HasKnownReplica() {
+		t.Fatal("expected the peer-table replica to be detected")
+	}
+	node.SetClusterNodesForTesting("primary 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n")
+	if node.HasKnownReplica() {
+		t.Fatal("did not expect a dependent replica")
 	}
 }
 

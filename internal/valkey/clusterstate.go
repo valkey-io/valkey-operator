@@ -67,6 +67,64 @@ func (n *NodeState) KnowsNode(id string) bool {
 	return false
 }
 
+// HasHealthyPeer reports whether this node's peer table has a connected entry
+// for id. It rejects entries that are failing, handshaking, or addressless.
+func (n *NodeState) HasHealthyPeer(id string) bool {
+	for i := range n.nodes {
+		if n.nodes[i].Id == id {
+			return n.nodes[i].IsConnected()
+		}
+	}
+	return false
+}
+
+// HealthyPeerIDs returns connected peer IDs from this node's table. The
+// viewer's own entry is excluded.
+func (n *NodeState) HealthyPeerIDs() []string {
+	ids := make([]string, 0, len(n.nodes))
+	for i := range n.nodes {
+		if !n.nodes[i].IsMyself() && n.nodes[i].IsConnected() {
+			ids = append(ids, n.nodes[i].Id)
+		}
+	}
+	return ids
+}
+
+// HasExactSlotOwnerView reports whether this node sees exactly the expected
+// healthy slot owners and ranges. Replica entries may also be present, but no
+// other entry may own slots or carry an in-flight migration marker.
+func (n *NodeState) HasExactSlotOwnerView(expected map[string][]SlotsRange) bool {
+	seen := make(map[string]struct{}, len(expected))
+	for i := range n.nodes {
+		entry := &n.nodes[i]
+		want, expectedOwner := expected[entry.Id]
+		if !entry.HasSlotAssignment() {
+			continue
+		}
+		if !expectedOwner || !entry.IsPrimary() || !entry.IsConnected() ||
+			len(entry.Migrating) != 0 || len(entry.Importing) != 0 || !slices.Equal(entry.Slots, want) {
+			return false
+		}
+		if _, duplicate := seen[entry.Id]; duplicate {
+			return false
+		}
+		seen[entry.Id] = struct{}{}
+	}
+	return len(seen) == len(expected)
+}
+
+// HasKnownReplica reports whether this node's peer table contains a replica
+// that follows it. The peer may be outside the set of pods the operator
+// scraped, so ClusterState.HasReplicaOf alone cannot answer this question.
+func (n *NodeState) HasKnownReplica() bool {
+	for _, entry := range n.nodes {
+		if entry.PrimaryId == n.Id {
+			return true
+		}
+	}
+	return false
+}
+
 // ReplicationOffset returns this node's processed replication offset from
 // INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
 // value means the replica is more caught up with its primary.
@@ -411,6 +469,17 @@ func (s *ClusterState) HasAddress(address string) bool {
 		}
 	}
 	return false
+}
+
+// FindNodeForAddress returns the reachable node at the given address, whether
+// it joined a shard or is still pending.
+func (s *ClusterState) FindNodeForAddress(address string) *NodeState {
+	for _, node := range s.AllNodes() {
+		if node.Address == address {
+			return node
+		}
+	}
+	return nil
 }
 
 // GetPrimaryNode returns the primary NodeState object

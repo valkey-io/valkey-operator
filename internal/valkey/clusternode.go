@@ -52,13 +52,14 @@ type SlotMigration struct {
 //
 // Fields are limited to what callers need, for a minimal memory footprint.
 type ClusterNode struct {
-	Id        string
-	Host      string // bare host from the endpoint field, unbracketed for IPv6
-	Flags     NodeFlags
-	PrimaryId string // "-" on a primary line, the primary's ID on a replica
-	Slots     []SlotsRange
-	Migrating []SlotMigration
-	Importing []SlotMigration
+	Id            string
+	Host          string // bare host from the endpoint field, unbracketed for IPv6
+	Flags         NodeFlags
+	PrimaryId     string // "-" on a primary line, the primary's ID on a replica
+	LinkConnected bool   // whether this viewer reports the cluster-bus link connected
+	Slots         []SlotsRange
+	Migrating     []SlotMigration
+	Importing     []SlotMigration
 }
 
 // NodeFlags is the set of flags on a CLUSTER NODES line.
@@ -158,6 +159,13 @@ func (c *ClusterNode) IsFailing() bool {
 	return c.HasFlag(FlagFail) || c.HasFlag(FlagPFail)
 }
 
+// IsConnected reports whether this viewer sees a usable cluster-bus link to
+// the entry. A known ID is not connected while it is failing, handshaking, or
+// addressless.
+func (c *ClusterNode) IsConnected() bool {
+	return c.LinkConnected && !c.IsFailing() && !c.HasFlag(FlagHandshake) && !c.HasNoAddress()
+}
+
 // HasNoAddress reports whether the viewer knows this node's ID but has no
 // address for it.
 func (c *ClusterNode) HasNoAddress() bool {
@@ -236,10 +244,11 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 	}
 
 	node := ClusterNode{
-		Id:        shared(head[0]),
-		Host:      shared(hostFromClusterNodesEndpoint(head[1])),
-		Flags:     parseNodeFlags(head[2]),
-		PrimaryId: shared(head[3]),
+		Id:            shared(head[0]),
+		Host:          shared(hostFromClusterNodesEndpoint(head[1])),
+		Flags:         parseNodeFlags(head[2]),
+		PrimaryId:     shared(head[3]),
+		LinkConnected: head[7] == "connected",
 	}
 
 	// Owned ranges and migration markers are interleaved in the same trailing

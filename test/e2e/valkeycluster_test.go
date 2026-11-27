@@ -2108,9 +2108,14 @@ spec:
 	Context("single-node cluster scale-up", Label("spec-update"), func() {
 		const clusterName = "valkeycluster-scaleup-e2e"
 
+		// Both specs use clusterName. Wait for the old cluster's ValkeyNodes
+		// and pods to go, or the next spec's cluster adopts them with the old
+		// operator password.
 		AfterEach(func() {
-			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true", "--wait=false")
-			_, _ = utils.Run(cmd)
+			cmd := exec.Command("kubectl", "delete", "valkeycluster", clusterName, "--ignore-not-found=true",
+				"--cascade=foreground", "--wait=true", "--timeout=3m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("scales from 1 shard 0 replicas to 1 shard 1 replica", func() {

@@ -312,3 +312,26 @@ func TestReportSystemPasswordSecretMissingKeepsOtherDegradedReasons(t *testing.T
 	require.NotNil(t, degraded)
 	require.Equal(t, valkeyiov1alpha1.ReasonUsersACLUnresolved, degraded.Reason)
 }
+
+// The refusal retries every 10s. Its warning is emitted when it first appears
+// or changes, not on every retry.
+func TestUpsertWarnsOnceWhileTheRefusalHolds(t *testing.T) {
+	ctx := context.Background()
+	cluster, _, objs := systemPasswordFixture(false)
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, _ := newMigrationReconciler(t, objs...)
+	recorder := r.Recorder.(*events.FakeRecorder)
+
+	_, err := r.upsertSystemUsersPasswordSecret(ctx, cluster)
+	require.True(t, reportSystemPasswordSecretMissing(cluster, err))
+	require.Len(t, drainEvents(recorder), 1)
+
+	_, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Empty(t, drainEvents(recorder), "an unchanged refusal is not reported again")
+
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, "an earlier refusal", metav1.ConditionTrue)
+	_, err = r.upsertSystemUsersPasswordSecret(ctx, cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Len(t, drainEvents(recorder), 1, "a changed refusal is reported")
+}

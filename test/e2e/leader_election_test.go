@@ -96,6 +96,9 @@ var _ = Describe("Leader election", Ordered, ContinueOnFailure, Label("leader-el
 	waitForTakeover := func(oldLeader string, start time.Time) string {
 		GinkgoHelper()
 		By("waiting for another operator pod to take the lease")
+		remaining := takeoverTimeout - time.Since(start)
+		Expect(remaining).To(BeNumerically(">", 0),
+			"more than %s passed after the leader was stopped before the wait began", takeoverTimeout)
 		var newLeader string
 		Eventually(func(g Gomega) {
 			var err error
@@ -103,7 +106,9 @@ var _ = Describe("Leader election", Ordered, ContinueOnFailure, Label("leader-el
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(newLeader).NotTo(BeEmpty())
 			g.Expect(newLeader).NotTo(Equal(oldLeader))
-		}).WithTimeout(takeoverTimeout-time.Since(start)).WithPolling(250*time.Millisecond).Should(Succeed(),
+			// Gomega takes a passing poll even if it ran past the timeout.
+			g.Expect(time.Since(start)).To(BeNumerically("<=", takeoverTimeout))
+		}).WithTimeout(remaining).WithPolling(250*time.Millisecond).Should(Succeed(),
 			"no other pod took the lease within %s of the leader being stopped", takeoverTimeout)
 		_, _ = GinkgoWriter.Write([]byte(newLeader + " took the lease after " +
 			time.Since(start).Round(100*time.Millisecond).String() + "\n"))
@@ -167,16 +172,19 @@ var _ = Describe("Leader election", Ordered, ContinueOnFailure, Label("leader-el
 		_, err := kubectl("rollout", "restart", "deployment", deployment)
 		Expect(err).NotTo(HaveOccurred())
 
-		// The leader gets SIGTERM when the rolling update deletes it.
+		// The leader gets SIGTERM when the rolling update deletes it. The time
+		// is taken before the poll that sees the deletion, so the handover is
+		// never measured as shorter than it was.
 		By("waiting for the rolling update to stop the leader " + leader)
 		var start time.Time
 		Eventually(func(g Gomega) {
+			polled := time.Now()
 			out, err := kubectl("get", "pod", leader, "--ignore-not-found",
 				"-o", "jsonpath={.metadata.name} {.metadata.deletionTimestamp}")
 			g.Expect(err).NotTo(HaveOccurred())
 			name, deleted, _ := strings.Cut(strings.TrimSpace(out), " ")
 			g.Expect(name == "" || deleted != "").To(BeTrue(), "the leader has not been stopped yet")
-			start = time.Now()
+			start = polled
 		}, 3*time.Minute, 250*time.Millisecond).Should(Succeed())
 
 		newLeader := waitForTakeover(leader, start)

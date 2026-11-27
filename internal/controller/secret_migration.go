@@ -22,11 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -115,20 +117,24 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 // adoptOperatorSecret gives secret the operator's labels and the cluster as
 // controller when it lacks them, as a Secret restored from a backup or by hand
 // does. Without the managed-by label the cache never sees it, and without the
-// controller reference it outlives the cluster. A Secret another object
-// controls is refused and not written, except one an earlier cluster of the
-// same name controls.
+// controller reference it outlives the cluster. A Secret an earlier cluster
+// of the same name controls is taken over. One another object controls is
+// refused and not written.
 func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
+	before := secret.DeepCopy()
 	owner := metav1.GetControllerOf(secret)
 	if owner != nil && owner.UID != cluster.UID {
-		// An earlier cluster of the same name: garbage collection removes
-		// the Secret, and until then it is used as it is.
-		if owner.Kind == "ValkeyCluster" && owner.Name == cluster.Name {
-			return nil
+		if !earlierCluster(owner, cluster) {
+			return fmt.Errorf("%w: secret %s is controlled by %s %s; the operator manages this Secret itself", errOperatorSecretForeignController, secret.Name, owner.Kind, owner.Name)
 		}
-		return fmt.Errorf("%w: secret %s is controlled by %s %s; the operator manages this Secret itself", errOperatorSecretForeignController, secret.Name, owner.Kind, owner.Name)
+		// That cluster is gone, since the name is this one's. Taking the
+		// Secret over stops garbage collection deleting passwords this
+		// cluster's servers may already run with.
+		secret.OwnerReferences = slices.DeleteFunc(secret.OwnerReferences, func(ref metav1.OwnerReference) bool {
+			return ref.UID == owner.UID
+		})
+		owner = nil
 	}
-	before := secret.DeepCopy()
 	if secret.Labels == nil {
 		secret.Labels = map[string]string{}
 	}
@@ -146,6 +152,13 @@ func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, clust
 	}
 	logf.FromContext(ctx).Info("adopted the Secret", "name", secret.Name)
 	return nil
+}
+
+// earlierCluster reports whether owner is a ValkeyCluster with cluster's name.
+func earlierCluster(owner *metav1.OwnerReference, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	gv, err := schema.ParseGroupVersion(owner.APIVersion)
+	return err == nil && gv.Group == valkeyiov1alpha1.GroupVersion.Group &&
+		owner.Kind == "ValkeyCluster" && owner.Name == cluster.Name
 }
 
 // copyLegacySecret creates name as a copy of the legacy Secret, with every key,

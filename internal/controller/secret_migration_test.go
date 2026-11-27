@@ -645,9 +645,9 @@ func TestFetchSystemUserPasswordFallsBackToTheLegacySecret(t *testing.T) {
 }
 
 // A cluster deleted and created again under the same name finds the old
-// Secret until garbage collection removes it. It is used as it is, as before,
-// and is not refused as another controller's.
-func TestOperatorSecretUsesTheSecretOfAnEarlierClusterWithTheSameName(t *testing.T) {
+// Secret until garbage collection removes it. The new cluster takes it over,
+// so the passwords its servers may already run with are not deleted.
+func TestOperatorSecretTakesOverTheSecretOfAnEarlierClusterWithTheSameName(t *testing.T) {
 	ctx := context.Background()
 	earlier := migrationCluster()
 	earlier.UID = "earlier-uid"
@@ -661,5 +661,23 @@ func TestOperatorSecretUsesTheSecretOfAnEarlierClusterWithTheSameName(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "earlier-pw", string(got.Data[operatorUser]))
 	stored, _ := getSecret(t, c, "valkey-c-system-passwords")
-	assert.Equal(t, secret.OwnerReferences, stored.OwnerReferences)
+	assert.True(t, metav1.IsControlledBy(stored, migrationCluster()))
+	assert.Len(t, stored.OwnerReferences, 1, "the earlier cluster's reference is replaced")
+	assert.Equal(t, map[string][]byte{operatorUser: []byte("earlier-pw")}, stored.Data)
+}
+
+// Only a ValkeyCluster of this API group counts as an earlier cluster.
+func TestOperatorSecretRefusesASameNamedOwnerOfAnotherGroup(t *testing.T) {
+	ctx := context.Background()
+	isController := true
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "valkey-c-system-passwords", Namespace: "ns",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "example.com/v1", Kind: "ValkeyCluster", Name: "c", UID: "other", Controller: &isController,
+		}},
+	}}
+	r, _ := newMigrationReconciler(t, secret)
+
+	_, err := r.operatorSecret(ctx, migrationCluster(), "valkey-c-system-passwords", "internal-c-system-passwords")
+	require.ErrorIs(t, err, errOperatorSecretForeignController)
 }

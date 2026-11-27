@@ -362,6 +362,30 @@ func TestDeleteExcessValkeyNodesKeepsShardWhenPrimaryMatchesNoValkeyNode(t *test
 	}
 }
 
+// TestDeleteExcessValkeyNodesKeepsShardWhoseRecordedIDTheScrapeMisses: the
+// scrape reached no node that lists the excess primary, so it cannot show
+// whether the primary still owns slots.
+func TestDeleteExcessValkeyNodesKeepsShardWhoseRecordedIDTheScrapeMisses(t *testing.T) {
+	for name, state := range map[string]*valkey.ClusterState{
+		"empty scrape":                  {},
+		"scraped node does not know it": {Shards: []*valkey.ShardState{primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inSpec, unseen, replica := primaryNode(0), primaryNode(3), replicaNode(3)
+			unseen.Status.ClusterNodeID = "p3"
+			r, cluster, recorder := scaleInReconciler(t, inSpec, unseen, replica)
+
+			deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, unseen, replica))
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			assert.Equal(t, []string{"c-3-0", "c-3-1"}, kept)
+			assert.True(t, nodeExists(t, r.Client, unseen))
+			assert.True(t, nodeExists(t, r.Client, replica))
+			assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping excess ValkeyNode c-3-0: shard 3 has a node the scrape does not show")
+		})
+	}
+}
+
 // TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID: a node that
 // was down when the operator was upgraded has no recorded ID.
 func TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID(t *testing.T) {

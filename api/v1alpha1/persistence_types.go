@@ -33,6 +33,7 @@ const (
 // PersistenceSpec defines persistent storage for a Valkey node.
 type PersistenceSpec struct {
 	// Size is the requested PVC size.
+	// +required
 	Size resource.Quantity `json:"size"`
 
 	// StorageClassName is the storage class to use for the PVC.

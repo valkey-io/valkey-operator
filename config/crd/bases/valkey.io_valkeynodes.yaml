@@ -2589,6 +2589,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: container name 'server-init' is reserved for the operator-managed
                     init container
@@ -2603,6 +2604,7 @@ spec:
                     items:
                       type: string
                     type: array
+                    x-kubernetes-list-type: atomic
                   enabled:
                     description: |-
                       Enable or disable the exporter sidecar container. Unset means enabled
@@ -2889,6 +2891,7 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+                x-kubernetes-list-type: atomic
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -3578,6 +3581,7 @@ spec:
                       type: string
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               topologySpreadConstraints:
                 description: |-
                   TopologySpreadConstraints defines pod topology spread constraints applied
@@ -3755,6 +3759,7 @@ spec:
                   - whenUnsatisfiable
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               usersACLSecretName:
                 description: |-
                   UsersACLSecretName is the name of the Secret containing the ACL user

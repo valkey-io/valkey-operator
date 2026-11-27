@@ -103,6 +103,7 @@ spec:
                                 pattern: ^[^\s]+$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                           type: object
                         commands:
                           description: Valkey command categories, commands, and subcommands
@@ -114,12 +115,14 @@ spec:
                                 pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                             deny:
                               description: Denied commands for this user
                               items:
                                 pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                           type: object
                         keys:
                           description: Key restrictions
@@ -131,6 +134,7 @@ spec:
                                 pattern: ^[^\s]+$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                             readWrite:
                               description: 'Keys on which this user can read, and
                                 write; maps to Valkey: ~pattern'
@@ -138,6 +142,7 @@ spec:
                                 pattern: ^[^\s]+$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                             writeOnly:
                               description: 'Keys restricted to write-only; maps to
                                 Valkey: %W~pattern'
@@ -145,6 +150,7 @@ spec:
                                 pattern: ^[^\s]+$
                                 type: string
                               type: array
+                              x-kubernetes-list-type: atomic
                           type: object
                         name:
                           description: Username
@@ -173,6 +179,7 @@ spec:
                                   items:
                                     type: string
                                   type: array
+                                  x-kubernetes-list-type: atomic
                                 name:
                                   description: |-
                                     Name of the Secret, in the cluster's namespace, that holds the passwords.
@@ -1826,6 +1833,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: container name 'server-init' is reserved for the operator-managed
                     init container
@@ -1842,6 +1850,7 @@ spec:
                     items:
                       type: string
                     type: array
+                    x-kubernetes-list-type: atomic
                   enabled:
                     description: |-
                       Enable or disable the exporter sidecar container. Unset means enabled
@@ -2129,6 +2138,7 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+                x-kubernetes-list-type: atomic
               networking:
                 description: |-
                   Networking groups how clients and peers reach cluster nodes (TLS,
@@ -3888,6 +3898,7 @@ spec:
                           type: string
                       type: object
                     type: array
+                    x-kubernetes-list-type: atomic
                   topologySpreadConstraints:
                     description: TopologySpreadConstraints to apply to the pods
                     items:
@@ -4062,6 +4073,7 @@ spec:
                       - whenUnsatisfiable
                       type: object
                     type: array
+                    x-kubernetes-list-type: atomic
                   zone:
                     description: |-
                       Zone groups scheduling constraints on the zone axis
@@ -4217,6 +4229,7 @@ spec:
                             pattern: ^[^\s]+$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       type: object
                     commands:
                       description: Valkey command categories, commands, and subcommands
@@ -4228,12 +4241,14 @@ spec:
                             pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                         deny:
                           description: Denied commands for this user
                           items:
                             pattern: ^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       type: object
                     enabled:
                       default: true
@@ -4249,6 +4264,7 @@ spec:
                             pattern: ^[^\s]+$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                         readWrite:
                           description: 'Keys on which this user can read, and write;
                             maps to Valkey: ~pattern'
@@ -4256,6 +4272,7 @@ spec:
                             pattern: ^[^\s]+$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                         writeOnly:
                           description: 'Keys restricted to write-only; maps to Valkey:
                             %W~pattern'
@@ -4263,6 +4280,7 @@ spec:
                             pattern: ^[^\s]+$
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       type: object
                     name:
                       description: Username
@@ -4289,6 +4307,7 @@ spec:
                           items:
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                         name:
                           description: |-
                             Name of the Secret, in the cluster's namespace, that holds the passwords.

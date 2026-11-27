@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"testing"
 
@@ -226,6 +227,96 @@ func TestDeleteExcessValkeyNodesKeepsSlotOwners(t *testing.T) {
 	assert.True(t, nodeExists(t, r.Client, owner), "excess node that owns slots must be kept")
 	assert.False(t, nodeExists(t, r.Client, drained))
 	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Excess ValkeyNode c-3-0 still owns slots; waiting for drain")
+}
+
+// invalidTopologyNode returns a ValkeyNode of cluster "c" at 10.0.0.9 with the
+// given shard-index and node-index labels.
+func invalidTopologyNode(name string, topology map[string]string) *valkeyiov1alpha1.ValkeyNode {
+	labels := map[string]string{LabelCluster: "c"}
+	maps.Copy(labels, topology)
+	return &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		Status:     valkeyiov1alpha1.ValkeyNodeStatus{PodIP: "10.0.0.9"},
+	}
+}
+
+// TestDeleteExcessValkeyNodesKeepsSlotOwnerWithInvalidTopology: someone edited
+// the labels on a live primary. Deleting it would lose the keys in its slots.
+func TestDeleteExcessValkeyNodesKeepsSlotOwnerWithInvalidTopology(t *testing.T) {
+	edited := invalidTopologyNode("c-edited", map[string]string{LabelShardIndex: "one", LabelNodeIndex: "0"})
+	r, cluster, recorder := scaleInReconciler(t, primaryNode(0), edited)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+		primaryShard(9, valkey.SlotsRange{Start: 8192, End: 16383}),
+	}}
+
+	deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), edited))
+	require.NoError(t, err)
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-edited"}, kept)
+	assert.True(t, nodeExists(t, r.Client, edited))
+	assert.Equal(t, []string{`Warning ScaleInBlocked Keeping ValkeyNode c-edited with invalid topology labels (shard-index "one", node-index "0"): it still owns slots`}, drainEvents(recorder))
+}
+
+// TestDeleteExcessValkeyNodesDeletesInvalidTopology: a node with invalid
+// topology labels that owns no scraped slots is deleted. Unassigned slots keep
+// an unreachable excess primary, but not this node.
+func TestDeleteExcessValkeyNodesDeletesInvalidTopology(t *testing.T) {
+	for name, topology := range map[string]map[string]string{
+		"labels from #403":   {LabelShardIndex: "not-an-integer", LabelNodeIndex: "99"},
+		"empty shard-index":  {LabelShardIndex: "", LabelNodeIndex: "0"},
+		"missing node-index": {LabelShardIndex: "0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bogus := invalidTopologyNode("aclfail-bogus", topology)
+			r, cluster, recorder := scaleInReconciler(t, primaryNode(0), bogus)
+			state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+				primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+			}}
+
+			deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), bogus))
+			require.NoError(t, err)
+			assert.True(t, deleted)
+			assert.Empty(t, kept)
+			assert.False(t, nodeExists(t, r.Client, bogus))
+			assert.True(t, nodeExists(t, r.Client, primaryNode(0)))
+			want := fmt.Sprintf("Warning ValkeyNodeDeleted Deleted ValkeyNode aclfail-bogus with invalid topology labels (shard-index %q, node-index %q)",
+				topology[LabelShardIndex], topology[LabelNodeIndex])
+			assert.Equal(t, []string{want}, drainEvents(recorder))
+		})
+	}
+}
+
+// TestDropInvalidTopologyPendingNodes: a pending node with invalid topology
+// labels is removed before CLUSTER MEET. A slot owner with invalid labels stays
+// in its shard, where deleteExcessValkeyNodes keeps it.
+func TestDropInvalidTopologyPendingNodes(t *testing.T) {
+	bogus := invalidTopologyNode("aclfail-bogus", map[string]string{LabelShardIndex: "not-an-integer", LabelNodeIndex: "99"})
+	edited := invalidTopologyNode("c-edited", map[string]string{LabelShardIndex: "one", LabelNodeIndex: "0"})
+	edited.Status.PodIP = "10.0.0.8"
+	nodes := nodeList(primaryNode(0), primaryNode(1), bogus, edited)
+	// The valid pending node was met on an earlier pass, so MEET has nothing
+	// to do once the isolated bogus node is gone.
+	valid := &valkey.NodeState{Id: "p1", Address: "10.0.0.1", ClusterInfo: map[string]string{"cluster_known_nodes": "3"}}
+	state := &valkey.ClusterState{
+		Shards: []*valkey.ShardState{
+			primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
+			primaryShard(8, valkey.SlotsRange{Start: 8192, End: 16383}),
+		},
+		PendingNodes: []*valkey.NodeState{
+			{Id: "b", Address: "10.0.0.9", ClusterInfo: map[string]string{"cluster_known_nodes": "1"}},
+			valid,
+		},
+	}
+
+	dropInvalidTopologyPendingNodes(state, nodes)
+	assert.Equal(t, []*valkey.NodeState{valid}, state.PendingNodes)
+	assert.Equal(t, []string{"p0", "p8"}, primaryIDs(state.Shards))
+
+	r, cluster, _ := scaleInReconciler(t)
+	met, err := r.meetIsolatedNodes(context.Background(), cluster, state)
+	require.NoError(t, err)
+	assert.Zero(t, met)
 }
 
 // TestDeleteExcessValkeyNodesKeepsUnreachablePrimaries: a primary the scrape

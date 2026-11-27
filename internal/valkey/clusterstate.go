@@ -104,13 +104,21 @@ type ShardState struct {
 	Nodes     []*NodeState
 }
 
-// ClusterState represents the current state of a cluster.
+// ClusterState represents the current state of a cluster. It is a snapshot:
+// queries memoise what they derive, so build a new ClusterState rather than
+// changing it, or the shards and nodes it holds, after the first query. Do not
+// copy it.
 type ClusterState struct {
 	Shards       []*ShardState
 	PendingNodes []*NodeState
 
 	// targets are the pod addresses this pass set out to scrape.
 	targets map[string]struct{}
+
+	// failedByMajority holds the node IDs IsNodeFailedByMajority reports,
+	// built from the peer tables on first use.
+	failedByMajorityOnce sync.Once
+	failedByMajority     map[string]struct{}
 }
 
 // TotalSlots is the number of hash slots in a Valkey cluster (0-16383).
@@ -576,28 +584,41 @@ func (s *ClusterState) HasFailoverQuorum() bool {
 // the any-viewer rule for both flags on the takeover path, where one report
 // is the trigger.
 func (s *ClusterState) IsNodeFailedByMajority(nodeId string) bool {
-	var reports int
+	s.failedByMajorityOnce.Do(s.buildFailedByMajority)
+	_, failed := s.failedByMajority[nodeId]
+	return failed
+}
+
+// buildFailedByMajority applies the IsNodeFailedByMajority rules to every
+// entry of every shard member's table in one pass.
+func (s *ClusterState) buildFailedByMajority() {
+	failed := make(map[string]struct{})
+	reports := make(map[string]int)
 	for _, shard := range s.Shards {
 		for _, node := range shard.Nodes {
-			if node.Id == nodeId {
-				continue // its own entry never carries a failure flag
-			}
-			for _, entry := range node.nodes {
-				if entry.Id != nodeId {
+			voting := node.isVotingPrimary()
+			for i := range node.nodes {
+				entry := &node.nodes[i]
+				// Most entries carry no flag, so test that before the ID.
+				if !entry.IsFailing() || entry.Id == node.Id {
 					continue
 				}
 				if entry.HasFlag(FlagFail) {
-					return true
+					failed[entry.Id] = struct{}{}
+				} else if voting {
+					reports[entry.Id]++
 				}
-				if node.isVotingPrimary() && entry.HasFlag(FlagPFail) {
-					reports++
-				}
-				break
 			}
 		}
 	}
-	size := s.clusterSize()
-	return size > 0 && reports >= size/2+1
+	if size := s.clusterSize(); size > 0 {
+		for id, n := range reports {
+			if n >= size/2+1 {
+				failed[id] = struct{}{}
+			}
+		}
+	}
+	s.failedByMajority = failed
 }
 
 // isVotingPrimary mirrors clusterNodeIsVotingPrimary: a primary that owns

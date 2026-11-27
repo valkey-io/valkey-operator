@@ -468,6 +468,9 @@ const (
 	// ValkeyNodeReasonConfigRevisionMismatch indicates spec.configRevision is
 	// not in the node's ConfigMap and the node's spec does not render to it.
 	ValkeyNodeReasonConfigRevisionMismatch = "ConfigRevisionMismatch"
+	// ValkeyNodeReasonHibernated is the Ready reason while the node's workload
+	// is scaled to zero because its ValkeyCluster is hibernated.
+	ValkeyNodeReasonHibernated = "Hibernated"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

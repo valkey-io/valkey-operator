@@ -78,6 +78,9 @@ type ValkeyClusterReconciler struct {
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
+
+	// hibernation holds the per-process progress of hibernating clusters.
+	hibernation hibernationTracker
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -120,6 +123,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //   - Stop if a Ready node rejects the operator's password
 //     (nodesRejectingOperator), so the steps below never act on a partial
 //     scrape.
+//   - Hibernate or wake the cluster when the valkey.io/hibernate annotation
+//     asks for it (reconcileHibernation, reconcileWake; see hibernate.go).
+//     Once a descent has started, the steps below do not run.
 //   - Ensure one ValkeyNode per (shard, node) pair exists, creating missing
 //     nodes and propagating spec changes one at a time in shard order with
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
@@ -152,6 +158,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			deleteClusterMetrics(req.Name, req.Namespace)
+			r.hibernation.forgetCluster(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -161,6 +168,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// collector removes dependents before the cluster itself) reconciling would
 	// recreate the very children being deleted and deadlock the delete
 	if !cluster.DeletionTimestamp.IsZero() {
+		r.hibernation.forgetCluster(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -315,6 +323,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Error(gateErr, "failed to update the initial sync readiness gate")
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonInitialSyncGateFailed, "SetReadinessGate",
 			"%s", initialSyncGateFailedMessage(gateErr))
+	}
+
+	// Hibernation takes over from here once its descent has started; until
+	// then the steps below run, so in-flight work finishes first. Waking
+	// unmarks the nodes, primaries first, and the steps below bring the pods
+	// back once the replicas are started too.
+	if hibernationRequested(cluster) {
+		if result, handled, err := r.reconcileHibernation(ctx, cluster, nodes, state, trustBundle); handled || err != nil {
+			return result, err
+		}
+	} else if result, handled, err := r.reconcileWake(ctx, cluster, nodes, state, trustBundle); handled || err != nil {
+		return result, err
 	}
 
 	rollSkipped := false
@@ -623,6 +643,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionClusterFormed, valkeyiov1alpha1.ReasonTopologyComplete, "All nodes joined cluster", metav1.ConditionTrue)
 	setCondition(cluster, valkeyiov1alpha1.ConditionSlotsAssigned, valkeyiov1alpha1.ReasonAllSlotsAssigned, "All slots assigned", metav1.ConditionTrue)
+	if !gatesPending {
+		r.finishWake(ctx, cluster)
+	}
 
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		log.Error(err, statusUpdateFailedMsg)
@@ -633,6 +656,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if gatesPending {
 		log.V(1).Info("cluster pod readiness pending, rechecking", "after", initialSyncGateRecheck)
 		return ctrl.Result{RequeueAfter: initialSyncGateRecheck}, nil
+	}
+	// A requested hibernation starts on the next pass, now that the cluster
+	// is healthy, or once its retry delay after a failed save is over.
+	if hibernationRequested(cluster) {
+		if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionHibernated); c != nil && c.Reason == valkeyiov1alpha1.ReasonHibernationSaveFailed {
+			return ctrl.Result{RequeueAfter: hibernationRetryAfter}, nil
+		}
+		return ctrl.Result{RequeueAfter: hibernationStepRequeue}, nil
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
@@ -888,6 +919,9 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	var existing *valkeyiov1alpha1.ValkeyNode
 	if currentExists {
 		existing = current
+		if hibernationWaking(cluster) {
+			keepDataLoadConfig(desired, current)
+		}
 	}
 	if err := r.setDesiredConfigRevision(ctx, desired, existing, live.configRevision); err != nil {
 		return nodeUnchanged, err
@@ -1830,8 +1864,13 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)
 	progressingCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionProgressing)
 	degradedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	hibernatedCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionHibernated)
 
 	switch {
+	case hibernatedCondition != nil && hibernatedCondition.Status == metav1.ConditionTrue:
+		current.Status.State = valkeyiov1alpha1.ClusterStateHibernated
+		current.Status.Reason = hibernatedCondition.Reason
+		current.Status.Message = hibernatedCondition.Message
 	case degradedCondition != nil && degradedCondition.Status == metav1.ConditionTrue:
 		current.Status.State = valkeyiov1alpha1.ClusterStateDegraded
 		current.Status.Reason = degradedCondition.Reason

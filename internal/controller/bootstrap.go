@@ -279,8 +279,19 @@ func (r *ValkeyClusterReconciler) replicateToSource(ctx context.Context, cluster
 		if shardIndex < 0 || shardIndex >= len(plan.shards) {
 			continue
 		}
-		if err := setReplicationAuth(ctx, node, "", plan.password); err != nil {
-			return replicated, fmt.Errorf("set source replication auth on %s: %w", node.Address, err)
+		// A shard that has already been cut over has one of our own nodes as its
+		// primary, which takes this cluster's replication credentials, not the
+		// source's.
+		user, password := "", plan.password
+		if state.FindNodeById(plan.shards[shardIndex].PrimaryId) != nil {
+			pw, err := fetchSystemUserPassword(ctx, replicationUser, r.Client, cluster.Name, cluster.Namespace)
+			if err != nil || pw == "" {
+				return replicated, fmt.Errorf("read replication password for %s: %v", node.Address, err)
+			}
+			user, password = replicationUser, pw
+		}
+		if err := setReplicationAuth(ctx, node, user, password); err != nil {
+			return replicated, fmt.Errorf("set replication auth on %s: %w", node.Address, err)
 		}
 		err := r.issueReplicate(ctx, cluster, node, plan.shards[shardIndex].PrimaryId, shardIndex)
 		if errors.Is(err, errPrimaryNotReady) {
@@ -307,6 +318,20 @@ func setReplicationAuth(ctx context.Context, node *valkey.NodeState, user, passw
 	return nil
 }
 
+// stillSourcePrimaries returns the IDs of the source primaries that have not
+// been replaced yet. Once a shard is cut over its slot range belongs to one of
+// our own nodes, so it shows up in the plan as a primary too, but its replicas
+// follow a node of this cluster and use this cluster's credentials.
+func stillSourcePrimaries(state *valkey.ClusterState, plan *bootstrapPlan) map[string]struct{} {
+	out := make(map[string]struct{}, len(plan.shards))
+	for _, sh := range plan.shards {
+		if state.FindNodeById(sh.PrimaryId) == nil {
+			out[sh.PrimaryId] = struct{}{}
+		}
+	}
+	return out
+}
+
 // restoreSourceReplicationAuth re-applies the source credentials on every new
 // node that replicates a source primary but whose link is down. A pod that
 // restarted with its saved cluster state is not pending, so replicateToSource
@@ -314,10 +339,7 @@ func setReplicationAuth(ctx context.Context, node *valkey.NodeState, user, passw
 // replication credentials, which the source rejects. Nodes with the link up are
 // left alone.
 func (r *ValkeyClusterReconciler) restoreSourceReplicationAuth(ctx context.Context, state *valkey.ClusterState, plan *bootstrapPlan) {
-	source := make(map[string]struct{}, len(plan.shards))
-	for _, sh := range plan.shards {
-		source[sh.PrimaryId] = struct{}{}
-	}
+	source := stillSourcePrimaries(state, plan)
 	for _, node := range state.AllNodes() {
 		if _, ok := source[node.PrimaryIdFromSelf()]; !ok || node.Info["master_link_status"] == "up" {
 			continue
@@ -494,53 +516,89 @@ func nodeConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	return config
 }
 
+// destinationBarred reports whether a new node must not be elected primary.
+// Before cutover every new node is barred. After it, a shard that owns its
+// slots is free to fail over normally, shard by shard, so a half-finished
+// cutover never leaves a moved shard without a way to recover.
+func destinationBarred(migrated, shardOwnsSlots bool) bool {
+	return !migrated && !shardOwnsSlots
+}
+
 // ensureDestinationFailoverPolicy keeps this cluster's own nodes from being
-// elected primary while bootstrapping, and restores normal failover once the
-// slots have moved. The rendered config already starts new pods with the
-// setting on, so a restart never opens a window; this applies the change live
-// and corrects it after a restart. It reads the node's nofailover flag and
-// only issues CONFIG SET when the flag differs.
-func (r *ValkeyClusterReconciler) ensureDestinationFailoverPolicy(ctx context.Context, state *valkey.ClusterState, bootstrapping bool) {
-	log := logf.FromContext(ctx)
-	want := "no"
-	if bootstrapping {
-		want = "yes"
+// elected primary until their shard has been cut over, then gives them normal
+// failover back. The rendered config already starts new pods barred, so a
+// restart never opens a window; this applies the change live and corrects it
+// after a restart. It reads the node's nofailover flag and only issues
+// CONFIG SET when the flag differs.
+func (r *ValkeyClusterReconciler) ensureDestinationFailoverPolicy(ctx context.Context, state *valkey.ClusterState, migrated bool) {
+	for _, shard := range state.Shards {
+		barred := destinationBarred(migrated, len(shard.Slots) > 0)
+		for _, node := range shard.Nodes {
+			setNoFailover(ctx, node, barred)
+		}
 	}
-	for _, node := range state.AllNodes() {
-		me := node.Myself()
-		if me == nil || me.IsAutomaticFailoverDisabled() == bootstrapping {
-			continue
-		}
-		cmd := node.Client.B().ConfigSet().ParameterValue().ParameterValue(noFailoverParam, want).Build()
-		if err := node.Client.Do(ctx, cmd).Error(); err != nil {
-			log.Error(err, "CONFIG SET "+noFailoverParam, "node", node.Address, "value", want)
-		}
+	for _, node := range state.PendingNodes {
+		setNoFailover(ctx, node, destinationBarred(migrated, false))
 	}
 }
 
-// protectSourceNodes keeps the source nodes that are still members after
-// cutover from being elected primary, and keeps them in sync, until the user
-// sets the stage to Complete. On each replica it sets, with live CONFIG SET:
+func setNoFailover(ctx context.Context, node *valkey.NodeState, barred bool) {
+	me := node.Myself()
+	if me == nil || me.IsAutomaticFailoverDisabled() == barred {
+		return
+	}
+	want := "no"
+	if barred {
+		want = "yes"
+	}
+	cmd := node.Client.B().ConfigSet().ParameterValue().ParameterValue(noFailoverParam, want).Build()
+	if err := node.Client.Do(ctx, cmd).Error(); err != nil {
+		logf.FromContext(ctx).Error(err, "CONFIG SET "+noFailoverParam, "node", node.Address, "value", want)
+	}
+}
+
+// sourceFollowers returns the source nodes that now follow one of our own
+// primaries: the replicas of a shard that has been cut over. The nodes of a
+// shard that has not moved yet are still the source's own, and serve traffic
+// with their own failover, so they are not included.
+func sourceFollowers(state *valkey.ClusterState, members []valkey.ClusterNode) []valkey.ClusterNode {
+	cutOver := map[string]struct{}{}
+	for _, shard := range state.Shards {
+		if len(shard.Slots) > 0 && shard.PrimaryId != "" {
+			cutOver[shard.PrimaryId] = struct{}{}
+		}
+	}
+	var out []valkey.ClusterNode
+	for _, m := range members {
+		if _, ok := cutOver[m.PrimaryId]; !ok || m.IsPrimary() || m.IsFailing() || m.HasNoAddress() {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// protectSourceNodes keeps the source nodes that follow one of our primaries
+// from being elected primary, and keeps them in sync, until the user sets the
+// stage to Complete. It works shard by shard, as each shard is cut over, so a
+// half-finished cutover leaves no moved shard open to a source replica. On
+// each such replica it sets, with live CONFIG SET:
 //
 //   - masteruser and masterauth to this cluster's replication credentials. The
 //     source replicas now follow a new primary, which does not know the source
 //     password; without this their link would stay down and rollback would
 //     have nothing to roll back to.
-//   - cluster-replica-no-failover, last, so the flag marks the node as done.
+//   - cluster-replica-no-failover, last.
 //
 // Nothing is persisted (the operator never runs CONFIG REWRITE), so a restarted
-// source node loses these and is set up again on the next pass. Only reachable
-// replicas without the nofailover flag are touched.
-func (r *ValkeyClusterReconciler) protectSourceNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, members []valkey.ClusterNode) {
+// source node loses these and is set up again on the next pass. A replica that
+// already has the flag is still checked: when its link to the new primary is
+// down, the credentials are written again, which also covers a pass where the
+// replication password could not be read.
+func (r *ValkeyClusterReconciler) protectSourceNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, members []valkey.ClusterNode) {
 	log := logf.FromContext(ctx)
-	var pending []valkey.ClusterNode
-	for _, m := range members {
-		if m.IsFailing() || m.HasNoAddress() || m.IsAutomaticFailoverDisabled() || m.IsPrimary() {
-			continue
-		}
-		pending = append(pending, m)
-	}
-	if len(pending) == 0 {
+	followers := sourceFollowers(state, members)
+	if len(followers) == 0 {
 		return
 	}
 	cfg, err := r.sourceConn(ctx, cluster)
@@ -556,8 +614,9 @@ func (r *ValkeyClusterReconciler) protectSourceNodes(ctx context.Context, cluste
 		replPassword = ""
 	}
 	port := sourcePort(cluster)
-	for _, m := range pending {
-		if err := protectSourceNode(ctx, net.JoinHostPort(m.Host, strconv.Itoa(port)), cfg, replPassword); err != nil {
+	for _, m := range followers {
+		address := net.JoinHostPort(m.Host, strconv.Itoa(port))
+		if err := protectSourceNode(ctx, address, cfg, replPassword, m.IsAutomaticFailoverDisabled()); err != nil {
 			log.Error(err, "protect source node", "node", m.Host)
 		}
 	}
@@ -577,7 +636,10 @@ func sourcePort(cluster *valkeyiov1alpha1.ValkeyCluster) int {
 	return DefaultPort
 }
 
-func protectSourceNode(ctx context.Context, address string, cfg connConfig, replPassword string) error {
+// protectSourceNode applies the settings to one source replica. A replica that
+// already carries the flag is left alone while its link to the new primary is
+// up; when the link is down the credentials are written again.
+func protectSourceNode(ctx context.Context, address string, cfg connConfig, replPassword string, flagged bool) error {
 	c, err := vclient.NewClient(clientOption(address, cfg))
 	if err != nil {
 		return err
@@ -585,6 +647,15 @@ func protectSourceNode(ctx context.Context, address string, cfg connConfig, repl
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	if flagged {
+		if replPassword == "" {
+			return nil
+		}
+		info, err := c.Do(ctx, c.B().Info().Section("replication").Build()).ToString()
+		if err == nil && strings.Contains(info, "master_link_status:up") {
+			return nil
+		}
+	}
 	settings := [][2]string{}
 	if replPassword != "" {
 		settings = append(settings, [2]string{"masteruser", replicationUser}, [2]string{"masterauth", replPassword})

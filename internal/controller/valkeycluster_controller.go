@@ -330,14 +330,17 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if cluster.Spec.Bootstrap != nil {
 		r.restoreReplicationAuth(ctx, cluster, state)
 		migrated := bootstrapMigrated(cluster, state)
-		// New nodes must never be elected primary before cutover; once the slots
-		// have moved they get normal failover back.
-		r.ensureDestinationFailoverPolicy(ctx, state, !migrated)
+		// Source replicas of every shard that has been cut over must not be
+		// electable, and keep their link, until the stage is Complete. This runs
+		// per shard, before the failover policy below frees the new nodes of that
+		// shard, so a half-finished cutover leaves no moved shard open to the
+		// source.
+		members := sourceMembers(state, nodes.Items)
+		r.protectSourceNodes(ctx, cluster, state, members)
+		// New nodes must never be elected primary before their shard is cut
+		// over; afterwards they get normal failover back.
+		r.ensureDestinationFailoverPolicy(ctx, state, migrated)
 		if migrated {
-			// The source nodes stay as replicas, which keeps rollback possible,
-			// but none of them may be elected primary until the stage is Complete.
-			members := sourceMembers(state, nodes.Items)
-			r.protectSourceNodes(ctx, cluster, members)
 			finishBootstrapConditions(cluster, len(members))
 		} else {
 			bootstrap, err = r.planBootstrap(ctx, cluster)

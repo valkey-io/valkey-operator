@@ -205,3 +205,44 @@ func TestFailoverDueDoesNotRestartAFailoverInProgress(t *testing.T) {
 	r.clearFailover("node-b")
 	require.True(t, r.failoverDue("node-b", now.Add(3*time.Second)), "a failover that could not be sent is retried at once")
 }
+
+func TestDestinationBarredIsPerShard(t *testing.T) {
+	require.True(t, destinationBarred(false, false), "before cutover, a new node cannot be elected")
+	require.False(t, destinationBarred(false, true), "a shard that owns its slots fails over normally, even mid-cutover")
+	require.False(t, destinationBarred(true, false), "after cutover nothing is barred")
+	require.False(t, destinationBarred(true, true))
+}
+
+func TestSourceFollowersAreProtectedPerShard(t *testing.T) {
+	// Two shards. Shard "new1" has been cut over: its primary is ours and owns
+	// slots. Shard "old2" has not: its primary is still a source node.
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		{PrimaryId: "new1", Slots: []valkey.SlotsRange{{Start: 0, End: 8191}}},
+		{PrimaryId: "", Slots: nil},
+	}}
+	members := valkey.ParseClusterNodes("" +
+		"oldA 10.1.0.1:6379@16379 slave new1 0 1 1 connected\n" + // old primary of shard 1, now a replica of new1
+		"oldB 10.1.0.2:6379@16379 slave new1 0 1 1 connected\n" + // old replica of shard 1, follows new1
+		"oldC 10.1.0.3:6379@16379 master - 0 1 1 connected 8192-16383\n" + // source primary of shard 2, untouched
+		"oldD 10.1.0.4:6379@16379 slave oldC 0 1 1 connected\n" + // source replica of shard 2, untouched
+		"oldE 10.1.0.5:6379@16379 slave,fail new1 0 1 1 disconnected\n") // down, nothing to configure
+
+	got := sourceFollowers(state, members)
+	var ids []string
+	for _, m := range got {
+		ids = append(ids, m.Id)
+	}
+	require.Equal(t, []string{"oldA", "oldB"}, ids, "only the replicas of a cut-over shard, and only the reachable ones")
+
+	require.Empty(t, sourceFollowers(&valkey.ClusterState{Shards: []*valkey.ShardState{{}}}, members), "nothing is touched before any shard is cut over")
+}
+
+func TestStillSourcePrimariesSkipsMovedShards(t *testing.T) {
+	ours := &valkey.NodeState{Id: "new1"}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{ours}}}}
+	plan := &bootstrapPlan{shards: []valkey.SourceShard{{PrimaryId: "new1"}, {PrimaryId: "oldC"}}}
+
+	got := stillSourcePrimaries(state, plan)
+	require.Len(t, got, 1)
+	require.Contains(t, got, "oldC", "a primary that is one of ours is no longer the source's")
+}

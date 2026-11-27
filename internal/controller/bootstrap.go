@@ -72,11 +72,14 @@ func clusterMigrated(state *valkey.ClusterState, shards int32) bool {
 // spec.shards after cutover would look like a bootstrap again, and the operator
 // would try to plan a source that may be gone.
 func bootstrapMigrated(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) bool {
-	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSynced); c != nil &&
-		c.Status == metav1.ConditionTrue && c.Reason == valkeyiov1alpha1.ReasonBootstrapComplete {
-		return true
-	}
-	return clusterMigrated(state, cluster.Spec.Shards)
+	return bootstrapCutoverRecorded(cluster) || clusterMigrated(state, cluster.Spec.Shards)
+}
+
+// bootstrapCutoverRecorded reports whether the status records that cutover has
+// finished. It is the one fact the operator stores about a bootstrap.
+func bootstrapCutoverRecorded(cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSynced)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == valkeyiov1alpha1.ReasonBootstrapComplete
 }
 
 // bootstrapCutoverRequested reports whether the user moved spec.bootstrap.stage
@@ -188,7 +191,11 @@ func (r *ValkeyClusterReconciler) planBootstrap(ctx context.Context, cluster *va
 	}
 	plan := &bootstrapPlan{password: cfg.password}
 
-	var lastErr error
+	// A connection failure and a topology that fails validation both move on to
+	// the next endpoint: one node's view can be stale or partitioned while
+	// another's is fine. If every endpoint fails, a validation error is reported
+	// in preference to a connection error, because it says what is wrong.
+	var lastErr, invalidErr error
 	for _, endpoint := range src.Endpoints {
 		host, portStr, err := net.SplitHostPort(endpoint)
 		if err != nil {
@@ -205,7 +212,8 @@ func (r *ValkeyClusterReconciler) planBootstrap(ctx context.Context, cluster *va
 		}
 		shards, err := valkey.PlanBootstrapSource(valkey.ParseClusterNodes(raw), int(cluster.Spec.Shards))
 		if err != nil {
-			return nil, err
+			invalidErr = fmt.Errorf("endpoint %s: %w", endpoint, err)
+			continue
 		}
 		ip, err := resolveIP(host)
 		if err != nil {
@@ -213,6 +221,9 @@ func (r *ValkeyClusterReconciler) planBootstrap(ctx context.Context, cluster *va
 		}
 		plan.shards, plan.seedIP, plan.seedPort = shards, ip, port
 		return plan, nil
+	}
+	if invalidErr != nil {
+		return nil, invalidErr
 	}
 	return nil, fmt.Errorf("no bootstrap source endpoint reachable: %w", lastErr)
 }
@@ -354,7 +365,12 @@ func (r *ValkeyClusterReconciler) restoreSourceReplicationAuth(ctx context.Conte
 // to replicas of a shard that has been cut over. Their sibling was promoted, so
 // they now sync from a primary of this cluster, which does not know the source
 // password. Idempotent: it touches only replicas whose link is down.
-func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) {
+func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, members []valkey.ClusterNode) {
+	// A replica that follows a source node, for example after a manual rollback,
+	// needs the source credentials, not this cluster's. Handle those first and
+	// leave them out of the loop below.
+	r.restoreAuthOnSourceFollowers(ctx, cluster, state, members)
+	sourceIDs := memberIDs(members)
 	var password string
 	for _, shard := range state.Shards {
 		if len(shard.Slots) == 0 {
@@ -362,6 +378,9 @@ func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cl
 		}
 		for _, node := range shard.Nodes {
 			if node.Id == shard.PrimaryId || node.Info["master_link_status"] == "up" {
+				continue
+			}
+			if _, followsSource := sourceIDs[node.PrimaryIdFromSelf()]; followsSource {
 				continue
 			}
 			if password == "" {
@@ -379,6 +398,71 @@ func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cl
 	}
 }
 
+// memberIDs returns the node IDs of the given cluster members.
+func memberIDs(members []valkey.ClusterNode) map[string]struct{} {
+	out := make(map[string]struct{}, len(members))
+	for _, m := range members {
+		out[m.Id] = struct{}{}
+	}
+	return out
+}
+
+// restoreAuthOnSourceFollowers gives the source credentials to every new node
+// whose replication link is down and which follows a source node. That is the
+// state after someone rolls a shard back by failing over to an old node: the
+// former new primary now follows a source node, which does not know this
+// cluster's replication credentials.
+func (r *ValkeyClusterReconciler) restoreAuthOnSourceFollowers(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, members []valkey.ClusterNode) {
+	sourceIDs := memberIDs(members)
+	var password string
+	var loaded bool
+	for _, node := range state.AllNodes() {
+		if node.IsPrimary() || node.Info["master_link_status"] == "up" {
+			continue
+		}
+		if _, ok := sourceIDs[node.PrimaryIdFromSelf()]; !ok {
+			continue
+		}
+		if !loaded {
+			cfg, err := r.sourceConn(ctx, cluster)
+			if err != nil {
+				logf.FromContext(ctx).Error(err, "cannot read the source credentials")
+				return
+			}
+			password, loaded = cfg.password, true
+		}
+		if err := setReplicationAuth(ctx, node, "", password); err != nil {
+			logf.FromContext(ctx).Error(err, "restore source replication auth", "node", node.Address)
+		}
+	}
+}
+
+// shardFollowsSource reports whether a shard of a cluster that has not been
+// cut over still has a node following a source primary. Such a shard has no
+// primary among our nodes, which is expected and not a sign of a broken shard.
+func shardFollowsSource(cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, shardIndex int, nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
+	if cluster.Spec.Bootstrap == nil || state == nil || bootstrapMigrated(cluster, state) {
+		return false
+	}
+	sourceIDs := memberIDs(sourceMembers(state, nodes.Items))
+	si := strconv.Itoa(shardIndex)
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Labels[LabelShardIndex] != si || n.Status.PodIP == "" {
+			continue
+		}
+		for _, node := range state.AllNodes() {
+			if node.Address != n.Status.PodIP {
+				continue
+			}
+			if _, ok := sourceIDs[node.PrimaryIdFromSelf()]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // bootstrapCutover promotes the most caught-up new replica of each shard that
 // does not own its slots yet, with a graceful CLUSTER FAILOVER: the replica
 // waits for its primary's offset, so no write is lost. It is called only when
@@ -386,6 +470,14 @@ func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cl
 // bootstrapping node. Returns the number of failovers started.
 func (r *ValkeyClusterReconciler) bootstrapCutover(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
 	log := logf.FromContext(ctx)
+	// Do not start until every shard that has not moved has a synced replica.
+	// The failovers then run together, so the cluster is only half cut over for
+	// the few seconds they take, not for as long as the slowest shard needs to
+	// sync.
+	if !cutoverReady(state, int(cluster.Spec.Shards)) {
+		log.V(1).Info("cutover waiting: not every shard has a synced replica")
+		return 0
+	}
 	started := 0
 	for _, shard := range state.Shards {
 		if len(shard.Slots) > 0 {
@@ -443,6 +535,23 @@ func (r *ValkeyClusterReconciler) clearFailover(nodeID string) {
 	delete(r.failoverIssued, nodeID)
 }
 
+// cutoverReady reports whether every shard that has not been cut over has a
+// synced replica to promote, and every shard is present in the state.
+func cutoverReady(state *valkey.ClusterState, wantShards int) bool {
+	if len(state.Shards) < wantShards {
+		return false
+	}
+	for _, shard := range state.Shards {
+		if len(shard.Slots) > 0 {
+			continue // already moved
+		}
+		if valkey.HighestOffsetReplica(syncedNodes(shard)) == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // syncedNodes returns the shard's nodes whose replication link is up.
 func syncedNodes(shard *valkey.ShardState) []*valkey.NodeState {
 	var out []*valkey.NodeState
@@ -473,7 +582,12 @@ func (r *ValkeyClusterReconciler) reconcileBootstrap(ctx context.Context, cluste
 		setBootstrapping("Attaching nodes to the source cluster")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}
 	}
-	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	// Clear only the failure this function sets. Other reasons, such as an
+	// unresolved users ACL, belong to their own code and stay until it clears them.
+	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil &&
+		c.Reason == valkeyiov1alpha1.ReasonNodeAddFailed {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	}
 
 	synced, total := bootstrapSyncProgress(state, cluster, plan)
 	if synced == total {
@@ -502,12 +616,16 @@ const noFailoverParam = "cluster-replica-no-failover"
 // nodeConfig returns the user config each ValkeyNode renders. A cluster that is
 // being bootstrapped starts every pod with cluster-replica-no-failover on, so a
 // restart can never elect a new node primary before cutover. The setting
-// is dropped at stage Complete; between Bootstrap and Complete the operator
-// switches it off live once the slots have moved, so the key is stable across
-// Bootstrap and Cutover and no pod rolls at cutover.
+// is dropped only when the stage is Complete and the status records that cutover
+// has finished. The stage alone is not enough: it can be set to Complete before
+// cutover, and a pod that restarted then would start unprotected and could win
+// an automatic election that bypasses the graceful failover. Between Bootstrap
+// and Complete the operator switches the setting off live once the slots have
+// moved, so the key is stable across Bootstrap and Cutover and no pod rolls at
+// cutover.
 func nodeConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
 	b := cluster.Spec.Bootstrap
-	if b == nil || b.Stage == valkeyiov1alpha1.BootstrapStageComplete {
+	if b == nil || (b.Stage == valkeyiov1alpha1.BootstrapStageComplete && bootstrapCutoverRecorded(cluster)) {
 		return cluster.Spec.Config
 	}
 	config := make(map[string]string, len(cluster.Spec.Config)+1)
@@ -530,16 +648,25 @@ func destinationBarred(migrated, shardOwnsSlots bool) bool {
 // restart never opens a window; this applies the change live and corrects it
 // after a restart. It reads the node's nofailover flag and only issues
 // CONFIG SET when the flag differs.
-func (r *ValkeyClusterReconciler) ensureDestinationFailoverPolicy(ctx context.Context, state *valkey.ClusterState, migrated bool) {
+func (r *ValkeyClusterReconciler) ensureDestinationFailoverPolicy(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, migrated bool) {
+	// A user who set cluster-replica-no-failover themselves keeps it at every
+	// stage: the operator only lifts the setting it added.
+	userBarred := userBarsFailover(cluster)
 	for _, shard := range state.Shards {
-		barred := destinationBarred(migrated, len(shard.Slots) > 0)
+		barred := userBarred || destinationBarred(migrated, len(shard.Slots) > 0)
 		for _, node := range shard.Nodes {
 			setNoFailover(ctx, node, barred)
 		}
 	}
 	for _, node := range state.PendingNodes {
-		setNoFailover(ctx, node, destinationBarred(migrated, false))
+		setNoFailover(ctx, node, userBarred || destinationBarred(migrated, false))
 	}
+}
+
+// userBarsFailover reports whether spec.config sets cluster-replica-no-failover
+// on, so the operator must not switch it off.
+func userBarsFailover(cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	return strings.EqualFold(cluster.Spec.Config[noFailoverParam], "yes")
 }
 
 func setNoFailover(ctx context.Context, node *valkey.NodeState, barred bool) {
@@ -613,8 +740,13 @@ func (r *ValkeyClusterReconciler) protectSourceNodes(ctx context.Context, cluste
 		log.Error(err, "cannot read the replication password; protecting source nodes without it")
 		replPassword = ""
 	}
-	port := sourcePort(cluster)
 	for _, m := range followers {
+		// Each node's own client port comes from its CLUSTER NODES entry; the
+		// first endpoint's port is only a fallback for an entry without one.
+		port := m.Port
+		if port == 0 {
+			port = sourcePort(cluster)
+		}
 		address := net.JoinHostPort(m.Host, strconv.Itoa(port))
 		if err := protectSourceNode(ctx, address, cfg, replPassword, m.IsAutomaticFailoverDisabled()); err != nil {
 			log.Error(err, "protect source node", "node", m.Host)

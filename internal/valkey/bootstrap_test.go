@@ -69,3 +69,19 @@ func TestPlanBootstrapSource(t *testing.T) {
 		}
 	})
 }
+
+func TestClusterNodesEntryCarriesItsOwnClientPort(t *testing.T) {
+	nodes := ParseClusterNodes("" +
+		"a 10.0.0.1:6379@16379 myself,master - 0 1 1 connected 0-5460\n" +
+		"b 10.0.0.2:7000@17000,host-b slave a 0 1 1 connected\n" +
+		"c fd00::2:6380@16380 slave a 0 1 1 connected\n" +
+		"d :0@0 slave a 0 1 1 disconnected\n")
+	if len(nodes) != 4 {
+		t.Fatalf("parsed %d nodes, want 4", len(nodes))
+	}
+	for i, want := range []int{6379, 7000, 6380, 0} {
+		if nodes[i].Port != want {
+			t.Errorf("node %s: Port = %d, want %d", nodes[i].Id, nodes[i].Port, want)
+		}
+	}
+}

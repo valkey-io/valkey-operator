@@ -93,7 +93,8 @@ A replica that wins an automatic election becomes a primary without the user ask
 
 - **`Bootstrap`:** every new node runs with `cluster-replica-no-failover yes`. The operator renders it into the node config, so even a restarted pod comes back protected. A manual `CLUSTER FAILOVER` still works, which is how cutover promotes a node. The source nodes are not modified, because the source keeps serving traffic and needs its own failover.
 - **`Cutover`:** this works shard by shard, as each shard is cut over, so a half-finished cutover never leaves a moved shard open to the source. For a shard whose new primary owns its slots, the operator turns `cluster-replica-no-failover` off on the shard's new nodes (live `CONFIG SET`) so they get normal failover back. In the same pass it turns it on, also live, for every source node that now follows that primary. Shards that have not moved yet are left as they were: their new nodes stay barred and their source nodes are not touched, because the source still serves them. On the protected source nodes it also sets `masteruser` and `masterauth` to this cluster's replication credentials. The source replicas now follow a new primary, which does not know the source password, so without this their link would go down and there would be nothing to roll back to. The operator keeps checking those nodes: if one has the flag but its link to the new primary is down, the credentials are written again, which also covers a pass where the replication password could not be read. None of this is persisted on the source (the operator never runs `CONFIG REWRITE`), so a restarted source node loses it and gets it back on the next reconcile.
-- **`Complete`:** the source nodes are forgotten, and the key is dropped from the rendered config. That one change rolls the new pods once, through the normal rolling update.
+- **A value you set yourself is kept.** If `spec.config` sets `cluster-replica-no-failover: "yes"`, the operator never switches it off, at any stage. It only lifts the setting it added.
+- **`Complete`:** the source nodes are forgotten. The key is dropped from the rendered config only once the status records that cutover has finished, not merely because the stage says `Complete`, so a pod that restarts after an early `Complete` still starts protected. That one change rolls the new pods once, through the normal rolling update.
 
 The config key is the same in `Bootstrap` and `Cutover`, so moving to `Cutover` does not roll any pod.
 
@@ -147,7 +148,7 @@ flowchart TD
 Before creating any pod, the operator reads the source:
 
 1. Reads the password and CA Secrets through `APIReader`. This is needed because the manager's cache only holds operator-labelled Secrets.
-2. Connects to each endpoint in turn with a short-lived client and runs `CLUSTER NODES`. It uses the first one that answers.
+2. Connects to each endpoint in turn with a short-lived client and runs `CLUSTER NODES`. It uses the first one that answers and passes the checks below. An endpoint that is unreachable, or whose view is stale or partitioned, is skipped in favour of the next. If every endpoint fails, the validation error is reported in preference to a connection error.
 3. Strips the RESP3 `txt:` marker from the reply, then parses it.
 4. Runs `PlanBootstrapSource`, which rejects the source if:
    - it has no primaries owning slots,
@@ -219,7 +220,9 @@ A graceful failover takes a few seconds, and asking again while it runs restarts
 2. Picks the one with the highest replication offset (`HighestOffsetReplica`).
 3. Runs a graceful `CLUSTER FAILOVER` on it. The replica pauses the source primary, waits to match its offset, then takes over. Because of that wait, **no acknowledged write is lost**.
 
-If the stage is moved before sync finishes, shards with no synced replica are skipped and retried every 2 seconds, so cutover proceeds as each shard becomes ready.
+The operator starts no failover until **every** shard that has not moved has a synced replica, and then it starts them all in one pass. If the stage is moved before sync finishes, it waits and re-checks every 2 seconds. This keeps the cluster only half cut over for the few seconds the failovers take, instead of for as long as the slowest shard needs to sync.
+
+The half-cut-over window is not closed completely. If a new primary dies in those seconds, its surviving replicas are free to fail over (they are no longer barred once their shard owns slots), but the operator has no durable record of which shards it has moved, and the source plan can fail because the source table lists the dead new primary. A durable per-shard record in the status would remove that gap and is listed under hardening.
 
 ### After cutover
 
@@ -283,7 +286,7 @@ Events: `BootstrapSourceInvalid` (warning), `ClusterMeetFailed` (warning), `Repl
 ## Aborting
 
 - **Before cutover:** delete the ValkeyCluster. The source keeps serving from its own primaries, and nothing was promoted. The operator does **not** clean up after itself on the source: the removed new nodes remain in the source's node table as failing entries until someone runs `CLUSTER FORGET` for each of them on every source node. I have not verified how long those entries linger on a real source, only that nothing in the operator removes them. This is a known gap.
-- **After cutover, before `Complete`:** there is no automatic rollback, but the old nodes are still replicas of the new primaries, so you can fail over to them manually with `CLUSTER FAILOVER` on each old node. They carry `cluster-replica-no-failover` until then, which a manual failover ignores. This path has not been tested.
+- **After cutover, before `Complete`:** there is no automatic rollback, but the old nodes are still replicas of the new primaries, so you can fail over to them manually with `CLUSTER FAILOVER` on each old node. They carry `cluster-replica-no-failover` until then, which a manual failover ignores. After such a failover, the former new primary follows an old node. The operator gives any new node whose link is down and which follows a source node the **source** credentials, and it does not write this cluster's replication credentials to it, because the source would reject them. This path has not been tested.
 - **After `Complete`:** the source nodes are forgotten, so rollback is no longer possible.
 
 ## Limitations and what is not tested
@@ -299,12 +302,12 @@ Requirements:
 Known gaps:
 
 - **TLS:** `tls.caSecretRef` covers only the operator's own connection. A TLS source also needs the destination's `networking.tls` to trust the source CA for bus and replication traffic, which is not handled yet.
-- **Source port:** `CLUSTER NODES` entries carry no port, so the operator assumes the source nodes use the port of the first endpoint when it protects them after cutover.
+- **Source port:** when the operator protects the source nodes after cutover, it dials each node on the client port from its own `CLUSTER NODES` entry. It falls back to the port of the first endpoint only for an entry without one.
 - **Protection is not persisted:** the operator sets `cluster-replica-no-failover` on source nodes with `CONFIG SET` only. A restarted source node is unprotected until the next reconcile, which is a short window.
 - **A running source at `Complete`:** nodes that are still up are not forgotten, because they would rejoin. The condition reports them.
 - **Partial cutover is only unit-tested:** the per-shard rules (which new nodes are barred, which source nodes are protected, which plan shards still count as the source) are covered by unit tests. The e2e cuts over all shards at once, so it does not exercise a half-finished cutover.
 - **Complete rolls the new pods once:** dropping `cluster-replica-no-failover` from the rendered config changes the config revision.
-- **Rolls during bootstrap:** the logs show "cannot identify primary for shard, skipping its roll", because the operator can't see the source primary as part of the new shards. Spec changes that need a rolling update wait until after cutover.
+- **Rolls and node creation during bootstrap:** a shard that still follows a source primary has none of our nodes as its primary. The shard guard in the node reconcile no longer skips such a shard, so a missing node can be created, `replicasPerShard` can be raised, and replicas can be rolled before cutover. The shard is rolled replicas only, since the source primary is not ours to roll. This is covered by a unit test, not by the e2e.
 - **Pod restarts:** a restarted new pod comes back with the destination credentials. While bootstrapping, every pass re-applies the source credentials on any new node that replicates a source primary and has its link down, including a pod that restarted with saved cluster state and is no longer pending. In a half-finished cutover this is limited to shards whose primary is still a source node; the replicas of a moved shard keep this cluster's own credentials. This path is not tested.
 - **No lag check:** `BootstrapSynced` doesn't compare offsets with the source primary.
 - **Abort cleanup:** see [Aborting](#aborting).
@@ -347,7 +350,7 @@ The e2e test ran once on a small dataset. It has no restart or failure-injection
 
 1. **POC** (this branch): equal shard counts, cutover through the field, Kind e2e test.
 2. **API and conditions:** the final field shape, user documentation, and the lag check against the source.
-3. **Hardening:** operator-restart and failure-injection tests, a rollback test, abort cleanup on the source, the version matrix (#375, #263), and pre-9.0 sources (#575).
+3. **Hardening:** a durable per-shard cutover record in the status, operator-restart and failure-injection tests, a rollback test, abort cleanup on the source, the version matrix (#375, #263), and pre-9.0 sources (#575).
 4. **Later:** differing shard counts, the sync-tool path (B), standalone or Sentinel sources, in-place adoption, and the topology-conversion idea from the issue comments.
 
 ## Open questions

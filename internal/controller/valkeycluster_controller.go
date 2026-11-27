@@ -328,18 +328,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// state, so it survives operator restarts.
 	var bootstrap *bootstrapPlan
 	if cluster.Spec.Bootstrap != nil {
-		r.restoreReplicationAuth(ctx, cluster, state)
+		members := sourceMembers(state, nodes.Items)
+		r.restoreReplicationAuth(ctx, cluster, state, members)
 		migrated := bootstrapMigrated(cluster, state)
 		// Source replicas of every shard that has been cut over must not be
 		// electable, and keep their link, until the stage is Complete. This runs
 		// per shard, before the failover policy below frees the new nodes of that
 		// shard, so a half-finished cutover leaves no moved shard open to the
 		// source.
-		members := sourceMembers(state, nodes.Items)
 		r.protectSourceNodes(ctx, cluster, state, members)
 		// New nodes must never be elected primary before their shard is cut
 		// over; afterwards they get normal failover back.
-		r.ensureDestinationFailoverPolicy(ctx, state, migrated)
+		r.ensureDestinationFailoverPolicy(ctx, cluster, state, migrated)
 		if migrated {
 			finishBootstrapConditions(cluster, len(members))
 		} else {
@@ -863,7 +863,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 		// replica, and scale-in needs one of them synced before it can fail over.
 		if clusterState != nil && shardExistsInTopology(clusterState, shardIndex, nodes) &&
 			primaryNodeIndexForShard(shardIndex, nodesPerShard, nodes, clusterState) < 0 &&
-			!shardPrimaryOnExcessNode(shardIndex, nodesPerShard, nodes, clusterState) {
+			!shardPrimaryOnExcessNode(shardIndex, nodesPerShard, nodes, clusterState) &&
+			// Before cutover a bootstrapping shard follows a source primary, so
+			// none of our nodes is its primary. That is expected: its nodes can
+			// still be created and rolled, replicas only.
+			!shardFollowsSource(cluster, clusterState, shardIndex, nodes) {
 			// Skip this shard only, never the whole reconcile: the later phases
 			// (MEET/ADDSLOTSRANGE/REPLICATE, forgetStaleNodes, handleScaleIn,
 			// rebalance) are what make an unidentifiable primary identifiable

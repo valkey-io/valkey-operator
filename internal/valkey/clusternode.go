@@ -54,6 +54,7 @@ type SlotMigration struct {
 type ClusterNode struct {
 	Id        string
 	Host      string // bare host from the endpoint field, unbracketed for IPv6
+	Port      int    // client port from the endpoint field, 0 when it has none
 	Flags     NodeFlags
 	PrimaryId string // "-" on a primary line, the primary's ID on a replica
 	Slots     []SlotsRange
@@ -238,6 +239,7 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 	node := ClusterNode{
 		Id:        shared(head[0]),
 		Host:      shared(hostFromClusterNodesEndpoint(head[1])),
+		Port:      portFromClusterNodesEndpoint(head[1]),
 		Flags:     parseNodeFlags(head[2]),
 		PrimaryId: shared(head[3]),
 	}

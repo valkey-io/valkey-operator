@@ -118,8 +118,17 @@ func TestNodeConfigKeepsNewNodesFromBeingElected(t *testing.T) {
 	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageCutover
 	require.Equal(t, atBootstrap, nodeConfig(cluster))
 
+	// Complete alone is not enough: it can be set before cutover, and a pod that
+	// restarted then would start unprotected.
 	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageComplete
-	require.NotContains(t, nodeConfig(cluster), noFailoverParam, "Complete restores normal failover")
+	require.Equal(t, "yes", nodeConfig(cluster)[noFailoverParam], "Complete before cutover has finished keeps the protection")
+
+	setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapComplete, "Cutover complete", metav1.ConditionTrue)
+	require.NotContains(t, nodeConfig(cluster), noFailoverParam, "Complete after cutover restores normal failover")
+
+	// Cutover recorded, but the user has not asked for Complete yet.
+	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageCutover
+	require.Equal(t, "yes", nodeConfig(cluster)[noFailoverParam])
 }
 
 func TestSourceMembers(t *testing.T) {
@@ -245,4 +254,58 @@ func TestStillSourcePrimariesSkipsMovedShards(t *testing.T) {
 	got := stillSourcePrimaries(state, plan)
 	require.Len(t, got, 1)
 	require.Contains(t, got, "oldC", "a primary that is one of ours is no longer the source's")
+}
+
+func TestCutoverReadyWaitsForEveryShard(t *testing.T) {
+	synced := func() *valkey.ShardState {
+		return &valkey.ShardState{Nodes: []*valkey.NodeState{replicaOf("src", "up")}}
+	}
+	notSynced := func() *valkey.ShardState {
+		return &valkey.ShardState{Nodes: []*valkey.NodeState{replicaOf("src", "down")}}
+	}
+	moved := &valkey.ShardState{Slots: []valkey.SlotsRange{{Start: 0, End: 5460}}}
+
+	require.True(t, cutoverReady(&valkey.ClusterState{Shards: []*valkey.ShardState{synced(), synced(), synced()}}, 3))
+	require.False(t, cutoverReady(&valkey.ClusterState{Shards: []*valkey.ShardState{synced(), synced(), notSynced()}}, 3),
+		"one shard still syncing holds back every failover")
+	require.False(t, cutoverReady(&valkey.ClusterState{Shards: []*valkey.ShardState{synced(), synced()}}, 3),
+		"a shard missing from the scrape is not ready")
+	require.True(t, cutoverReady(&valkey.ClusterState{Shards: []*valkey.ShardState{moved, synced(), synced()}}, 3),
+		"a shard that already moved does not hold back the rest")
+}
+
+func TestUserBarsFailoverIsKept(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	require.False(t, userBarsFailover(cluster))
+
+	cluster.Spec.Config = map[string]string{noFailoverParam: "yes"}
+	require.True(t, userBarsFailover(cluster), "a user who set it keeps it after cutover")
+
+	cluster.Spec.Config = map[string]string{noFailoverParam: "no"}
+	require.False(t, userBarsFailover(cluster))
+}
+
+func TestShardFollowsSourceBeforeCutover(t *testing.T) {
+	// One destination replica, in shard 0, follows source primary "src".
+	node := &valkey.NodeState{Id: "n0", Address: "10.0.0.9"}
+	node.SetClusterNodesForTesting("" +
+		"n0 10.0.0.9:6379@16379 myself,slave src 0 1 1 connected\n" +
+		"src 10.1.0.1:6379@16379 master - 0 1 1 connected 0-16383\n")
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{node}}}}
+
+	vn := valkeyiov1alpha1.ValkeyNode{}
+	vn.Labels = map[string]string{LabelShardIndex: "0"}
+	vn.Status.PodIP = "10.0.0.9"
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{Items: []valkeyiov1alpha1.ValkeyNode{vn}}
+
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	require.False(t, shardFollowsSource(cluster, state, 0, nodes), "not a bootstrap")
+
+	cluster.Spec.Bootstrap = &valkeyiov1alpha1.BootstrapSpec{}
+	cluster.Spec.Shards = 1
+	require.True(t, shardFollowsSource(cluster, state, 0, nodes), "its primary is a source node, so it must not be skipped as unidentifiable")
+	require.False(t, shardFollowsSource(cluster, state, 1, nodes), "another shard has no such node")
+
+	setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapComplete, "Cutover complete", metav1.ConditionTrue)
+	require.False(t, shardFollowsSource(cluster, state, 0, nodes), "after cutover the normal guard applies again")
 }

@@ -623,6 +623,24 @@ func hostFromClusterNodesEndpoint(endpoint string) string {
 	return ""
 }
 
+// portFromClusterNodesEndpoint extracts the client port from a CLUSTER NODES
+// endpoint field (<ip:port@cport[,hostname]>). It returns 0 when the field has
+// no usable port.
+func portFromClusterNodesEndpoint(endpoint string) int {
+	if i := strings.Index(endpoint, "@"); i != -1 {
+		endpoint = endpoint[:i]
+	}
+	i := strings.LastIndex(endpoint, ":")
+	if i == -1 {
+		return 0
+	}
+	port, err := strconv.Atoi(endpoint[i+1:])
+	if err != nil || port < 0 || port > 65535 {
+		return 0
+	}
+	return port
+}
+
 // StaleAddressPeer pairs a viewer node with a live cluster member whose
 // address in the viewer's node table is outdated.
 type StaleAddressPeer struct {

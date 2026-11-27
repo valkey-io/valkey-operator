@@ -137,21 +137,18 @@ func assertSnapshotKept(t *testing.T, r scriptRun, kept bool) {
 	}
 }
 
-// The server command of a cluster node runs replicationAuthShell(true), which
-// falls back to the server binary when the mounted ConfigMap has no
-// primary-handoff.sh, as an older shared ConfigMap may not. The script and password
-// paths are absolute, so this exercises the fallback, with the password from
-// the environment, on a machine without them.
-func TestPrimaryHandoffCommandFallsBackToServer(t *testing.T) {
-	for _, path := range []string{"/scripts/" + primaryHandoffScriptKey, systemPasswordMountPath + "/" + replicationUser} {
-		if _, err := os.Stat(path); err == nil {
-			t.Skip(path + " exists on this machine")
-		}
+// replicationAuthShell starts the server with the password from the
+// environment when the password file is not mounted. The password path is
+// absolute, so this runs on a machine without it.
+func TestReplicationAuthShellUsesTheEnvironmentPassword(t *testing.T) {
+	path := systemPasswordMountPath + "/" + replicationUser
+	if _, err := os.Stat(path); err == nil {
+		t.Skip(path + " exists on this machine")
 	}
 	binDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-server"),
 		[]byte("#!/bin/sh\necho \"valkey-server $*\"\n"), 0o755))
-	cmd := exec.Command(shellPath, "-c", replicationAuthShell(true), "valkey-server", "/config/valkey.conf", "--port", "6379")
+	cmd := exec.Command(shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf", "--port", "6379")
 	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "PRIMARY_AUTH=re-current")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
@@ -190,7 +187,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		{"double-quoted timeout", `"5000"`, "30s"},
 		{"single-quoted timeout", "'5000'", "30s"},
 		{"invalid timeout falls back", "invalid", "90s"},
-		{"large timeout caps the wait", "9223372036854775807", "300s"},
+		{"large timeout caps the wait", "9223372036854775807", strconv.Itoa(primaryHandoffMaxWaitSeconds) + "s"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := runPrimaryHandoffScript(t, primary+replica+vars, "cluster-node-timeout "+tt.value+"\n", stubCLI{})
@@ -225,7 +222,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		require.NoError(t, cmd.Start())
 		require.Eventually(t, func() bool {
 			b, _ := os.ReadFile(log.Name())
-			return strings.Contains(string(b), "waiting up to 300s")
+			return strings.Contains(string(b), "waiting up to "+strconv.Itoa(primaryHandoffMaxWaitSeconds)+"s")
 		}, 10*time.Second, 50*time.Millisecond)
 		require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
 		done := make(chan error, 1)
@@ -305,7 +302,7 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
 		passwordFile := filepath.Join(filepath.Dir(calls), operatorUser)
 		require.NoError(t, os.WriteFile(passwordFile, []byte("op-mounted\n"), 0o644))
-		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile, "ROTATE_TO=op-rotated")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
@@ -316,19 +313,36 @@ func TestPrimaryHandoffScript(t *testing.T) {
 		for i, want := range []string{"op-mounted", "op-rotated", "op-rotated"} {
 			assert.True(t, strings.HasPrefix(lines[i], want+" "), lines[i])
 			assert.Contains(t, lines[i], "--user "+operatorUser)
+			assert.NotContains(t, lines[i], "alice")
 		}
 	})
 
-	t.Run("ROLE calls fall back to the environment password without the mount", func(t *testing.T) {
+	t.Run("ROLE calls ignore VALKEYCLI_USER and VALKEYCLI_AUTH without the mount", func(t *testing.T) {
 		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 0})
-		cmd.Env = append(cmd.Env, "VALKEY_USER="+operatorUser, "VALKEYCLI_AUTH=op-env",
+		cmd.Env = append(cmd.Env, "VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw",
 			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 		auth, err := os.ReadFile(calls + ".auth")
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(string(auth), "op-env "), string(auth))
-		assert.Contains(t, string(auth), "--user "+operatorUser)
+		assert.True(t, strings.HasPrefix(string(auth), " "), string(auth))
+		assert.NotContains(t, string(auth), "--user")
+	})
+
+	t.Run("ROLE calls use VALKEY_USER and VALKEYCLI_AUTH in a pod without the mount", func(t *testing.T) {
+		cmd, _, calls := primaryHandoffTestCommand(t, primary+replica+vars, conf, stubCLI{promotedAfter: 2})
+		cmd.Env = append(cmd.Env, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw",
+			"VALKEY_OPERATOR_PASSWORD_FILE="+filepath.Join(filepath.Dir(calls), "missing"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		auth, err := os.ReadFile(calls + ".auth")
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(auth)), "\n")
+		require.Len(t, lines, 3)
+		for _, line := range lines {
+			assert.True(t, strings.HasPrefix(line, "env-pw "), line)
+			assert.Contains(t, line, "--user "+operatorUser)
+		}
 	})
 }
 

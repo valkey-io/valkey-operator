@@ -361,7 +361,7 @@ var _ = Describe("ValkeyCluster", Ordered, Label("cluster-lifecycle"), func() {
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),
@@ -480,7 +480,7 @@ spec:
 				g.Expect(podIP).NotTo(BeEmpty(), "pod %q has no podIP", podName)
 
 				cmd = exec.Command("kubectl", "exec", podName, "-c", "server", "--",
-					"valkey-cli", "CLUSTER", "SLOTS")
+					"env", "-u", "VALKEYCLI_USER", "-u", "VALKEYCLI_AUTH", "valkey-cli", "CLUSTER", "SLOTS")
 				slotsOut, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "CLUSTER SLOTS failed")
 				g.Expect(slotsOut).To(ContainSubstring(podIP),
@@ -751,7 +751,7 @@ EOF`,
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(commands).NotTo(BeEmpty())
 
-				valkeyCli := []string{"valkey-cli", "-a", defaultPassword}
+				valkeyCli := []string{"env", "-u", "VALKEYCLI_USER", "valkey-cli", "-a", defaultPassword}
 				arities, err := utils.CommandArities(podName, valkeyCli, commands)
 				g.Expect(err).NotTo(HaveOccurred())
 
@@ -830,7 +830,7 @@ spec:
 
 				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
-					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
+					fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"SET key:\"i\" val:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^OK$'", seedKeys))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seed writes should succeed across shards")
@@ -894,7 +894,7 @@ spec:
 
 				cmd = exec.Command("kubectl", "exec", strings.TrimSpace(podName), "-c", "server", "--",
 					"sh", "-c",
-					fmt.Sprintf("unset VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
+					fmt.Sprintf("unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH; awk 'BEGIN{for(i=1;i<=%d;i++) print \"GET key:\"i}' | valkey-cli -c -h 127.0.0.1 | grep -c '^val:'", seedKeys))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(strings.TrimSpace(output)).To(Equal(fmt.Sprintf("%d", seedKeys)), "all seeded keys should survive after rebalance")
@@ -2827,13 +2827,13 @@ const writerDurationSeconds = 20
 
 // execValkeyPodShell runs a shell script inside the pod's server container
 // with VALKEYCLI_AUTH set to the default user's password, so every valkey-cli
-// invocation in the script runs authenticated. The operator injects
-// VALKEYCLI_AUTH with the _operator user's password for the probe scripts;
-// it must be overridden here because valkey-cli auto-sends it as the default
-// user's AUTH credential.
+// invocation in the script runs authenticated. The operator sets
+// VALKEYCLI_USER and VALKEYCLI_AUTH to _operator for valkey-cli run in the
+// pod, so both are overridden here: valkey-cli 9.2+ would otherwise send
+// AUTH _operator with the default user's password.
 func execValkeyPodShell(pod string, script string) (string, error) {
 	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
+		"sh", "-c", fmt.Sprintf("unset VALKEYCLI_USER; export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
 	return utils.Run(cmd)
 }
 
@@ -2954,7 +2954,7 @@ func startContinuousWriter(pod string) *continuousWriter {
 			"i=$((i+1)); "+
 			"done; echo \"end - $(date +%%s.%%N)\"", writerDurationSeconds)
 	cmd := exec.Command("kubectl", "exec", pod, "-c", "server", "--",
-		"sh", "-c", fmt.Sprintf("export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
+		"sh", "-c", fmt.Sprintf("unset VALKEYCLI_USER; export VALKEYCLI_AUTH=%q; ", failoverDefaultPassword)+script)
 
 	w := &continuousWriter{cmd: cmd, output: &strings.Builder{}}
 	cmd.Stdout = w.output

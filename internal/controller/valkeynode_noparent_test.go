@@ -107,7 +107,7 @@ var _ = Describe("ValkeyNode without a known parent", func() {
 				Image:               "valkey/valkey:9.0.0",
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		Expect(k8sClient.Create(ctx, withParentFields(node))).To(Succeed())
 		DeferCleanup(cleanup, node.DeepCopy())
 		key := client.ObjectKeyFromObject(node)
 
@@ -133,6 +133,7 @@ var _ = Describe("ValkeyNode without a known parent", func() {
 		Expect(sts.Generation).To(Equal(generation))
 		Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("valkey/valkey:9.0.0"))
 		Expect(podTemplateRollHash(sts.Spec.Template)).To(Equal(podTemplateRollHash(*template)))
+		Expect(k8sClient.Get(ctx, name, &corev1.ConfigMap{})).To(Succeed())
 		_, ready := readyCondition(key)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Reason).To(Equal(valkeyiov1alpha1.ValkeyNodeReasonNoParent))

@@ -25,17 +25,31 @@ import (
 )
 
 // The cluster controller hashes the node it builds before the owner reference
-// is set; the node controller hashes the stored node. Both must agree.
+// is set; the node controller hashes the stored node. Both must agree. The
+// primary handoff script changes the command and, with an unset startup
+// failureThreshold, the threshold.
 func TestWorkloadRevisionParityWithPrimaryHandoffScript(t *testing.T) {
-	cluster := &valkeyv1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}, Spec: valkeyv1.ValkeyClusterSpec{Shards: 1}}
-	desired := buildClusterValkeyNode(cluster, 0, 0)
-	before, err := computeWorkloadRevision(desired)
-	require.NoError(t, err)
-	stored := desired.DeepCopy()
-	controller := true
-	stored.OwnerReferences = []metav1.OwnerReference{{Kind: "ValkeyCluster", Name: "c", Controller: &controller}}
-	after, err := computeWorkloadRevision(stored)
-	require.NoError(t, err)
-	require.Equal(t, before, after)
-	require.True(t, usesPrimaryHandoffScript(desired), "a cluster node without persistence runs the primary handoff script")
+	for _, tc := range []struct {
+		name                string
+		probes              *valkeyv1.ProbesSpec
+		wantStartupFailures int32
+	}{
+		{"no spec.probes", nil, 80},
+		{"startup period 10 with the threshold unset", &valkeyv1.ProbesSpec{Startup: &valkeyv1.StartupProbeSpec{PeriodSeconds: new(int32(10))}}, 41},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := &valkeyv1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}, Spec: valkeyv1.ValkeyClusterSpec{Shards: 1, Probes: tc.probes}}
+			desired := buildClusterValkeyNode(cluster, 0, 0)
+			before, err := computeWorkloadRevision(desired)
+			require.NoError(t, err)
+			stored := desired.DeepCopy()
+			controller := true
+			stored.OwnerReferences = []metav1.OwnerReference{{Kind: "ValkeyCluster", Name: "c", Controller: &controller}}
+			after, err := computeWorkloadRevision(stored)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.True(t, usesPrimaryHandoffScript(desired), "a cluster node without persistence runs the primary handoff script")
+			require.Equal(t, tc.wantStartupFailures, renderedServer(t, stored).StartupProbe.FailureThreshold)
+		})
+	}
 }

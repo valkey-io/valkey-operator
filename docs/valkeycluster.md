@@ -19,6 +19,7 @@
 - [Pod disruption budget](#pod-disruption-budget)
 - [Pod metadata](#pod-metadata)
 - [Private image registries](#private-image-registries)
+- [Probes](#probes)
 - [Scheduling](#scheduling)
 - [Shards and replicas](#shards-and-replicas)
 - [TLS](#tls)
@@ -42,6 +43,8 @@ maxclients
 maxmemory         # There are no safeguards, ensure you do not exceed your container capacity
 maxmemory-policy
 ```
+
+Each node also writes the live values its server last accepted to its `live.conf`, so a pod that restarts boots with them. A pod that restarts before the new file reaches it boots with the previous value, and the operator sets the current value with CONFIG SET once the pod is ready. Changing any other key rolls the pods one at a time.
 
 #### Failover tuning
 
@@ -103,7 +106,7 @@ tls-replication
 
 Cluster directives the operator does not set, such as `cluster-require-full-coverage`, `cluster-migration-barrier` and `cluster-node-timeout`, stay available.
 
-Keys may contain only letters, digits, `.`, `_` and `-`. Valkey trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
+Keys may contain only lowercase letters, digits, `.`, `_` and `-`. Valkey matches keys in any case, but the operator picks out live-settable keys such as `maxmemory` by exact name, so it would not apply `MAXMEMORY` live. Valkey also trims and unquotes each config line before reading its key, so a quoted or padded key such as `"port"` would otherwise bypass the list above. Module configs such as `search.<name>` stay valid.
 
 #### Future plans
 
@@ -123,7 +126,7 @@ containers:
     command: ["sh", "-c", "sleep infinity"]
 ```
 
-`containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar.
+`containers` patches the pod's container list using strategic merge patch. Containers named `server` or `metrics-exporter` are merged by name; anything else is appended as a sidecar. To tune or disable the `server` container's probes, use [`probes`](#probes).
 
 The operator sets `securityContext.allowPrivilegeEscalation: false` on its
 `server` and `metrics-exporter` containers when the field is unset. It keeps
@@ -270,7 +273,7 @@ podMetadata:
 
 Keys the operator owns are rejected: any label or annotation key under `valkey.io/`, and the `app.kubernetes.io/` `name`, `instance`, `component`, `part-of` and `managed-by` labels. Other `app.kubernetes.io/` keys, such as `app.kubernetes.io/version`, are allowed.
 
-Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB less the operator's own `valkey.io/config-revision` annotation (37 bytes). Each map holds at most 1024 entries.
+Keys and label values are validated when the ValkeyCluster is applied, with the same rules Kubernetes applies to pod metadata, so a value Kubernetes would reject on the pod (for example a label value with a space) is rejected up front. Annotation values have no format rule, but annotation keys and values together are limited to 256 KiB. Each map holds at most 1024 entries.
 
 The ValkeyCluster's own `metadata.labels` are not copied to pods; use `podMetadata` instead.
 
@@ -301,6 +304,51 @@ imagePullSecrets:
 ```
 
 `imagePullSecrets` is a list of `Secret` references (in the cluster's namespace) used to pull images from private registries. It is applied at the pod level, so a single list covers every image in the pod - the Valkey server, the metrics exporter sidecar, and any additional containers. It is optional and has no default; omit it when the nodes already authenticate to the registry.
+
+### Probes
+
+```yaml
+probes:
+  startup:
+    failureThreshold: 120
+  liveness:
+    mode: Disabled  # BuiltIn (default) | Disabled
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 3
+```
+
+`probes` tunes the startup, liveness and readiness probes of the `server` container. Each field you set replaces one default and the others keep theirs, so setting only `failureThreshold` keeps the period, the timeout and the check. The one default that follows another field is the startup `failureThreshold`, which keeps the startup window when you change `periodSeconds`; see [Startup window](#startup-window).
+
+| Probe | Check | `initialDelaySeconds` | `periodSeconds` | `timeoutSeconds` | `successThreshold` | `failureThreshold` |
+|---|---|---|---|---|---|---|
+| `startup` | `liveness-check.sh` | 5 | 5 | 4 | 1, fixed | enough checks for 100 seconds, or 400 without `persistence`, and at least 3: 20 or 80 at the default period |
+| `liveness` | `liveness-check.sh` | not settable | 5 | 4 | 1, fixed | 5 |
+| `readiness` | `readiness-check.sh` | not settable | 5 | 1 | 1 | 5 |
+
+`timeoutSeconds` is how long Valkey has to answer, at most 3600. The operator passes it to the check script and sets the probe's own timeout one second higher, so that the script normally gives up first; the defaults above appear in the pod as 5, 5 and 2. The script counts 0.1-second polls, which run late with a long timeout or a CPU-throttled container, and a check that runs past the extra second fails on the probe's timeout instead, which counts as a failed check all the same. Liveness and readiness have no `initialDelaySeconds` because they start only after the startup probe passes, and Kubernetes requires a `successThreshold` of 1 for startup and liveness.
+
+Both checks run `valkey-cli` against the local server. The liveness check passes on `PONG`, `LOADING` and `MASTERDOWN`, so a slow load of the dataset does not fail it, but a blocked event loop does: a slow command, a fork, or a CPU-throttled container where `valkey-cli` itself runs slowly. The readiness check passes only on `PONG`. A pod is Ready only once the [initial sync gate](#pod-disruption-budget) is set as well. After a restart of the server container the pod keeps its gate until the operator sees the new container and clears it, so a startup probe that passes sooner, with a shorter `initialDelaySeconds` or `periodSeconds`, leaves the operator less time to clear the gate before the pod reads Ready.
+
+#### Disabling liveness
+
+`liveness.mode: Disabled` removes the liveness probe. Only liveness can be disabled: the operator moves a roll on only once the containers are ready, so startup and readiness stay on.
+
+A failed liveness probe makes the kubelet restart the server container. The restart is not an eviction, so neither the PodDisruptionBudget nor the readiness gate holds it back, and from inside the pod a busy node looks the same as a hung one. Some of the operator's own work loads a node: a replacement replica's full sync forks the primary, and a rebalance or scale-in moves up to 400 slots in each `CLUSTER MIGRATESLOTS` batch. A CPU-throttled container makes both slower. The restart is handled like a crash of the server; see [Failure handling](#failure-handling) for what a primary keeps without `persistence`.
+
+For a node that is busy rather than hung, raise `liveness.failureThreshold` (or `periodSeconds`) first: the check already passes while the server loads its dataset, and a real hang still gets a restart. Disable liveness only when you would rather the cluster fail a node over than the kubelet restart it. A hung node then stays up but not Ready, and nothing restarts it until you delete the pod. The cluster fails it over if it is a primary, but the node walk waits at that node, so a roll and the steps after it do not run, and a later template change, turning liveness back on included, does not replace the pod, because the operator does not replace a pod whose server is running but does not answer. While it is not Ready it also uses the cluster PodDisruptionBudget's one unavailable pod, so node drains cannot evict any other pod of the cluster. Timing fields cannot be set together with `mode: Disabled`.
+
+#### Startup window
+
+Without `persistence`, a primary whose server restarts waits up to six `cluster-node-timeout`s, at most 300 seconds, for a replica to take over before the server starts again (see [Failure handling](#failure-handling)), and its startup probe fails during the wait. A startup probe that gives up sooner restarts the container into the same wait, so a node whose replica never takes over would not start.
+
+The startup probe checks first after `initialDelaySeconds`, then every `periodSeconds`, so it gives up after `initialDelaySeconds` + (`failureThreshold` − 1) × `periodSeconds`. An unset `failureThreshold` is the smallest that gives up no sooner than 400 seconds without `persistence`, the longest wait plus the default 100 seconds, and 100 seconds with it, and at least 3, so a long `initialDelaySeconds` still leaves retries: 80 or 20 checks at the default delay and period of 5 seconds, 41 or 11 at a period of 10 seconds. A `failureThreshold` you set is used as is. When it gives up in less than 400 seconds on a cluster without `persistence` that has replicas, the operator sets a `ConfigurationWarning` condition with reason `StartupProbeTooShort`, whose message names the `failureThreshold` that covers 400 seconds, and emits an event when the cluster first enters that state, as it does for a short [termination grace period](#termination-grace-period). Without replicas a restarted primary has no one to wait for, so there is no warning. The warning uses the longest wait whatever `cluster-node-timeout` is, so with a shorter timeout a shorter window can be enough, and it reads `probes` only, not a startup probe patched in through [`containers`](#containers).
+
+#### Changing probes
+
+Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. A cluster that does not set `probes` keeps the pod template it had, so upgrading the operator does not roll it.
+
+[`containers`](#containers) patches are applied after `probes`, so a probe field set in both takes the `containers` value, and `containers` remains the way to use your own check. A `timeoutSeconds` patch changes only the probe's own timeout: the check script keeps the `probes` value, or its default, unless the patch replaces the command too. To replace the liveness check, set `liveness.mode: Disabled` and give the `server` container a complete `livenessProbe`, handler included, in `containers`. Take that patch out before you set the mode back to `BuiltIn`: its handler would be merged into the operator's check, giving the probe two handlers. With liveness disabled there is no operator probe for a patch to merge into, so a `livenessProbe` patch that sets only timings leaves a probe without a handler. Either way the roll deletes the node's pod and its replacement cannot be created, so the node stays down until the patch is fixed.
 
 ### Shards and replicas
 
@@ -677,7 +725,7 @@ acl:
   - `Secret` (default): the passwords referenced by `password.secret`
   - `Any`: any password authenticates (Valkey `nopass`)
   - `Disabled`: no password authenticates (Valkey `resetpass`). The user can still authenticate with a TLS client certificate; see [mTLS](mtls.md)
-- `password.secret`: the Secret that holds the user's passwords, in `name`, and the keys to read from it, in `keys` (multiple keys supported for rotation). `keys` defaults to the username. Only valid with `type: Secret`, and `name` is required for an enabled user with `type: Secret`. An empty Secret value sets an empty password: clients can authenticate with `AUTH <user> ""`. This differs from a missing key. Use `Any` to accept any password, or `Disabled` to disallow password authentication.
+- `password.secret`: the Secret that holds the user's passwords, in `name`, and the keys to read from it, in `keys` (multiple keys supported for rotation). `keys` defaults to the username. A value that is `#` followed by 64 hex characters is used as a pre-hashed SHA-256 password (uppercase hex is lowercased); any other value, including one with a trailing newline, is hashed as plaintext. Only valid with `type: Secret`, and `name` is required for an enabled user with `type: Secret`. An empty Secret value sets an empty password: clients can authenticate with `AUTH <user> ""`. This differs from a missing key. Use `Any` to accept any password, or `Disabled` to disallow password authentication.
   If the Secret is missing or lacks a listed key, a cluster that already has an aclfile keeps it, reports the user on the `Degraded` condition (`UsersACLUnresolved`) and keeps reconciling everything else, so an asynchronously created Secret (External Secrets Operator, for example) does not block scaling. A new cluster still waits for every user's Secret before it starts. While a user is unresolved, a system user change reaches the system-passwords Secret but not the aclfile, so an exporter enabled in that state cannot authenticate until the Secret resolves.
 - `commands`: command categories (`@read`, `@write`, `@admin`, etc.), individual commands, module commands (`json.set`), and subcommands to allow or deny. Entries are validated on admission: a category is `@` followed by letters, a command is a dot-separated name optionally followed by one `|` and a subcommand. The name itself is not checked against the server, so a well-formed but unknown command is only rejected later by Valkey when the ACL is loaded. Module commands are in no category except `@all`, so they must be granted individually
 - `keys`: key patterns by access type: `readWrite`, `readOnly`, `writeOnly`
@@ -763,6 +811,33 @@ Removing `acl.systemUsers.passwordRotation` starts no new rotation and resets th
 A rotation step that fails, for example because the operator cannot list the pods it checks, leaves the rotation where it was and records a `SystemPasswordRotationHeld` warning event. Users and ACLs keep reconciling, and the step is tried again on the next reconcile.
 
 > **Upgrade note:** This version mounts the system password files into every Valkey pod and has the server read the replication password from them, whether or not rotation is turned on. Every existing cluster rolls once on upgrade.
+
+#### `valkey-cli` in a node's pod
+
+The server container sets `VALKEYCLI_USER` to `_operator` and `VALKEYCLI_AUTH` to its password. On Valkey 9.2 and later, `valkey-cli` reads both, so `kubectl exec <pod> -c server -- valkey-cli` logs in as `_operator`. Older versions ignore `VALKEYCLI_USER` and send the password as `default`, so pass `--user _operator` there. With TLS, run `kubectl exec <pod> -c server -- sh -c 'valkey-cli $VALKEY_TLS_ARGS'`.
+
+`_operator` can run only the cluster, config and ACL commands the operator needs and has no key access. To log in as your own user instead, set both variables on the server container:
+
+```yaml
+containers:
+  - name: server
+    env:
+      - name: VALKEYCLI_USER
+        value: admin
+      - name: VALKEYCLI_AUTH
+        valueFrom:
+          secretKeyRef:
+            name: my-users-secret
+            key: admin
+```
+
+The probes and the startup script read the `_operator` password from the mounted file and ignore both variables, so this override does not affect them. Changing it rolls the pods.
+
+`VALKEYCLI_AUTH` is set when the container starts and does not change after that. A [system password rotation](#system-password-rotation) keeps the old `_operator` password valid for at least five minutes after the switch, then removes it. From then on, `valkey-cli` in a pod that started before the rotation fails to authenticate until the container restarts. To use the current password, read it from the mounted file:
+
+```sh
+VALKEYCLI_AUTH=$(cat /etc/valkey/system-passwords/_operator) valkey-cli --user _operator
+```
 
 ### Operator-managed Secrets
 

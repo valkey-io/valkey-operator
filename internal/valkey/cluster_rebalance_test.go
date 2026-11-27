@@ -182,7 +182,7 @@ func newPrimaryShard(address, nodeID string, slots []SlotsRange) *ShardState {
 	node := &NodeState{
 		Address: address,
 		Id:      nodeID,
-		Flags:   []string{"master"},
+		Flags:   FlagMaster,
 	}
 	return &ShardState{
 		Id:        "shard-" + nodeID,

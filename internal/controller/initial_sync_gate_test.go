@@ -41,7 +41,7 @@ import (
 // gatePrimary is a scraped primary at address. slots is its owned range in
 // CLUSTER NODES form, or empty for a primary with no slots.
 func gatePrimary(address, slots string, info map[string]string) *valkey.NodeState {
-	n := &valkey.NodeState{Id: "id-" + address, Address: address, Flags: []string{"myself", "master"}, Info: info}
+	n := &valkey.NodeState{Id: "id-" + address, Address: address, Flags: valkey.FlagMyself | valkey.FlagMaster, Info: info}
 	line := "id-" + address + " " + address + ":6379@16379 myself,master - 0 0 1 connected"
 	if slots != "" {
 		line += " " + slots
@@ -52,7 +52,7 @@ func gatePrimary(address, slots string, info map[string]string) *valkey.NodeStat
 
 // gateReplica is a scraped replica at address with the given INFO fields.
 func gateReplica(address string, info map[string]string) *valkey.NodeState {
-	n := &valkey.NodeState{Id: "id-" + address, Address: address, Flags: []string{"myself", "slave"}, Info: info}
+	n := &valkey.NodeState{Id: "id-" + address, Address: address, Flags: valkey.FlagMyself | valkey.FlagSlave, Info: info}
 	n.SetClusterNodesForTesting("id-" + address + " " + address + ":6379@16379 myself,slave id-p 0 0 1 connected\n")
 	return n
 }

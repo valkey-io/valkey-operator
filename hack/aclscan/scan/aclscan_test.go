@@ -59,6 +59,7 @@ func TestOperatorCommands(t *testing.T) {
 		"CLUSTER SET-CONFIG-EPOCH",
 		"CONFIG SET",
 		"INFO",
+		"TIME",
 	}
 	assert.ElementsMatch(t, want, got)
 }

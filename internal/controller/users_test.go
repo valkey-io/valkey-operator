@@ -285,7 +285,7 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	}
 
 	replicas := &valkeyiov1alpha1.ValkeyCluster{}
-	replicas.Spec.Replicas = 2 //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	replicas.Spec.Replicas = 2 //nolint:staticcheck // legacy spec.replicas
 	warnings = deprecatedFieldConfigWarnings(replicas)
 	if assert.Len(t, warnings, 1) {
 		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
@@ -295,7 +295,7 @@ func TestDeprecatedFieldConfigWarnings(t *testing.T) {
 	both := &valkeyiov1alpha1.ValkeyCluster{
 		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy}, //nolint:staticcheck // legacy spec.users
 	}
-	both.Spec.Replicas = 1 //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	both.Spec.Replicas = 1 //nolint:staticcheck // legacy spec.replicas
 	assert.Len(t, deprecatedFieldConfigWarnings(both), 2)
 
 	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{

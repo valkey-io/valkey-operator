@@ -106,6 +106,31 @@ func TestSplitShardsForScaleIn(t *testing.T) {
 	assert.Empty(t, draining)
 }
 
+// TestSplitShardsForScaleInOrderIsStable: the scrape lists shards in no fixed
+// order. Equal destinations and the excess shards must come out the same way
+// every pass, so a failed move is retried against the same pair.
+func TestSplitShardsForScaleInOrderIsStable(t *testing.T) {
+	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
+	for i := range 4 {
+		nodes.Items = append(nodes.Items, *primaryNode(i))
+	}
+	shards := []*valkey.ShardState{
+		primaryShard(0, valkey.SlotsRange{Start: 0, End: 4095}),
+		primaryShard(1, valkey.SlotsRange{Start: 4096, End: 8191}),
+		primaryShard(2, valkey.SlotsRange{Start: 8192, End: 12287}),
+		primaryShard(3, valkey.SlotsRange{Start: 12288, End: 16383}),
+	}
+	for _, order := range [][]int{{1, 0, 3, 2}, {0, 1, 2, 3}} {
+		var listed []*valkey.ShardState
+		for _, i := range order {
+			listed = append(listed, shards[i])
+		}
+		remaining, draining := splitShardsForScaleIn(listed, nodes, 2)
+		assert.Equal(t, []string{"p0", "p1"}, primaryIDs(remaining), "order %v", order)
+		assert.Equal(t, []string{"p2", "p3"}, primaryIDs(draining), "order %v", order)
+	}
+}
+
 // TestEffectiveShardsSkipsPostFailoverReplacement: shard 0's primary restarted
 // empty before its replica was promoted. The new pod waits to become that
 // replica, so it is not a new shard and must not receive drained slots.
@@ -193,7 +218,7 @@ func TestDeleteExcessValkeyNodesKeepsSlotOwners(t *testing.T) {
 		primaryShard(2),
 	}}
 
-	deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, owner, drained))
+	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, owner, drained))
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assert.Equal(t, []string{"c-3-0"}, kept)
@@ -213,14 +238,14 @@ func TestDeleteExcessValkeyNodesKeepsUnreachablePrimaries(t *testing.T) {
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 	}}
 
-	_, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	_, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"c-3-0"}, kept)
 	assert.True(t, nodeExists(t, r.Client, unreachable))
 	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping unreachable excess ValkeyNode c-3-0: some slots are unassigned")
 
 	state.Shards[0].Slots = []valkey.SlotsRange{{Start: 0, End: 16383}}
-	_, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
+	_, _, kept, err = r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
 	assert.Empty(t, kept)
 	assert.False(t, nodeExists(t, r.Client, unreachable), "deleted once every slot is accounted for")
@@ -238,7 +263,7 @@ func TestDeleteExcessValkeyNodesKeepsUnreadyPromotedPrimary(t *testing.T) {
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 	}}
 
-	_, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), promoted))
+	_, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), promoted))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"c-3-1"}, kept)
 	assert.True(t, nodeExists(t, r.Client, promoted))
@@ -259,7 +284,7 @@ func TestDeleteExcessValkeyNodesDeletesNodesThatCannotOwnSlots(t *testing.T) {
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 	}}
 
-	deleted, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(replica, unscheduled))
+	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(replica, unscheduled))
 	require.NoError(t, err)
 	assert.True(t, deleted)
 	assert.Empty(t, kept)
@@ -267,22 +292,25 @@ func TestDeleteExcessValkeyNodesDeletesNodesThatCannotOwnSlots(t *testing.T) {
 	assert.False(t, nodeExists(t, r.Client, unscheduled))
 }
 
-// TestDeleteExcessValkeyNodesIgnoresSlotsOnExcessNodeIndex: a promoted replica
-// past replicasPerShard is deleted even though it owns slots. Nothing would move
-// the slots off it, so keeping it would block the scale-in for good.
-func TestDeleteExcessValkeyNodesIgnoresSlotsOnExcessNodeIndex(t *testing.T) {
+// TestDeleteExcessValkeyNodesKeepsPrimaryOnExcessNodeIndex: a live primary
+// past replicasPerShard waits for a synced replica the new count keeps.
+func TestDeleteExcessValkeyNodesKeepsPrimaryOnExcessNodeIndex(t *testing.T) {
 	promoted := primaryNode(0)
 	promoted.Name = "c-0-1"
 	promoted.Labels[LabelNodeIndex] = "1"
-	r, cluster, _ := scaleInReconciler(t, promoted)
+	r, cluster, recorder := scaleInReconciler(t, promoted)
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383}),
 	}}
 
-	_, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(promoted))
+	_, deferred, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(promoted))
 	require.NoError(t, err)
 	assert.Empty(t, kept)
-	assert.False(t, nodeExists(t, r.Client, promoted))
+	assert.True(t, deferred)
+	assert.True(t, nodeExists(t, r.Client, promoted))
+	assert.Empty(t, drainEvents(recorder))
+	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode c-0-1: it is the primary of shard 0 and no kept replica is synced",
+		meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionProgressing).Message)
 }
 
 // TestDeleteExcessValkeyNodesKeepsReplicasFromEitherField: node index 1 is in
@@ -304,7 +332,7 @@ func TestDeleteExcessValkeyNodesKeepsReplicasFromEitherField(t *testing.T) {
 				primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383}),
 			}}
 
-			deleted, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), replica))
+			deleted, _, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(primaryNode(0), replica))
 			require.NoError(t, err)
 			assert.False(t, deleted)
 			assert.True(t, nodeExists(t, r.Client, replica))

@@ -772,20 +772,20 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:           1,
 					ReplicasPerShard: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
-						{
-							Name:    "testuser",
-							Enabled: true,
-							PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-								Name: "nonexistent-secret",
-								Keys: []string{"password"},
-							},
-						},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+			cluster.Spec.Users = []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+				{
+					Name:    "testuser",
+					Enabled: true,
+					PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+						Name: "nonexistent-secret",
+						Keys: []string{"password"},
+					},
+				},
+			}
 
 			reconciler := &ValkeyClusterReconciler{
 				Client:    k8sClient,
@@ -809,20 +809,20 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:           1,
 					ReplicasPerShard: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
-						{
-							Name:       "testuser",
-							Enabled:    true,
-							NoPassword: true,
-							ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-								RawAcl: "+@all",
-							},
-						},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+			cluster.Spec.Users = []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+				{
+					Name:       "testuser",
+					Enabled:    true,
+					NoPassword: true,
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						RawAcl: "+@all",
+					},
+				},
+			}
 
 			reconciler := &ValkeyClusterReconciler{
 				Client:    k8sClient,
@@ -848,7 +848,12 @@ var _ = Describe("reconcileUsersAcl", func() {
 		// declaredUserLines reconciles the cluster's users and returns the
 		// aclfile lines for the declared (non-system) users.
 		declaredUserLines := func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []string {
+			// A new spec.users is rejected. The function reads the object it is
+			// given, so store the cluster without that field and put it back.
+			legacy := cluster.Spec.Users //nolint:staticcheck // legacy spec.users
+			cluster.Spec.Users = nil     //nolint:staticcheck // legacy spec.users
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			cluster.Spec.Users = legacy //nolint:staticcheck // legacy spec.users
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
 
 			reconciler := &ValkeyClusterReconciler{
@@ -2149,6 +2154,57 @@ var _ = Describe("reconcileValkeyNodes", func() {
 			Expect(getResourceVersion(name)).To(Equal(shard0RVsBefore[name]),
 				"%s must not be written while its shard's primary is unidentifiable", name)
 		}
+	})
+
+	It("creates a missing in-spec node while the shard's primary sits on an excess node-index", func() {
+		By("creating three nodes per shard and publishing pod IPs")
+		cluster.Spec.ReplicasPerShard = 2
+		createAllNodes()
+		node02 := valkeyNodeName(clusterName, 0, 2)
+		node12 := valkeyNodeName(clusterName, 1, 2)
+		for name, ip := range map[string]string{
+			node00: "10.0.0.1", node01: "10.0.0.2", node02: "10.0.0.3",
+			node10: "10.0.1.1", node11: "10.0.1.2", node12: "10.0.1.3",
+		} {
+			setPodIP(name, ip)
+		}
+
+		By("losing " + node00 + " and lowering replicasPerShard while shard 0's primary is node-index 2")
+		Expect(k8sClient.Delete(testCtx, &valkeyiov1alpha1.ValkeyNode{
+			ObjectMeta: metav1.ObjectMeta{Name: node00, Namespace: "default"},
+		})).To(Succeed())
+		cluster.Spec.ReplicasPerShard = 1
+		state := &valkey.ClusterState{
+			Shards: []*valkey.ShardState{
+				{
+					Id:        "shard-0",
+					PrimaryId: "node-02",
+					Slots:     []valkey.SlotsRange{{Start: 0, End: 8191}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.0.2", Id: "node-01", Flags: valkey.FlagSlave},
+						{Address: "10.0.0.3", Id: "node-02", Flags: valkey.FlagMaster},
+					},
+				},
+				{
+					Id:        "shard-1",
+					PrimaryId: "node-10",
+					Slots:     []valkey.SlotsRange{{Start: 8192, End: 16383}},
+					Nodes: []*valkey.NodeState{
+						{Address: "10.0.1.1", Id: "node-10", Flags: valkey.FlagMaster},
+						{Address: "10.0.1.2", Id: "node-11", Flags: valkey.FlagSlave},
+						{Address: "10.0.1.3", Id: "node-12", Flags: valkey.FlagSlave},
+					},
+				},
+			},
+		}
+
+		By("reconciling: the primary is known, so shard 0 is not skipped")
+		// Scale-in waits for a synced replica on an in-spec node-index before
+		// it fails over node-index 2, so the roll must still create node-index 0.
+		_, err := reconcileNodesWithState(state)
+		Expect(stderrors.Is(err, errShardRollSkipped)).To(BeFalse(), "got %v", err)
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: node00, Namespace: "default"},
+			&valkeyiov1alpha1.ValkeyNode{})).To(Succeed())
 	})
 
 	It("reports a skipped shard roll as errShardRollSkipped, not a requeue", func() {

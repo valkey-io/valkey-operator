@@ -235,7 +235,7 @@ When `persistence` is set, the operator manages a PVC for each ValkeyNode. With 
 
 Without `persistence`, `/data` is an `emptyDir`. It survives a server container restart within the same pod. If Valkey's `save` rules have written an RDB snapshot, Valkey can reload it on restart when the data directory is kept. Writes after the snapshot can be lost. Replacing the pod removes its `emptyDir`.
 
-When a primary crashes, the restarted container waits for its reachable replicas to stop following it. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
+When a primary crashes, the restarted container waits until each of its reachable replicas has a slot assignment as a primary or follows another node. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
 
 If there are no reachable replicas or the wait expires, the server keeps its node ID, slots, and local files. In this case, an RDB snapshot can restore data through the last save.
 
@@ -363,7 +363,7 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 
 #### Migrating from `spec.replicas`
 
-`replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a spec that sets both fields.
+`replicas` is the deprecated name of `replicasPerShard`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a new or changed `replicas`, and it rejects a spec that sets both fields. Removing `replicas` is accepted only when the same update sets `replicasPerShard` to that stored count. An absent `replicasPerShard` counts as 0, so removing a stored `replicas: 0` needs no replacement field.
 
 1. Check that the installed CRD has the new field: `kubectl explain valkeyclusters.spec.replicasPerShard` must print it. Helm does not upgrade CRDs from a chart's `crds` directory. On an old CRD the API server drops `replicasPerShard` from the patch in step 3, which then leaves the cluster with 0 replicas.
 2. Wait until the new operator release runs and the old operator pod is gone.
@@ -373,6 +373,8 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
    n=$(kubectl get valkeycluster <name> -o jsonpath='{.spec.replicas}') && \
    kubectl patch valkeycluster <name> --type=merge -p "{\"spec\":{\"replicas\":null,\"replicasPerShard\":${n:?spec.replicas is not set}}}"
    ```
+
+To change the replica count of a cluster that still stores `replicas`, migrate first, then set the new count on `replicasPerShard` in a second update. A single update that removes `replicas` and sets a different `replicasPerShard` is rejected.
 
 Applying an edited manifest works only if the apply removes `replicas`. Two cases keep it, and the API server rejects the update: client side `kubectl apply` on a cluster that was not created with `kubectl apply`, and server side apply when another field manager owns `spec.replicas`, for example after a `kubectl patch`. The merge patch works in both cases.
 
@@ -768,11 +770,11 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `password.secret` is only valid with `password.type: Secret`
 - An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
 
-> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, so set `password.secret.name: <cluster>-users` on every such user before upgrading.
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone. On `spec.acl.users`, set `password.secret.name: <cluster>-users` on every such user. A stored `spec.users` cannot be changed, so move those users to `spec.acl.users` and set `password.secret.name` there.
 
 #### Migrating from `spec.users`
 
-`spec.users` is deprecated and will be removed in `v1beta1`. It still works in this release, and a cluster that uses it reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event.
+`spec.users` is deprecated. A cluster that already has it still reconciles, and reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event. A new or changed `spec.users` is rejected. Removing it is accepted only when every user name is on `spec.acl.users` in that same update.
 
 Move the list under `spec.acl.users`, replace the booleans and nest `passwordSecret` under `password`:
 

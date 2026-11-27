@@ -152,7 +152,7 @@ func (u ACLUserSpec) PasswordType() ACLPasswordType {
 }
 
 // An UserAclSpec contains user, authorization, and permissions-related configurations.
-// It is the legacy spec.users entry, replaced by ACLUserSpec and removed in v1beta1.
+// It is the legacy spec.users entry, replaced by ACLUserSpec.
 // +kubebuilder:validation:XValidation:rule="(has(self.enabled) && !self.enabled) || (has(self.nopass) && self.nopass) || (has(self.resetpass) && self.resetpass) || (has(self.passwordSecret) && has(self.passwordSecret.name) && size(self.passwordSecret.name) > 0)",message="passwordSecret.name is required for an enabled user without nopass or resetpass",fieldPath=".passwordSecret.name",reason="FieldValueRequired"
 type UserAclSpec struct {
 

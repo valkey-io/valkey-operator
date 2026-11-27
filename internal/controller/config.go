@@ -170,6 +170,13 @@ var liveConfigAllowlist = map[string]struct{}{
 	"maxclients":       {},
 }
 
+// liveConfigDefaults holds the server defaults for settings we apply live.
+var liveConfigDefaults = map[string]string{
+	"maxmemory-policy": "noeviction",
+	"maxmemory":        "0",
+	"maxclients":       "10000",
+}
+
 // liveConfigToApply returns the subset of config whose keys are live-settable.
 // A nil config is safe: map lookup on a nil map returns the zero value.
 func liveConfigToApply(config map[string]string) map[string]string {

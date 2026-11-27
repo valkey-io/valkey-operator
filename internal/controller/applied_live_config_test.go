@@ -111,11 +111,62 @@ var _ = Describe("status.appliedLiveConfig", func() {
 		Expect(meta.IsStatusConditionFalse(got.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeTrue())
 	})
 
+	It("retries failed resets and reapplies defaults after a stale-config restart", func() {
+		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).To(Succeed())
+		node = read()
+		node.Spec.Config = map[string]string{"maxmemory": "200mb"}
+		Expect(k8sClient.Update(ctx, node)).To(Succeed())
+		server := &fakeConfigClient{}
+		r.newConfigClient = func(context.Context, *ValkeyNodeReconciler, *valkeyiov1alpha1.ValkeyNode) (valkeyConfigClient, error) {
+			return server, nil
+		}
+
+		stop, _, err := r.applyLiveSettings(ctx, read())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stop).To(BeFalse())
+		Expect(server.params).To(Equal(map[string]string{"maxclients": "10000", "maxmemory": "200mb"}))
+		node = read()
+		recorded := []valkeyiov1alpha1.AppliedLiveConfigEntry{
+			{Name: "maxclients", Value: "10000"},
+			{Name: "maxmemory", Value: "200mb"},
+		}
+		Expect(node.Status.AppliedLiveConfig).To(Equal(recorded))
+
+		node.Spec.Config = nil
+		Expect(k8sClient.Update(ctx, node)).To(Succeed())
+		server.err = errors.New("ERR CONFIG SET failed")
+		stop, _, err = r.applyLiveSettings(ctx, read())
+		Expect(err).To(HaveOccurred())
+		Expect(stop).To(BeTrue())
+		Expect(server.params).To(Equal(map[string]string{"maxclients": "10000", "maxmemory": "0"}))
+		Expect(read().Status.AppliedLiveConfig).To(Equal(recorded))
+
+		server.err = nil
+		stop, _, err = r.applyLiveSettings(ctx, read())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stop).To(BeFalse())
+		Expect(server.params).To(Equal(map[string]string{"maxclients": "10000", "maxmemory": "0"}))
+		got := read()
+		Expect(got.Status.AppliedLiveConfig).To(Equal(configEntries(server.params)))
+		Expect(renderLiveConfig(got)).To(BeEmpty())
+		Expect(meta.FindStatusCondition(got.Status.Conditions, valkeyiov1alpha1.ValkeyNodeConditionLiveConfigApplied)).To(BeNil())
+
+		By("reapplying the defaults to a server that restarted with stale live.conf")
+		server = &fakeConfigClient{}
+		stop, _, err = r.applyLiveSettings(ctx, read())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stop).To(BeFalse())
+		Expect(server.params).To(Equal(map[string]string{"maxclients": "10000", "maxmemory": "0"}))
+	})
+
 	It("clears the condition and the values when there is nothing to apply", func() {
 		Expect(r.setLiveConfigApplied(ctx, node, map[string]string{"maxmemory": "100mb", "maxclients": "500"})).To(Succeed())
+		node = read()
+		node.Spec.Config = nil
+		Expect(k8sClient.Update(ctx, node)).To(Succeed())
 		counter.Reset()
 
-		Expect(r.clearLiveConfigApplied(ctx, node)).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, nil)).To(Succeed())
 
 		got := read()
 		Expect(got.Status.AppliedLiveConfig).To(BeNil())
@@ -123,7 +174,7 @@ var _ = Describe("status.appliedLiveConfig", func() {
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(1))
 
 		By("writing nothing when there is nothing to clear")
-		Expect(r.clearLiveConfigApplied(ctx, node)).To(Succeed())
+		Expect(r.setLiveConfigApplied(ctx, node, nil)).To(Succeed())
 		Expect(counter.Count("ValkeyNode", verbStatusPatch)).To(Equal(1))
 	})
 })

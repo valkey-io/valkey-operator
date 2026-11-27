@@ -59,7 +59,7 @@ Lower values fail over faster but make the cluster more sensitive to network bli
 
 Operator versions before #434 have `cluster-node-timeout` hardcoded to 2000. Clusters created on an older operator roll once on upgrade and move to the Valkey default. Set the value explicitly in `spec.config` to keep the old behaviour.
 
-`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, recovery is left to Valkey.
+`cluster-replica-no-failover` stops a replica from promoting itself. The operator reads this from the replica's `nofailover` flag in `CLUSTER NODES`, which also covers the `cluster-slave-no-failover` alias and `CONFIG SET`. Without persistence, the operator promotes such a replica with `CLUSTER FAILOVER TAKEOVER` once the primary's failure is confirmed (`fail`, or `fail?` from a majority of slot-owning primaries). Without failover quorum it takes over regardless of this setting. With persistence, the operator leaves recovery with quorum to Valkey; without quorum, takeover requires the `valkey.io/force-takeover` annotation described below.
 
 #### Version-gated config
 
@@ -218,6 +218,45 @@ persistence:
 When `persistence` is set, the operator manages a PVC for each ValkeyNode. With the [save config option](https://valkey.io/topics/persistence/), memory state survives pod rolls and [partial resyncs](https://valkey.io/topics/replication/) are possible.
 
 `Retain` keeps the PVC when a ValkeyNode is deleted; `Delete` removes it.
+
+If a primary fails and the cluster has no failover quorum (for example a single shard), Valkey cannot promote its replica. With persistence, the operator does not take over automatically: a timer cannot distinguish a dead primary from a partitioned or slow-restarting one, and takeover may discard writes that exist only on the primary's volume. The cluster is marked `Degraded=True` with reason `AwaitingManualTakeover`. Its message and a Warning event identify the shard, failed primary, eligible replica, and command to authorize takeover.
+
+Alert on `Degraded=True` with reason `AwaitingManualTakeover`. Kubernetes events expire, so a Warning event may disappear while recovery is still pending.
+
+Before authorizing recovery, inspect the recovery condition, node roles, pods, and events:
+
+```sh
+kubectl get valkeycluster <name> -n <namespace> -o yaml
+kubectl get valkeynodes -n <namespace> -o wide
+kubectl get pods,pvc -n <namespace>
+kubectl get events -n <namespace> --sort-by=.metadata.creationTimestamp
+```
+
+Use the `AwaitingManualTakeover` message to identify the failed primary and candidate replica. The message includes the replica's replication offset, whether a full sync is in progress, and whether its link to the primary is up or down. Missing values are reported as unknown. An offset of zero can describe an empty dataset; an unknown offset or a replica still syncing needs investigation. These values do not prove that the replica has every acknowledged write. Approval names the failed primary. The candidate can change as replicas become available or their offsets advance, so inspect every replica you would accept as the new primary. Check the candidate's `INFO replication` for the link-down duration, along with its persistence status and logs. Check the primary pod's phase and readiness before approving. If the replica points to a different node at the old primary's address, a full sync from that node can replace the replica's data. Check what the replica still holds before promoting it.
+
+Check whether the primary's pod or storage can return, and whether the problem is a network partition. An unschedulable pod or an unreachable server does not prove its durable data is lost. Compare the available copies before choosing recovery: with RDB snapshots alone, a restarted primary can be older than its replica, and a full resync from that primary can discard the replica's newer writes. Check `appendonly`, `appendfsync`, and `save` in the effective configuration, and inspect persistence status and logs. AOF can narrow the loss window, but its presence alone is not proof that all writes reached disk. See [Failure handling](#failure-handling).
+
+Before approving takeover, stop the old primary or isolate it from clients that can write to it. Do not assume that deleting a pod on a partitioned host stopped its process; confirm it has stopped, or block client access on that side of the partition. Writes it accepts after the replica is promoted can be discarded when it rejoins. The operator does not fence the old process for you.
+
+Manual takeover provides a recovery path when too few slot-owning primaries remain available for Valkey's normal failover election. This includes a single-shard cluster whose primary is down, or a three-primary cluster with two primaries down. If multiple primaries are lost, you may need to approve more than one takeover until a majority of slot-owning primaries is available to vote.
+
+Each approval authorizes one operator-issued TAKEOVER. This takeover bypasses Valkey's normal failover election. Promoting that replica can give the cluster failover quorum again. Valkey can then promote replicas of the other orphaned primaries through its own election, without further approval. Before approving any takeover, check every orphaned shard in the condition and confirm you would accept its replica as the new primary. If you want to wait for one of those primaries to return, approve nothing until it does. See Valkey’s [CLUSTER FAILOVER documentation](https://valkey.io/commands/cluster-failover/) and [replica election and promotion specification](https://valkey.io/topics/cluster-spec/#replica-election-and-promotion).
+
+To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:
+
+```sh
+kubectl get valkeycluster <name> -n <namespace> -o yaml
+# Read metadata.resourceVersion and the current approval list from this output.
+kubectl annotate valkeycluster <name> -n <namespace> valkey.io/force-takeover=<updated-primary-id-list> --resource-version=<resourceVersion> --overwrite
+```
+
+The annotation applies only to an eligible orphan whose primary is unreachable in the current scrape. The operator removes that primary's ID before sending TAKEOVER, preserving any other IDs in the annotation. Each approval authorizes one attempt. If the command fails or the operator stops after consuming the approval, check the live topology before approving another attempt. A missing response does not establish that promotion failed.
+
+To approve more than one primary, use a comma-separated list. Include any existing approvals you want to keep. To cancel one pending approval, read the current list and resourceVersion together, then use the version-checked command above with only that ID removed. To cancel the last approval, use `valkey.io/force-takeover-` with the same resourceVersion check. If the write conflicts, read the object again and recompute the list. A stale edit or an overwrite without a version check can restore an approval the operator already consumed. Consuming an approval commits the operator to the attempt, so removing the annotation after that point cannot cancel the command.
+
+While an orphan remains unresolved, the operator pauses later topology repairs, including repairs in other shards. It can still repair stale peer addresses while waiting. If the primary returns, `AwaitingManualTakeover` clears. How much data it recovers depends on its persistence configuration and the files it can load.
+
+After takeover, check the node roles and application data, then inspect any remaining conditions. The cluster may still need missing pods or replicas restored before it becomes `Ready`.
 
 #### Constraints
 

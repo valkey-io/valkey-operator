@@ -38,11 +38,12 @@ const (
 // live-settable and version-gated keys, then the base config, then an include
 // of live.conf so live values override any copy in the pinned file.
 func renderPinnedConfig(node *valkeyiov1alpha1.ValkeyNode) string {
+	image := effectiveServerImage(node.Spec.Image, node.Spec.Containers)
 	excluded := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excluded, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
+	maps.Copy(excluded, gatedUserKeysToSuppress(image, node.Spec.Config))
 	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
 	var b strings.Builder
-	b.WriteString(renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, hostname, node.Spec.Image), excluded))
+	b.WriteString(renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, hostname, image), excluded))
 	writeConfigLine(&b, "include", configMountPath+"/"+liveConfigFileKey)
 	return b.String()
 }
@@ -73,7 +74,7 @@ func liveConfigEntries(node *valkeyiov1alpha1.ValkeyNode) map[string]string {
 	} else {
 		out = liveConfigToApply(node.Spec.Config)
 	}
-	for key := range gatedUserKeysToSuppress(node.Spec.Image, out) {
+	for key := range gatedUserKeysToSuppress(effectiveServerImage(node.Spec.Image, node.Spec.Containers), out) {
 		delete(out, key)
 	}
 	return out

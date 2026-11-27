@@ -758,6 +758,11 @@ EOF`,
 				var denied []string
 				for _, command := range commands {
 					arity, ok := arities[utils.CommandName(command.Tokens)]
+					// ACL DIGEST is an optional 9.2+ fast path; older servers
+					// neither run it nor grant it to _operator.
+					if !ok && strings.EqualFold(strings.Join(command.Tokens, " "), "ACL DIGEST") {
+						continue
+					}
 					minArgs := utils.PlaceholdersNeeded(command.Tokens, arity, ok)
 					result, err := utils.AclDryRun(podName, valkeyCli, "_operator", command.Tokens, minArgs)
 					g.Expect(err).NotTo(HaveOccurred(), "failed to run ACL DRYRUN for %q (%s)", command, command.Pos)

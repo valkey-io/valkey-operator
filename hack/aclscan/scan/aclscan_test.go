@@ -44,6 +44,7 @@ func TestOperatorCommands(t *testing.T) {
 		"ACL GETUSER",
 		"ACL LOAD",
 		"ACL USERS",
+		"ACL DIGEST",
 		"CLIENT KILL",
 		"CLUSTER ADDSLOTSRANGE",
 		"CLUSTER FAILOVER",

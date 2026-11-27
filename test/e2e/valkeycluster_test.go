@@ -2447,7 +2447,7 @@ metadata:
   name: %s
 spec:
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   acl:
     users:
       - name: alice
@@ -2600,22 +2600,25 @@ spec:
     limits:
       cpu: "500m"
       memory: "512Mi"
-  users:
-    - name: default
-      enabled: true
-      permissions: "+@all ~* &*"
-      passwordSecret:
-        name: %s
-        keys: [defaultpw]
-    - name: alice
-      enabled: true
-      passwordSecret:
-        name: %s
-        keys: [alicepw]
-      commands:
-        allow: ["@read", "@write", "@connection"]
-      keys:
-        readWrite: ["app:*"]
+  acl:
+    users:
+      - name: default
+        permissions: "+@all ~* &*"
+        password:
+          type: Secret
+          secret:
+            name: %s
+            keys: [defaultpw]
+      - name: alice
+        password:
+          type: Secret
+          secret:
+            name: %s
+            keys: [alicepw]
+        commands:
+          allow: ["@read", "@write", "@connection"]
+        keys:
+          readWrite: ["app:*"]
 `, usersSecret, defaultPassword, alicePassword, clusterName, usersSecret, usersSecret)
 
 		serverStatefulSets := func(g Gomega) []string {
@@ -2662,19 +2665,6 @@ spec:
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
 			}, 10*time.Minute, 5*time.Second).Should(Succeed())
 			Eventually(expectACLAppliedTrue, 5*time.Minute, 5*time.Second).Should(Succeed())
-
-			By("reporting the deprecated spec.users field")
-			Eventually(func(g Gomega) {
-				cr, err := utils.GetValkeyClusterStatus(clusterName)
-				g.Expect(err).NotTo(HaveOccurred())
-				cond := meta.FindStatusCondition(cr.Status.Conditions, valkeyiov1alpha1.ConditionConfigurationWarning)
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(cond.Message).To(ContainSubstring("spec.users is deprecated"))
-				_, warningEvents, err := utils.GetEvents(clusterName)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(warningEvents[valkeyiov1alpha1.ReasonDeprecatedField]).To(BeTrue())
-			}).Should(Succeed())
 
 			By("stamping the legacy internal-acl-hash annotation on every server StatefulSet")
 			// Operator versions before live ACL stamped the ACL hash on the pod

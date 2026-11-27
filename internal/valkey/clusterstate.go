@@ -670,7 +670,6 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 
 // NodeView is what the scraped nodes report for one node ID.
 type NodeView struct {
-	ID         string
 	Scraped    bool     // the node answered and its own myself line is the view
 	Hosts      []string // its scrape address, or every host the tables list for it
 	OwnsSlots  bool
@@ -690,26 +689,25 @@ func (s *ClusterState) NodeViews() map[string]NodeView {
 		if myself == nil {
 			continue
 		}
-		v := NodeView{ID: n.Id, Scraped: true, Hosts: []string{n.Address}, OwnsSlots: myself.HasSlotAssignment()}
-		if myself.PrimaryId != "" && myself.PrimaryId != "-" {
-			v.PrimaryIDs = []string{myself.PrimaryId}
+		v := NodeView{Scraped: true, Hosts: []string{n.Address}, OwnsSlots: myself.HasSlotAssignment()}
+		if p := primaryIDOf(myself); p != "" {
+			v.PrimaryIDs = []string{p}
 		}
 		views[n.Id] = v
 	}
 
 	merge := func(id, host string, entry *ClusterNode) {
-		if v, ok := views[id]; ok && v.Scraped {
+		if views[id].Scraped {
 			return
 		}
 		v := views[id]
-		v.ID = id
 		if host != "" && !slices.Contains(v.Hosts, host) {
 			v.Hosts = append(v.Hosts, host)
 		}
 		if entry != nil {
 			v.OwnsSlots = v.OwnsSlots || entry.HasSlotAssignment()
-			if entry.PrimaryId != "" && entry.PrimaryId != "-" && !slices.Contains(v.PrimaryIDs, entry.PrimaryId) {
-				v.PrimaryIDs = append(v.PrimaryIDs, entry.PrimaryId)
+			if p := primaryIDOf(entry); p != "" && !slices.Contains(v.PrimaryIDs, p) {
+				v.PrimaryIDs = append(v.PrimaryIDs, p)
 			}
 		}
 		views[id] = v
@@ -730,6 +728,15 @@ func (s *ClusterState) NodeViews() map[string]NodeView {
 		views[id] = v
 	}
 	return views
+}
+
+// primaryIDOf returns the primary a CLUSTER NODES entry replicates, or "" for a
+// primary.
+func primaryIDOf(e *ClusterNode) string {
+	if e.PrimaryId == "-" {
+		return ""
+	}
+	return e.PrimaryId
 }
 
 // hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
@@ -906,8 +913,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		log.Error(err, "command failed: CLUSTER NODES")
 		return nil
 	}
-	// Remove the encoding string included in a verbatim string.
-	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	node.nodes = ParseClusterNodes(cnodes)
 	myself := node.Myself()
 	if myself == nil {
 		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")

@@ -72,6 +72,10 @@ func clusterNodesLine(id, host, flags, primary string, slots ...valkey.SlotsRang
 	return line
 }
 
+// failedP3 is how a peer lists p3, the excess primary, once it fails with its
+// slots undrained.
+var failedP3 = clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383})
+
 // withPeers sets what the node's CLUSTER NODES table says about other nodes:
 // its own line is kept and lines follow it.
 func withPeers(n *valkey.NodeState, lines ...string) *valkey.NodeState {
@@ -289,7 +293,7 @@ func TestDeleteExcessValkeyNodesKeepsShardOfUnreachableOwner(t *testing.T) {
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 		{Id: "s3", PrimaryId: "p3", Nodes: []*valkey.NodeState{withPeers(
 			scrapedNode("r3", "10.0.1.3", "myself,slave", "p3"),
-			clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}),
+			failedP3,
 		)}},
 	}}
 
@@ -312,7 +316,7 @@ func TestDeleteExcessValkeyNodesKeepsNodeWithRecordedIDAndNoPodIP(t *testing.T) 
 	recreating.Status.PodIP = ""
 	r, cluster, _ := scaleInReconciler(t, inSpec, recreating)
 	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
-	withPeers(shard0.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+	withPeers(shard0.Nodes[0], failedP3)
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0}}
 
 	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, recreating))
@@ -326,19 +330,18 @@ func TestDeleteExcessValkeyNodesKeepsNodeWithRecordedIDAndNoPodIP(t *testing.T) 
 // excess primary's pod was replaced without persistence, so its ID is gone
 // from every ValkeyNode. Its replica still follows the old ID.
 func TestDeleteExcessValkeyNodesKeepsShardWhenPrimaryMatchesNoValkeyNode(t *testing.T) {
-	oldPrimary := clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383})
 	for name, shards := range map[string]func() []*valkey.ShardState{
 		"replica scraped": func() []*valkey.ShardState {
 			return []*valkey.ShardState{
 				primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 				{Id: "s3", PrimaryId: "p3", Nodes: []*valkey.NodeState{
-					withPeers(scrapedNode("r3", "10.0.1.3", "myself,slave", "p3"), oldPrimary),
+					withPeers(scrapedNode("r3", "10.0.1.3", "myself,slave", "p3"), failedP3),
 				}},
 			}
 		},
 		"replica missed the scrape": func() []*valkey.ShardState {
 			shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
-			withPeers(shard0.Nodes[0], oldPrimary, clusterNodesLine("r3", "10.0.1.3", "slave,fail?", "p3"))
+			withPeers(shard0.Nodes[0], failedP3, clusterNodesLine("r3", "10.0.1.3", "slave,fail?", "p3"))
 			return []*valkey.ShardState{shard0}
 		},
 	} {
@@ -365,7 +368,7 @@ func TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID(t *testing.
 	inSpec, owner := primaryNode(0), primaryNode(3)
 	r, cluster, recorder := scaleInReconciler(t, inSpec, owner)
 	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
-	withPeers(shard0.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+	withPeers(shard0.Nodes[0], failedP3)
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard0}}
 
 	_, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, owner))
@@ -383,7 +386,7 @@ func TestDeleteExcessValkeyNodesIgnoresEntryAtPodIPOnceIDIsRecorded(t *testing.T
 	rejoined.Status.ClusterNodeID = "new"
 	r, cluster, _ := scaleInReconciler(t, inSpec, rejoined)
 	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
-	withPeers(shard0.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+	withPeers(shard0.Nodes[0], failedP3)
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
 		shard0,
 		{Id: "s3", PrimaryId: "new", Nodes: []*valkey.NodeState{scrapedNode("new", "10.0.0.3", "myself,master", "-")}},
@@ -462,7 +465,7 @@ func TestDeleteExcessValkeyNodesKeepsRecordedIDWhenPodIPIsTakenByAnotherNode(t *
 	stale.Status.PodIP = newPrimary.Status.PodIP
 	r, cluster, _ := scaleInReconciler(t, newPrimary, inSpec, stale)
 	shard0 := primaryShard(0)
-	withPeers(shard0.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+	withPeers(shard0.Nodes[0], failedP3)
 	state := &valkey.ClusterState{
 		Shards:       []*valkey.ShardState{primaryShard(1, valkey.SlotsRange{Start: 0, End: 8191})},
 		PendingNodes: shard0.Nodes,
@@ -540,7 +543,7 @@ func TestDeleteExcessValkeyNodesKeepsReplicaWhenPrimaryHostIsReused(t *testing.T
 		primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191}),
 		{Id: "s3", PrimaryId: "p3", Nodes: []*valkey.NodeState{withPeers(
 			scrapedNode("r3", "10.0.1.3", "myself,slave", "p3"),
-			clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}),
+			failedP3,
 		)}},
 	}}
 
@@ -643,7 +646,7 @@ func unreachableExcessOwner() (*valkeyiov1alpha1.ValkeyNode, *valkey.ClusterStat
 	node := primaryNode(3)
 	node.Status.ClusterNodeID = "p3"
 	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
-	withPeers(shard0.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+	withPeers(shard0.Nodes[0], failedP3)
 	return node, &valkey.ClusterState{Shards: []*valkey.ShardState{shard0}}
 }
 
@@ -756,7 +759,7 @@ func TestForgetStaleNodes(t *testing.T) {
 			}
 			shard := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
 			shard.Nodes[0].Client = c
-			withPeers(shard.Nodes[0], clusterNodesLine("p3", "10.0.0.3", "master,fail", "-", valkey.SlotsRange{Start: 8192, End: 16383}))
+			withPeers(shard.Nodes[0], failedP3)
 			state := &valkey.ClusterState{Shards: []*valkey.ShardState{shard}}
 			if tc.replica {
 				state.Shards = append(state.Shards, &valkey.ShardState{Id: "s3", PrimaryId: "p3",

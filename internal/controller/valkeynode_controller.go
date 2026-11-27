@@ -1165,8 +1165,9 @@ func (r *ValkeyNodeReconciler) updateStatus(ctx context.Context, node *valkeyiov
 		// Read the recorded values before overwriting them: the ID is kept
 		// only while the volume is the one it was recorded against.
 		if !volumeUnknown {
-			current.Status.ClusterNodeID, current.Status.DataVolumeUID = nextClusterNodeID(
-				current.Status.ClusterNodeID, current.Status.DataVolumeUID, volumeUID, readID), volumeUID
+			current.Status.ClusterNodeID = nextClusterNodeID(
+				current.Status.ClusterNodeID, current.Status.DataVolumeUID, volumeUID, readID)
+			current.Status.DataVolumeUID = volumeUID
 		}
 
 		if node.Spec.Persistence != nil {
@@ -1558,7 +1559,7 @@ func nextClusterNodeID(recordedID, recordedVolumeUID, volumeUID, readID string) 
 	if readID != "" {
 		return readID
 	}
-	if volumeUID != "" && volumeUID == recordedVolumeUID {
+	if volumeUID == recordedVolumeUID {
 		return recordedID
 	}
 	return ""

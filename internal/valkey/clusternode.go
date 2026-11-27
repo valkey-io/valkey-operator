@@ -208,8 +208,10 @@ func ParseClusterNodesMyself(raw string) *ClusterNode {
 
 // ParseClusterNodes parses CLUSTER NODES output into one entry per node.
 // Lines with fewer than clusterNodesMinFields fields are skipped, which covers
-// the trailing empty line and any partial output.
+// the trailing empty line and any partial output. A RESP3 verbatim-string
+// "txt:" prefix is stripped.
 func ParseClusterNodes(raw string) []ClusterNode {
+	raw = strings.TrimPrefix(raw, "txt:")
 	// One entry per line at most. Growing the slice by append would allocate
 	// about twice the final size on every one of the scrape's node tables. A
 	// table beyond the cap still parses; the slice grows by append past it.

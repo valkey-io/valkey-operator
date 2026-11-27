@@ -2082,7 +2082,7 @@ func stabilizeManualTakeoverReplicas(state *valkey.ClusterState, candidates []or
 // Check each cluster node and forget stale nodes (noaddr or status fail)
 func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) {
 	log := logf.FromContext(ctx)
-	views := state.NodeViews()
+	var views map[string]valkey.NodeView // built on first use
 	for _, shard := range state.Shards {
 		for _, node := range shard.Nodes {
 			for _, failing := range node.GetFailingNodes() {
@@ -2100,6 +2100,9 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 					log.V(1).Info("skipping forget; node is alive at a new address",
 						"staleAddress", failing.Host, "Id", failing.Id)
 					continue
+				}
+				if views == nil {
+					views = state.NodeViews()
 				}
 				if name := replicaAwaitedBy(failing.Id, views, nodes); name != "" {
 					log.Info("skipping forget; waiting for ValkeyNode",
@@ -2407,9 +2410,7 @@ func (r *ValkeyClusterReconciler) handleScaleIn(ctx context.Context, cluster *va
 // something it cannot fix by itself.
 func setScaleInBlocked(cluster *valkeyiov1alpha1.ValkeyCluster, msg string) {
 	// A failed drain batch is over once scale-in is only waiting.
-	if c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded); c != nil && c.Reason == valkeyiov1alpha1.ReasonRebalanceFailed {
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	}
+	removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonRebalanceFailed)
 	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonScaleInBlocked, msg, metav1.ConditionFalse)
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonScaleInBlocked, msg, metav1.ConditionTrue)
 }
@@ -2506,7 +2507,7 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 // reports it.
 func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) (deleted, deferred bool, kept []string, err error) {
 	log := logf.FromContext(ctx)
-	holding := shardsHoldingSlots(state, nodes)
+	var holding map[int]bool // built on the first excess shard's node
 	nodesPerShard := 1 + int(cluster.GetReplicasPerShard())
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
@@ -2526,12 +2527,15 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 		// replica may hold the only other copy. Only excess shards get
 		// drained, so only their nodes are guarded.
 		if excessShard {
+			if holding == nil {
+				holding = shardsHoldingSlots(state, nodes)
+			}
 			if answered, ok := holding[shardIndex]; ok {
-				if answered {
-					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Keeping excess ValkeyNode %s: shard %d still owns slots; waiting for drain", node.Name, shardIndex)
-				} else {
-					r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Keeping excess ValkeyNode %s: shard %d owns slots and its primary is unreachable", node.Name, shardIndex)
+				why := "still owns slots; waiting for drain"
+				if !answered {
+					why = "owns slots and its primary is unreachable"
 				}
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ScaleInBlocked", "ScaleIn", "Keeping excess ValkeyNode %s: shard %d %s", node.Name, shardIndex, why)
 				kept = append(kept, node.Name)
 				continue
 			}
@@ -2702,18 +2706,20 @@ func candidateIDs(node *valkeyiov1alpha1.ValkeyNode, known []string, views map[s
 // keep a node, not to rule a primary out.
 func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) map[int]bool {
 	views := state.NodeViews()
-	candidates := make([][]string, len(nodes.Items))
-	shards := make([]int, len(nodes.Items))
-	parsed := make([]bool, len(nodes.Items))
+	type member struct {
+		shard      int
+		candidates []string
+	}
+	var members []member
 	shardsOfID := map[string][]int{}
 	for i := range nodes.Items {
-		known := knownIDs(&nodes.Items[i], state)
-		candidates[i] = candidateIDs(&nodes.Items[i], known, views)
-		shard, err := strconv.Atoi(nodes.Items[i].Labels[LabelShardIndex])
+		node := &nodes.Items[i]
+		shard, err := strconv.Atoi(node.Labels[LabelShardIndex])
 		if err != nil {
 			continue
 		}
-		shards[i], parsed[i] = shard, true
+		known := knownIDs(node, state)
+		members = append(members, member{shard, candidateIDs(node, known, views)})
 		for _, id := range known {
 			shardsOfID[id] = append(shardsOfID[id], shard)
 		}
@@ -2723,12 +2729,9 @@ func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valk
 	hold := func(shard int, owner valkey.NodeView) {
 		holding[shard] = holding[shard] || owner.Scraped
 	}
-	for i := range nodes.Items {
-		if !parsed[i] {
-			continue
-		}
-		shard := shards[i]
-		for _, id := range candidates[i] {
+	for _, m := range members {
+		shard := m.shard
+		for _, id := range m.candidates {
 			v := views[id]
 			if v.OwnsSlots {
 				hold(shard, v)

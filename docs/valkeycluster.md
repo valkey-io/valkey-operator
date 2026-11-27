@@ -851,27 +851,32 @@ The operator creates these Secrets in the cluster's namespace. The ValkeyCluster
 
 The `valkey-` prefix marks objects the operator owns, so do not give your own Secrets these names.
 
-A Secret restored without its labels or owner, from a backup or with `kubectl create`, is adopted: the operator adds its labels and sets the ValkeyCluster as controller, and keeps the data. A Secret that another object controls, such as an `ExternalSecret`, is not used or changed, and the cluster reports `Ready=False` with `UsersACLError`.
+A Secret restored without its labels or owner, from a backup or with `kubectl create`, is adopted: the operator adds its labels and sets the ValkeyCluster as controller, and keeps the data. A Secret that another object controls, such as an `ExternalSecret`, is not used or changed, and the cluster reports `Ready=False` with `UsersACLError`. Restore `valkey-<cluster>-acl` with its type, `valkey.io/acl`, which `kubectl create secret generic` does not set: the nodes watch only Secrets of that type, and pick up a change to one of another type only on their periodic resync.
 
 #### Losing the system passwords Secret
 
 `valkey-<cluster>-system-passwords` is the only copy of the passwords the running servers accept. Back it up with the cluster, and do not manage it with another tool: the operator writes to it during a [rotation](#system-password-rotation).
 
-While a server of the cluster runs, the operator does not replace a missing Secret or a missing current `_operator` or `_replication` password in it. New passwords would lock it out of every running server. Instead the cluster reports [`Degraded`](status-conditions.md#degraded) with `SystemPasswordSecretMissing` and retries every 10 seconds. When no server is running, for example on a new cluster or one whose pods are all stopped, the operator generates new passwords, and every server that starts loads them. When the exporter is enabled, a missing `_exporter` is always generated again, because the exporter image has no shell and its password cannot be read back: the running exporters report `redis_up 0` until their pods restart, and the operator emits an `ExporterPasswordRegenerated` warning event.
+While a server of the cluster runs, the operator does not replace a missing or empty `_operator` or `_replication` password, or a deleted Secret. New passwords would lock it out of every running server. It also refuses a current `_operator` or `_replication` that the cluster's aclfile does not accept, as in a backup taken before the last rotation or a hand edit. Instead the cluster reports [`Degraded`](status-conditions.md#degraded) with `SystemPasswordSecretMissing` and retries every 10 seconds, and every ValkeyNode reports `ACLApplied=False` with `ApplyFailed`, because the operator cannot read its password. When no server is running, for example on a new cluster or one whose pods are all stopped, the operator generates new passwords, and every server that starts loads them. When the exporter is enabled, a missing `_exporter` is always generated again, because the exporter image has no shell and its password cannot be read back: the running exporters report `redis_up 0` until their pods restart, and the operator emits an `ExporterPasswordRegenerated` warning event.
 
-To recover, restore the Secret from a backup. The operator adopts it and the cluster returns to `Ready` within about 10 seconds.
+A cluster deleted and created again under the same name can report `SystemPasswordSecretMissing` until the old cluster's pods have terminated, since they carry the same `valkey.io/cluster` label. It clears without action.
 
-Without a backup, rebuild the current passwords from the files mounted in a running server container. Read the files, not `VALKEYCLI_AUTH` or `PRIMARY_AUTH`: the environment holds the passwords from when the container started, which are out of date after a rotation.
+To recover, restore the Secret from a backup taken after the last rotation. The operator adopts it and the cluster returns to `Ready` within about 10 seconds. A backup taken before a rotation holds passwords the servers no longer accept, and is refused. With `acl.systemUsers.passwordRotation` set, rebuild the Secret as below instead.
+
+Without a backup, rebuild the current passwords from the files mounted in a running server container. Read the files, not `VALKEYCLI_AUTH` or `PRIMARY_AUTH`: the environment holds the passwords from when the container started, which are out of date after a rotation. Check that both values are set before writing them, since a failed `kubectl exec` leaves one empty:
 
 ```sh
-OP=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_operator)
-RE=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_replication)
-kubectl create secret generic valkey-<cluster>-system-passwords --from-literal=_operator="$OP" --from-literal=_replication="$RE"
+NS=<namespace>; CLUSTER=<cluster>
+POD=$(kubectl -n "$NS" get pods -l valkey.io/cluster="$CLUSTER" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+OP=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_operator)
+RE=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_replication)
+[ -n "$OP" ] && [ -n "$RE" ] || { echo "a password is empty; run the commands again"; exit 1; }
+kubectl -n "$NS" create secret generic "valkey-$CLUSTER-system-passwords" --from-literal=_operator="$OP" --from-literal=_replication="$RE"
 ```
 
-If the Secret still exists and only lacks keys, add them with `kubectl patch secret valkey-<cluster>-system-passwords --type=merge -p '{"stringData": {...}}'` instead. The operator generates `_exporter` when the exporter is enabled, so restart the Valkey pods one at a time once the cluster is `Ready` to bring the exporters back.
+If the Secret still exists and only lacks keys, add them with `kubectl patch secret "valkey-$CLUSTER-system-passwords" --type=merge -p '{"stringData": {...}}'` instead. The operator generates `_exporter` when the exporter is enabled, so restart the Valkey pods one at a time once the cluster is `Ready` to bring the exporters back.
 
-A Valkey pod that restarts while the Secret is missing cannot start its server until the Secret is back.
+A Valkey pod that restarts while the Secret is missing stays in `CreateContainerConfigError` until the Secret is back.
 
 ### Workload type
 

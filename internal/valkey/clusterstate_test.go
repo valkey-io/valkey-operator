@@ -878,6 +878,33 @@ func TestNodeState_KnowsNode(t *testing.T) {
 	}
 }
 
+func TestNodeState_SeesSlotsOwnedBy(t *testing.T) {
+	node := &NodeState{}
+	node.nodes = ParseClusterNodes("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n" +
+		"def456 10.0.0.2:6379@16379 master - 0 0 2 connected 0-99 200-299\n" +
+		"ghi789 10.0.0.3:6379@16379 master - 0 0 0 connected\n")
+
+	cases := []struct {
+		name  string
+		id    string
+		slots []int
+		want  bool
+	}{
+		{"every slot in the peer's ranges", "def456", []int{0, 99, 200, 299}, true},
+		{"one slot outside the peer's ranges", "def456", []int{0, 150}, false},
+		// Gossip introduced the peer but not yet its slots.
+		{"known peer with no slots", "ghi789", []int{0}, false},
+		{"unknown peer", "zzz000", []int{0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := node.SeesSlotsOwnedBy(tc.id, tc.slots); got != tc.want {
+				t.Errorf("SeesSlotsOwnedBy(%q, %v) = %v, want %v", tc.id, tc.slots, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNodeState_GetFailingNodes(t *testing.T) {
 	// fail and noaddr are reported; fail? is not, because the caller forgets
 	// these nodes and a pfail entry may still recover.

@@ -2276,6 +2276,14 @@ func unknownPeer(move *valkey.SlotMove) (node, peer *valkey.NodeState) {
 	return nil, nil
 }
 
+// slotOwnershipUnseen reports whether the destination has yet to see the
+// source owning every slot in the move. The destination refuses the handshake
+// until it does, and gossip carries a node's slots after its ID, so a move
+// that passes unknownPeer can still fail here.
+func slotOwnershipUnseen(move *valkey.SlotMove) bool {
+	return !move.Dst.SeesSlotsOwnedBy(move.Src.Id, move.Slots)
+}
+
 // rebalanceSlots plans one slot move and starts it. It returns the move while
 // the rebalance has work left, whether this pass migrated a batch or waited
 // for one in flight, and nil once the slots are balanced.
@@ -2299,6 +2307,11 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	if node, peer := unknownPeer(move); node != nil {
 		log.V(1).Info("source and destination do not yet know each other via gossip; will retry", "node", node.Address, "peer", peer.Address, "peerId", peer.Id)
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn node %s", node.Address, peer.Address)
+		return move, nil
+	}
+	if slotOwnershipUnseen(move) {
+		log.V(1).Info("destination does not yet see the source owning the slots via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn that %s owns the slots to move", move.Dst.Address, move.Src.Address)
 		return move, nil
 	}
 
@@ -2466,6 +2479,10 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 
 	if node, peer := unknownPeer(move); node != nil {
 		log.V(1).Info("drain source and destination do not yet know each other", "node", node.Address, "peer", peer.Address)
+		return true, nil
+	}
+	if slotOwnershipUnseen(move) {
+		log.V(1).Info("drain destination does not yet see the source owning the slots", "src", move.Src.Address, "dst", move.Dst.Address)
 		return true, nil
 	}
 

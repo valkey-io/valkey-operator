@@ -102,7 +102,7 @@ var (
 	errMissingSystemUser = errors.New("missing system user")
 
 	// errSystemPasswordSecretMissing is a refused regeneration of a system
-	// password that a running server or exporter still holds.
+	// password that a running server still holds.
 	errSystemPasswordSecretMissing = errors.New("system password secret missing")
 )
 
@@ -547,7 +547,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
-	if err := r.refuseLockedSystemPasswords(ctx, cluster, systemUsersSecret); err != nil {
+	if err := r.guardMissingSystemPasswords(ctx, cluster, systemUsersSecret); err != nil {
 		log.Error(err, "refusing to generate system user passwords")
 		return nil, err
 	}

@@ -205,11 +205,14 @@ func TestUpsertRegeneratesExporterKeyWhileNoExporterRuns(t *testing.T) {
 	require.Equal(t, "op-old", string(stored.Data[operatorUser]))
 	require.Equal(t, "re-old", string(stored.Data[replicationUser]))
 	require.NotEmpty(t, stored.Data[exporterUser])
+	require.Empty(t, r.Recorder.(*events.FakeRecorder).Events, "enabling the exporter is not a lost password")
 }
 
-// A running exporter read REDIS_PASSWORD at start and keeps it, so a new
-// _exporter would lock it out.
-func TestUpsertRefusesExporterKeyWhileTheExporterRuns(t *testing.T) {
+// A lost _exporter cannot be read back from a running exporter, so a new one
+// is generated, with a warning: the running exporters keep the old password
+// until their pods restart. Refusing would hold the whole cluster for a
+// metrics credential.
+func TestUpsertRegeneratesExporterKeyWhileTheExporterRuns(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
 	delete(secret.Data, exporterUser)
 	enabled := true
@@ -218,11 +221,32 @@ func TestUpsertRefusesExporterKeyWhileTheExporterRuns(t *testing.T) {
 	r, c := systemPasswordReconciler(t, objs)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
-	require.Contains(t, err.Error(), "_exporter")
+	require.NoError(t, err)
 	stored, _ := storedSystemPasswords(t, c)
-	require.Empty(t, stored.Data[exporterUser])
-	requireWarningEvent(t, r, "_exporter")
+	require.Equal(t, "op-old", string(stored.Data[operatorUser]))
+	require.Equal(t, "re-old", string(stored.Data[replicationUser]))
+	require.NotEmpty(t, stored.Data[exporterUser])
+	select {
+	case e := <-r.Recorder.(*events.FakeRecorder).Events:
+		require.Contains(t, e, "Warning ExporterPasswordRegenerated")
+		require.Contains(t, e, "redis_up 0")
+	default:
+		t.Fatal("expected an ExporterPasswordRegenerated warning event")
+	}
+}
+
+func TestUpsertRegeneratesExporterKeyWhenThePodListFails(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	delete(secret.Data, exporterUser)
+	enabled := true
+	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
+	r, c := systemPasswordReconciler(t, objs)
+	r.APIReader = listErrorReader{Reader: c}
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	stored, _ := storedSystemPasswords(t, c)
+	require.NotEmpty(t, stored.Data[exporterUser])
 }
 
 // The pods are matched on the exact cluster label, so h10's servers do not

@@ -857,7 +857,7 @@ A Secret restored without its labels or owner, from a backup or with `kubectl cr
 
 `valkey-<cluster>-system-passwords` is the only copy of the passwords the running servers accept. Back it up with the cluster, and do not manage it with another tool: the operator writes to it during a [rotation](#system-password-rotation).
 
-While a server or exporter container of the cluster runs, the operator does not replace a missing Secret or a missing current password in it. New passwords would lock it out of every running server. Instead the cluster reports [`Degraded`](status-conditions.md#degraded) with `SystemPasswordSecretMissing` and retries every 10 seconds. When no server is running, for example on a new cluster or one whose pods are all stopped, the operator generates new passwords, and every server that starts loads them.
+While a server of the cluster runs, the operator does not replace a missing Secret or a missing current `_operator` or `_replication` password in it. New passwords would lock it out of every running server. Instead the cluster reports [`Degraded`](status-conditions.md#degraded) with `SystemPasswordSecretMissing` and retries every 10 seconds. When no server is running, for example on a new cluster or one whose pods are all stopped, the operator generates new passwords, and every server that starts loads them. When the exporter is enabled, a missing `_exporter` is always generated again, because the exporter image has no shell and its password cannot be read back: the running exporters report `redis_up 0` until their pods restart, and the operator emits an `ExporterPasswordRegenerated` warning event.
 
 To recover, restore the Secret from a backup. The operator adopts it and the cluster returns to `Ready` within about 10 seconds.
 
@@ -866,12 +866,10 @@ Without a backup, rebuild the current passwords from the files mounted in a runn
 ```sh
 OP=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_operator)
 RE=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_replication)
-EX=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
-kubectl create secret generic valkey-<cluster>-system-passwords \
-  --from-literal=_operator="$OP" --from-literal=_replication="$RE" --from-literal=_exporter="$EX"
+kubectl create secret generic valkey-<cluster>-system-passwords --from-literal=_operator="$OP" --from-literal=_replication="$RE"
 ```
 
-If the Secret still exists and only lacks keys, add them with `kubectl patch secret valkey-<cluster>-system-passwords --type=merge -p '{"stringData": {...}}'` instead. The exporter image has no shell, so `_exporter` cannot be read back and gets a new value. Leave `_exporter` out when the exporter is disabled. The running exporters keep the old password and report `redis_up 0` until their pods restart, so restart the Valkey pods one at a time once the cluster is `Ready`.
+If the Secret still exists and only lacks keys, add them with `kubectl patch secret valkey-<cluster>-system-passwords --type=merge -p '{"stringData": {...}}'` instead. The operator generates `_exporter` when the exporter is enabled, so restart the Valkey pods one at a time once the cluster is `Ready` to bring the exporters back.
 
 A Valkey pod that restarts while the Secret is missing cannot start its server until the Secret is back.
 

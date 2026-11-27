@@ -543,7 +543,7 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
-	exporterLost, err := r.guardMissingSystemPasswords(ctx, cluster, systemUsersSecret)
+	exporterLost, err := r.guardSystemPasswords(ctx, cluster, systemUsersSecret)
 	if err != nil {
 		return nil, err
 	}

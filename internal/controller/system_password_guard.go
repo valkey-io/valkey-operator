@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -74,33 +75,70 @@ func missingServerPasswordKeys(secret *corev1.Secret) []string {
 	return missing
 }
 
-// guardMissingSystemPasswords returns errSystemPasswordSecretMissing, with a
-// warning event, when the Secret lacks _operator or _replication while a
-// server runs, or lacks one and the pods cannot be listed. It lists the pods
-// only when a key is missing.
+// unmatchedServerPasswordKeys returns the _operator and _replication keys
+// whose password the cluster's aclfile does not accept: a backup from before
+// a rotation, or a hand edit. The aclfile is what the servers load, and the
+// operator adds a password to it before it becomes current, so a password
+// the operator wrote always matches. A cluster with no aclfile yet has
+// nothing to match.
+func (r *ValkeyClusterReconciler) unmatchedServerPasswordKeys(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) ([]string, error) {
+	aclSecret, err := r.operatorSecret(ctx, cluster, getInternalSecretName(cluster.Name), legacyInternalSecretName(cluster.Name))
+	if err != nil || aclSecret == nil || len(aclSecret.Data[aclFilename]) == 0 {
+		return nil, err
+	}
+	accepted := desiredUserPasswordHashes(string(aclSecret.Data[aclFilename]))
+	var unmatched []string
+	for _, user := range []string{operatorUser, replicationUser} {
+		hashes, ok := accepted[user]
+		password := secret.Data[user]
+		if ok && len(password) > 0 && !slices.Contains(hashes, systemPasswordDigest(password)) {
+			unmatched = append(unmatched, user)
+		}
+	}
+	return unmatched, nil
+}
+
+// guardSystemPasswords returns errSystemPasswordSecretMissing, with a warning
+// event, when the Secret lacks _operator or _replication, or holds one the
+// aclfile does not accept, while a server runs, or when the pods cannot be
+// listed to tell. It lists the pods only when there is such a key.
 //
 // A lost _exporter is generated again: a running exporter's password cannot
 // be read back, so a new one is the only recovery, and the exporter is the
 // only client of it. exporterLost reports that an exporter runs with the lost
 // password, for warnExporterPasswordRegenerated once the new one is written.
-func (r *ValkeyClusterReconciler) guardMissingSystemPasswords(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (exporterLost bool, err error) {
+func (r *ValkeyClusterReconciler) guardSystemPasswords(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (exporterLost bool, err error) {
 	missing := missingServerPasswordKeys(secret)
+	unmatched, err := r.unmatchedServerPasswordKeys(ctx, cluster, secret)
+	if err != nil {
+		return false, err
+	}
 	exporterMissing := cluster.Spec.ExporterEnabled() && len(secret.Data[exporterUser]) == 0
-	if len(missing) == 0 && !exporterMissing {
+	if len(missing) == 0 && len(unmatched) == 0 && !exporterMissing {
 		return false, nil
 	}
 	serverRunning, exporterRunning, err := r.systemPasswordHolders(ctx, cluster)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to list the cluster's pods")
-		if len(missing) == 0 {
-			return false, nil
+		switch {
+		case len(missing) > 0:
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s and the pod state could not be checked; not generating system user passwords until the pods can be listed",
+				secret.Name, strings.Join(missing, ", ")))
+		case len(unmatched) > 0:
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s holds %s passwords that do not match the aclfile and the pod state could not be checked; not writing them until the pods can be listed",
+				secret.Name, strings.Join(unmatched, ", ")))
 		}
-		return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s and the pod state could not be checked; not generating system user passwords until the pods can be listed",
-			secret.Name, strings.Join(missing, ", ")))
+		return false, nil
 	}
-	if len(missing) > 0 && serverRunning {
-		return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
-			secret.Name, strings.Join(missing, ", ")))
+	if serverRunning {
+		switch {
+		case len(missing) > 0:
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
+				secret.Name, strings.Join(missing, ", ")))
+		case len(unmatched) > 0:
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s holds %s passwords that do not match the aclfile the servers run with; restore a copy taken after the last rotation, or rebuild the Secret from the files mounted in a running server",
+				secret.Name, strings.Join(unmatched, ", ")))
+		}
 	}
 	return exporterMissing && exporterRunning, nil
 }

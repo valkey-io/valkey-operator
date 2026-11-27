@@ -385,3 +385,61 @@ func TestUpsertRegeneratesAnEmptyPasswordWhenNoServerRuns(t *testing.T) {
 	stored, _ := storedSystemPasswords(t, c)
 	require.NotEmpty(t, stored.Data[operatorUser])
 }
+
+// systemPasswordACL is the cluster's ACL Secret, with an aclfile whose system
+// users accept the given passwords.
+func systemPasswordACL(operatorPasswords, replicationPasswords []string) *corev1.Secret {
+	line := func(user string, passwords []string) string {
+		l := "user " + user + " on"
+		for _, p := range passwords {
+			l += " #" + systemPasswordDigest([]byte(p))
+		}
+		return l + " resetchannels -@all\n"
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: getInternalSecretName("h1"), Namespace: "ns"},
+		Type:       AclSecretType,
+		Data:       map[string][]byte{aclFilename: []byte(line(operatorUser, operatorPasswords) + line(replicationUser, replicationPasswords))},
+	}
+}
+
+// A backup from before a rotation, or a hand edit, holds passwords the
+// running servers no longer accept. Writing them into the aclfile would lock
+// the operator out of every server, so they are refused like missing ones.
+func TestUpsertRefusesPasswordsTheServersDoNotRun(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(true)
+	objs = append(objs,
+		systemPasswordACL([]string{"op-rotated"}, []string{"re-old"}),
+		systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, c := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "_operator")
+	require.NotContains(t, err.Error(), "_replication")
+	require.Contains(t, err.Error(), "do not match")
+	stored, _ := storedSystemPasswords(t, c)
+	require.Equal(t, "op-old", string(stored.Data[operatorUser]))
+}
+
+// Mid-rotation the aclfile accepts the current and the next password.
+func TestUpsertAcceptsPasswordsTheAclfileHolds(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(true)
+	objs = append(objs,
+		systemPasswordACL([]string{"op-old", "op-next"}, []string{"re-old"}),
+		systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, _ := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+}
+
+// With no server running, nothing holds the old aclfile.
+func TestUpsertAcceptsUnmatchedPasswordsWhenNoServerRuns(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(true)
+	objs = append(objs, systemPasswordACL([]string{"op-rotated"}, []string{"re-rotated"}))
+	r, _ := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+}

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -35,8 +36,7 @@ const (
 	defaultReadinessFailureThreshold  = 5
 	defaultReadinessSuccessThreshold  = 1
 
-	// The timeouts liveness-check.sh and readiness-check.sh use when the
-	// command passes none.
+	// The timeouts passed to liveness-check.sh and readiness-check.sh.
 	defaultLivenessCheckTimeoutSeconds  = 4
 	defaultReadinessCheckTimeoutSeconds = 1
 
@@ -96,22 +96,16 @@ func serverProbes(node *valkeyiov1alpha1.ValkeyNode) (startup, liveness, readine
 }
 
 // execCheckAndTimeout returns the handler that runs script, and the probe
-// timeout. A timeout from spec.probes is passed to the script, and the probe
-// gets one second more, so that the script normally gives up first. The
-// script counts 0.1s polls, which run late with a long timeout or a throttled
-// container; a check that runs past the extra second fails on the kubelet's
-// timeout instead. Without a timeout the command passes none and the script
-// keeps its default: the command of a cluster that does not set spec.probes
-// must not change, or an operator upgrade rolls its pods.
-func execCheckAndTimeout(script string, timeoutSeconds *int32, scriptDefaultSeconds int32) (corev1.ProbeHandler, int32) {
-	command, scriptTimeoutSeconds := script, scriptDefaultSeconds
-	if timeoutSeconds != nil {
-		scriptTimeoutSeconds = *timeoutSeconds
-		command = fmt.Sprintf("%s %d", script, scriptTimeoutSeconds)
-	}
+// timeout. The script gets the timeout from spec.probes, or defaultSeconds,
+// and the probe gets one second more, so that the script normally gives up
+// first. The script counts 0.1s polls, which run late with a long timeout or
+// a throttled container; a check that runs past the extra second fails on the
+// kubelet's timeout instead.
+func execCheckAndTimeout(script string, timeoutSeconds *int32, defaultSeconds int32) (corev1.ProbeHandler, int32) {
+	seconds := orDefault(timeoutSeconds, defaultSeconds)
 	return corev1.ProbeHandler{
-		Exec: &corev1.ExecAction{Command: []string{shellPath, "-c", command}},
-	}, scriptTimeoutSeconds + 1
+		Exec: &corev1.ExecAction{Command: []string{shellPath, "-c", fmt.Sprintf("%s %d", script, seconds)}},
+	}, seconds + 1
 }
 
 // startupFailureThreshold returns the failure threshold of the startup probe.
@@ -179,6 +173,57 @@ func startupChecksCovering(windowSeconds int64, initialDelaySeconds, periodSecon
 	period := int64(max(periodSeconds, 1))
 	rest := max(windowSeconds-int64(initialDelaySeconds), 0)
 	return 1 + (rest+period-1)/period
+}
+
+// probeHandlerProblems describes each probe of containers that does not have
+// exactly one handler, which the API server rejects. A spec.containers patch
+// is merged into the operator's probe field by field, so a patch that sets
+// only timings on a probe the operator leaves out has no handler, and one
+// with an httpGet, tcpSocket or grpc handler adds a second handler to the
+// operator's exec check.
+func probeHandlerProblems(containers []corev1.Container) []string {
+	var problems []string
+	for _, c := range containers {
+		for _, p := range []struct {
+			field string
+			probe *corev1.Probe
+		}{
+			{"livenessProbe", c.LivenessProbe},
+			{"readinessProbe", c.ReadinessProbe},
+			{"startupProbe", c.StartupProbe},
+		} {
+			if p.probe == nil {
+				continue
+			}
+			switch handlers := probeHandlers(p.probe.ProbeHandler); len(handlers) {
+			case 0:
+				problems = append(problems, fmt.Sprintf("container %q %s has no handler", c.Name, p.field))
+			case 1:
+			default:
+				problems = append(problems, fmt.Sprintf("container %q %s has %d handlers (%s)",
+					c.Name, p.field, len(handlers), strings.Join(handlers, ", ")))
+			}
+		}
+	}
+	return problems
+}
+
+// probeHandlers returns the field names of the handlers set on h.
+func probeHandlers(h corev1.ProbeHandler) []string {
+	var names []string
+	if h.Exec != nil {
+		names = append(names, "exec")
+	}
+	if h.HTTPGet != nil {
+		names = append(names, "httpGet")
+	}
+	if h.TCPSocket != nil {
+		names = append(names, "tcpSocket")
+	}
+	if h.GRPC != nil {
+		names = append(names, "grpc")
+	}
+	return names
 }
 
 // probesOrEmpty returns probes with every probe set, empty where unset.

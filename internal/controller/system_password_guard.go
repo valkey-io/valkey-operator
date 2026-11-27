@@ -136,7 +136,7 @@ func (r *ValkeyClusterReconciler) guardSystemPasswords(ctx context.Context, clus
 			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s does not exist while the cluster's servers run with its passwords; restore the Secret to recover the cluster",
 				secret.Name))
 		case len(missing) > 0:
-			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run; restore the Secret to recover the cluster",
 				secret.Name, strings.Join(missing, ", ")))
 		case len(unmatched) > 0:
 			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s holds %s passwords that do not match the aclfile the servers run with; restore a copy taken after the last rotation, or rebuild the Secret from the files mounted in a running server",

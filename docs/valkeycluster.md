@@ -874,8 +874,11 @@ POD=$(kubectl -n "$NS" get pods -l valkey.io/cluster="$CLUSTER" \
   | awk '$2 != "" {print $1; exit}')
 OP=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_operator)
 RE=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_replication)
-[ -n "$OP" ] && [ -n "$RE" ] || { echo "a password is empty; run the commands again"; exit 1; }
-kubectl -n "$NS" create secret generic "valkey-$CLUSTER-system-passwords" --from-literal=_operator="$OP" --from-literal=_replication="$RE"
+if [ -n "$OP" ] && [ -n "$RE" ]; then
+  kubectl -n "$NS" create secret generic "valkey-$CLUSTER-system-passwords" --from-literal=_operator="$OP" --from-literal=_replication="$RE"
+else
+  echo "a password is empty; run the commands again"
+fi
 ```
 
 If the Secret still exists and only lacks keys, add them with `kubectl patch secret "valkey-$CLUSTER-system-passwords" --type=merge -p '{"stringData": {...}}'` instead. The operator generates `_exporter` when the exporter is enabled, so restart the Valkey pods one at a time once the cluster is `Ready` to bring the exporters back.

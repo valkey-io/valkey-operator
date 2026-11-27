@@ -99,7 +99,7 @@ Indicates whether the cluster is impaired but may still be partially functional.
 
 Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
-- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
+- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in), including a slot migration that failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it. The message then reads `slot migration from <src> to <dst> failed: <message>`, where `<message>` is the failed job's description from `CLUSTER GETSLOTMIGRATIONS`
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 - `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, or the user names no Secret, so the aclfile could not be rebuilt. Only a cluster stored before `password.secret.name` was required can have a user that names no Secret; see the upgrade note under [Users](valkeycluster.md#users). The message names the user and the Secret, and the key when the Secret exists but lacks it, or the unset field; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `valkey-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
@@ -442,8 +442,8 @@ These events are emitted during scale-out slot rebalancing.
 | Event Type | Type | Description |
 |---|---|---|
 | `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
-| `SlotsRebalancePending` | Normal | Waiting for a shard to learn its migration target before moving slots |
-| `SlotRebalanceFailed` | Warning | Slot rebalancing failed |
+| `SlotsRebalancePending` | Normal | Waiting for the migration source and target to learn each other through gossip before moving slots |
+| `SlotRebalanceFailed` | Warning | Slot rebalancing failed, including an asynchronous `CLUSTER MIGRATESLOTS` job failure read back from `CLUSTER GETSLOTMIGRATIONS`; a scale-in drain whose migration failed asynchronously emits this event too |
 
 ### Scale-in events
 
@@ -453,7 +453,8 @@ These events are emitted during scale-in operations.
 |---|---|---|
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
-| `DrainFailed` | Warning | Failed to drain slots from excess shards |
+| `DrainFailed` | Warning | Failed to drain excess shards for a reason other than an asynchronously failed slot migration |
+| `SlotRebalanceFailed` | Warning | A drain migration failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it; same failure class as the rebalance event above |
 | `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, an excess ValkeyNode still owns slots, or an unreachable excess primary is kept while some slots are unassigned |
 
 ### Proactive failover events

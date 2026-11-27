@@ -35,6 +35,9 @@ data_dir=${VALKEY_DATA_DIR:-/data}
 nodes_conf="$data_dir/nodes.conf"
 role_timeout=3 # seconds one ROLE call may take, connection and reply included
 operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
+# Read before load_operator_auth unsets them. See load_operator_auth.
+legacy_user=${VALKEY_USER:-}
+legacy_pw=${VALKEYCLI_AUTH:-}
 
 case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
 
@@ -117,23 +120,30 @@ promotable_replicas() {
         }' "$nodes_conf"
 }
 
-# load_operator_auth sets the password for the next ROLE call. As in the probe
-# scripts, the mounted file is the current _operator password and updates when
-# the Secret rotates. It is read before every call, so a rotation during the
-# wait is picked up. VALKEYCLI_AUTH from the environment is fixed at container
-# start and is the fallback when the file is not mounted.
+# load_operator_auth sets the _operator credentials for the next ROLE call. As
+# in the probe scripts, the mounted file is the current password and updates
+# when the Secret rotates. It is read before every call, so a rotation during
+# the wait is picked up. VALKEYCLI_USER and VALKEYCLI_AUTH in the environment
+# are for valkey-cli run in the pod and may name another user, so they are not
+# used here. A pod created before the operator mounted the file has none: it
+# falls back to the VALKEY_USER and VALKEYCLI_AUTH pair the operator set then.
 load_operator_auth() {
+    unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+    pw=""
     if [ -f "$operator_password_file" ]; then
         # An unreadable file must not end the script; set -e would exit here.
         pw=$(cat "$operator_password_file" 2>/dev/null) || true
-        if [ -n "$pw" ]; then
-            VALKEYCLI_AUTH=$pw
-            export VALKEYCLI_AUTH
-        fi
     fi
     auth_args=""
-    if [ -n "${VALKEY_USER:-}" ] && [ -n "${VALKEYCLI_AUTH:-}" ]; then
-        auth_args="--user $VALKEY_USER"
+    if [ -n "$pw" ]; then
+        auth_args="--user _operator"
+    elif [ -n "$legacy_user" ] && [ -n "$legacy_pw" ]; then
+        pw=$legacy_pw
+        auth_args="--user $legacy_user"
+    fi
+    if [ -n "$auth_args" ]; then
+        VALKEYCLI_AUTH=$pw
+        export VALKEYCLI_AUTH
     fi
 }
 

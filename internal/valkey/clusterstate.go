@@ -67,6 +67,24 @@ func (n *NodeState) KnowsNode(id string) bool {
 	return false
 }
 
+// SeesSlotsOwnedBy reports whether this node's peer table assigns every given
+// slot to the node with the given ID. Gossip carries a node's ID before its
+// slots, so KnowsNode can hold while this does not.
+func (n *NodeState) SeesSlotsOwnedBy(id string, slots []int) bool {
+	for _, entry := range n.nodes {
+		if entry.Id != id {
+			continue
+		}
+		for _, slot := range slots {
+			if !slices.ContainsFunc(entry.Slots, func(r SlotsRange) bool { return r.Start <= slot && slot <= r.End }) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // ReplicationOffset returns this node's processed replication offset from
 // INFO replication (slave_repl_offset), or -1 when it is unavailable. A higher
 // value means the replica is more caught up with its primary.

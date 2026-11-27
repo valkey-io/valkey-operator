@@ -308,7 +308,91 @@ func TestOperatorSecretRefusesASecretTheClusterDoesNotControl(t *testing.T) {
 		acl, ok := getSecret(t, c, "valkey-c-acl")
 		require.True(t, ok)
 		assert.Contains(t, string(acl.Data[aclFilename]), "user _operator on #"+hashOf("someone-elses-pw")+" ")
+		adopted, _ := getSecret(t, c, "valkey-c-system-passwords")
+		assert.True(t, metav1.IsControlledBy(adopted, cluster), "and adopts it")
 	})
+}
+
+// A Secret restored without its labels and owner, the way a backup tool or
+// kubectl create brings it back, keeps its passwords and is the cluster's
+// again, so the cache sees it and garbage collection removes it with the
+// cluster.
+func TestOperatorSecretAdoptsAnUnlabelledSecret(t *testing.T) {
+	ctx := context.Background()
+	cluster := migrationCluster()
+	restored := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-system-passwords", Namespace: "ns"},
+		Data:       map[string][]byte{operatorUser: []byte("restored-pw")},
+	}
+	r, c := newMigrationReconciler(t, restored)
+	r.Client = hidingClient{Client: c, hidden: []string{"valkey-c-system-passwords"}}
+
+	got, err := r.operatorSecret(ctx, cluster, "valkey-c-system-passwords", "internal-c-system-passwords")
+	require.NoError(t, err)
+	assert.Equal(t, "restored-pw", string(got.Data[operatorUser]))
+	stored, _ := getSecret(t, c, "valkey-c-system-passwords")
+	assert.Equal(t, "valkey-operator", stored.Labels["app.kubernetes.io/managed-by"])
+	assert.True(t, metav1.IsControlledBy(stored, cluster))
+	assert.Equal(t, map[string][]byte{operatorUser: []byte("restored-pw")}, stored.Data)
+}
+
+func TestOperatorSecretRestoresTheLabelsOfAControlledSecret(t *testing.T) {
+	ctx := context.Background()
+	cluster := migrationCluster()
+	secret := operatorOwned(t, cluster, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-acl", Namespace: "ns"},
+		Data:       map[string][]byte{aclFilename: []byte("user default off\n")},
+	})
+	delete(secret.Labels, "app.kubernetes.io/managed-by")
+	r, c := newMigrationReconciler(t, secret)
+	r.Client = labelFilteredClient{Client: c}
+
+	_, err := r.operatorSecret(ctx, cluster, "valkey-c-acl", "internal-c-acl")
+	require.NoError(t, err)
+	stored, _ := getSecret(t, c, "valkey-c-acl")
+	assert.Equal(t, "valkey-operator", stored.Labels["app.kubernetes.io/managed-by"])
+}
+
+// A steady Secret is not written: an Update on every reconcile would change
+// its resourceVersion and requeue the cluster forever.
+func TestOperatorSecretLeavesAnAdoptedSecretAlone(t *testing.T) {
+	ctx := context.Background()
+	cluster := migrationCluster()
+	secret := operatorOwned(t, cluster, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-acl", Namespace: "ns"},
+	})
+	r, c := newMigrationReconciler(t, secret)
+	before, _ := getSecret(t, c, "valkey-c-acl")
+
+	_, err := r.operatorSecret(ctx, cluster, "valkey-c-acl", "internal-c-acl")
+	require.NoError(t, err)
+	after, _ := getSecret(t, c, "valkey-c-acl")
+	assert.Equal(t, before.ResourceVersion, after.ResourceVersion)
+}
+
+// A Secret another controller owns, External Secrets Operator say, would be
+// overwritten by it, so the operator neither adopts nor uses it.
+func TestOperatorSecretRefusesASecretAnotherControllerOwns(t *testing.T) {
+	ctx := context.Background()
+	cluster := migrationCluster()
+	isController := true
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "valkey-c-system-passwords", Namespace: "ns",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "external-secrets.io/v1beta1", Kind: "ExternalSecret", Name: "es", UID: "u", Controller: &isController,
+			}},
+		},
+		Data: map[string][]byte{operatorUser: []byte("theirs")},
+	}
+	r, c := newMigrationReconciler(t, foreign)
+
+	_, err := r.operatorSecret(ctx, cluster, "valkey-c-system-passwords", "internal-c-system-passwords")
+	require.ErrorIs(t, err, errOperatorSecretForeignController)
+	assert.Contains(t, err.Error(), "ExternalSecret es")
+	stored, _ := getSecret(t, c, "valkey-c-system-passwords")
+	assert.Empty(t, stored.Labels)
+	assert.Equal(t, foreign.OwnerReferences, stored.OwnerReferences)
 }
 
 func TestRetireLegacySecrets(t *testing.T) {

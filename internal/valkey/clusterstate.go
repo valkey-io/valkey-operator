@@ -670,10 +670,14 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 
 // NodeView is what the scraped nodes report for one node ID.
 type NodeView struct {
-	Scraped    bool     // the node answered and its own myself line is the view
-	Hosts      []string // its scrape address, or every host the tables list for it
-	OwnsSlots  bool
-	PrimaryIDs []string // primaries it is listed as replicating; at most one when Scraped
+	Scraped   bool     // the node answered and its own myself line is the view
+	Hosts     []string // its scrape address, or every host the tables list for it
+	OwnsSlots bool
+	// ListedWithSlots is whether any scraped table, its own or a peer's, lists
+	// it with slots. The scrape is not one snapshot, so a peer can show a
+	// promotion the node's own earlier line does not.
+	ListedWithSlots bool
+	PrimaryIDs      []string // primaries it is listed as replicating; at most one when Scraped
 }
 
 // NodeViews returns one view per node ID any scraped node knows. A node that
@@ -689,7 +693,8 @@ func (s *ClusterState) NodeViews() map[string]NodeView {
 		if myself == nil {
 			continue
 		}
-		v := NodeView{Scraped: true, Hosts: []string{n.Address}, OwnsSlots: myself.HasSlotAssignment()}
+		owns := myself.HasSlotAssignment()
+		v := NodeView{Scraped: true, Hosts: []string{n.Address}, OwnsSlots: owns, ListedWithSlots: owns}
 		if p := primaryIDOf(myself); p != "" {
 			v.PrimaryIDs = []string{p}
 		}
@@ -697,10 +702,14 @@ func (s *ClusterState) NodeViews() map[string]NodeView {
 	}
 
 	merge := func(id, host string, entry *ClusterNode) {
-		if views[id].Scraped {
+		v := views[id]
+		if entry != nil && entry.HasSlotAssignment() {
+			v.ListedWithSlots = true
+		}
+		if v.Scraped {
+			views[id] = v
 			return
 		}
-		v := views[id]
 		if host != "" && !slices.Contains(v.Hosts, host) {
 			v.Hosts = append(v.Hosts, host)
 		}

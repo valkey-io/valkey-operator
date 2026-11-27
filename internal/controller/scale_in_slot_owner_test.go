@@ -441,10 +441,34 @@ func TestDeleteExcessValkeyNodesDeletesPendingExcessNodeWhileOtherSlotsUnowned(t
 	assert.False(t, nodeExists(t, r.Client, pending))
 }
 
-// TestDeleteExcessValkeyNodesIgnoresStaleTableAboutScrapedNode: a node cut off
-// from the bus still lists a drained primary with slots. The drained primary
-// answered, so its own line counts.
-func TestDeleteExcessValkeyNodesIgnoresStaleTableAboutScrapedNode(t *testing.T) {
+// TestDeleteExcessValkeyNodesKeepsShardAnotherTableGivesSlots: the scrape is
+// not one snapshot. The replica answered before its promotion, with no slots,
+// and the in-spec primary answered after it, listing the replica as the owner.
+func TestDeleteExcessValkeyNodesKeepsShardAnotherTableGivesSlots(t *testing.T) {
+	inSpec, crashed, promoted := primaryNode(0), primaryNode(3), replicaNode(3)
+	r, cluster, recorder := scaleInReconciler(t, inSpec, crashed, promoted)
+	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 8191})
+	withPeers(shard0.Nodes[0],
+		clusterNodesLine("p3", "10.0.0.3", "master,fail", "-"),
+		clusterNodesLine("r3", "10.0.1.3", "master", "-", valkey.SlotsRange{Start: 8192, End: 16383}),
+	)
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{
+		shard0,
+		{Id: "s3", PrimaryId: "p3", Nodes: []*valkey.NodeState{scrapedNode("r3", "10.0.1.3", "myself,slave", "p3")}},
+	}}
+
+	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, crashed, promoted))
+	require.NoError(t, err)
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-3-0", "c-3-1"}, kept)
+	assert.True(t, nodeExists(t, r.Client, promoted), "the promoted replica holds the shard's only copy")
+	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping excess ValkeyNode c-3-1: shard 3 still owns slots; waiting for drain")
+}
+
+// TestDeleteExcessValkeyNodesKeepsShardWhileStaleTableGivesSlots: a node cut
+// off from the bus still lists a drained primary with slots. The shard is kept
+// until that table catches up: waiting errs toward keeping data.
+func TestDeleteExcessValkeyNodesKeepsShardWhileStaleTableGivesSlots(t *testing.T) {
 	inSpec, drained := primaryNode(0), primaryNode(3)
 	r, cluster, _ := scaleInReconciler(t, inSpec, drained)
 	shard0 := primaryShard(0, valkey.SlotsRange{Start: 0, End: 16383})
@@ -453,9 +477,9 @@ func TestDeleteExcessValkeyNodesIgnoresStaleTableAboutScrapedNode(t *testing.T) 
 
 	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodeList(inSpec, drained))
 	require.NoError(t, err)
-	assert.True(t, deleted)
-	assert.Empty(t, kept)
-	assert.False(t, nodeExists(t, r.Client, drained))
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-3-0"}, kept)
+	assert.True(t, nodeExists(t, r.Client, drained))
 }
 
 // TestDeleteExcessValkeyNodesUsesScrapedIDOverStaleRecord: the hand-off wiped

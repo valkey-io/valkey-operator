@@ -1611,8 +1611,8 @@ func TestNodeViews(t *testing.T) {
 		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n")
 		b := node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n"+
 			"a 10.0.0.1:6379@16379 master - 0 0 1 connected 0-100\n")
-		if v := state(a, b).NodeViews()["a"]; v.OwnsSlots {
-			t.Errorf("got %+v, want OwnsSlots false", v)
+		if v := state(a, b).NodeViews()["a"]; v.OwnsSlots || !v.ListedWithSlots {
+			t.Errorf("got %+v, want OwnsSlots false, ListedWithSlots", v)
 		}
 	})
 

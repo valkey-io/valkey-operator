@@ -2711,8 +2711,9 @@ const (
 // shardsHoldingSlots maps the shard index of every ValkeyNode that may hold
 // slots to why its shard is kept.
 //
-// A ValkeyNode holds slots when one of its candidate IDs owns slots, or
-// replicates a primary that does. A primary counts unless it is a known ID of
+// A ValkeyNode holds slots when any scraped table lists one of its candidate
+// IDs with slots, or one replicating a primary listed with them. The scrape is
+// not one snapshot, and a stale table only delays deletion. A primary counts unless it is a known ID of
 // a ValkeyNode in another shard: a replica of another shard's primary holds
 // none of its own shard's data. A pod-IP match against the tables is enough to
 // keep a node, not to rule a primary out. A recorded ID that no scraped table
@@ -2758,12 +2759,12 @@ func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valk
 		}
 		for _, id := range m.candidates {
 			v := views[id]
-			if v.OwnsSlots {
+			if v.ListedWithSlots {
 				hold(shard, v)
 			}
 			for _, p := range v.PrimaryIDs {
 				primary := views[p]
-				if !primary.OwnsSlots || slices.ContainsFunc(shardsOfID[p], func(s int) bool { return s != shard }) {
+				if !primary.ListedWithSlots || slices.ContainsFunc(shardsOfID[p], func(s int) bool { return s != shard }) {
 					continue
 				}
 				hold(shard, primary)

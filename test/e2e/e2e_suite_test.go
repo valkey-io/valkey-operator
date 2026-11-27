@@ -148,6 +148,13 @@ var _ = AfterSuite(func() {
 		"--ignore-not-found=true", "--wait=false")
 	_, _ = utils.Run(cmd)
 
+	// A ValkeyNode created without a parent has no owner, so nothing else
+	// deletes it and the wait below would time out on it.
+	By("deleting any remaining ValkeyNodes")
+	cmd = exec.Command("kubectl", "delete", "valkeynodes.valkey.io", "--all", "-A",
+		"--ignore-not-found=true", "--wait=false")
+	_, _ = utils.Run(cmd)
+
 	// `kubectl wait --all` errors when nothing matches (all nodes already gone,
 	// or the CRD was never installed), so only wait when ValkeyNodes exist.
 	By("waiting for every ValkeyNode to be deleted")

@@ -543,7 +543,8 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
-	if err := r.guardMissingSystemPasswords(ctx, cluster, systemUsersSecret); err != nil {
+	exporterLost, err := r.guardMissingSystemPasswords(ctx, cluster, systemUsersSecret)
+	if err != nil {
 		return nil, err
 	}
 
@@ -598,6 +599,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	}
 	if err != nil {
 		return systemUsersSecret, err
+	}
+	if exporterLost {
+		r.warnExporterPasswordRegenerated(cluster, systemUsersSecret.Name)
 	}
 	// Only after a successful write, so the condition matches the stored Secret.
 	if !rotationHeld {

@@ -81,33 +81,36 @@ func missingServerPasswordKeys(secret *corev1.Secret) []string {
 //
 // A lost _exporter is generated again: a running exporter's password cannot
 // be read back, so a new one is the only recovery, and the exporter is the
-// only client of it. A warning event says the running exporters fail until
-// their pods restart.
-func (r *ValkeyClusterReconciler) guardMissingSystemPasswords(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
+// only client of it. exporterLost reports that an exporter runs with the lost
+// password, for warnExporterPasswordRegenerated once the new one is written.
+func (r *ValkeyClusterReconciler) guardMissingSystemPasswords(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (exporterLost bool, err error) {
 	missing := missingServerPasswordKeys(secret)
 	_, hasExporterKey := secret.Data[exporterUser]
-	exporterLost := cluster.Spec.ExporterEnabled() && !hasExporterKey
-	if len(missing) == 0 && !exporterLost {
-		return nil
+	exporterMissing := cluster.Spec.ExporterEnabled() && !hasExporterKey
+	if len(missing) == 0 && !exporterMissing {
+		return false, nil
 	}
 	serverRunning, exporterRunning, err := r.systemPasswordHolders(ctx, cluster)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to list the cluster's pods")
 		if len(missing) == 0 {
-			return nil
+			return false, nil
 		}
-		return r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s and the pod state could not be checked; not generating system user passwords until the pods can be listed",
+		return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s and the pod state could not be checked; not generating system user passwords until the pods can be listed",
 			secret.Name, strings.Join(missing, ", ")))
 	}
 	if len(missing) > 0 && serverRunning {
-		return r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
+		return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
 			secret.Name, strings.Join(missing, ", ")))
 	}
-	if exporterLost && exporterRunning {
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ExporterPasswordRegenerated", "ReconcileUsers",
-			"%s is missing %s, so a new password is generated; running exporters keep the old one and report redis_up 0 until their pods restart", secret.Name, exporterUser)
-	}
-	return nil
+	return exporterMissing && exporterRunning, nil
+}
+
+// warnExporterPasswordRegenerated says the running exporters fail until their
+// pods restart, since they keep the password they started with.
+func (r *ValkeyClusterReconciler) warnExporterPasswordRegenerated(cluster *valkeyiov1alpha1.ValkeyCluster, secretName string) {
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ExporterPasswordRegenerated", "ReconcileUsers",
+		"%s was missing %s, so a new password was generated; running exporters keep the old one and report redis_up 0 until their pods restart", secretName, exporterUser)
 }
 
 // refuseSystemPasswords returns the refusal, and emits its warning when the

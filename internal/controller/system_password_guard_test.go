@@ -335,3 +335,26 @@ func TestUpsertWarnsOnceWhileTheRefusalHolds(t *testing.T) {
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
 	require.Len(t, drainEvents(recorder), 1, "a changed refusal is reported")
 }
+
+// failingUpdateClient fails every Update.
+type failingUpdateClient struct {
+	client.Client
+}
+
+func (failingUpdateClient) Update(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+	return fmt.Errorf("api unavailable")
+}
+
+// The warning says a new _exporter was generated, so it waits for the write.
+func TestUpsertWarnsAboutTheExporterKeyOnlyOnceWritten(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	loseExporterKey(cluster, secret)
+	operatorOwned(t, cluster, secret) // so adoption does not write first
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName, metricsExporterContainerName))
+	r, c := newMigrationReconciler(t, objs...)
+	r.Client = failingUpdateClient{Client: c}
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.Error(t, err)
+	require.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)))
+}

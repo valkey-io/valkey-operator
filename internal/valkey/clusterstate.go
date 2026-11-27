@@ -293,7 +293,12 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 			liveByAddress[node.Address] = node.Id
 		}
 	}
+	// A followed primary whose slots no scraped table lists may own any free
+	// range, so nothing is assignable until its slots are known again.
 	followed := s.followedPrimaries(scraped, liveByAddress)
+	if s.followsUnknownSlots(scraped, followed) {
+		return nil
+	}
 	// Hold back the slots of each primary a peer table lists but this pass did
 	// not scrape, while a replica follows it or it is still at a pod address
 	// no other node answered.
@@ -356,6 +361,31 @@ func (s *ClusterState) followedPrimaries(scraped map[string]struct{}, liveByAddr
 		}
 	}
 	return followed
+}
+
+// followsUnknownSlots reports whether a replica follows a primary that this
+// pass did not scrape and that no scraped table lists with slots. Only a
+// primary's own shard learns its slots; a node that joined later lists it
+// without them. Such a primary may own any free range, so none is assignable
+// until a replica is promoted with the slots or answers again.
+func (s *ClusterState) followsUnknownSlots(scraped, followed map[string]struct{}) bool {
+	owners := make(map[string]struct{})
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if entry.IsPrimary() && len(entry.Slots) > 0 {
+				owners[entry.Id] = struct{}{}
+			}
+		}
+	}
+	for id := range followed {
+		if _, found := scraped[id]; found {
+			continue
+		}
+		if _, known := owners[id]; !known {
+			return true
+		}
+	}
+	return false
 }
 
 // FindShardForAddress returns the shard containing a node with the given IP

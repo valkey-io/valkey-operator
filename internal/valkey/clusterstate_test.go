@@ -1407,6 +1407,15 @@ func TestAssignableSlotsHoldsTheRangesOfAPrimaryAReplicaFollows(t *testing.T) {
 	followerReplaced[0] = blobResult("xyz")
 	followerReplaced[1] = blobResult("shard-8")
 	followerReplaced[4] = blobResult("xyz 10.0.0.2:6379@16379 myself,master - 0 0 4 connected\n")
+	// A node that joined after ghi went away lists it, and its follower,
+	// without ghi's slots: only ghi's own shard learned them.
+	newcomer := func() []vclient.ValkeyResult {
+		r := healthyScrape()
+		r[4] = blobResult("abc 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 4096-16383\n" +
+			"ghi 10.0.0.3:6379@16379 master - 0 0 2 connected\n" +
+			"def 10.0.0.2:6379@16379 slave ghi 0 0 2 connected\n")
+		return r
+	}
 
 	for _, tc := range []struct {
 		name       string
@@ -1419,6 +1428,21 @@ func TestAssignableSlotsHoldsTheRangesOfAPrimaryAReplicaFollows(t *testing.T) {
 				"10.0.0.1:6379": viewer("10.0.0.3"),
 				"10.0.0.2:6379": followerUnscraped,
 			}, nil},
+		{"held when no scraped table knows the slots of the primary an unscraped follower follows", []string{"10.0.0.1", "10.0.0.2"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": newcomer(),
+				"10.0.0.2:6379": followerUnscraped,
+			}, nil},
+		{"assignable when the unscraped follower of a primary with unknown slots is no longer a pod", []string{"10.0.0.1"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": newcomer(),
+			}, []SlotsRange{{0, 4095}}},
+		{"a scraped primary without slots does not hold the free ranges for its replica", []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			map[string][]vclient.ValkeyResult{
+				"10.0.0.1:6379": viewer("10.0.0.9"),
+				"10.0.0.2:6379": replicaOf("new", "10.0.0.9"),
+				"10.0.0.3:6379": replacement,
+			}, []SlotsRange{{0, 4095}}},
 		{"assignable once the unscraped follower's address is no longer a pod", []string{"10.0.0.1"},
 			map[string][]vclient.ValkeyResult{
 				"10.0.0.1:6379": viewer("10.0.0.3"),

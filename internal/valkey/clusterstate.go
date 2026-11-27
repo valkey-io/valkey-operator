@@ -274,12 +274,16 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 // That primary can still be serving them, for example when only its CLUSTER
 // INFO failed, and a new primary given them would take them over with a
 // higher config epoch. A primary whose address answered as another id has
-// been replaced, so its ranges stay assignable. GetUnassignedSlots still
-// counts all of these as unassigned.
+// been replaced, so its ranges stay assignable, unless a replica still
+// follows it. A followed primary's ranges are also left out once its pod is
+// gone: the replica holds the keys and can be promoted with the slots.
+// GetUnassignedSlots still counts all of these as unassigned.
 func (s *ClusterState) AssignableSlots() []SlotsRange {
 	free := s.GetUnassignedSlots()
 	scraped := make(map[string]struct{})
 	liveByAddress := make(map[string]string)
+	// Map the scraped nodes by id and by address. A scraped node always has
+	// both; the empty checks only guard a hand-built state.
 	for _, node := range s.AllNodes() {
 		if node.Id == "" {
 			continue
@@ -289,6 +293,15 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 			liveByAddress[node.Address] = node.Id
 		}
 	}
+	// A followed primary whose slots no scraped table lists may own any free
+	// range, so nothing is assignable until its slots are known again.
+	followed := s.followedPrimaries(scraped, liveByAddress)
+	if s.followsUnknownSlots(scraped, followed) {
+		return nil
+	}
+	// Hold back the slots of each primary a peer table lists but this pass did
+	// not scrape, while a replica follows it or it is still at a pod address
+	// no other node answered.
 	for _, node := range s.AllNodes() {
 		for _, entry := range node.nodes {
 			if entry.IsMyself() || !entry.IsPrimary() || len(entry.Slots) == 0 {
@@ -297,11 +310,13 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 			if _, found := scraped[entry.Id]; found {
 				continue
 			}
-			if _, isPod := s.targets[entry.Host]; !isPod {
-				continue
-			}
-			if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
-				continue
+			if _, held := followed[entry.Id]; !held {
+				if _, isPod := s.targets[entry.Host]; !isPod {
+					continue
+				}
+				if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+					continue
+				}
 			}
 			for _, owned := range entry.Slots {
 				var next []SlotsRange //nolint:prealloc
@@ -313,6 +328,64 @@ func (s *ClusterState) AssignableSlots() []SlotsRange {
 		}
 	}
 	return free
+}
+
+// followedPrimaries returns the ids of the primaries some replica follows. A
+// scraped node's own myself line decides for that node. A replica this pass
+// did not scrape counts from a peer's table while its address is a pod address
+// no other node answered, as a primary does in AssignableSlots: a failed
+// scrape, such as one CLUSTER INFO error, must not end the hold.
+func (s *ClusterState) followedPrimaries(scraped map[string]struct{}, liveByAddress map[string]string) map[string]struct{} {
+	followed := make(map[string]struct{})
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if entry.IsPrimary() || entry.PrimaryId == "" || entry.PrimaryId == "-" {
+				continue
+			}
+			// A myself line is a scraped replica's own view of its primary and
+			// counts as it is.
+			if !entry.IsMyself() {
+				// Other nodes' gossip about a replica that answered this pass
+				// may be stale, so ignore it.
+				if _, found := scraped[entry.Id]; found {
+					continue
+				}
+				if _, isPod := s.targets[entry.Host]; !isPod {
+					continue
+				}
+				if id, answered := liveByAddress[entry.Host]; answered && id != entry.Id {
+					continue
+				}
+			}
+			followed[entry.PrimaryId] = struct{}{}
+		}
+	}
+	return followed
+}
+
+// followsUnknownSlots reports whether a replica follows a primary that this
+// pass did not scrape and that no scraped table lists with slots. Only a
+// primary's own shard learns its slots; a node that joined later lists it
+// without them. Such a primary may own any free range, so none is assignable
+// until a replica is promoted with the slots or answers again.
+func (s *ClusterState) followsUnknownSlots(scraped, followed map[string]struct{}) bool {
+	owners := make(map[string]struct{})
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			if entry.IsPrimary() && len(entry.Slots) > 0 {
+				owners[entry.Id] = struct{}{}
+			}
+		}
+	}
+	for id := range followed {
+		if _, found := scraped[id]; found {
+			continue
+		}
+		if _, known := owners[id]; !known {
+			return true
+		}
+	}
+	return false
 }
 
 // FindShardForAddress returns the shard containing a node with the given IP

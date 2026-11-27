@@ -730,4 +730,129 @@ spec:
 			}, time.Minute).Should(Succeed())
 		})
 	})
+
+	// A primary deleted during a scale-out leaves its replicas following it
+	// until one is promoted. The new shards' primaries join in that window and
+	// must not be given the deleted primary's slots: with higher config epochs
+	// they would win them from the replica, which holds every key.
+	Context("when a primary is deleted during a scale-out", Label("scale-out-primary-deleted"), func() {
+		const clusterName = "valkeycluster-scaleout-delete-e2e"
+		const keyCount = 300
+		const keyPrefix = "e2e:scaleoutdelete"
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		It("keeps the deleted primary's keys for its promoted replica", func() {
+			By("creating a 1-shard cluster with 2 replicas and no persistence")
+			// A long cluster-node-timeout delays the replica promotion well past
+			// the new shards' start, so they join while the primary is gone.
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+  shards: 1
+  replicasPerShard: 2
+  config:
+    cluster-node-timeout: "60000"
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			primary := podFor(clusterName, 0, 0)
+			replicas := []string{podFor(clusterName, 0, 1), podFor(clusterName, 0, 2)}
+			Eventually(func(g Gomega) {
+				role, err := roleOf(clusterName, 0, 0)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(role).To(Equal("primary"))
+			}).Should(Succeed())
+
+			By("writing test keys")
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(primary, keyPrefix, keyCount, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("waiting for both replicas to hold every key")
+			Eventually(func(g Gomega) {
+				for _, pod := range replicas {
+					out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
+					g.Expect(err).NotTo(HaveOccurred(), out)
+					g.Expect(strings.TrimSpace(out)).To(Equal(strconv.Itoa(keyCount)), "replica %s is not in sync", pod)
+				}
+			}).Should(Succeed())
+
+			By("stopping the primary from handing off on SIGTERM")
+			// A hand-off would leave a live primary owning the slots, and the
+			// window under test would not open.
+			out, err := utils.ValkeyCLI(primary, cliOpts, "CONFIG", "SET", "shutdown-on-sigterm", `"nosave now"`)
+			Expect(err).NotTo(HaveOccurred(), out)
+
+			replicaIDs := make([]string, 0, len(replicas))
+			for _, pod := range replicas {
+				out, err := utils.ValkeyCLI(pod, cliOpts, "CLUSTER", "MYID")
+				Expect(err).NotTo(HaveOccurred(), out)
+				replicaIDs = append(replicaIDs, strings.TrimSpace(out))
+			}
+
+			By("scaling out to 4 shards and force-deleting the primary pod")
+			const shards = 4
+			_, err = utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName, "--type=merge",
+				"-p", fmt.Sprintf(`{"spec":{"shards":%d}}`, shards)))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = utils.Run(exec.Command("kubectl", "delete", "pod", primary, "--grace-period=0", "--force"))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the new shards' primaries join before a replica is promoted")
+			// The scenario needs the new primaries in the cluster while the
+			// deleted primary's replicas still follow it. If a replica wins the
+			// race, the test would pass without exercising it, so stop instead.
+			Eventually(func(g Gomega) {
+				for shard := 1; shard < shards; shard++ {
+					nodes, err := utils.ValkeyCLI(podFor(clusterName, shard, 0), cliOpts, "CLUSTER", "NODES")
+					g.Expect(err).NotTo(HaveOccurred(), nodes)
+					g.Expect(replicaIDs).To(ContainElement(Satisfy(func(id string) bool {
+						return strings.Contains(nodes, id)
+					})), "shard %d's primary has not joined the cluster yet", shard)
+				}
+				// Read the roles after the joins, so a replica still following
+				// here was not promoted before any of them.
+				for _, pod := range replicas {
+					info, err := utils.ValkeyCLI(pod, cliOpts, "INFO", "replication")
+					g.Expect(err).NotTo(HaveOccurred(), info)
+					if strings.Contains(info, "role:master") {
+						StopTrying(fmt.Sprintf("replica %s was promoted before the new shards joined the cluster; "+
+							"raise cluster-node-timeout", pod)).Now()
+					}
+				}
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("waiting for the cluster to become Ready with 4 shards")
+			Eventually(func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady),
+					"cluster state: %s, reason: %s: %s", cr.Status.State, cr.Status.Reason, cr.Status.Message)
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(shards)))
+			}, 8*time.Minute, 5*time.Second).Should(Succeed(), "cluster did not recover from the deleted primary")
+
+			By("verifying every test key survived")
+			// The replicas were never deleted; -c follows redirects from there
+			// to whichever shard now serves each key.
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(replicas[0], keyPrefix, keyCount, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(keyCount), "test keys were lost after the primary was deleted during the scale-out")
+			}, time.Minute).Should(Succeed())
+		})
+	})
 })

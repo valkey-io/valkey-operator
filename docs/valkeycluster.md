@@ -861,13 +861,17 @@ While a server of the cluster runs, the operator does not replace a missing or e
 
 A cluster deleted and created again under the same name can report `SystemPasswordSecretMissing` until the old cluster's pods have terminated, since they carry the same `valkey.io/cluster` label. It clears without action.
 
-To recover, restore the Secret from a backup taken after the last rotation. The operator adopts it and the cluster returns to `Ready` within about 10 seconds. A backup taken before a rotation holds passwords the servers no longer accept, and is refused. With `acl.systemUsers.passwordRotation` set, rebuild the Secret as below instead.
+To recover, restore the Secret from a backup taken after the last rotation. The operator adopts it and the cluster returns to `Ready` within about 10 seconds.
 
-Without a backup, rebuild the current passwords from the files mounted in a running server container. Read the files, not `VALKEYCLI_AUTH` or `PRIMARY_AUTH`: the environment holds the passwords from when the container started, which are out of date after a rotation. Check that both values are set before writing them, since a failed `kubectl exec` leaves one empty:
+Do not restore a backup taken before a rotation, or write a password by hand. The operator refuses a password the servers do not accept, but the pods read the Secret directly: the probes send the new password, fail, and restart every server, and a replica that restarts then cannot authenticate to its primary until its server restarts again. With `acl.systemUsers.passwordRotation` set, rebuild the Secret as below instead of restoring one.
+
+Without a backup, rebuild the current passwords from the files mounted in a running server container. Read the files, not `VALKEYCLI_AUTH` or `PRIMARY_AUTH`: the environment holds the passwords from when the container started, which are out of date after a rotation. Read them from a pod whose server container is running, and check that both values are set before writing them, since a failed `kubectl exec` leaves one empty:
 
 ```sh
 NS=<namespace>; CLUSTER=<cluster>
-POD=$(kubectl -n "$NS" get pods -l valkey.io/cluster="$CLUSTER" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl -n "$NS" get pods -l valkey.io/cluster="$CLUSTER" \
+  -o jsonpath='{range .items[*]}{.metadata.name} {.status.containerStatuses[?(@.name=="server")].state.running.startedAt}{"\n"}{end}' \
+  | awk '$2 != "" {print $1; exit}')
 OP=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_operator)
 RE=$(kubectl -n "$NS" exec "$POD" -c server -- cat /etc/valkey/system-passwords/_replication)
 [ -n "$OP" ] && [ -n "$RE" ] || { echo "a password is empty; run the commands again"; exit 1; }

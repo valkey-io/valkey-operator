@@ -381,6 +381,12 @@ func (n *NodeState) SetClusterNodesForTesting(raw string) {
 	n.nodes = ParseClusterNodes(raw)
 }
 
+// Peers returns this node's CLUSTER NODES table from the last scrape, including
+// its own entry.
+func (n *NodeState) Peers() []ClusterNode {
+	return n.nodes
+}
+
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
 // nil when the output held no "myself" line.
 func (n *NodeState) Myself() *ClusterNode {
@@ -615,6 +621,24 @@ func hostFromClusterNodesEndpoint(endpoint string) string {
 		return strings.Trim(endpoint[:i], "[]")
 	}
 	return ""
+}
+
+// portFromClusterNodesEndpoint extracts the client port from a CLUSTER NODES
+// endpoint field (<ip:port@cport[,hostname]>). It returns 0 when the field has
+// no usable port.
+func portFromClusterNodesEndpoint(endpoint string) int {
+	if i := strings.Index(endpoint, "@"); i != -1 {
+		endpoint = endpoint[:i]
+	}
+	i := strings.LastIndex(endpoint, ":")
+	if i == -1 {
+		return 0
+	}
+	port, err := strconv.Atoi(endpoint[i+1:])
+	if err != nil || port < 0 || port > 65535 {
+		return 0
+	}
+	return port
 }
 
 // StaleAddressPeer pairs a viewer node with a live cluster member whose

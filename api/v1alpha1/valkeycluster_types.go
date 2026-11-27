@@ -300,6 +300,8 @@ var ReservedConfigKeys = []string{
 // +kubebuilder:validation:XValidation:rule="!(has(self.persistence) && self.workloadType == 'Deployment')",message="persistence requires workloadType StatefulSet",fieldPath=".persistence",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.users) && size(self.users) > 0 && has(self.acl) && has(self.acl.users) && size(self.acl.users) > 0)",message="spec.users is deprecated and cannot be combined with spec.acl.users: move every user to spec.acl.users",fieldPath=".acl.users",reason="FieldValueForbidden"
 // +kubebuilder:validation:XValidation:rule="!(has(self.replicas) && has(self.replicasPerShard))",message="spec.replicas is deprecated and cannot be combined with spec.replicasPerShard: remove spec.replicas (set it to null) in the same update",fieldPath=".replicasPerShard",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.bootstrap) || !has(self.bootstrap)",message="bootstrap cannot be added after creation",fieldPath=".bootstrap",reason="FieldValueForbidden"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.bootstrap) || has(self.bootstrap)",message="bootstrap cannot be removed once set",fieldPath=".bootstrap",reason="FieldValueForbidden"
 //
 // A new or changed spec.replicas or spec.users is rejected. optionalOldSelf runs the rule on create, where any value is new. An unchanged stored value stays valid. Clearing spec.replicas requires replicasPerShard equal to that stored count, and an unset replicasPerShard counts as 0. Clearing spec.users requires every legacy user name on spec.acl.users.
 // +kubebuilder:validation:XValidation:rule="(!has(self.replicas) && (!oldSelf.hasValue() || !has(oldSelf.value().replicas) || oldSelf.value().replicas == (has(self.replicasPerShard) ? self.replicasPerShard : 0))) || (has(self.replicas) && oldSelf.hasValue() && has(oldSelf.value().replicas) && self.replicas == oldSelf.value().replicas)",optionalOldSelf=true,message="spec.replicas is deprecated and cannot be added or changed: set spec.replicasPerShard to the stored spec.replicas and remove spec.replicas in the same update. An absent spec.replicasPerShard counts as 0",fieldPath=".replicas",reason="FieldValueForbidden"
@@ -397,6 +399,14 @@ type ValkeyClusterSpec struct {
 	// Persistence defines durable storage that is propagated to each ValkeyNode.
 	// +optional
 	Persistence *PersistenceSpec `json:"persistence,omitempty"`
+
+	// Bootstrap seeds this cluster from an existing Valkey/Redis Cluster. The
+	// new nodes join the source cluster as replicas of its primaries and are
+	// promoted at cutover. Set it at creation only.
+	// +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source",message="bootstrap.source is immutable",fieldPath=".source",reason="FieldValueForbidden"
+	// +kubebuilder:validation:XValidation:rule="self.stage == oldSelf.stage || oldSelf.stage == 'Bootstrap' || (oldSelf.stage == 'Cutover' && self.stage == 'Complete')",message="bootstrap.stage can only move forward: Bootstrap, Cutover, Complete",fieldPath=".stage",reason="FieldValueForbidden"
+	// +optional
+	Bootstrap *BootstrapSpec `json:"bootstrap,omitempty"`
 
 	// Valkey users managed by the operator.
 	//
@@ -1065,3 +1075,92 @@ func init() {
 		return nil
 	})
 }
+
+// BootstrapSpec describes an existing cluster to migrate into this ValkeyCluster.
+type BootstrapSpec struct {
+	// Source identifies the cluster to migrate from.
+	// +kubebuilder:validation:Required
+	Source BootstrapSource `json:"source"`
+
+	// Stage is the step the migration is in. It only moves forward, and only
+	// this field moves it: the operator never cuts over or detaches the source
+	// on its own.
+	//
+	//   - Bootstrap: the new nodes join the source as replicas and keep
+	//     syncing. Nothing is promoted, and the new nodes cannot be elected
+	//     primary.
+	//   - Cutover: the new nodes are promoted with a graceful failover. The
+	//     source nodes stay in the cluster as replicas, so you can still roll
+	//     back, and they cannot be elected primary.
+	//   - Complete: the operator forgets the source nodes. Shut the source
+	//     down first, or a running node can rejoin.
+	//
+	// +kubebuilder:default=Bootstrap
+	// +optional
+	Stage BootstrapStage `json:"stage,omitempty"`
+}
+
+// BootstrapStage is the step a bootstrap migration is in.
+// +kubebuilder:validation:Enum=Bootstrap;Cutover;Complete
+type BootstrapStage string
+
+const (
+	// BootstrapStageBootstrap syncs from the source without promoting anything.
+	BootstrapStageBootstrap BootstrapStage = "Bootstrap"
+	// BootstrapStageCutover promotes the new nodes; the source stays as replicas.
+	BootstrapStageCutover BootstrapStage = "Cutover"
+	// BootstrapStageComplete forgets the source nodes.
+	BootstrapStageComplete BootstrapStage = "Complete"
+)
+
+// BootstrapSource locates and authenticates against the source cluster.
+type BootstrapSource struct {
+	// Endpoints are seed addresses (host:port) of source nodes. One reachable
+	// endpoint is enough: the full topology is discovered with CLUSTER NODES.
+	// List several for redundancy; they need not be on different shards.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=3
+	// +kubebuilder:validation:items:MaxLength=261
+	// +kubebuilder:validation:items:Pattern=`^([^\s:\[\]]+|\[[0-9A-Fa-f:.]+\]):([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$`
+	Endpoints []string `json:"endpoints"`
+
+	// PasswordSecretRef names a Secret key holding the source cluster password.
+	// It is used only to reach the source and to authenticate replication from
+	// it; destination users are configured separately.
+	// +optional
+	PasswordSecretRef *corev1.SecretKeySelector `json:"passwordSecretRef,omitempty"`
+
+	// TLS configures the operator's connection to a TLS-enabled source. Leave it
+	// unset for a plaintext source.
+	// +optional
+	TLS *BootstrapSourceTLS `json:"tls,omitempty"`
+}
+
+// BootstrapSourceTLS configures TLS towards the source cluster.
+type BootstrapSourceTLS struct {
+	// CASecretRef names a Secret key holding the CA that signed the source's
+	// certificates. When unset, the system trust store is used.
+	// +optional
+	CASecretRef *corev1.SecretKeySelector `json:"caSecretRef,omitempty"`
+}
+
+const (
+	// ConditionBootstrapSynced is True when every new node is replicating from its
+	// source primary and the cluster is ready for cutover.
+	ConditionBootstrapSynced = "BootstrapSynced"
+	// ConditionBootstrapFailed is True while the source cannot be bootstrapped from.
+	ConditionBootstrapFailed = "BootstrapFailed"
+	// ConditionBootstrapSourceDetached is False after cutover while source nodes
+	// are still members of the cluster, and True once none are left.
+	ConditionBootstrapSourceDetached = "BootstrapSourceDetached"
+
+	ReasonBootstrapping          = "Bootstrapping"
+	ReasonBootstrapSynced        = "BootstrapSynced"
+	ReasonBootstrapSyncing       = "BootstrapSyncing"
+	ReasonBootstrapSourceInvalid = "BootstrapSourceInvalid"
+	ReasonBootstrapCutover       = "BootstrapCutover"
+	ReasonBootstrapComplete      = "BootstrapComplete"
+	ReasonSourceNodesRemain      = "SourceNodesRemain"
+	ReasonSourceDetached         = "SourceDetached"
+)

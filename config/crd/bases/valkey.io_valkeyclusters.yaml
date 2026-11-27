@@ -224,6 +224,124 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                 type: object
+              bootstrap:
+                description: |-
+                  Bootstrap seeds this cluster from an existing Valkey/Redis Cluster. The
+                  new nodes join the source cluster as replicas of its primaries and are
+                  promoted at cutover. Set it at creation only.
+                properties:
+                  source:
+                    description: Source identifies the cluster to migrate from.
+                    properties:
+                      endpoints:
+                        description: |-
+                          Endpoints are seed addresses (host:port) of source nodes. One reachable
+                          endpoint is enough: the full topology is discovered with CLUSTER NODES.
+                          List several for redundancy; they need not be on different shards.
+                        items:
+                          maxLength: 261
+                          minLength: 3
+                          pattern: ^([^\s:\[\]]+|\[[0-9A-Fa-f:.]+\]):([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$
+                          type: string
+                        maxItems: 16
+                        minItems: 1
+                        type: array
+                      passwordSecretRef:
+                        description: |-
+                          PasswordSecretRef names a Secret key holding the source cluster password.
+                          It is used only to reach the source and to authenticate replication from
+                          it; destination users are configured separately.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      tls:
+                        description: |-
+                          TLS configures the operator's connection to a TLS-enabled source. Leave it
+                          unset for a plaintext source.
+                        properties:
+                          caSecretRef:
+                            description: |-
+                              CASecretRef names a Secret key holding the CA that signed the source's
+                              certificates. When unset, the system trust store is used.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                    required:
+                    - endpoints
+                    type: object
+                  stage:
+                    default: Bootstrap
+                    description: |-
+                      Stage is the step the migration is in. It only moves forward, and only
+                      this field moves it: the operator never cuts over or detaches the source
+                      on its own.
+
+                        - Bootstrap: the new nodes join the source as replicas and keep
+                          syncing. Nothing is promoted, and the new nodes cannot be elected
+                          primary.
+                        - Cutover: the new nodes are promoted with a graceful failover. The
+                          source nodes stay in the cluster as replicas, so you can still roll
+                          back, and they cannot be elected primary.
+                        - Complete: the operator forgets the source nodes. Shut the source
+                          down first, or a running node can rejoin.
+                    enum:
+                    - Bootstrap
+                    - Cutover
+                    - Complete
+                    type: string
+                required:
+                - source
+                type: object
+                x-kubernetes-validations:
+                - fieldPath: .source
+                  message: bootstrap.source is immutable
+                  reason: FieldValueForbidden
+                  rule: self.source == oldSelf.source
+                - fieldPath: .stage
+                  message: 'bootstrap.stage can only move forward: Bootstrap, Cutover,
+                    Complete'
+                  reason: FieldValueForbidden
+                  rule: self.stage == oldSelf.stage || oldSelf.stage == 'Bootstrap'
+                    || (oldSelf.stage == 'Cutover' && self.stage == 'Complete')
               config:
                 additionalProperties:
                   type: string
@@ -4354,6 +4472,14 @@ spec:
                 remove spec.replicas (set it to null) in the same update'
               reason: FieldValueForbidden
               rule: '!(has(self.replicas) && has(self.replicasPerShard))'
+            - fieldPath: .bootstrap
+              message: bootstrap cannot be added after creation
+              reason: FieldValueForbidden
+              rule: has(oldSelf.bootstrap) || !has(self.bootstrap)
+            - fieldPath: .bootstrap
+              message: bootstrap cannot be removed once set
+              reason: FieldValueForbidden
+              rule: '!has(oldSelf.bootstrap) || has(self.bootstrap)'
             - fieldPath: .replicas
               message: 'spec.replicas is deprecated and cannot be added or changed:
                 set spec.replicasPerShard to the stored spec.replicas and remove spec.replicas

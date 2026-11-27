@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -239,6 +240,7 @@ func main() {
 		}
 	}
 
+	gracefulShutdownTimeout := time.Duration(-1)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -248,17 +250,15 @@ func main() {
 		PprofBindAddress:       pprofAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "73d40801.valkey.io",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		// The leader releases the lease when the manager stops, so a standby
+		// takes over without waiting for it to expire. The manager stops every
+		// reconciler and runnable before releasing, and main only closes its
+		// Valkey connections afterwards.
+		LeaderElectionReleaseOnCancel: true,
+		// A negative timeout makes the manager wait for every runnable to stop
+		// before it returns and releases the lease; the kubelet's kill at the
+		// end of the grace period bounds a shutdown that hangs.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -320,9 +320,8 @@ func main() {
 
 	setupLog.Info("Starting manager")
 	startErr := mgr.Start(ctrl.SetupSignalHandler()) // blocks until shutdown
-	// Reconciles and poller ticks have returned, unless the shutdown timeout
-	// expired or the lease was lost. Close before the exit below, which would
-	// skip a deferred call.
+	// Reconciles and poller ticks have returned, unless the lease was lost.
+	// Close before the exit below, which would skip a deferred call.
 	valkeyPool.Close()
 	if startErr != nil {
 		setupLog.Error(startErr, "Failed to run manager")

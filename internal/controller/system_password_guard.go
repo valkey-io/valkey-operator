@@ -62,12 +62,12 @@ func (r *ValkeyClusterReconciler) systemPasswordHolders(ctx context.Context, clu
 }
 
 // missingServerPasswordKeys returns the _operator and _replication keys the
-// Secret lacks. Generating either while a server runs would lock the operator
-// or the replicas out of that server.
+// Secret lacks or holds empty. Generating either while a server runs would
+// lock the operator or the replicas out of that server.
 func missingServerPasswordKeys(secret *corev1.Secret) []string {
 	var missing []string
 	for _, user := range []string{operatorUser, replicationUser} {
-		if _, ok := secret.Data[user]; !ok {
+		if len(secret.Data[user]) == 0 {
 			missing = append(missing, user)
 		}
 	}
@@ -85,8 +85,7 @@ func missingServerPasswordKeys(secret *corev1.Secret) []string {
 // password, for warnExporterPasswordRegenerated once the new one is written.
 func (r *ValkeyClusterReconciler) guardMissingSystemPasswords(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) (exporterLost bool, err error) {
 	missing := missingServerPasswordKeys(secret)
-	_, hasExporterKey := secret.Data[exporterUser]
-	exporterMissing := cluster.Spec.ExporterEnabled() && !hasExporterKey
+	exporterMissing := cluster.Spec.ExporterEnabled() && len(secret.Data[exporterUser]) == 0
 	if len(missing) == 0 && !exporterMissing {
 		return false, nil
 	}

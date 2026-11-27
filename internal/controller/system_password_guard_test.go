@@ -358,3 +358,30 @@ func TestUpsertWarnsAboutTheExporterKeyOnlyOnceWritten(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, drainEvents(r.Recorder.(*events.FakeRecorder)))
 }
+
+// A failed kubectl exec in a hand rebuild can store an empty password. The
+// aclfile would then give _operator no password, which every running server
+// rejects, so an empty value counts as missing.
+func TestUpsertRefusesAnEmptyPasswordWhileAServerRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	secret.Data[operatorUser] = []byte{}
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, c := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "_operator")
+	stored, _ := storedSystemPasswords(t, c)
+	require.Empty(t, stored.Data[operatorUser])
+}
+
+func TestUpsertRegeneratesAnEmptyPasswordWhenNoServerRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	secret.Data[operatorUser] = []byte{}
+	r, c := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	stored, _ := storedSystemPasswords(t, c)
+	require.NotEmpty(t, stored.Data[operatorUser])
+}

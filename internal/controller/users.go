@@ -550,7 +550,8 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 
 	filled := map[string]bool{}
 	for _, user := range systemUsers {
-		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
+		// An empty password is never valid, so it is generated like a missing one.
+		if len(systemUsersSecret.Data[user]) > 0 {
 			continue
 		}
 		if user == exporterUser && !cluster.Spec.ExporterEnabled() {

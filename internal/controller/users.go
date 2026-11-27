@@ -100,10 +100,6 @@ var (
 var (
 	errUnknownSystemUser = errors.New("unknown system user")
 	errMissingSystemUser = errors.New("missing system user")
-
-	// errSystemPasswordSecretMissing is a refused regeneration of a system
-	// password that a running server still holds.
-	errSystemPasswordSecretMissing = errors.New("system password secret missing")
 )
 
 func getInternalSecretName(clusterName string) string {
@@ -548,7 +544,6 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	}
 
 	if err := r.guardMissingSystemPasswords(ctx, cluster, systemUsersSecret); err != nil {
-		log.Error(err, "refusing to generate system user passwords")
 		return nil, err
 	}
 

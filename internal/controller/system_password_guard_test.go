@@ -26,10 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
@@ -80,13 +78,11 @@ func systemPasswordPod(clusterName, name string, running ...string) *corev1.Pod 
 	return pod
 }
 
-func systemPasswordReconciler(t *testing.T, objs []client.Object) (*ValkeyClusterReconciler, client.Client) {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(64)}, c
+// loseExporterKey enables the exporter and drops _exporter from the Secret.
+func loseExporterKey(cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) {
+	delete(secret.Data, exporterUser)
+	enabled := true
+	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
 }
 
 func storedSystemPasswords(t *testing.T, c client.Client) (*corev1.Secret, bool) {
@@ -94,17 +90,13 @@ func storedSystemPasswords(t *testing.T, c client.Client) (*corev1.Secret, bool)
 	return getSecret(t, c, getSystemPasswordSecretName("h1"))
 }
 
-func requireWarningEvent(t *testing.T, r *ValkeyClusterReconciler, contains ...string) {
+func requireWarningEvent(t *testing.T, r *ValkeyClusterReconciler, reason string, contains ...string) {
 	t.Helper()
-	recorder := r.Recorder.(*events.FakeRecorder)
-	select {
-	case e := <-recorder.Events:
-		require.Contains(t, e, "SystemPasswordSecretMissing")
-		for _, s := range contains {
-			require.Contains(t, e, s)
-		}
-	default:
-		t.Fatal("expected a SystemPasswordSecretMissing warning event")
+	got := drainEvents(r.Recorder.(*events.FakeRecorder))
+	require.Len(t, got, 1)
+	require.Contains(t, got[0], "Warning "+reason)
+	for _, s := range contains {
+		require.Contains(t, got[0], s)
 	}
 }
 
@@ -113,7 +105,7 @@ func requireWarningEvent(t *testing.T, r *ValkeyClusterReconciler, contains ...s
 func TestUpsertRefusesRegenerationWhileAServerRuns(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
@@ -123,12 +115,12 @@ func TestUpsertRefusesRegenerationWhileAServerRuns(t *testing.T) {
 
 	_, exists := storedSystemPasswords(t, c)
 	require.False(t, exists, "a regenerated Secret would replace the only copy of the passwords the servers accept")
-	requireWarningEvent(t, r, "valkey-h1-system-passwords", "restore the Secret")
+	requireWarningEvent(t, r, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, "valkey-h1-system-passwords", "restore the Secret")
 }
 
 func TestUpsertRegeneratesOnFreshCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
@@ -146,7 +138,7 @@ func TestUpsertRegeneratesWhenNoServerRuns(t *testing.T) {
 		Name: "h1-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "h1"},
 	}}
 	objs = append(objs, node, systemPasswordPod("h1", "valkey-h1-0-0-0"))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
@@ -161,7 +153,7 @@ func TestUpsertRefusesWhileATerminatingPodRunsAServer(t *testing.T) {
 	pod.Finalizers = []string{"test"}
 	pod.DeletionTimestamp = &metav1.Time{}
 	objs = append(objs, pod)
-	r, _ := systemPasswordReconciler(t, objs)
+	r, _ := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
@@ -176,7 +168,7 @@ func TestUpsertRefusesMidRotationWhileAServerRuns(t *testing.T) {
 		replicationUser:                     []byte("re-old"),
 	}
 	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
@@ -193,11 +185,9 @@ func TestUpsertRefusesMidRotationWhileAServerRuns(t *testing.T) {
 // sidecar, so the key is generated while only the servers run.
 func TestUpsertRegeneratesExporterKeyWhileNoExporterRuns(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
-	delete(secret.Data, exporterUser)
-	enabled := true
-	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
+	loseExporterKey(cluster, secret)
 	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
@@ -214,11 +204,9 @@ func TestUpsertRegeneratesExporterKeyWhileNoExporterRuns(t *testing.T) {
 // metrics credential.
 func TestUpsertRegeneratesExporterKeyWhileTheExporterRuns(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
-	delete(secret.Data, exporterUser)
-	enabled := true
-	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
+	loseExporterKey(cluster, secret)
 	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName, metricsExporterContainerName))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
@@ -226,21 +214,13 @@ func TestUpsertRegeneratesExporterKeyWhileTheExporterRuns(t *testing.T) {
 	require.Equal(t, "op-old", string(stored.Data[operatorUser]))
 	require.Equal(t, "re-old", string(stored.Data[replicationUser]))
 	require.NotEmpty(t, stored.Data[exporterUser])
-	select {
-	case e := <-r.Recorder.(*events.FakeRecorder).Events:
-		require.Contains(t, e, "Warning ExporterPasswordRegenerated")
-		require.Contains(t, e, "redis_up 0")
-	default:
-		t.Fatal("expected an ExporterPasswordRegenerated warning event")
-	}
+	requireWarningEvent(t, r, "ExporterPasswordRegenerated", "redis_up 0")
 }
 
 func TestUpsertRegeneratesExporterKeyWhenThePodListFails(t *testing.T) {
 	cluster, secret, objs := systemPasswordFixture(true)
-	delete(secret.Data, exporterUser)
-	enabled := true
-	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
-	r, c := systemPasswordReconciler(t, objs)
+	loseExporterKey(cluster, secret)
+	r, c := newMigrationReconciler(t, objs...)
 	r.APIReader = listErrorReader{Reader: c}
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
@@ -254,7 +234,7 @@ func TestUpsertRegeneratesExporterKeyWhenThePodListFails(t *testing.T) {
 func TestUpsertIgnoresPodsOfAnotherCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	objs = append(objs, systemPasswordPod("h10", "valkey-h10-0-0-0", serverContainerName))
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
@@ -275,20 +255,20 @@ func (listErrorReader) List(_ context.Context, _ client.ObjectList, _ ...client.
 // it refuses, without claiming the servers run or that a Secret existed.
 func TestUpsertRefusesWhenThePodListFails(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
-	r, c := systemPasswordReconciler(t, objs)
+	r, c := newMigrationReconciler(t, objs...)
 	r.APIReader = listErrorReader{Reader: c}
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
 	require.Contains(t, err.Error(), "pod state could not be checked")
 	require.NotContains(t, err.Error(), "restore the Secret")
-	requireWarningEvent(t, r, "pod state could not be checked")
+	requireWarningEvent(t, r, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, "pod state could not be checked")
 }
 
 func TestCreateSystemUsersAclRefusesWhileAServerRuns(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
-	r, _ := systemPasswordReconciler(t, objs)
+	r, _ := newMigrationReconciler(t, objs...)
 
 	_, err := r.createSystemUsersAcl(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)

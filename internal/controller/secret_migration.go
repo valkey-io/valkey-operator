@@ -24,6 +24,7 @@ import (
 	"maps"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,15 +34,15 @@ import (
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
 
+// errOperatorSecretForeignController is an operator Secret that another
+// object controls.
+var errOperatorSecretForeignController = errors.New("operator secret controlled by another object")
+
 // legacyInternalSecretName is the name the ACL Secret had before it took the
 // valkey- prefix.
 func legacyInternalSecretName(clusterName string) string {
 	return "internal-" + clusterName + "-acl"
 }
-
-// errOperatorSecretForeignController is an operator Secret that another
-// object controls.
-var errOperatorSecretForeignController = errors.New("operator secret controlled by another object")
 
 // legacySystemPasswordSecretName is the name the system passwords Secret had
 // before it took the valkey- prefix.
@@ -88,17 +89,16 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 	legacyKey := client.ObjectKey{Namespace: cluster.Namespace, Name: legacyName}
 	legacy := &corev1.Secret{}
 	if err == nil {
-		if metav1.IsControlledBy(secret, cluster) {
-			return secret, r.adoptOperatorSecret(ctx, cluster, secret)
-		}
-		// Uncached: a legacy Secret the cluster still controls may have lost
-		// the managed-by label the cache selects on.
-		if err := r.uncachedReader().Get(ctx, legacyKey, legacy); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return nil, err
+		if !metav1.IsControlledBy(secret, cluster) {
+			// Uncached: a legacy Secret the cluster still controls may have
+			// lost the managed-by label the cache selects on.
+			legacyErr := r.uncachedReader().Get(ctx, legacyKey, legacy)
+			if client.IgnoreNotFound(legacyErr) != nil {
+				return nil, legacyErr
 			}
-		} else if metav1.IsControlledBy(legacy, cluster) {
-			return nil, fmt.Errorf("secret %s exists but this cluster does not control it, while it still controls %s: delete %s so the operator can copy %s to it", name, legacyName, name, legacyName)
+			if legacyErr == nil && metav1.IsControlledBy(legacy, cluster) {
+				return nil, fmt.Errorf("secret %s exists but this cluster does not control it, while it still controls %s: delete %s so the operator can copy %s to it", name, legacyName, name, legacyName)
+			}
 		}
 		if err := r.adoptOperatorSecret(ctx, cluster, secret); err != nil {
 			return nil, err
@@ -119,7 +119,8 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 // controls is refused and not written, except one an earlier cluster of the
 // same name controls.
 func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
-	if owner := metav1.GetControllerOf(secret); owner != nil && owner.UID != cluster.UID {
+	owner := metav1.GetControllerOf(secret)
+	if owner != nil && owner.UID != cluster.UID {
 		// An earlier cluster of the same name: garbage collection removes
 		// the Secret, and until then it is used as it is.
 		if owner.Kind == "ValkeyCluster" && owner.Name == cluster.Name {
@@ -127,23 +128,17 @@ func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, clust
 		}
 		return fmt.Errorf("%w: secret %s is controlled by %s %s; the operator manages this Secret itself", errOperatorSecretForeignController, secret.Name, owner.Kind, owner.Name)
 	}
-	changed := false
+	before := secret.DeepCopy()
 	if secret.Labels == nil {
 		secret.Labels = map[string]string{}
 	}
-	for k, v := range labels(cluster) {
-		if secret.Labels[k] != v {
-			secret.Labels[k] = v
-			changed = true
-		}
-	}
-	if metav1.GetControllerOf(secret) == nil {
+	maps.Copy(secret.Labels, labels(cluster))
+	if owner == nil {
 		if err := controllerutil.SetControllerReference(cluster, secret, r.Scheme); err != nil {
 			return err
 		}
-		changed = true
 	}
-	if !changed {
+	if equality.Semantic.DeepEqual(before, secret) {
 		return nil
 	}
 	if err := r.Update(ctx, secret); err != nil {

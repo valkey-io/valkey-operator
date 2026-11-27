@@ -610,11 +610,21 @@ func (r *ValkeyClusterReconciler) systemPasswordWorkloads(ctx context.Context, c
 	if err := r.uncachedReader().List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
 		return nil, nil, err
 	}
-	pods := &corev1.PodList{}
-	if err := r.uncachedReader().List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
+	pods, err := r.uncachedClusterPods(ctx, cluster)
+	if err != nil {
 		return nil, nil, err
 	}
-	return nodes.Items, pods.Items, nil
+	return nodes.Items, pods, nil
+}
+
+// uncachedClusterPods lists the cluster's pods uncached, so a pod that has
+// just started is not missed.
+func (r *ValkeyClusterReconciler) uncachedClusterPods(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) ([]corev1.Pod, error) {
+	pods := &corev1.PodList{}
+	if err := r.uncachedReader().List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels{LabelCluster: cluster.Name}); err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
 }
 
 // applyReplicationPassword points a running server at the current replication

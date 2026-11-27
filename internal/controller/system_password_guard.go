@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -95,6 +97,19 @@ func (r *ValkeyClusterReconciler) refuseLockedSystemPasswords(ctx context.Contex
 		msg = fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
 			secret.Name, strings.Join(locked, ", "))
 	}
-	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonSystemPasswordMissing, "ReconcileUsers", "%s", msg)
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, "ReconcileUsers", "%s", msg)
 	return fmt.Errorf("%w: %s", errSystemPasswordSecretMissing, msg)
+}
+
+// reportSystemPasswordSecretMissing sets Degraded and Ready for a refused
+// regeneration and returns true. Otherwise it clears the Degraded reason it
+// set, and returns false.
+func reportSystemPasswordSecretMissing(cluster *valkeyiov1alpha1.ValkeyCluster, aclErr error) bool {
+	if !errors.Is(aclErr, errSystemPasswordSecretMissing) {
+		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing)
+		return false
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, aclErr.Error(), metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, aclErr.Error(), metav1.ConditionFalse)
+	return true
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -267,4 +268,43 @@ func TestCreateSystemUsersAclRefusesWhileAServerRuns(t *testing.T) {
 
 	_, err := r.createSystemUsersAcl(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+}
+
+func TestReportSystemPasswordSecretMissingSetsDegraded(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	err := fmt.Errorf("users: %w: x is missing _operator", errSystemPasswordSecretMissing)
+
+	require.True(t, reportSystemPasswordSecretMissing(cluster, err))
+	degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	require.NotNil(t, degraded)
+	require.Equal(t, metav1.ConditionTrue, degraded.Status)
+	require.Equal(t, "SystemPasswordSecretMissing", degraded.Reason)
+	require.Equal(t, err.Error(), degraded.Message)
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, "UsersACLError", ready.Reason)
+}
+
+// Degraded clears on the first pass past the guard, whatever happens next.
+func TestReportSystemPasswordSecretMissingClearsOnSuccess(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	require.True(t, reportSystemPasswordSecretMissing(cluster, fmt.Errorf("%w", errSystemPasswordSecretMissing)))
+
+	require.False(t, reportSystemPasswordSecretMissing(cluster, nil))
+	require.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded))
+
+	require.True(t, reportSystemPasswordSecretMissing(cluster, fmt.Errorf("%w", errSystemPasswordSecretMissing)))
+	require.False(t, reportSystemPasswordSecretMissing(cluster, fmt.Errorf("other")))
+	require.Nil(t, meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded))
+}
+
+func TestReportSystemPasswordSecretMissingKeepsOtherDegradedReasons(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved, "alice", metav1.ConditionTrue)
+
+	require.False(t, reportSystemPasswordSecretMissing(cluster, nil))
+	degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	require.NotNil(t, degraded)
+	require.Equal(t, valkeyiov1alpha1.ReasonUsersACLUnresolved, degraded.Reason)
 }

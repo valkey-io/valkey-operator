@@ -201,6 +201,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// still return here (#500 replaces the first-reconcile case with per-user
 	// handling).
 	aclErr := r.reconcileUsersAcl(ctx, cluster)
+	// Returns before nodesRejectingOperator, so a refusal is not also
+	// reported as OperatorAuthenticationFailed.
+	if reportSystemPasswordSecretMissing(cluster, aclErr) {
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
+	}
 	var unresolved *userSecretUnresolvedError
 	fallback := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
 	if aclErr != nil && !fallback {
@@ -208,14 +214,6 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// the internal Secret, say) must not keep reporting the old reason.
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUsersAclError, aclErr.Error(), metav1.ConditionFalse)
-		if errors.Is(aclErr, errSystemPasswordSecretMissing) {
-			// A refused regeneration leaves the operator unable to manage
-			// the cluster until the Secret is restored, which is a
-			// degradation with its own reason rather than a generic
-			// users ACL error. The healthy reconcile path removes the
-			// condition again once the Secret is back.
-			setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonSystemPasswordMissing, aclErr.Error(), metav1.ConditionTrue)
-		}
 		_ = r.updateStatus(ctx, cluster, nil)
 		return ctrl.Result{}, aclErr
 	}

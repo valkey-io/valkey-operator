@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -78,6 +79,11 @@ type ValkeyClusterReconciler struct {
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
+
+	// failoverIssued records when bootstrapCutover last sent CLUSTER FAILOVER to
+	// each node, so a failover in progress is not restarted every pass.
+	failoverMu     sync.Mutex
+	failoverIssued map[string]time.Time
 }
 
 // scrapeClusterState returns the live cluster state, from the test hook when
@@ -323,14 +329,14 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var bootstrap *bootstrapPlan
 	if cluster.Spec.Bootstrap != nil {
 		r.restoreReplicationAuth(ctx, cluster, state)
-		migrated := clusterMigrated(state, cluster.Spec.Shards)
+		migrated := bootstrapMigrated(cluster, state)
 		// New nodes must never be elected primary before cutover; once the slots
 		// have moved they get normal failover back.
 		r.ensureDestinationFailoverPolicy(ctx, state, !migrated)
 		if migrated {
 			// The source nodes stay as replicas, which keeps rollback possible,
 			// but none of them may be elected primary until the stage is Complete.
-			members := sourceMembers(state)
+			members := sourceMembers(state, nodes.Items)
 			r.protectSourceNodes(ctx, cluster, members)
 			finishBootstrapConditions(cluster, len(members))
 		} else {

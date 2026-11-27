@@ -68,7 +68,7 @@ spec:
 
 | Field | Meaning |
 |---|---|
-| `source.endpoints` | One to sixteen `host:port` seeds. One reachable endpoint is enough, because the operator reads the full topology with `CLUSTER NODES`. List several for redundancy. They don't need to be on different shards. |
+| `source.endpoints` | One to sixteen `host:port` seeds, each checked against a simple `host:port` pattern (IPv6 as `[addr]:port`). One reachable endpoint is enough, because the operator reads the full topology with `CLUSTER NODES`. List several for redundancy. They don't need to be on different shards. |
 | `source.passwordSecretRef` | A Secret key with the **source** password. Used only to read the source and to authenticate replication from it. It does not need to match the destination's users. |
 | `source.tls.caSecretRef` | CA for the operator's own connection to a TLS source. See [limitations](#limitations-and-what-is-not-tested). |
 | `stage` | The step the migration is in. Defaults to `Bootstrap`. See [Stages](#stages). |
@@ -92,7 +92,7 @@ Validation rules (CEL, enforced by the API server):
 A replica that wins an automatic election becomes a primary without the user asking. That must not happen to the wrong node, so each stage closes it off:
 
 - **`Bootstrap`:** every new node runs with `cluster-replica-no-failover yes`. The operator renders it into the node config, so even a restarted pod comes back protected. A manual `CLUSTER FAILOVER` still works, which is how cutover promotes a node. The source nodes are not modified, because the source keeps serving traffic and needs its own failover.
-- **`Cutover`:** once the new nodes own the slots, the operator turns `cluster-replica-no-failover` off on them live (`CONFIG SET`) so the new cluster has normal failover. It turns it on, also live, for every source node that is still a replica. The setting is not persisted on the source (the operator never runs `CONFIG REWRITE`), so a restarted source node loses it and gets it back on the next reconcile.
+- **`Cutover`:** once the new nodes own the slots, the operator turns `cluster-replica-no-failover` off on them live (`CONFIG SET`) so the new cluster has normal failover. It turns it on, also live, for every source node that is still a replica. On the same nodes it sets `masteruser` and `masterauth` to this cluster's replication credentials. The source replicas now follow a new primary, which does not know the source password, so without this their link would go down and there would be nothing to roll back to. None of this is persisted on the source (the operator never runs `CONFIG REWRITE`), so a restarted source node loses it and gets it back on the next reconcile.
 - **`Complete`:** the source nodes are forgotten, and the key is dropped from the rendered config. That one change rolls the new pods once, through the normal rolling update.
 
 The config key is the same in `Bootstrap` and `Cutover`, so moving to `Cutover` does not roll any pod.
@@ -110,6 +110,8 @@ The operator stores no phase. Each reconcile derives it from live state:
 > A cluster **with `spec.bootstrap`** is bootstrapping until its own nodes own the slots, meaning at least `spec.shards` shards each own slots.
 
 That makes the flow safe across operator restarts and lets it end by itself after cutover. Source nodes are never part of this count, because the operator only scrapes its own pods.
+
+One piece of state is stored. When cutover finishes, the operator leaves `BootstrapSynced=True` with reason `BootstrapComplete`, and from then on the cluster counts as migrated even if the live check would say otherwise. Without it, raising `spec.shards` after cutover would make the new shard look like an unfinished bootstrap, and the operator would try to plan a source that may no longer exist.
 
 ## Reconcile flow
 
@@ -209,6 +211,8 @@ For each source primary the operator counts the new nodes whose own entry names 
 
 Cutover only runs when `spec.bootstrap.stage` is past `Bootstrap`. Nothing else in the operator promotes a bootstrapping node.
 
+A graceful failover takes a few seconds, and asking again while it runs restarts it. The operator remembers, in memory, when it last asked each replica and waits 15 seconds before asking that replica again. After an operator restart it simply asks once more.
+
 `bootstrapCutover` goes through every shard that does not yet own slots and:
 
 1. Takes the new nodes of that shard whose link is up.
@@ -300,7 +304,7 @@ Known gaps:
 - **A running source at `Complete`:** nodes that are still up are not forgotten, because they would rejoin. The condition reports them.
 - **Complete rolls the new pods once:** dropping `cluster-replica-no-failover` from the rendered config changes the config revision.
 - **Rolls during bootstrap:** the logs show "cannot identify primary for shard, skipping its roll", because the operator can't see the source primary as part of the new shards. Spec changes that need a rolling update wait until after cutover.
-- **Pod restarts:** a restarted new pod comes back with the destination credentials. The next reconcile re-applies the source credentials before it re-attaches. This path is not tested.
+- **Pod restarts:** a restarted new pod comes back with the destination credentials. While bootstrapping, every pass re-applies the source credentials on any new node that replicates a source primary and has its link down, including a pod that restarted with saved cluster state and is no longer pending. This path is not tested.
 - **No lag check:** `BootstrapSynced` doesn't compare offsets with the source primary.
 - **Abort cleanup:** see [Aborting](#aborting).
 - **Reshaping:** differing shard counts, standalone or Sentinel sources, and in-place adoption are out of scope.

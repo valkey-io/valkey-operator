@@ -2,7 +2,7 @@
 // +build e2e
 
 /*
-Copyright 2025 Valkey Contributors.
+Copyright 2026 Valkey Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -330,6 +330,16 @@ spec:
 			g.Expect(c).NotTo(BeNil())
 			g.Expect(c.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(c.Reason).To(Equal(valkeyiov1alpha1.ReasonSourceNodesRemain))
+		}, 2*time.Minute).Should(Succeed())
+
+		By("checking every source node stays in sync with its new primary, so a rollback has something to roll back to")
+		Eventually(func(g Gomega) {
+			for i := 0; i < srcPods; i++ {
+				out, err := srcExec(fmt.Sprintf("%s-%d", srcName, i), "valkey-cli info replication | tr -d '\\r'")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("role:slave"), "source pod %d", i)
+				g.Expect(out).To(ContainSubstring("master_link_status:up"), "source pod %d lost sync with the new primary", i)
+			}
 		}, 2*time.Minute).Should(Succeed())
 
 		By("checking no data was lost across cutover")

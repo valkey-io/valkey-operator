@@ -239,6 +239,9 @@ spec:
                           endpoint is enough: the full topology is discovered with CLUSTER NODES.
                           List several for redundancy; they need not be on different shards.
                         items:
+                          maxLength: 261
+                          minLength: 3
+                          pattern: ^\S+:[0-9]{1,5}$
                           type: string
                         maxItems: 16
                         minItems: 1

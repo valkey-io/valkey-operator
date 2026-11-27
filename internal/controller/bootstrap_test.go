@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Valkey Contributors.
+Copyright 2026 Valkey Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -130,12 +131,20 @@ func TestSourceMembers(t *testing.T) {
 	sibling := &valkey.NodeState{Id: "b"}
 	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{ours, sibling}}}}
 
-	got := sourceMembers(state)
+	got := sourceMembers(state, nil)
 	require.Len(t, got, 2)
 	require.Equal(t, "s1", got[0].Id)
 	require.Equal(t, "s2", got[1].Id)
 
-	require.Empty(t, sourceMembers(&valkey.ClusterState{}), "no reachable node, nothing to report")
+	require.Empty(t, sourceMembers(&valkey.ClusterState{}, nil), "no reachable node, nothing to report")
+
+	// A pod of ours whose scrape failed is not in the state, but it is not a
+	// source node either.
+	unscraped := valkeyiov1alpha1.ValkeyNode{}
+	unscraped.Status.PodIP = "10.1.0.2"
+	got = sourceMembers(state, []valkeyiov1alpha1.ValkeyNode{unscraped})
+	require.Len(t, got, 1)
+	require.Equal(t, "s1", got[0].Id)
 }
 
 func TestFinishBootstrapConditionsReportsRemainingSource(t *testing.T) {
@@ -158,4 +167,41 @@ func TestFinishBootstrapConditionsReportsRemainingSource(t *testing.T) {
 	c = meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
 	require.Equal(t, metav1.ConditionTrue, c.Status)
 	require.Equal(t, valkeyiov1alpha1.ReasonSourceDetached, c.Reason)
+}
+
+func TestBootstrapMigratedSurvivesScaleOut(t *testing.T) {
+	owning := &valkey.ShardState{Slots: []valkey.SlotsRange{{Start: 0, End: 16383}}}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Bootstrap = &valkeyiov1alpha1.BootstrapSpec{Stage: valkeyiov1alpha1.BootstrapStageCutover}
+	cluster.Spec.Shards = 1
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{owning}}
+
+	require.True(t, bootstrapMigrated(cluster, state), "every shard owns slots")
+
+	// Cutover is recorded in the status.
+	setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapComplete, "Cutover complete", metav1.ConditionTrue)
+
+	// Raising spec.shards makes the live check false, because the new shard owns
+	// nothing yet. The cluster must not go back to bootstrapping.
+	cluster.Spec.Shards = 2
+	require.False(t, clusterMigrated(state, cluster.Spec.Shards))
+	require.True(t, bootstrapMigrated(cluster, state), "scale-out after cutover is not a bootstrap")
+
+	// Before cutover the same state is still a bootstrap.
+	fresh := &valkeyiov1alpha1.ValkeyCluster{}
+	fresh.Spec.Shards = 2
+	require.False(t, bootstrapMigrated(fresh, state))
+}
+
+func TestFailoverDueDoesNotRestartAFailoverInProgress(t *testing.T) {
+	r := &ValkeyClusterReconciler{}
+	now := time.Now()
+
+	require.True(t, r.failoverDue("node-a", now), "first request goes out")
+	require.False(t, r.failoverDue("node-a", now.Add(2*time.Second)), "still running, not sent again")
+	require.True(t, r.failoverDue("node-b", now.Add(2*time.Second)), "another node is independent")
+	require.True(t, r.failoverDue("node-a", now.Add(bootstrapFailoverCooldown)), "asked again after the cooldown")
+
+	r.clearFailover("node-b")
+	require.True(t, r.failoverDue("node-b", now.Add(3*time.Second)), "a failover that could not be sent is retried at once")
 }

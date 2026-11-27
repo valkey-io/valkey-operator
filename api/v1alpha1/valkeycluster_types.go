@@ -1113,6 +1113,9 @@ type BootstrapSource struct {
 	// List several for redundancy; they need not be on different shards.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=3
+	// +kubebuilder:validation:items:MaxLength=261
+	// +kubebuilder:validation:items:Pattern=`^\S+:[0-9]{1,5}$`
 	Endpoints []string `json:"endpoints"`
 
 	// PasswordSecretRef names a Secret key holding the source cluster password.

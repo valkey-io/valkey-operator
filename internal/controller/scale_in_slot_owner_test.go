@@ -386,6 +386,21 @@ func TestDeleteExcessValkeyNodesKeepsShardWhoseRecordedIDTheScrapeMisses(t *test
 	}
 }
 
+// TestDeleteExcessValkeyNodesKeepsEveryExcessNodeWhenNoNodeAnswered: a node
+// down during the upgrade has no recorded ID, and an empty scrape cannot show
+// whether it owns slots.
+func TestDeleteExcessValkeyNodesKeepsEveryExcessNodeWhenNoNodeAnswered(t *testing.T) {
+	inSpec, unrecorded := primaryNode(0), primaryNode(3)
+	r, cluster, recorder := scaleInReconciler(t, inSpec, unrecorded)
+
+	deleted, _, kept, err := r.deleteExcessValkeyNodes(context.Background(), cluster, &valkey.ClusterState{}, nodeList(inSpec, unrecorded))
+	require.NoError(t, err)
+	assert.False(t, deleted)
+	assert.Equal(t, []string{"c-3-0"}, kept)
+	assert.True(t, nodeExists(t, r.Client, unrecorded))
+	assert.Contains(t, drainEvents(recorder), "Warning ScaleInBlocked Keeping excess ValkeyNode c-3-0: shard 3 is kept while the scrape reaches no node")
+}
+
 // TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID: a node that
 // was down when the operator was upgraded has no recorded ID.
 func TestDeleteExcessValkeyNodesMatchesOwnerByPodIPWithoutRecordedID(t *testing.T) {

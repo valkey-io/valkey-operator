@@ -458,7 +458,7 @@ These events are emitted during scale-in operations.
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain excess shards for a reason other than an asynchronously failed slot migration |
 | `SlotRebalanceFailed` | Warning | A drain migration failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it; same failure class as the rebalance event above |
-| `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, or an excess shard still holds slots, with or without a reachable primary, or has a recorded node ID the scrape does not show |
+| `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, or an excess shard still holds slots, with or without a reachable primary, or has a recorded node ID the scrape does not show, or no node answered the scrape |
 
 ### Proactive failover events
 

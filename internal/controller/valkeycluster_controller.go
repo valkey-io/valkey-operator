@@ -2533,6 +2533,8 @@ func (r *ValkeyClusterReconciler) deleteExcessValkeyNodes(ctx context.Context, c
 			if hold, ok := holding[shardIndex]; ok {
 				why := "still owns slots; waiting for drain"
 				switch hold {
+				case holdBlind:
+					why = "is kept while the scrape reaches no node"
 				case holdUnseen:
 					why = "has a node the scrape does not show"
 				case holdUnreachable:
@@ -2703,7 +2705,8 @@ func candidateIDs(node *valkeyiov1alpha1.ValkeyNode, known []string, views map[s
 type shardHold int
 
 const (
-	holdUnseen      shardHold = iota + 1 // a recorded ID is in no scraped table
+	holdBlind       shardHold = iota + 1 // no node answered the scrape
+	holdUnseen                           // a recorded ID is in no scraped table
 	holdUnreachable                      // a slot owner did not answer
 	holdAnswered                         // a slot owner answered
 )
@@ -2718,7 +2721,8 @@ const (
 // none of its own shard's data. A pod-IP match against the tables is enough to
 // keep a node, not to rule a primary out. A recorded ID that no scraped table
 // lists also keeps the shard: the forget hold keeps a recorded ID in the
-// tables, so the scrape missed the nodes that know it.
+// tables, so the scrape missed the nodes that know it. When no node answered,
+// every shard is kept: a node with no recorded ID may still own slots.
 func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList) map[int]shardHold {
 	views := state.NodeViews()
 	type member struct {
@@ -2752,8 +2756,12 @@ func shardsHoldingSlots(state *valkey.ClusterState, nodes *valkeyiov1alpha1.Valk
 			keep(shard, holdUnreachable)
 		}
 	}
+	blind := len(state.AllNodes()) == 0
 	for _, m := range members {
 		shard := m.shard
+		if blind {
+			keep(shard, holdBlind)
+		}
 		if _, seen := views[m.recorded]; m.recorded != "" && !seen {
 			keep(shard, holdUnseen)
 		}

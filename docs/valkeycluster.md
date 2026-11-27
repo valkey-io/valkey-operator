@@ -410,7 +410,7 @@ When `shards` is lowered, the operator moves the slots of each excess shard to t
 
 If the primary of an excess shard crashes during the drain, its replica takes over and the drain continues from it. See [Failure handling](#failure-handling) for what a crashed primary keeps with and without `persistence`.
 
-When the owner of a shard's slots is unreachable, or a node ID a ValkeyNode of the shard records is in no scraped `CLUSTER NODES` table, the operator keeps the shard and the cluster reports `ScaleInBlocked`, or an earlier reason such as `UpdatingNodes` when a node of a shard that stays is not ready.
+When the owner of a shard's slots is unreachable, or a node ID a ValkeyNode of the shard records is in no scraped `CLUSTER NODES` table, or no node answers the scrape, the operator keeps the shard and the cluster reports `ScaleInBlocked`, or an earlier reason such as `UpdatingNodes` when a node of a shard that stays is not ready.
 
 #### Migrating from `spec.replicas`
 

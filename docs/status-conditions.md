@@ -99,7 +99,7 @@ Indicates whether the cluster is impaired but may still be partially functional.
 
 Common reasons:
 - `NodeAddFailed` – failed to add a node to the cluster
-- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in)
+- `RebalanceFailed` – slot rebalancing failed (scale-out or scale-in), including a slot migration that failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it. The message then reads `slot migration from <src> to <dst> failed: <message>`, where `<message>` is the failed job's description from `CLUSTER GETSLOTMIGRATIONS`
 - `PodUnschedulable` – Kubernetes scheduler cannot place one or more Valkey pods, for example because strict topology spread constraints cannot be satisfied
 - `ACLApplyFailed` – one or more nodes report `ACLApplied=False/ApplyFailed`, so the users declared in `spec.acl.users` (or the deprecated `spec.users`) are not in effect on those nodes. See [`ACLApplied`](#aclapplied)
 - `UsersACLUnresolved` – a user's password Secret is missing, or lacks a key listed in `password.secret.keys`, or the user names no Secret, so the aclfile could not be rebuilt. Only a cluster stored before `password.secret.name` was required can have a user that names no Secret; see the upgrade note under [Users](valkeycluster.md#users). The message names the user and the Secret, and the key when the Secret exists but lacks it, or the unset field; a node that cannot apply even the last aclfile is appended to it. The nodes keep the last applied aclfile (they still report `ACLApplied=True`), new nodes mount that same aclfile, and topology work such as scaling and rolling updates carries on. The operator emits a `UsersACLUnresolved` warning event when the failure appears or changes and a `UsersACLResolved` event when the aclfile is rebuilt. A cluster that has no aclfile yet still blocks on every reconcile until its user Secrets resolve, with `Ready=False/UsersACLError`, because there is no aclfile to fall back to. One gap remains while a user is unresolved: a system user change reaches `valkey-<cluster>-system-passwords` but not the aclfile, so after enabling the exporter in that state the exporter cannot authenticate (`redis_up 0`) until the Secret resolves. Per-user handling (#500) removes this
@@ -147,7 +147,7 @@ Common reasons:
 - `UnsupportedConfigDirective` – one or more user-set `spec.config` directives were dropped from the rendered `valkey.conf` because the operator could not determine the image version, or the detected Valkey version does not support them. The condition message names each directive, the minimum version, and the detected version or detection failure.
 - `ServiceAccountNotFound` – `spec.serviceAccountName` names a ServiceAccount that does not exist in the cluster namespace. Pod admission rejects each ValkeyNode pod until the ServiceAccount is created.
 - `ServiceAccountLookupFailed` – the operator could not verify that `spec.serviceAccountName` exists, for example because of a transient API error. This lookup is advisory; pod admission still enforces the ServiceAccount requirement.
-- `DeprecatedField` – the spec uses a field scheduled for removal. Today this is `spec.users`, which `spec.acl.users` replaces, and `spec.replicas`, which `spec.replicasPerShard` replaces. The field keeps working until `v1beta1`. See [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers) and [Migrating from `spec.replicas`](valkeycluster.md#migrating-from-specreplicas).
+- `DeprecatedField` – the spec still stores `spec.users` or a non-zero `spec.replicas`. The cluster keeps reconciling. A new or changed value is rejected. See [Migrating from `spec.users`](valkeycluster.md#migrating-from-specusers) and [Migrating from `spec.replicas`](valkeycluster.md#migrating-from-specreplicas).
 - `MultipleConfigurationWarnings` – more than one configuration warning is active at the same time. The controller combines them into a single `ConfigurationWarning` condition with this reason, and the message lists all active warnings. A `Warning` event is emitted for each warning, and the condition clears on the next reconcile once the offending input is no longer present.
 
 #### `TLSEndpointWarning`
@@ -218,8 +218,9 @@ Common reasons when `Ready=False`:
 - `PersistentVolumeClaimPending` – persistence is enabled and the managed PVC is missing or not yet bound.
 - `ServiceError` – `spec.service` is set and a Service the node does not own already has the per-node Service name. Used only when the pod is Ready and the workload has rolled out; before that the pod or PVC reason stays.
 - `NoParent` – the node has no controller ownerReference to a `valkey.io` `ValkeyCluster`. The operator creates or updates no workload, Service or ConfigMap for the node and leaves the existing ones and the pod as they are. It still manages the persistence finalizer, and deleting the node still runs its finalizers. A ValkeyNode created by hand, or left behind by `kubectl delete valkeycluster <name> --cascade=orphan`, gets this reason. If the cluster was paused when it was deleted, its nodes keep the `valkey.io/pause-reconciliation` annotation and stay paused. They report `NoParent` after someone removes the annotation.
-- `ConfigRevisionMismatch` – the node's ConfigMap has no `valkey-<rev>.conf` key for `spec.configRevision`, and the pinned file the node renders from its own spec hashes to a different revision. The node writes nothing and leaves the workload alone. Its status still follows the pod, and when the pod is up the node still applies live config, ACL and the trust bundle. It clears once the parent sets a revision the node's spec renders to. See [Config revisions](architecture.md#config-revisions).
+- `ConfigRevisionMismatch` – the node's ConfigMap has no `valkey-<rev>.conf` key for `spec.configRevision`, and the pinned file the node renders from its own spec hashes to a different revision. The node writes no revision key and leaves the workload alone. Its status still follows the pod. When the pod is up, the node still applies live config, ACL and the trust bundle, and writes the applied values to `live.conf`. Once the parent finds the expected key gone, it names the revision the spec renders, which clears the reason, and the node rolls through the usual one-at-a-time gate. See [Config revisions](architecture.md#config-revisions).
 - `ConfigMapError` – the node could not write its ConfigMap `valkey-<node>`, or a ConfigMap of that name exists that the node does not own, such as another cluster's shared ConfigMap. The node leaves the ConfigMap and the workload alone. Its status still follows the pod, and when the pod is up the node still applies live config, ACL and the trust bundle.
+- `InvalidPodTemplate` – a container probe in the node's pod template, after the `spec.containers` patches, has no handler or more than one, which Kubernetes rejects. The message names each container and probe, for example `container "server" livenessProbe has no handler`. The node does not create or update its StatefulSet or Deployment, so its pod keeps running on its current template, and a new node gets no pod. Its status still follows the pod, and when the pod is up the node still applies live config, ACL and the trust bundle. It clears once the patch is fixed. See [Changing probes](valkeycluster.md#changing-probes).
 
 Common reasons when `Ready=True`:
 - `PodRunning` – pod is running, ready, and the workload is rolled out.
@@ -415,6 +416,7 @@ These events are emitted during the creation and management of Kubernetes resour
 | `ValkeyNodeUpdated` | Normal | ValkeyNode CR spec is updated (rolling update) |
 | `ValkeyNodeFailed` | Warning | Failed to create or update a ValkeyNode CR |
 | `NoParent` | Warning | A ValkeyNode has no `ValkeyCluster` controller ownerReference, so the operator stops reconciling it. Emitted when the node's `Ready` reason changes to `NoParent` |
+| `InvalidPodTemplate` | Warning | A container probe in a ValkeyNode's pod template has no handler or more than one, so the node keeps its current workload. Emitted when the node's `Ready` condition does not already report that problem |
 | `PodDisruptionBudgetCreated` | Normal | PodDisruptionBudget is created |
 | `PodDisruptionBudgetUpdated` | Normal | PodDisruptionBudget is updated |
 | `PodDisruptionBudgetDeleted` | Normal | PodDisruptionBudget is deleted (policy set to Disabled) |
@@ -442,8 +444,8 @@ These events are emitted during scale-out slot rebalancing.
 | Event Type | Type | Description |
 |---|---|---|
 | `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
-| `SlotsRebalancePending` | Normal | Waiting for a shard to learn its migration target before moving slots |
-| `SlotRebalanceFailed` | Warning | Slot rebalancing failed |
+| `SlotsRebalancePending` | Normal | Waiting for the migration source and target to learn each other through gossip before moving slots |
+| `SlotRebalanceFailed` | Warning | Slot rebalancing failed, including an asynchronous `CLUSTER MIGRATESLOTS` job failure read back from `CLUSTER GETSLOTMIGRATIONS`; a scale-in drain whose migration failed asynchronously emits this event too |
 
 ### Scale-in events
 
@@ -453,7 +455,8 @@ These events are emitted during scale-in operations.
 |---|---|---|
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
-| `DrainFailed` | Warning | Failed to drain slots from excess shards |
+| `DrainFailed` | Warning | Failed to drain excess shards for a reason other than an asynchronously failed slot migration |
+| `SlotRebalanceFailed` | Warning | A drain migration failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it; same failure class as the rebalance event above |
 | `ScaleInBlocked` | Warning | An excess shard owns slots with no in-spec primary to drain into, an excess ValkeyNode still owns slots, or an unreachable excess primary is kept while some slots are unassigned |
 
 ### Proactive failover events

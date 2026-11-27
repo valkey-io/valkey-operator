@@ -249,11 +249,12 @@ spec:
         ca:
           - configMapName: %s
             key: bundle.spiffe
-  users:
-    - name: %s
-      enabled: true
-      resetpass: true
-      permissions: "+@all ~* &*"
+  acl:
+    users:
+      - name: %s
+        password:
+          type: Disabled
+        permissions: "+@all ~* &*"
 `, clusterName, gatedImage, serverCertSecret, spireBundle, spiffeID)
 		clusterFile := filepath.Join(tmpDir, "valkeycluster-clientca.yaml")
 		Expect(os.WriteFile(clusterFile, []byte(clusterManifest), 0644)).To(Succeed())

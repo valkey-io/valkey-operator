@@ -73,9 +73,12 @@ var _ = Describe("spec.replicasPerShard and the deprecated spec.replicas", func(
 		Expect(err.Error()).To(ContainSubstring(bothSet))
 	}
 
-	It("accepts either field alone", func() {
+	It("accepts replicasPerShard alone and rejects spec.replicas on create", func() {
 		Expect(createSpec("rps-new-only", map[string]any{"shards": int64(1), "replicasPerShard": int64(1)})).To(Succeed())
-		Expect(createSpec("rps-old-only", map[string]any{"shards": int64(1), "replicas": int64(1)})).To(Succeed())
+		err := createSpec("rps-old-only", map[string]any{"shards": int64(1), "replicas": int64(1)})
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got %v", err)
+		Expect(err.Error()).To(ContainSubstring("spec.replicas is deprecated and cannot be added or changed"))
 	})
 
 	It("rejects a spec that sets both fields, even when one is 0", func() {
@@ -85,7 +88,9 @@ var _ = Describe("spec.replicasPerShard and the deprecated spec.replicas", func(
 
 	It("rejects an update that adds replicasPerShard without removing replicas", func() {
 		const name = "rps-add-keep"
-		Expect(createSpec(name, map[string]any{"shards": int64(1), "replicas": int64(1)})).To(Succeed())
+		withDeprecatedFieldRulesRemoved(ctx, func() {
+			Expect(createSpec(name, map[string]any{"shards": int64(1), "replicas": int64(1)})).To(Succeed())
+		})
 		cluster := &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 		expectInvalid(k8sClient.Patch(ctx, cluster, client.RawPatch(types.MergePatchType, []byte(`{"spec":{"replicasPerShard":1}}`))))
 	})
@@ -93,7 +98,9 @@ var _ = Describe("spec.replicasPerShard and the deprecated spec.replicas", func(
 	It("warns about spec.replicas until the spec moves to replicasPerShard, without touching the ValkeyNodes", func() {
 		const name = "rps-migrate"
 		key := types.NamespacedName{Name: name, Namespace: "default"}
-		Expect(createSpec(name, map[string]any{"shards": int64(1), "replicas": int64(1)})).To(Succeed())
+		withDeprecatedFieldRulesRemoved(ctx, func() {
+			Expect(createSpec(name, map[string]any{"shards": int64(1), "replicas": int64(1)})).To(Succeed())
+		})
 
 		recorder := events.NewFakeRecorder(100)
 		r := &ValkeyClusterReconciler{

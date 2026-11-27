@@ -167,23 +167,27 @@ var _ = Describe("spec.acl validation", func() {
 		}
 	})
 
+	// A new spec.users is rejected, so this checks the password rule with that
+	// rejection removed. A stored spec.users still has to name its Secret.
 	It("requires passwordSecret.name for an enabled legacy user with Secret passwords", func() {
-		for desc, legacy := range map[string]valkeyiov1alpha1.UserAclSpec{
-			"no passwordSecret": {Name: "alice", Enabled: true},
-			"only keys":         {Name: "alice", Enabled: true, PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"alicepw"}}},
-		} {
-			_, err := create(legacyUsers(legacy))
-			Expect(err).To(HaveOccurred(), desc)
-			Expect(err.Error()).To(ContainSubstring("spec.users[0].passwordSecret.name: Required value"), desc)
-		}
-		for desc, legacy := range map[string]valkeyiov1alpha1.UserAclSpec{
-			"named":     {Name: "alice", Enabled: true, PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{Name: "users"}},
-			"nopass":    {Name: "alice", Enabled: true, NoPassword: true},
-			"resetpass": {Name: "alice", Enabled: true, ResetPass: true},
-		} {
-			_, err := create(legacyUsers(legacy))
-			Expect(err).NotTo(HaveOccurred(), desc)
-		}
+		withDeprecatedFieldRulesRemoved(ctx, func() {
+			for desc, legacy := range map[string]valkeyiov1alpha1.UserAclSpec{
+				"no passwordSecret": {Name: "alice", Enabled: true},
+				"only keys":         {Name: "alice", Enabled: true, PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"alicepw"}}},
+			} {
+				_, err := create(legacyUsers(legacy))
+				Expect(err).To(HaveOccurred(), desc)
+				Expect(err.Error()).To(ContainSubstring("spec.users[0].passwordSecret.name: Required value"), desc)
+			}
+			for desc, legacy := range map[string]valkeyiov1alpha1.UserAclSpec{
+				"named":     {Name: "alice", Enabled: true, PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{Name: "users"}},
+				"nopass":    {Name: "alice", Enabled: true, NoPassword: true},
+				"resetpass": {Name: "alice", Enabled: true, ResetPass: true},
+			} {
+				_, err := create(legacyUsers(legacy))
+				Expect(err).NotTo(HaveOccurred(), desc)
+			}
+		})
 	})
 
 	It("accepts password.secret when password.type is Secret", func() {
@@ -196,11 +200,12 @@ var _ = Describe("spec.acl validation", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("accepts legacy spec.users alone", func() {
+	It("rejects a new legacy spec.users", func() {
 		_, err := create(func(s *valkeyiov1alpha1.ValkeyClusterSpec) {
 			s.Users = []valkeyiov1alpha1.UserAclSpec{legacyUser} //nolint:staticcheck // legacy spec.users
 		})
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	// A typed client drops users: [] through omitempty, so send it unstructured
@@ -314,7 +319,8 @@ var _ = Describe("spec.acl validation", func() {
 		legacy := legacyUser
 		legacy.RawAcl = "+ping\n"
 		_, err = create(legacyUsers(legacy))
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	It("rejects invalid legacy usernames", func() {
@@ -328,7 +334,8 @@ var _ = Describe("spec.acl validation", func() {
 		legacy := legacyUser
 		legacy.Name = strings.Repeat("a", 128)
 		_, err := create(legacyUsers(legacy))
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.users is deprecated and cannot be added or changed"))
 	})
 
 	It("rejects whitespace in key and channel patterns", func() {

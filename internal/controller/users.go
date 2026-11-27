@@ -81,6 +81,7 @@ var (
 			"+acl|users",                 // read the user set to verify membership after a reload
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
+			"+time",                      // node clock, to age failed slot migrations
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		// plus +command|info and +commandlog|len: redis_exporter probes for COMMANDLOG with COMMAND INFO (v1.89.0+) and reads COMMANDLOG LEN (Valkey 8.1+).
@@ -265,13 +266,13 @@ func deprecatedFieldConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []co
 	if len(cluster.Spec.Users) > 0 { //nolint:staticcheck // legacy spec.users
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-			message: "spec.users is deprecated and will be removed in v1beta1: move the users to spec.acl.users, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
+			message: "spec.users is deprecated: move the users to spec.acl.users and remove spec.users in the same update, replacing enabled with state, nopass or resetpass with password.type, and passwordSecret with password.secret",
 		})
 	}
-	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // warn until v1beta1 removes spec.replicas
+	if n := cluster.Spec.Replicas; n != 0 { //nolint:staticcheck // legacy spec.replicas
 		warnings = append(warnings, configWarning{
 			reason:  valkeyiov1alpha1.ReasonDeprecatedField,
-			message: fmt.Sprintf("spec.replicas is deprecated and is removed in v1beta1; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
+			message: fmt.Sprintf("spec.replicas is deprecated; set spec.replicasPerShard: %d and remove spec.replicas in the same update", n),
 		})
 	}
 	return warnings

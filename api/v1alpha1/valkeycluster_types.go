@@ -398,7 +398,7 @@ type ValkeyClusterSpec struct {
 	// new nodes join the source cluster as replicas of its primaries and are
 	// promoted at cutover. Set it at creation only.
 	// +kubebuilder:validation:XValidation:rule="self.source == oldSelf.source",message="bootstrap.source is immutable",fieldPath=".source",reason="FieldValueForbidden"
-	// +kubebuilder:validation:XValidation:rule="!oldSelf.complete || self.complete",message="bootstrap.complete cannot be reverted once set",fieldPath=".complete",reason="FieldValueForbidden"
+	// +kubebuilder:validation:XValidation:rule="self.stage == oldSelf.stage || oldSelf.stage == 'Bootstrap' || (oldSelf.stage == 'Cutover' && self.stage == 'Complete')",message="bootstrap.stage can only move forward: Bootstrap, Cutover, Complete",fieldPath=".stage",reason="FieldValueForbidden"
 	// +optional
 	Bootstrap *BootstrapSpec `json:"bootstrap,omitempty"`
 
@@ -1075,13 +1075,36 @@ type BootstrapSpec struct {
 	// +kubebuilder:validation:Required
 	Source BootstrapSource `json:"source"`
 
-	// Complete triggers cutover once every shard is in sync: the new nodes are
-	// promoted and the source members are forgotten. Set it only after clients
-	// are ready to use this cluster.
-	// +kubebuilder:default=false
+	// Stage is the step the migration is in. It only moves forward, and only
+	// this field moves it: the operator never cuts over or detaches the source
+	// on its own.
+	//
+	//   - Bootstrap: the new nodes join the source as replicas and keep
+	//     syncing. Nothing is promoted, and the new nodes cannot be elected
+	//     primary.
+	//   - Cutover: the new nodes are promoted with a graceful failover. The
+	//     source nodes stay in the cluster as replicas, so you can still roll
+	//     back, and they cannot be elected primary.
+	//   - Complete: the operator forgets the source nodes. Shut the source
+	//     down first, or a running node can rejoin.
+	//
+	// +kubebuilder:default=Bootstrap
 	// +optional
-	Complete bool `json:"complete,omitempty"`
+	Stage BootstrapStage `json:"stage,omitempty"`
 }
+
+// BootstrapStage is the step a bootstrap migration is in.
+// +kubebuilder:validation:Enum=Bootstrap;Cutover;Complete
+type BootstrapStage string
+
+const (
+	// BootstrapStageBootstrap syncs from the source without promoting anything.
+	BootstrapStageBootstrap BootstrapStage = "Bootstrap"
+	// BootstrapStageCutover promotes the new nodes; the source stays as replicas.
+	BootstrapStageCutover BootstrapStage = "Cutover"
+	// BootstrapStageComplete forgets the source nodes.
+	BootstrapStageComplete BootstrapStage = "Complete"
+)
 
 // BootstrapSource locates and authenticates against the source cluster.
 type BootstrapSource struct {
@@ -1118,6 +1141,9 @@ const (
 	ConditionBootstrapSynced = "BootstrapSynced"
 	// ConditionBootstrapFailed is True while the source cannot be bootstrapped from.
 	ConditionBootstrapFailed = "BootstrapFailed"
+	// ConditionBootstrapSourceDetached is False after cutover while source nodes
+	// are still members of the cluster, and True once none are left.
+	ConditionBootstrapSourceDetached = "BootstrapSourceDetached"
 
 	ReasonBootstrapping          = "Bootstrapping"
 	ReasonBootstrapSynced        = "BootstrapSynced"
@@ -1125,4 +1151,6 @@ const (
 	ReasonBootstrapSourceInvalid = "BootstrapSourceInvalid"
 	ReasonBootstrapCutover       = "BootstrapCutover"
 	ReasonBootstrapComplete      = "BootstrapComplete"
+	ReasonSourceNodesRemain      = "SourceNodesRemain"
+	ReasonSourceDetached         = "SourceDetached"
 )

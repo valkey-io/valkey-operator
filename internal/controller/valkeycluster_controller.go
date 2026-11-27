@@ -321,8 +321,16 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var bootstrap *bootstrapPlan
 	if cluster.Spec.Bootstrap != nil {
 		r.restoreReplicationAuth(ctx, cluster, state)
-		if clusterMigrated(state, cluster.Spec.Shards) {
-			finishBootstrapConditions(cluster)
+		migrated := clusterMigrated(state, cluster.Spec.Shards)
+		// New nodes must never be elected primary before cutover; once the slots
+		// have moved they get normal failover back.
+		r.ensureDestinationFailoverPolicy(ctx, state, !migrated)
+		if migrated {
+			// The source nodes stay as replicas, which keeps rollback possible,
+			// but none of them may be elected primary until the stage is Complete.
+			members := sourceMembers(state)
+			r.protectSourceNodes(ctx, cluster, members)
+			finishBootstrapConditions(cluster, len(members))
 		} else {
 			bootstrap, err = r.planBootstrap(ctx, cluster)
 			if err != nil {
@@ -420,7 +428,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Source members are never forgotten while bootstrapping.
-	if bootstrap == nil {
+	// After cutover the source nodes stay in the cluster so the user can still
+	// roll back; they are forgotten only at stage Complete.
+	if bootstrap == nil && (cluster.Spec.Bootstrap == nil || cluster.Spec.Bootstrap.Stage == valkeyiov1alpha1.BootstrapStageComplete) {
 		r.forgetStaleNodes(ctx, cluster, state, nodes)
 	}
 
@@ -1286,7 +1296,7 @@ func buildClusterValkeyNode(cluster *valkeyiov1alpha1.ValkeyCluster, shardIndex 
 			SharedConfigMapName:           GetSharedConfigMapName(cluster.Name),
 			UsersACLSecretName:            getInternalSecretName(cluster.Name),
 			TLS:                           nodeTLSFromCluster(cluster),
-			Config:                        cluster.Spec.Config,
+			Config:                        nodeConfig(cluster),
 			PodSecurityContext:            cluster.Spec.PodSecurityContext,
 			ServiceAccountName:            cluster.Spec.ServiceAccountName,
 			PodMetadata:                   cluster.Spec.PodMetadata,

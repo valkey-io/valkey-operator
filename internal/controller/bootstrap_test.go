@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	"github.com/valkey-io/valkey-operator/internal/valkey"
@@ -73,4 +75,87 @@ func TestSyncedNodesSkipsInitialSync(t *testing.T) {
 	ready := replicaOf("src", "up")
 	got := syncedNodes(&valkey.ShardState{Nodes: []*valkey.NodeState{syncing, ready}})
 	require.Equal(t, []*valkey.NodeState{ready}, got)
+}
+
+func TestBootstrapCutoverRequested(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	require.False(t, bootstrapCutoverRequested(cluster), "no spec.bootstrap")
+
+	cluster.Spec.Bootstrap = &valkeyiov1alpha1.BootstrapSpec{}
+	require.False(t, bootstrapCutoverRequested(cluster), "an unset stage means Bootstrap")
+
+	for stage, want := range map[valkeyiov1alpha1.BootstrapStage]bool{
+		valkeyiov1alpha1.BootstrapStageBootstrap: false,
+		valkeyiov1alpha1.BootstrapStageCutover:   true,
+		valkeyiov1alpha1.BootstrapStageComplete:  true,
+	} {
+		cluster.Spec.Bootstrap.Stage = stage
+		require.Equal(t, want, bootstrapCutoverRequested(cluster), string(stage))
+	}
+}
+
+func TestNodeConfigKeepsNewNodesFromBeingElected(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Config = map[string]string{"maxmemory": "100mb"}
+
+	require.NotContains(t, nodeConfig(cluster), noFailoverParam, "a cluster without spec.bootstrap is untouched")
+
+	cluster.Spec.Bootstrap = &valkeyiov1alpha1.BootstrapSpec{}
+	for _, stage := range []valkeyiov1alpha1.BootstrapStage{
+		"", valkeyiov1alpha1.BootstrapStageBootstrap, valkeyiov1alpha1.BootstrapStageCutover,
+	} {
+		cluster.Spec.Bootstrap.Stage = stage
+		got := nodeConfig(cluster)
+		require.Equal(t, "yes", got[noFailoverParam], "stage %q", stage)
+		require.Equal(t, "100mb", got["maxmemory"], "user config is kept")
+	}
+	require.NotContains(t, cluster.Spec.Config, noFailoverParam, "the user's map is not modified")
+
+	// Bootstrap and Cutover render the same file, so the move to Cutover rolls nothing.
+	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageBootstrap
+	atBootstrap := nodeConfig(cluster)
+	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageCutover
+	require.Equal(t, atBootstrap, nodeConfig(cluster))
+
+	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageComplete
+	require.NotContains(t, nodeConfig(cluster), noFailoverParam, "Complete restores normal failover")
+}
+
+func TestSourceMembers(t *testing.T) {
+	ours := &valkey.NodeState{Id: "a"}
+	ours.SetClusterNodesForTesting("a 10.0.0.1:6379@16379 myself,master - 0 1 1 connected 0-16383\n" +
+		"b 10.0.0.2:6379@16379 slave a 0 1 1 connected\n" +
+		"s1 10.1.0.1:6379@16379 slave a 0 1 1 connected\n" +
+		"s2 10.1.0.2:6379@16379 slave a 0 1 1 connected\n")
+	sibling := &valkey.NodeState{Id: "b"}
+	state := &valkey.ClusterState{Shards: []*valkey.ShardState{{Nodes: []*valkey.NodeState{ours, sibling}}}}
+
+	got := sourceMembers(state)
+	require.Len(t, got, 2)
+	require.Equal(t, "s1", got[0].Id)
+	require.Equal(t, "s2", got[1].Id)
+
+	require.Empty(t, sourceMembers(&valkey.ClusterState{}), "no reachable node, nothing to report")
+}
+
+func TestFinishBootstrapConditionsReportsRemainingSource(t *testing.T) {
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Bootstrap = &valkeyiov1alpha1.BootstrapSpec{Stage: valkeyiov1alpha1.BootstrapStageCutover}
+
+	finishBootstrapConditions(cluster, 6)
+	c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
+	require.NotNil(t, c)
+	require.Equal(t, metav1.ConditionFalse, c.Status)
+	require.Equal(t, valkeyiov1alpha1.ReasonSourceNodesRemain, c.Reason)
+	require.Contains(t, c.Message, "Complete", "tells the user how to finish")
+
+	cluster.Spec.Bootstrap.Stage = valkeyiov1alpha1.BootstrapStageComplete
+	finishBootstrapConditions(cluster, 6)
+	c = meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
+	require.Contains(t, c.Message, "shut them down", "at Complete the source must be stopped")
+
+	finishBootstrapConditions(cluster, 0)
+	c = meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
+	require.Equal(t, metav1.ConditionTrue, c.Status)
+	require.Equal(t, valkeyiov1alpha1.ReasonSourceDetached, c.Reason)
 }

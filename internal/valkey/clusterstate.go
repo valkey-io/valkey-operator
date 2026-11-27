@@ -381,6 +381,12 @@ func (n *NodeState) SetClusterNodesForTesting(raw string) {
 	n.nodes = ParseClusterNodes(raw)
 }
 
+// Peers returns this node's CLUSTER NODES table from the last scrape, including
+// its own entry.
+func (n *NodeState) Peers() []ClusterNode {
+	return n.nodes
+}
+
 // Myself returns this node's own entry from its last CLUSTER NODES scrape, or
 // nil when the output held no "myself" line.
 func (n *NodeState) Myself() *ClusterNode {

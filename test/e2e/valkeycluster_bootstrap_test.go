@@ -35,8 +35,8 @@ import (
 
 // Covers https://github.com/valkey-io/valkey-operator/issues/696. A plain
 // StatefulSet Valkey cluster (no operator) is the source. A ValkeyCluster with
-// spec.bootstrap joins it as replicas, and only spec.bootstrap.complete makes
-// the operator promote them.
+// spec.bootstrap joins it as replicas. Only spec.bootstrap.stage moves the
+// migration: Cutover promotes the new nodes, and Complete forgets the source.
 var _ = Describe("ValkeyCluster bootstrap from an existing cluster", Ordered, Label("ValkeyCluster", "Bootstrap"), func() {
 	const (
 		srcName     = "bootsrc"
@@ -53,6 +53,27 @@ var _ = Describe("ValkeyCluster bootstrap from an existing cluster", Ordered, La
 	dstExec := func(pod string, script string) (string, error) {
 		return utils.Run(exec.Command("kubectl", "exec", pod, "-c", "server", "--", "sh", "-c",
 			"unset VALKEYCLI_AUTH REDISCLI_AUTH; "+script))
+	}
+	// nodeLines returns the CLUSTER NODES lines seen from a new node, split into
+	// the new cluster's own nodes and everyone else (the source).
+	nodeLines := func(g Gomega) (ours, others []string) {
+		out, err := dstExec(dstPod(0, 0), `valkey-cli cluster nodes | tr -d '\r'`)
+		g.Expect(err).NotTo(HaveOccurred())
+		pods, err := utils.Run(exec.Command("kubectl", "get", "pods", "-l", "valkey.io/cluster="+dstName,
+			"-o", "jsonpath={range .items[*]}{.status.podIP} {end}"))
+		g.Expect(err).NotTo(HaveOccurred())
+		for _, line := range strings.Split(out, "\n") {
+			f := strings.Fields(line)
+			if len(f) < 3 {
+				continue
+			}
+			if strings.Contains(pods, strings.Split(f[1], ":")[0]) {
+				ours = append(ours, line)
+			} else {
+				others = append(others, line)
+			}
+		}
+		return ours, others
 	}
 	// writeKeys writes prefix:1..n through the source, following redirects.
 	writeKeys := func(prefix string, n int) {
@@ -243,8 +264,21 @@ spec:
 		}
 		Consistently(func(g Gomega) {
 			g.Expect(dstRole(dstPod(0, 0))).To(ContainSubstring("role:slave"))
-			g.Expect(clusterStatus(g).Spec.Bootstrap.Complete).To(BeFalse())
+			g.Expect(clusterStatus(g).Spec.Bootstrap.Stage).To(Equal(valkeyiov1alpha1.BootstrapStageBootstrap))
 		}, 20*time.Second, 5*time.Second).Should(Succeed())
+
+		By("checking no new node can be elected primary, and the source is untouched")
+		Eventually(func(g Gomega) {
+			ours, others := nodeLines(g)
+			g.Expect(ours).To(HaveLen(6))
+			for _, line := range ours {
+				g.Expect(line).To(ContainSubstring("nofailover"), line)
+			}
+			g.Expect(others).To(HaveLen(6))
+			for _, line := range others {
+				g.Expect(line).NotTo(ContainSubstring("nofailover"), "the source must not be modified before cutover: "+line)
+			}
+		}, time.Minute).Should(Succeed())
 
 		By("reading the source's data from a new replica")
 		Expect(replicatedKeys()).To(Equal(100))
@@ -255,9 +289,9 @@ spec:
 		Eventually(replicatedKeys, time.Minute).Should(Equal(200))
 	})
 
-	It("cuts over only when spec.bootstrap.complete is set", func() {
+	It("cuts over only when spec.bootstrap.stage is Cutover", func() {
 		_, err := utils.Run(exec.Command("kubectl", "patch", "valkeycluster", dstName, "--type=merge",
-			"-p", `{"spec":{"bootstrap":{"complete":true}}}`))
+			"-p", `{"spec":{"bootstrap":{"stage":"Cutover"}}}`))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("waiting for the new cluster to become Ready")
@@ -269,24 +303,80 @@ spec:
 
 		By("checking the new nodes own all slots: three primaries, all ours")
 		Eventually(func(g Gomega) {
-			out, err := dstExec(dstPod(0, 0), `valkey-cli cluster nodes | tr -d '\r'`)
-			g.Expect(err).NotTo(HaveOccurred())
-			ours, err := utils.Run(exec.Command("kubectl", "get", "pods", "-l", "valkey.io/cluster="+dstName,
-				"-o", "jsonpath={range .items[*]}{.status.podIP} {end}"))
-			g.Expect(err).NotTo(HaveOccurred())
+			ours, others := nodeLines(g)
 			primaries := 0
-			for _, line := range strings.Split(out, "\n") {
-				f := strings.Fields(line)
-				if len(f) < 3 || !strings.Contains(f[2], "master") {
-					continue
+			for _, line := range ours {
+				if strings.Contains(strings.Fields(line)[2], "master") {
+					primaries++
 				}
-				primaries++
-				g.Expect(ours).To(ContainSubstring(strings.Split(f[1], ":")[0]), "primary %s is not a new node", f[1])
 			}
 			g.Expect(primaries).To(Equal(3))
+			for _, line := range others {
+				g.Expect(strings.Fields(line)[2]).NotTo(ContainSubstring("master"), "a source node is still primary: "+line)
+			}
 		}, 3*time.Minute).Should(Succeed())
 
+		By("checking the source nodes stay as replicas that cannot be elected, and the new nodes can")
+		Eventually(func(g Gomega) {
+			ours, others := nodeLines(g)
+			g.Expect(others).To(HaveLen(6))
+			for _, line := range others {
+				g.Expect(line).To(ContainSubstring("nofailover"), "source node can be elected: "+line)
+			}
+			for _, line := range ours {
+				g.Expect(line).NotTo(ContainSubstring("nofailover"), "new node still cannot fail over: "+line)
+			}
+			c := utils.FindCondition(clusterStatus(g).Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(c.Reason).To(Equal(valkeyiov1alpha1.ReasonSourceNodesRemain))
+		}, 2*time.Minute).Should(Succeed())
+
 		By("checking no data was lost across cutover")
+		Expect(countKeys(dstPod(0, 0), "pre", 100)).To(Equal(100))
+		Expect(countKeys(dstPod(0, 0), "mid", 100)).To(Equal(100))
+	})
+
+	It("keeps the source nodes until the stage is Complete, then forgets them", func() {
+		By("shutting the source down")
+		_, err := utils.Run(exec.Command("kubectl", "scale", "statefulset", srcName, "--replicas=0"))
+		Expect(err).NotTo(HaveOccurred())
+
+		By("checking the operator keeps the failed source nodes while the stage is Cutover")
+		Eventually(func(g Gomega) {
+			_, others := nodeLines(g)
+			failed := 0
+			for _, line := range others {
+				if strings.Contains(strings.Fields(line)[2], "fail") {
+					failed++
+				}
+			}
+			g.Expect(failed).To(Equal(6))
+		}, 2*time.Minute).Should(Succeed())
+		Consistently(func(g Gomega) {
+			_, others := nodeLines(g)
+			g.Expect(others).To(HaveLen(6), "source nodes were forgotten before stage Complete")
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
+
+		By("moving the stage to Complete")
+		_, err = utils.Run(exec.Command("kubectl", "patch", "valkeycluster", dstName, "--type=merge",
+			"-p", `{"spec":{"bootstrap":{"stage":"Complete"}}}`))
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			_, others := nodeLines(g)
+			g.Expect(others).To(BeEmpty(), "source nodes are still in the cluster")
+			c := utils.FindCondition(clusterStatus(g).Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSourceDetached)
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		}, 4*time.Minute).Should(Succeed())
+
+		By("checking the cluster is healthy and the data is intact")
+		Eventually(func(g Gomega) {
+			cr := clusterStatus(g)
+			g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+			g.Expect(cr.Status.ReadyShards).To(Equal(int32(3)))
+		}, 8*time.Minute).Should(Succeed())
 		Expect(countKeys(dstPod(0, 0), "pre", 100)).To(Equal(100))
 		Expect(countKeys(dstPod(0, 0), "mid", 100)).To(Equal(100))
 	})

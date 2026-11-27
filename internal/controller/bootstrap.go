@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"strconv"
 	"strings"
@@ -65,13 +66,50 @@ func clusterMigrated(state *valkey.ClusterState, shards int32) bool {
 	return shards > 0 && owning >= int(shards)
 }
 
+// bootstrapCutoverRequested reports whether the user moved spec.bootstrap.stage
+// past Bootstrap. It is the only trigger for cutover.
+func bootstrapCutoverRequested(cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	b := cluster.Spec.Bootstrap
+	return b != nil && b.Stage != "" && b.Stage != valkeyiov1alpha1.BootstrapStageBootstrap
+}
+
+// sourceMembers returns the cluster members that are not this cluster's own
+// nodes, read from one reachable node's table. After cutover these are the old
+// source nodes, which stay as replicas until the stage is Complete.
+func sourceMembers(state *valkey.ClusterState) []valkey.ClusterNode {
+	all := state.AllNodes()
+	if len(all) == 0 {
+		return nil
+	}
+	var out []valkey.ClusterNode
+	for _, entry := range all[0].Peers() {
+		if entry.IsMyself() || state.FindNodeById(entry.Id) != nil {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // finishBootstrapConditions replaces the in-progress bootstrap conditions once
-// the new nodes own the slots.
-func finishBootstrapConditions(cluster *valkeyiov1alpha1.ValkeyCluster) {
+// the new nodes own the slots, and reports whether source nodes are still
+// members of the cluster.
+func finishBootstrapConditions(cluster *valkeyiov1alpha1.ValkeyCluster, remaining int) {
 	meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapFailed)
 	if meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionBootstrapSynced) != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapComplete, "Cutover complete", metav1.ConditionTrue)
 	}
+	if remaining == 0 {
+		setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSourceDetached, valkeyiov1alpha1.ReasonSourceDetached,
+			"No source nodes are left in the cluster", metav1.ConditionTrue)
+		return
+	}
+	msg := fmt.Sprintf("%d source node(s) are still in the cluster as replicas and cannot be elected primary; "+
+		"set spec.bootstrap.stage to Complete once you are done with the source", remaining)
+	if cluster.Spec.Bootstrap.Stage == valkeyiov1alpha1.BootstrapStageComplete {
+		msg = fmt.Sprintf("%d source node(s) are still in the cluster; shut them down and the operator will forget them", remaining)
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSourceDetached, valkeyiov1alpha1.ReasonSourceNodesRemain, msg, metav1.ConditionFalse)
 }
 
 // sourceSecret reads one key of a Secret in the cluster's namespace.
@@ -93,33 +131,44 @@ func (r *ValkeyClusterReconciler) sourceSecret(ctx context.Context, namespace st
 	return value, nil
 }
 
-// planBootstrap reads the source topology through the first reachable endpoint
-// and validates it. It only reads from the source.
-func (r *ValkeyClusterReconciler) planBootstrap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*bootstrapPlan, error) {
+// sourceConn builds the connection settings for the source cluster: its
+// password and, when configured, TLS with the user's CA.
+func (r *ValkeyClusterReconciler) sourceConn(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (connConfig, error) {
 	src := cluster.Spec.Bootstrap.Source
-	plan := &bootstrapPlan{}
+	var cfg connConfig
 	if src.PasswordSecretRef != nil {
 		pw, err := r.sourceSecret(ctx, cluster.Namespace, src.PasswordSecretRef)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap source password: %w", err)
+			return cfg, fmt.Errorf("bootstrap source password: %w", err)
 		}
-		plan.password = string(pw)
+		cfg.password = string(pw)
 	}
-	cfg := connConfig{password: plan.password}
 	if src.TLS != nil {
 		cfg.tls = &tls.Config{MinVersion: tls.VersionTLS12}
 		if src.TLS.CASecretRef != nil {
 			ca, err := r.sourceSecret(ctx, cluster.Namespace, src.TLS.CASecretRef)
 			if err != nil {
-				return nil, fmt.Errorf("bootstrap source CA: %w", err)
+				return cfg, fmt.Errorf("bootstrap source CA: %w", err)
 			}
 			pool := x509.NewCertPool()
 			if !pool.AppendCertsFromPEM(ca) {
-				return nil, errors.New("bootstrap source CA: no PEM certificates found")
+				return cfg, errors.New("bootstrap source CA: no PEM certificates found")
 			}
 			cfg.tls.RootCAs = pool
 		}
 	}
+	return cfg, nil
+}
+
+// planBootstrap reads the source topology through the first reachable endpoint
+// and validates it. It only reads from the source.
+func (r *ValkeyClusterReconciler) planBootstrap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (*bootstrapPlan, error) {
+	src := cluster.Spec.Bootstrap.Source
+	cfg, err := r.sourceConn(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	plan := &bootstrapPlan{password: cfg.password}
 
 	var lastErr error
 	for _, endpoint := range src.Endpoints {
@@ -272,7 +321,7 @@ func (r *ValkeyClusterReconciler) restoreReplicationAuth(ctx context.Context, cl
 // bootstrapCutover promotes the most caught-up new replica of each shard that
 // does not own its slots yet, with a graceful CLUSTER FAILOVER: the replica
 // waits for its primary's offset, so no write is lost. It is called only when
-// spec.bootstrap.complete is true; nothing else in the operator promotes a
+// spec.bootstrap.stage is past Bootstrap; nothing else in the operator promotes a
 // bootstrapping node. Returns the number of failovers started.
 func (r *ValkeyClusterReconciler) bootstrapCutover(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) int {
 	log := logf.FromContext(ctx)
@@ -331,14 +380,14 @@ func (r *ValkeyClusterReconciler) reconcileBootstrap(ctx context.Context, cluste
 	synced, total := bootstrapSyncProgress(state, cluster, plan)
 	if synced == total {
 		setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapSynced,
-			"All shards are in sync with the source; set spec.bootstrap.complete to cut over", metav1.ConditionTrue)
+			"All shards are in sync with the source; set spec.bootstrap.stage to Cutover to cut over", metav1.ConditionTrue)
 	} else {
 		setCondition(cluster, valkeyiov1alpha1.ConditionBootstrapSynced, valkeyiov1alpha1.ReasonBootstrapSyncing,
 			fmt.Sprintf("%d of %d shards in sync with the source", synced, total), metav1.ConditionFalse)
 	}
 
 	// The only trigger for cutover is the field.
-	if cluster.Spec.Bootstrap.Complete {
+	if bootstrapCutoverRequested(cluster) {
 		if started := r.bootstrapCutover(ctx, cluster, state); started > 0 {
 			setBootstrapping("Cutting over to the new cluster")
 			return ctrl.Result{RequeueAfter: 2 * time.Second}
@@ -348,6 +397,105 @@ func (r *ValkeyClusterReconciler) reconcileBootstrap(ctx context.Context, cluste
 	}
 	setBootstrapping(fmt.Sprintf("Replicating from the source (%d of %d shards in sync)", synced, total))
 	return ctrl.Result{RequeueAfter: 5 * time.Second}
+}
+
+const noFailoverParam = "cluster-replica-no-failover"
+
+// nodeConfig returns the user config each ValkeyNode renders. A cluster that is
+// being bootstrapped starts every pod with cluster-replica-no-failover on, so a
+// restart can never elect a new node primary before cutover. The setting
+// is dropped at stage Complete; between Bootstrap and Complete the operator
+// switches it off live once the slots have moved, so the key is stable across
+// Bootstrap and Cutover and no pod rolls at cutover.
+func nodeConfig(cluster *valkeyiov1alpha1.ValkeyCluster) map[string]string {
+	b := cluster.Spec.Bootstrap
+	if b == nil || b.Stage == valkeyiov1alpha1.BootstrapStageComplete {
+		return cluster.Spec.Config
+	}
+	config := make(map[string]string, len(cluster.Spec.Config)+1)
+	maps.Copy(config, cluster.Spec.Config)
+	config[noFailoverParam] = "yes"
+	return config
+}
+
+// ensureDestinationFailoverPolicy keeps this cluster's own nodes from being
+// elected primary while bootstrapping, and restores normal failover once the
+// slots have moved. The rendered config already starts new pods with the
+// setting on, so a restart never opens a window; this applies the change live
+// and corrects it after a restart. It reads the node's nofailover flag and
+// only issues CONFIG SET when the flag differs.
+func (r *ValkeyClusterReconciler) ensureDestinationFailoverPolicy(ctx context.Context, state *valkey.ClusterState, bootstrapping bool) {
+	log := logf.FromContext(ctx)
+	want := "no"
+	if bootstrapping {
+		want = "yes"
+	}
+	for _, node := range state.AllNodes() {
+		me := node.Myself()
+		if me == nil || me.IsAutomaticFailoverDisabled() == bootstrapping {
+			continue
+		}
+		cmd := node.Client.B().ConfigSet().ParameterValue().ParameterValue(noFailoverParam, want).Build()
+		if err := node.Client.Do(ctx, cmd).Error(); err != nil {
+			log.Error(err, "CONFIG SET "+noFailoverParam, "node", node.Address, "value", want)
+		}
+	}
+}
+
+// protectSourceNodes sets cluster-replica-no-failover on the source nodes that
+// are still members after cutover, so none of them can be elected primary
+// before the user sets the stage to Complete. This is a live CONFIG SET on the
+// source (never CONFIG REWRITE), so a restarted source node loses it and is
+// protected again on the next pass. It touches only nodes that are reachable
+// and do not already carry the nofailover flag.
+func (r *ValkeyClusterReconciler) protectSourceNodes(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, members []valkey.ClusterNode) {
+	log := logf.FromContext(ctx)
+	var pending []valkey.ClusterNode
+	for _, m := range members {
+		if m.IsFailing() || m.HasNoAddress() || m.IsAutomaticFailoverDisabled() || m.IsPrimary() {
+			continue
+		}
+		pending = append(pending, m)
+	}
+	if len(pending) == 0 {
+		return
+	}
+	cfg, err := r.sourceConn(ctx, cluster)
+	if err != nil {
+		log.Error(err, "cannot protect source nodes")
+		return
+	}
+	port := sourcePort(cluster)
+	for _, m := range pending {
+		if err := setSourceNoFailover(ctx, net.JoinHostPort(m.Host, strconv.Itoa(port)), cfg); err != nil {
+			log.Error(err, "set "+noFailoverParam+" on source node", "node", m.Host)
+		}
+	}
+}
+
+// sourcePort is the port source nodes listen on, taken from the first
+// endpoint. CLUSTER NODES entries carry no port, so source nodes are assumed to
+// share it.
+func sourcePort(cluster *valkeyiov1alpha1.ValkeyCluster) int {
+	for _, endpoint := range cluster.Spec.Bootstrap.Source.Endpoints {
+		if _, p, err := net.SplitHostPort(endpoint); err == nil {
+			if port, err := strconv.Atoi(p); err == nil {
+				return port
+			}
+		}
+	}
+	return DefaultPort
+}
+
+func setSourceNoFailover(ctx context.Context, address string, cfg connConfig) error {
+	c, err := vclient.NewClient(clientOption(address, cfg))
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.Do(ctx, c.B().ConfigSet().ParameterValue().ParameterValue(noFailoverParam, "yes").Build()).Error()
 }
 
 // bootstrapSyncProgress counts the shards whose every node replicates its source

@@ -12,9 +12,12 @@ You create a new `ValkeyCluster` with `spec.bootstrap` pointing at the old clust
 
 1. Starts new Valkey pods.
 2. Makes each of them a **replica** of one of the old cluster's primaries, so the old cluster keeps serving traffic and the new nodes copy its data.
-3. Waits. Nothing is promoted until you decide.
-4. When you set `spec.bootstrap.complete: true`, promotes the new nodes with a graceful failover. From then on the new nodes are the primaries and the old nodes are replicas of them.
-5. You point clients at the new cluster and shut the old nodes down.
+3. Waits. Nothing is promoted until you decide, and the new nodes cannot be elected primary on their own.
+4. When you set `spec.bootstrap.stage: Cutover`, promotes the new nodes with a graceful failover. From then on the new nodes are the primaries and the old nodes are replicas of them. The old nodes cannot be elected primary, and you can still roll back.
+5. You point clients at the new cluster and, when you are happy, shut the old nodes down.
+6. When you set `spec.bootstrap.stage: Complete`, the operator forgets the old nodes.
+
+Only the `stage` field moves the migration forward. The operator never cuts over or detaches the source on its own.
 
 The key idea is that a Valkey node in cluster mode can only replicate a node of *its own* cluster. So the new nodes **join the source cluster** as replicas. They do not form a separate cluster that copies from it.
 
@@ -37,7 +40,7 @@ Differing shard counts are handled after cutover with the operator's normal scal
 
 - `endpoints` are seeds, not one per shard. The topology comes from `CLUSTER NODES`.
 - There is no `mode` field. A single path is enough for the POC, and `mode` can be added if a snapshot or sync-tool path appears.
-- `complete` is the only cutover trigger, and it is one-way.
+- `stage` (`Bootstrap`, `Cutover`, `Complete`) is the only thing that moves the migration, and it only moves forward. It is an enum rather than a boolean, as suggested in review, so the user decides separately when to cut over and when to detach the source.
 - The source password is separate from the destination's users, because only the replication handshake and the operator's read of the source use it.
 
 ## The API
@@ -60,7 +63,7 @@ spec:
         caSecretRef:
           name: old-ca
           key: ca.crt
-    complete: false                           # set to true to cut over
+    stage: Bootstrap                          # Bootstrap | Cutover | Complete
 ```
 
 | Field | Meaning |
@@ -68,13 +71,37 @@ spec:
 | `source.endpoints` | One to sixteen `host:port` seeds. One reachable endpoint is enough, because the operator reads the full topology with `CLUSTER NODES`. List several for redundancy. They don't need to be on different shards. |
 | `source.passwordSecretRef` | A Secret key with the **source** password. Used only to read the source and to authenticate replication from it. It does not need to match the destination's users. |
 | `source.tls.caSecretRef` | CA for the operator's own connection to a TLS source. See [limitations](#limitations-and-what-is-not-tested). |
-| `complete` | The only trigger for cutover. Defaults to `false`. |
+| `stage` | The step the migration is in. Defaults to `Bootstrap`. See [Stages](#stages). |
 
 Validation rules (CEL, enforced by the API server):
 
 - `bootstrap` cannot be added to an existing cluster, and cannot be removed once set.
 - `bootstrap.source` is immutable.
-- `bootstrap.complete` cannot go back from `true` to `false`.
+- `bootstrap.stage` only moves forward: `Bootstrap` to `Cutover` to `Complete`. A skip from `Bootstrap` straight to `Complete` is allowed and cuts over first.
+
+## Stages
+
+| Stage | What the operator does | Source nodes |
+|---|---|---|
+| `Bootstrap` (default) | The new nodes join the source as replicas and keep syncing. Nothing is promoted. | Untouched. They keep their own failover behaviour. |
+| `Cutover` | Graceful `CLUSTER FAILOVER` per shard, so the new nodes become the primaries. | Stay in the cluster as replicas. The operator sets `cluster-replica-no-failover` on them, so none can be elected primary. You can still roll back. |
+| `Complete` | Forgets the source nodes with `CLUSTER FORGET`, through the existing stale-node cleanup. | Removed from the cluster. Shut them down first, or a running node can rejoin. |
+
+### Nothing can be elected by surprise
+
+A replica that wins an automatic election becomes a primary without the user asking. That must not happen to the wrong node, so each stage closes it off:
+
+- **`Bootstrap`:** every new node runs with `cluster-replica-no-failover yes`. The operator renders it into the node config, so even a restarted pod comes back protected. A manual `CLUSTER FAILOVER` still works, which is how cutover promotes a node. The source nodes are not modified, because the source keeps serving traffic and needs its own failover.
+- **`Cutover`:** once the new nodes own the slots, the operator turns `cluster-replica-no-failover` off on them live (`CONFIG SET`) so the new cluster has normal failover. It turns it on, also live, for every source node that is still a replica. The setting is not persisted on the source (the operator never runs `CONFIG REWRITE`), so a restarted source node loses it and gets it back on the next reconcile.
+- **`Complete`:** the source nodes are forgotten, and the key is dropped from the rendered config. That one change rolls the new pods once, through the normal rolling update.
+
+The config key is the same in `Bootstrap` and `Cutover`, so moving to `Cutover` does not roll any pod.
+
+### Why `Complete` is separate from `Cutover`
+
+After the failover, the old nodes are still replicas in the same Valkey cluster as the new ones. That is what makes rollback possible: if something is wrong, you can fail over back to them. Forgetting them ends that option, so it is its own explicit step. Do it only after you have moved clients, watched the new cluster, and shut the old nodes down.
+
+`CLUSTER FORGET` only bans a node for about a minute. A source node that is still running keeps gossiping and can rejoin. So at `Complete` the operator forgets only source nodes that are failing or unreachable, and the `BootstrapSourceDetached` condition says how many are still in the cluster.
 
 ## How "bootstrapping" is decided
 
@@ -95,8 +122,9 @@ flowchart TD
     C --> D{spec.bootstrap set?}
     D -- no --> N[Normal flow]
     D -- yes --> E[Restore replication auth on cut-over replicas whose link is down]
-    E --> F{Own nodes already own the slots?}
-    F -- yes --> G[Mark bootstrap complete, continue with normal flow]
+    E --> E2[Keep new nodes non-electable until the slots move]
+    E2 --> F{Own nodes already own the slots?}
+    F -- yes --> G[Protect source replicas, report BootstrapSourceDetached, continue with normal flow]
     F -- no --> H[Read and validate source topology]
     H -- invalid or unreachable --> I[BootstrapFailed + Ready=False, requeue 10s, no pods created]
     H -- ok --> J[Create or update ValkeyNodes]
@@ -106,7 +134,7 @@ flowchart TD
     M --> O[reconcileBootstrap]
     O --> P[Attach nodes to source primaries]
     P --> Q[Compute sync progress, set BootstrapSynced]
-    Q --> R{complete is true?}
+    Q --> R{stage past Bootstrap?}
     R -- no --> S[Requeue 5s]
     R -- yes --> T[Graceful CLUSTER FAILOVER per shard]
     T --> U[Requeue 2s until every shard owns slots]
@@ -149,7 +177,7 @@ While bootstrapping, the operator deliberately does not run:
 |---|---|
 | Slot assignment (`assignSlotsToPendingPrimaries`) | The source owns all 16384 slots. Assigning slots would create a second, conflicting cluster. |
 | `promoteOrphanedReplicas` | A `TAKEOVER` here would promote a node without the user asking. A dead source primary is not ours to replace. |
-| `forgetStaleNodes` and `healStaleAddressPeers` | They would treat source members as foreign and could `CLUSTER FORGET` a failing source node. |
+| `forgetStaleNodes` and `healStaleAddressPeers` | They would treat source members as foreign and could `CLUSTER FORGET` a failing source node. `forgetStaleNodes` also stays off through `Cutover`, and runs only at `Complete`, so a stopped source node is not forgotten while rollback is still possible. |
 | The normal replica phase | It looks for primaries inside the new cluster, and there are none yet. |
 | The health checks at the end of reconcile | They assume the operator owns every slot. |
 
@@ -171,7 +199,7 @@ For each source primary the operator counts the new nodes whose own entry names 
 
 | Result | Condition set |
 |---|---|
-| All shards in sync | `BootstrapSynced=True` (reason `BootstrapSynced`). The message says to set `complete`. |
+| All shards in sync | `BootstrapSynced=True` (reason `BootstrapSynced`). The message says to set the stage to `Cutover`. |
 | Some shards not yet | `BootstrapSynced=False` (reason `BootstrapSyncing`), with "N of M shards in sync". |
 | Always while bootstrapping | `Ready=False` and `Progressing=True`, reason `Bootstrapping`. |
 
@@ -179,7 +207,7 @@ For each source primary the operator counts the new nodes whose own entry names 
 
 ### Cutover
 
-Cutover only runs when `spec.bootstrap.complete` is `true`. Nothing else in the operator promotes a bootstrapping node.
+Cutover only runs when `spec.bootstrap.stage` is past `Bootstrap`. Nothing else in the operator promotes a bootstrapping node.
 
 `bootstrapCutover` goes through every shard that does not yet own slots and:
 
@@ -187,19 +215,21 @@ Cutover only runs when `spec.bootstrap.complete` is `true`. Nothing else in the 
 2. Picks the one with the highest replication offset (`HighestOffsetReplica`).
 3. Runs a graceful `CLUSTER FAILOVER` on it. The replica pauses the source primary, waits to match its offset, then takes over. Because of that wait, **no acknowledged write is lost**.
 
-If `complete` is set before sync finishes, shards with no synced replica are skipped and retried every 2 seconds, so cutover proceeds as each shard becomes ready.
+If the stage is moved before sync finishes, shards with no synced replica are skipped and retried every 2 seconds, so cutover proceeds as each shard becomes ready.
 
 ### After cutover
 
 Once each shard's new primary owns its slots, the next reconcile finds that the bootstrap is migrated. The operator then:
 
 - marks `BootstrapSynced` as complete and removes `BootstrapFailed`,
-- stops reading the source (it may now be shut down),
-- runs the normal flow again, including `forgetStaleNodes`.
+- turns normal failover back on for the new nodes and turns it off for the source replicas (see [Stages](#stages)),
+- sets `BootstrapSourceDetached=False` with the number of source nodes still in the cluster,
+- stops validating the source, which may now be shut down,
+- runs the normal flow again. `forgetStaleNodes` stays off until the stage is `Complete`.
 
 The other new replicas of each shard follow the new primary automatically. They still carry the source password in `primaryauth`, which the new primary doesn't accept. `restoreReplicationAuth` fixes that: for every cut-over shard, any replica whose link is down gets `primaryuser _replication` and `primaryauth <replication password>` back through `CONFIG SET`.
 
-The old source nodes become replicas of the new primaries and stay in the table until you shut them down. When they go away they show up as failing, and the existing `forgetStaleNodes` is expected to forget them. That last part is not covered by a test yet.
+The old source nodes become replicas of the new primaries and stay in the table. Once they are shut down they show up as failing, and at stage `Complete` the existing `forgetStaleNodes` forgets them.
 
 ## End-to-end timeline
 
@@ -219,12 +249,15 @@ sequenceDiagram
     S-->>N: Data sync, then live replication
     O->>O: BootstrapSynced=True
     Note over S,N: Source still serves all traffic. Nothing is promoted.
-    U->>O: spec.bootstrap.complete = true
+    U->>O: spec.bootstrap.stage = Cutover
     O->>N: CLUSTER FAILOVER (graceful) per shard
     N-->>S: Takes over slots after offsets match
     O->>N: Restore _replication credentials on lagging replicas
-    O->>O: Normal flow resumes
-    U->>U: Move clients, shut down source nodes
+    O->>S: CONFIG SET cluster-replica-no-failover yes (source replicas)
+    O->>O: Normal flow resumes, source nodes kept
+    U->>U: Move clients, watch the new cluster, shut down source nodes
+    U->>O: spec.bootstrap.stage = Complete
+    O->>N: CLUSTER FORGET the failed source nodes
 ```
 
 ## Status and events
@@ -235,7 +268,9 @@ Conditions on the ValkeyCluster:
 |---|---|
 | `BootstrapFailed=True` | The source can't be used. Read the message: unreachable, bad password, bad CA, shard count mismatch, unhealthy source, and so on. No pods are created while it is set. |
 | `BootstrapSynced=False` | Nodes are attaching or syncing. The message gives "N of M shards in sync". |
-| `BootstrapSynced=True` | Every shard is in sync. Safe to set `complete`. After cutover the reason becomes `BootstrapComplete`. |
+| `BootstrapSynced=True` | Every shard is in sync. Safe to move the stage to `Cutover`. After cutover the reason becomes `BootstrapComplete`. |
+| `BootstrapSourceDetached=False` | After cutover, source nodes are still in the cluster. The message says how many, and what to do next. |
+| `BootstrapSourceDetached=True` | No source node is left in the cluster. |
 | `Ready=False`, reason `Bootstrapping` | Expected for the whole bootstrap. Ready turns true after cutover, through the normal checks. |
 | `Degraded=True`, reason `NodeAddFailed` | A MEET or REPLICATE call failed. It clears on the next successful pass. |
 
@@ -244,7 +279,8 @@ Events: `BootstrapSourceInvalid` (warning), `ClusterMeetFailed` (warning), `Repl
 ## Aborting
 
 - **Before cutover:** delete the ValkeyCluster. The source keeps serving from its own primaries, and nothing was promoted. The operator does **not** clean up after itself on the source: the removed new nodes remain in the source's node table as failing entries until someone runs `CLUSTER FORGET` for each of them on every source node. I have not verified how long those entries linger on a real source, only that nothing in the operator removes them. This is a known gap.
-- **After cutover:** there is no automatic rollback. The old nodes are replicas of the new primaries. To go back you would fail over to them manually.
+- **After cutover, before `Complete`:** there is no automatic rollback, but the old nodes are still replicas of the new primaries, so you can fail over to them manually with `CLUSTER FAILOVER` on each old node. They carry `cluster-replica-no-failover` until then, which a manual failover ignores. This path has not been tested.
+- **After `Complete`:** the source nodes are forgotten, so rollback is no longer possible.
 
 ## Limitations and what is not tested
 
@@ -259,6 +295,10 @@ Requirements:
 Known gaps:
 
 - **TLS:** `tls.caSecretRef` covers only the operator's own connection. A TLS source also needs the destination's `networking.tls` to trust the source CA for bus and replication traffic, which is not handled yet.
+- **Source port:** `CLUSTER NODES` entries carry no port, so the operator assumes the source nodes use the port of the first endpoint when it protects them after cutover.
+- **Protection is not persisted:** the operator sets `cluster-replica-no-failover` on source nodes with `CONFIG SET` only. A restarted source node is unprotected until the next reconcile, which is a short window.
+- **A running source at `Complete`:** nodes that are still up are not forgotten, because they would rejoin. The condition reports them.
+- **Complete rolls the new pods once:** dropping `cluster-replica-no-failover` from the rendered config changes the config revision.
 - **Rolls during bootstrap:** the logs show "cannot identify primary for shard, skipping its roll", because the operator can't see the source primary as part of the new shards. Spec changes that need a rolling update wait until after cutover.
 - **Pod restarts:** a restarted new pod comes back with the destination credentials. The next reconcile re-applies the source credentials before it re-attaches. This path is not tested.
 - **No lag check:** `BootstrapSynced` doesn't compare offsets with the source primary.
@@ -274,12 +314,16 @@ Tests that pass:
 - The existing envtest suite, which confirms clusters without `spec.bootstrap` behave as before.
 - An end-to-end test on Kind (`test/e2e/valkeycluster_bootstrap_test.go`) against a plain StatefulSet source with a password. It covers:
   1. forming the source and seeding 100 keys,
-  2. all six new nodes joining as linked replicas (about 20 seconds in the run),
-  3. no promotion over a 20-second window while `complete` is false,
+  2. all six new nodes joining as linked replicas,
+  3. every new node carrying the `nofailover` flag during `Bootstrap`, the source nodes carrying none, and no promotion over a 20-second window,
   4. 100 more keys written after the join replicating to the new nodes,
-  5. setting `complete: true`, after which the new cluster became Ready with three new primaries and all 200 keys readable.
+  5. moving to `Cutover`: the new cluster becomes Ready with three new primaries, all six source nodes are replicas with the `nofailover` flag, the new nodes have it off, `BootstrapSourceDetached` is `False`, and all 200 keys are readable,
+  6. shutting the source down: its nodes stay in the cluster, failed, for 45 seconds while the stage is `Cutover`,
+  7. moving to `Complete`: the source nodes are forgotten, `BootstrapSourceDetached` is `True`, the cluster returns to Ready after the single roll, and all 200 keys are still readable.
 
-The e2e test ran once on a small dataset. It has no restart or failure-injection cases, and does not test TLS, differing shard counts, source shutdown, or lagging replicas.
+All five specs passed in one run (about five minutes), also on a branch rebased onto current `main`.
+
+The e2e test ran once on a small dataset. It has no restart or failure-injection cases, and does not test TLS, differing shard counts, a rollback to the source, or lagging replicas.
 
 ## Where the code is
 
@@ -296,7 +340,7 @@ The e2e test ran once on a small dataset. It has no restart or failure-injection
 
 1. **POC** (this branch): equal shard counts, cutover through the field, Kind e2e test.
 2. **API and conditions:** the final field shape, user documentation, and the lag check against the source.
-3. **Hardening:** operator-restart and failure-injection tests, abort cleanup on the source, the version matrix (#375, #263), and pre-9.0 sources (#575).
+3. **Hardening:** operator-restart and failure-injection tests, a rollback test, abort cleanup on the source, the version matrix (#375, #263), and pre-9.0 sources (#575).
 4. **Later:** differing shard counts, the sync-tool path (B), standalone or Sentinel sources, in-place adoption, and the topology-conversion idea from the issue comments.
 
 ## Open questions
@@ -306,3 +350,4 @@ The e2e test ran once on a small dataset. It has no restart or failure-injection
 3. What are the timeline and scope of `valkey-proxy`, and would it change this design?
 4. How should the source credential relate to the operator's `_operator` user?
 5. Should the operator forget its own nodes on the source when a bootstrap is aborted?
+6. Should `Complete` wait until the source nodes are down, as implemented, or also remove running ones (which would need a `CLUSTER RESET` on the source, a destructive step on the user's old data)?

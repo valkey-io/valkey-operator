@@ -311,6 +311,8 @@ Tests that pass:
 
 - Unit tests for source validation and shard ordering (`internal/valkey/bootstrap_test.go`).
 - Unit tests for the migrated check and the sync counting (`internal/controller/bootstrap_test.go`).
+- Unit tests for the rendered config per stage, source-member detection and the `BootstrapSourceDetached` condition.
+- Envtest specs for the CEL rules (`internal/controller/valkeycluster_bootstrap_validation_test.go`): the default stage, the enum, forward-only moves, the immutable source, and that `bootstrap` cannot be added or removed.
 - The existing envtest suite, which confirms clusters without `spec.bootstrap` behave as before.
 - An end-to-end test on Kind (`test/e2e/valkeycluster_bootstrap_test.go`) against a plain StatefulSet source with a password. It covers:
   1. forming the source and seeding 100 keys,

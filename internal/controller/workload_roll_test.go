@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,23 +65,53 @@ func TestPodTemplateWouldRoll(t *testing.T) {
 	assert.NotEqual(t, podTemplateRollHash(base), podTemplateRollHash(*changed))
 }
 
-func TestIsClusterOwned(t *testing.T) {
-	node := &valkeyiov1alpha1.ValkeyNode{}
-	assert.False(t, isClusterOwned(node))
+// The API server mirrors serviceAccountName into the deprecated serviceAccount
+// field on read; a template built without it must still compare equal.
+func TestPodTemplateIgnoresDeprecatedServiceAccount(t *testing.T) {
+	desired := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			ServiceAccountName: "my-sa",
+			Containers:         []corev1.Container{{Name: "server", Image: "valkey/valkey:9.0.0"}},
+		},
+	}
+	live := desired.DeepCopy()
+	live.Spec.DeprecatedServiceAccount = "my-sa"
 
-	ctrl := true
-	node.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "valkey.io/v1alpha1",
-		Kind:       "ValkeyCluster",
-		Name:       "c",
-		UID:        "1",
-		Controller: &ctrl,
-	}}
-	assert.True(t, isClusterOwned(node))
+	assert.False(t, podTemplateWouldRoll(*live, desired))
+	assert.Equal(t, podTemplateRollHash(desired), podTemplateRollHash(*live))
+}
 
-	ctrl = false
-	node.OwnerReferences[0].Controller = &ctrl
-	assert.False(t, isClusterOwned(node))
+func TestHasKnownParent(t *testing.T) {
+	ref := func(apiVersion, kind string, controller *bool) metav1.OwnerReference {
+		return metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: "p", UID: "1", Controller: controller}
+	}
+	tests := []struct {
+		name string
+		refs []metav1.OwnerReference
+		want bool
+	}{
+		{name: "no owner", want: false},
+		{name: "ValkeyCluster controller", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", new(true))}, want: true},
+		{name: "ValkeyCluster not controller", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", new(false))}, want: false},
+		{name: "ValkeyCluster controller nil", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "ValkeyCluster", nil)}, want: false},
+		{name: "other kind", refs: []metav1.OwnerReference{ref("apps/v1", "StatefulSet", new(true))}, want: false},
+		{name: "ValkeyCluster in another group", refs: []metav1.OwnerReference{ref("example.com/v1", "ValkeyCluster", new(true))}, want: false},
+		{name: "Valkey is not a known parent yet", refs: []metav1.OwnerReference{ref("valkey.io/v1alpha1", "Valkey", new(true))}, want: false},
+		{
+			name: "ValkeyCluster controller next to another owner",
+			refs: []metav1.OwnerReference{
+				ref("v1", "ConfigMap", nil),
+				ref("valkey.io/v1alpha1", "ValkeyCluster", new(true)),
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{OwnerReferences: tt.refs}}
+			assert.Equal(t, tt.want, hasKnownParent(node))
+		})
+	}
 }
 
 func TestWorkloadRevisionAllows(t *testing.T) {
@@ -110,6 +142,42 @@ func TestComputeWorkloadRevisionStable(t *testing.T) {
 	h3, err := computeWorkloadRevision(node)
 	require.NoError(t, err)
 	assert.NotEqual(t, h1, h3)
+}
+
+// TestComputeWorkloadRevisionIgnoresScripts guards the reason the scripts
+// live in a ConfigMap: changing one must not roll pods.
+func TestComputeWorkloadRevisionIgnoresScripts(t *testing.T) {
+	node := &valkeyiov1alpha1.ValkeyNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "n", Namespace: "ns"},
+		Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+			Image:        "valkey/valkey:9.0.0",
+			WorkloadType: valkeyiov1alpha1.WorkloadTypeStatefulSet,
+		},
+	}
+	before, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+
+	original := scriptsHash
+	t.Cleanup(func() { scriptsHash = original })
+	scriptsHash = "changed"
+	after, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a scripts hash change must not change the pod template")
+
+	tmpl, err := buildNodePodTemplate(node)
+	require.NoError(t, err)
+	data, err := json.Marshal(tmpl)
+	require.NoError(t, err)
+	entries, err := scripts.ReadDir("scripts")
+	require.NoError(t, err)
+	for _, e := range entries {
+		body, err := scripts.ReadFile("scripts/" + e.Name())
+		require.NoError(t, err)
+		// Search for the body as json.Marshal escapes it, newlines included.
+		encoded, err := json.Marshal(string(body))
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), strings.Trim(string(encoded), `"`), "%s contents must stay out of the pod template", e.Name())
+	}
 }
 
 func TestPodSupersededAndStuck(t *testing.T) {

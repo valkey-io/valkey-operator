@@ -21,11 +21,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // podTemplateRollHash returns a stable hash of the pod template fields that
@@ -56,20 +58,27 @@ func normalizePodTemplate(tmpl corev1.PodTemplateSpec) corev1.PodTemplateSpec {
 		Labels:      out.Labels,
 		Annotations: out.Annotations,
 	}
+	// The API server mirrors serviceAccountName into this field on read.
+	out.Spec.DeprecatedServiceAccount = ""
 	return *out
 }
 
-// isClusterOwned reports whether the ValkeyNode is controlled by a ValkeyCluster.
-func isClusterOwned(node *valkeyiov1alpha1.ValkeyNode) bool {
-	for _, ref := range node.OwnerReferences {
-		if ref.Kind != "ValkeyCluster" {
-			continue
-		}
-		if ref.Controller != nil && *ref.Controller {
-			return true
-		}
+// knownParentKinds lists the valkey.io kinds that may control a ValkeyNode.
+// Add a kind only together with the controller that sets Spec.WorkloadRevision
+// for it, otherwise its nodes never apply a pod template change.
+var knownParentKinds = []string{"ValkeyCluster"}
+
+// hasKnownParent reports whether the ValkeyNode is controlled by a known parent kind.
+func hasKnownParent(node *valkeyiov1alpha1.ValkeyNode) bool {
+	ref := metav1.GetControllerOfNoCopy(node)
+	if ref == nil {
+		return false
 	}
-	return false
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil || gv.Group != valkeyiov1alpha1.GroupVersion.Group {
+		return false
+	}
+	return slices.Contains(knownParentKinds, ref.Kind)
 }
 
 // computeWorkloadRevision builds the pod template for the node (using the same

@@ -79,6 +79,14 @@ Have an idea? Start a discussion in [GitHub Discussions](https://github.com/valk
 
 Stack PRs for larger changes — break work into a sequence of focused, reviewable PRs rather than one large change. For example: add new primitives in one PR, then wire them into existing controllers in a follow-up.
 
+#### Optional: pre-PR review with an agent
+
+If you use an AI coding agent, the repo ships a `pre-pr-review` skill at [`.agents/skills/pre-pr-review/`](.agents/skills/pre-pr-review/SKILL.md). It runs `make lint test`, reviews your diff, deploys your branch to a fresh kind cluster, and exercises the changed behaviour. It writes a report to `.review/`, named after your branch, and prints a block to paste into the PR's Testing section.
+
+You need Docker, [kind](https://kind.sigs.k8s.io/), and the Go toolchain from the [Developer Guide](./docs/developer-guide.md). [`gh`](https://cli.github.com/) is optional; the skill uses it to read linked issues. The kind cluster stays up afterwards, and the skill prints the command to delete it.
+
+In your coding agent, run `/pre-pr-review` or ask it to run the `pre-pr-review` skill. If your agent doesn't find the skill, symlink the skill directory into the agent's skills directory, or ask the agent to read and follow `.agents/skills/pre-pr-review/SKILL.md`. The check is optional, and CI runs the e2e suite on every PR either way. PRs that have been through it, with its recommendations acted on, get reviewed faster.
+
 We'll review your PR as soon as possible. Be patient and responsive to feedback.
 
 ## Developer Certificate of Origin (DCO)
@@ -163,6 +171,7 @@ git rebase --continue
 - Keep changes minimal; match the style of surrounding code rather than introducing new patterns
 - Avoid unrelated refactors in the same PR
 - Run `go fmt` before committing (or use `make fmt`)
+- Start new Go files with the header in `hack/boilerplate.go.txt`, using the current year. CI rejects new files with any other year
 - Add comments for exported functions and types
 - Write unit tests for new code
 - Update CRDs by modifying `api/v1alpha1/*_types.go` then run `make manifests generate`

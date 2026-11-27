@@ -29,14 +29,13 @@ import (
 	. "github.com/onsi/gomega"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
-	"github.com/valkey-io/valkey-operator/internal/controller"
 	"github.com/valkey-io/valkey-operator/test/utils"
 )
 
 // Test valkey cluster on PSS restricted namespace
 const pssRestrictedNamespace = "valkey-pss-restricted"
 
-var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem"), func() {
+var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFilesystem", Ordered, Label("ValkeyCluster", "ReadOnlyRootFilesystem", "security"), func() {
 	const noPersistClusterName = "cluster-readonly-rootfs-sample"
 	const noPersistManifest = "config/samples/v1alpha1_valkeycluster-readonly-rootfs.yaml"
 	const persistClusterName = "cluster-readonly-rootfs-persistent-sample"
@@ -97,12 +96,9 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 
 		// /data must be wired up even without persistence, otherwise the server
 		// can't write nodes.conf to a read-only rootfs.
-		By("verifying the ConfigMap sets dir and cluster-config-file under /data")
+		By("verifying the node's pinned config sets dir and cluster-config-file under /data")
 		verifyConfigMap := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "configmap", controller.GetServerConfigMapName(noPersistClusterName),
-				"-o", "jsonpath={.data.valkey\\.conf}",
-				"-n", pssRestrictedNamespace)
-			output, err := utils.Run(cmd)
+			output, err := utils.GetNodePinnedConfig(noPersistClusterName+"-0-0", pssRestrictedNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(output).To(ContainSubstring("dir /data"))
 			g.Expect(output).To(ContainSubstring("cluster-config-file /data/nodes.conf"))
@@ -123,6 +119,26 @@ var _ = Describe("ValkeyCluster on PSS restricted namespace and readOnlyRootFile
 			}
 		}
 		Eventually(verifyROFS).Should(Succeed())
+
+		By("verifying every pod's init container inherits the server's securityContext, exits 0, and the pod is Ready")
+		verifyInitROFS := func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("valkey.io/cluster=%s", noPersistClusterName),
+				"-o", "jsonpath={range .items[*]}{.metadata.name}"+
+					":{.spec.initContainers[?(@.name=='server-init')].securityContext.readOnlyRootFilesystem}"+
+					":{.status.initContainerStatuses[?(@.name=='server-init')].state.terminated.exitCode}"+
+					":{.status.conditions[?(@.type=='Ready')].status}{\"\\n\"}{end}",
+				"-n", pssRestrictedNamespace)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			pods := utils.GetNonEmptyLines(output)
+			g.Expect(pods).NotTo(BeEmpty())
+			for _, pod := range pods {
+				// name:readOnlyRootFilesystem:exitCode:Ready
+				g.Expect(pod).To(MatchRegexp(`^[^:]+:true:0:True$`))
+			}
+		}
+		Eventually(verifyInitROFS).Should(Succeed())
 
 		By("verifying /data is backed by an emptyDir")
 		verifyEmptyDir := func(g Gomega) {

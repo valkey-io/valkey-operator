@@ -17,53 +17,119 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOperatorUserPasswordSecret(t *testing.T) {
 	sel := operatorUserPasswordSecret("c1")
 	assert.NotNil(t, sel)
-	assert.Equal(t, "internal-c1-system-passwords", sel.Name)
+	assert.Equal(t, "valkey-c1-system-passwords", sel.Name)
 	assert.Equal(t, "_operator", sel.Key)
 	assert.NotNil(t, sel.Optional)
 	assert.True(t, *sel.Optional)
 }
 
-func TestBuildAclFileContents(t *testing.T) {
+var buildAclPasswords = map[string][]string{
+	"alice": {"a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"},
+	"david": {
+		"7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1",
+		"4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b",
+	},
+	"frank": {"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
+}
 
-	passwords := map[string][]string{
-		"alice":   {"a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"},
-		"bob":     {},
-		"charlie": {},
-		"david": {
-			"7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1",
-			"4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b",
+var buildAclExpected = map[string]string{
+	"alice":   "user alice on #a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137 ~app:* ~cache:* %R~shared:* %R~config:* %W~logs:* %W~metrics:* resetchannels &notifications:* &events:* +@read +@write +@connection -@admin -@dangerous +client|setname +debug",
+	"bob":     "user bob on nopass +@all -@admin ~* &*",
+	"charlie": "user charlie off nopass +@admin",
+	"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
+	"edward":  "user edward on +@admin",
+	"frank":   "user frank on #9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 +@read",
+}
+
+func TestBuildAclFileContents(t *testing.T) {
+	adminOnly := valkeyiov1alpha1.ACLPermissions{
+		Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@admin"}},
+	}
+	users := []valkeyiov1alpha1.ACLUserSpec{
+		{
+			Name:  "alice",
+			State: valkeyiov1alpha1.ACLUserStateEnabled,
+			Password: &valkeyiov1alpha1.ACLUserPassword{
+				Type:   valkeyiov1alpha1.ACLPasswordTypeSecret,
+				Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "alice-secret", Keys: []string{"alice"}},
+			},
+			ACLPermissions: legacyBuildAclUsers[0].ACLPermissions,
+		},
+		{
+			Name:           "bob",
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{RawAcl: "+@all -@admin ~* &*"},
+		},
+		{
+			Name:           "charlie",
+			State:          valkeyiov1alpha1.ACLUserStateDisabled,
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+			ACLPermissions: adminOnly,
+		},
+		{
+			Name: "david",
+			Password: &valkeyiov1alpha1.ACLUserPassword{
+				Secret: &valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"davidold", "davidnew"}},
+			},
+			ACLPermissions: adminOnly,
+		},
+		{
+			Name:           "edward",
+			Password:       &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeDisabled},
+			ACLPermissions: adminOnly,
+		},
+		{
+			// No state or password block behaves as Enabled and Secret.
+			Name: "frank",
+			ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+				Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{"@read"}},
+			},
 		},
 	}
 
-	expecteds := map[string]string{
-		"alice":   "user alice on #a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137 ~app:* ~cache:* %R~shared:* %R~config:* %W~logs:* %W~metrics:* resetchannels &notifications:* &events:* +@read +@write +@connection -@admin -@dangerous +client|setname +debug",
-		"bob":     "user bob on nopass +@all -@admin ~* &*",
-		"charlie": "user charlie off nopass +@admin",
-		"david":   "user david on #7447bd019c69af5975c54072b40f9c24d1105836cbd68408d6df7be76ac42ab1 #4b31cf3c1347d94fe80efb0c848579c5730d63efef2f5eaf32f78a7ca251833b +@admin",
-		"edward":  "user edward on +@admin",
+	for _, user := range users {
+		acl := buildUserAcl(user, buildAclPasswords[user.Name])
+		assert.Equal(t, buildAclExpected[user.Name], strings.TrimSpace(acl), user.Name)
 	}
+}
 
-	// UsersAcl
-	users := []valkeyiov1alpha1.UserAclSpec{
-		{
-			Name:    "alice",
-			Enabled: true,
-			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-				Name: "alice-secret",
-				Keys: []string{"alice"},
-			},
-			NoPassword: false,
+// Converted legacy users must render the same lines they did before
+// spec.acl.users existed, so moving users between the fields changes nothing.
+func TestBuildUserAclLegacyParity(t *testing.T) {
+	for _, legacy := range legacyBuildAclUsers {
+		acl := buildUserAcl(legacy.ToACLUser(), buildAclPasswords[legacy.Name])
+		assert.Equal(t, buildAclExpected[legacy.Name], strings.TrimSpace(acl), legacy.Name)
+	}
+}
+
+var legacyBuildAclUsers = []valkeyiov1alpha1.UserAclSpec{
+	{
+		Name:    "alice",
+		Enabled: true,
+		PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+			Name: "alice-secret",
+			Keys: []string{"alice"},
+		},
+		NoPassword: false,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@read", "@write", "@connection"},
 				Deny:  []string{"@admin", "@dangerous"},
@@ -78,52 +144,48 @@ func TestBuildAclFileContents(t *testing.T) {
 			},
 			RawAcl: "+client|setname +debug",
 		},
-		{
-			Name:       "bob",
-			Enabled:    true,
-			NoPassword: true,
-			RawAcl:     "+@all -@admin ~* &*",
+	},
+	{
+		Name:       "bob",
+		Enabled:    true,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+			RawAcl: "+@all -@admin ~* &*",
 		},
-		{
-			Name:       "charlie",
-			Enabled:    false,
-			NoPassword: true,
+	},
+	{
+		Name:       "charlie",
+		Enabled:    false,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-		{
-			Name:    "david",
-			Enabled: true,
-			PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-				Keys: []string{"davidold", "davidnew"},
-			},
+	},
+	{
+		Name:    "david",
+		Enabled: true,
+		PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+			Keys: []string{"davidold", "davidnew"},
+		},
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-		{
-			Name:       "edward",
-			Enabled:    true,
-			ResetPass:  true,
-			NoPassword: true,
+	},
+	{
+		Name:       "edward",
+		Enabled:    true,
+		ResetPass:  true,
+		NoPassword: true,
+		ACLPermissions: valkeyiov1alpha1.ACLPermissions{
 			Commands: valkeyiov1alpha1.CommandsAclSpec{
 				Allow: []string{"@admin"},
 			},
 		},
-	}
-
-	// iterate over the users
-	for _, user := range users {
-
-		userName := user.Name
-		acl := buildUserAcl(user, passwords[userName])
-		expected := expecteds[userName]
-
-		if strings.TrimSpace(acl) != expected {
-			t.Errorf("%s ACL Failed. Expected '%s'; got '%s'", userName, expected, acl)
-		}
-	}
+	},
 }
 
 func TestValidateSystemUserPasswordSecret(t *testing.T) {
@@ -198,4 +260,150 @@ func TestExporterUserAllowsCommandLogMetrics(t *testing.T) {
 	// ACL rules apply left to right, so the grant must follow the blanket -command.
 	assert.Greater(t, index("+command|info"), index("-command"))
 	assert.Greater(t, index("-command"), -1)
+}
+
+func TestBuildUserAclUnknownStateIsOff(t *testing.T) {
+	user := valkeyiov1alpha1.ACLUserSpec{
+		Name:     "alice",
+		State:    "Paused",
+		Password: &valkeyiov1alpha1.ACLUserPassword{Type: valkeyiov1alpha1.ACLPasswordTypeAny},
+	}
+
+	assert.Equal(t, "user alice off nopass", strings.TrimSpace(buildUserAcl(user, nil)))
+}
+
+func TestDeprecatedFieldConfigWarnings(t *testing.T) {
+	legacy := []valkeyiov1alpha1.UserAclSpec{{Name: "bob", Enabled: true, NoPassword: true}}
+
+	warnings := deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy}, //nolint:staticcheck // legacy spec.users
+	})
+	if assert.Len(t, warnings, 1) {
+		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
+		assert.Contains(t, warnings[0].message, "spec.users is deprecated")
+		assert.Contains(t, warnings[0].message, "spec.acl.users")
+	}
+
+	replicas := &valkeyiov1alpha1.ValkeyCluster{}
+	replicas.Spec.Replicas = 2 //nolint:staticcheck // legacy spec.replicas
+	warnings = deprecatedFieldConfigWarnings(replicas)
+	if assert.Len(t, warnings, 1) {
+		assert.Equal(t, valkeyiov1alpha1.ReasonDeprecatedField, warnings[0].reason)
+		assert.Contains(t, warnings[0].message, "set spec.replicasPerShard: 2 and remove spec.replicas in the same update")
+	}
+
+	both := &valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: legacy}, //nolint:staticcheck // legacy spec.users
+	}
+	both.Spec.Replicas = 1 //nolint:staticcheck // legacy spec.replicas
+	assert.Len(t, deprecatedFieldConfigWarnings(both), 2)
+
+	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{
+			ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{Name: "bob"}}},
+		},
+	}))
+	assert.Empty(t, deprecatedFieldConfigWarnings(&valkeyiov1alpha1.ValkeyCluster{
+		Spec: valkeyiov1alpha1.ValkeyClusterSpec{Users: []valkeyiov1alpha1.UserAclSpec{}}, //nolint:staticcheck // legacy spec.users
+	}))
+}
+
+// The API server requires the Secret's name, but a cluster stored before it
+// did keeps a user without one through validation ratcheting. The operator no
+// longer reads <cluster>-users for such a user, and names the missing field.
+func TestReconcileUsersAclNamesTheUnsetSecretNameField(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, valkeyiov1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	newReconciler := func() *ValkeyClusterReconciler {
+		fallback := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "c-users", Namespace: "ns"},
+			Data:       map[string][]byte{"alice": []byte("alice-pw")},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fallback).Build()
+		return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(100)}
+	}
+	cluster := func(spec valkeyiov1alpha1.ValkeyClusterSpec) *valkeyiov1alpha1.ValkeyCluster {
+		return &valkeyiov1alpha1.ValkeyCluster{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "cluster-uid"}, Spec: spec}
+	}
+
+	for desc, tc := range map[string]struct {
+		spec valkeyiov1alpha1.ValkeyClusterSpec
+		want string
+	}{
+		"spec.acl.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+				Name:     "alice",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Keys: []string{"alice"}}},
+			}}}},
+			want: "user alice: password.secret.name is not set",
+		},
+		"spec.users": {
+			spec: valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, Users: []valkeyiov1alpha1.UserAclSpec{{Name: "alice", Enabled: true}}}, //nolint:staticcheck // legacy spec.users
+			want: "user alice: passwordSecret.name is not set",
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			err := newReconciler().reconcileUsersAcl(ctx, cluster(tc.spec))
+			var unresolved *userSecretUnresolvedError
+			require.ErrorAs(t, err, &unresolved, "kept on the last good aclfile like a missing Secret")
+			assert.EqualError(t, err, tc.want)
+		})
+	}
+
+	t.Run("not for a disabled user", func(t *testing.T) {
+		spec := valkeyiov1alpha1.ValkeyClusterSpec{Shards: 1, ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+			Name: "alice", State: valkeyiov1alpha1.ACLUserStateDisabled,
+		}}}}
+		require.NoError(t, newReconciler().reconcileUsersAcl(ctx, cluster(spec)))
+	})
+}
+
+func TestFetchUserPasswordsEmptySecretValue(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "cache-users", Namespace: "default"},
+				Data:       map[string][]byte{"alice": tt.value},
+			}
+			user := valkeyiov1alpha1.ACLUserSpec{
+				Name:     "alice",
+				Password: &valkeyiov1alpha1.ACLUserPassword{Secret: &valkeyiov1alpha1.PasswordSecretSpec{Name: "cache-users"}},
+			}
+			hashes, err := fetchUserPasswords(context.Background(), user, "password.secret.name", providerTestClient(t, secret), "default")
+			require.NoError(t, err)
+			assert.Equal(t, []string{"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, hashes)
+		})
+	}
+}
+
+func TestPreHashedPassword(t *testing.T) {
+	const hash = "a71153805265764af6f55b4e0ce38858cde64e6e24b9a9b14e32262760572137"
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+		wantHash bool
+	}{
+		{"lowercase hash", "#" + hash, hash, true},
+		{"uppercase hash is lowercased", "#" + strings.ToUpper(hash), hash, true},
+		{"65 bytes but not hex is plaintext", "#" + strings.Repeat("z", 64), "", false},
+		{"hash with trailing newline is plaintext", "#" + hash + "\n", "", false},
+		{"no leading #", "x" + hash, "", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := preHashedPassword([]byte(tc.in))
+			assert.Equal(t, tc.wantHash, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

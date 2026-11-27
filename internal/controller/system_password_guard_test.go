@@ -23,7 +23,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -241,45 +240,4 @@ func TestUpsertRefusesWhenTheNodeListFails(t *testing.T) {
 	default:
 		t.Fatal("expected a SystemPasswordSecretMissing warning event")
 	}
-}
-
-// cacheMissClient simulates the manager cache for the read-through: the
-// cache is configured to only hold Secrets carrying the
-// app.kubernetes.io/managed-by label, so a Secret that lost the label
-// reads as NotFound through the cached client even though the API server
-// still has it. Everything else, including writes, delegates to the real
-// client the way uncached reads and all writes go to the API server.
-type cacheMissClient struct {
-	client.Client
-}
-
-func (c cacheMissClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*corev1.Secret); ok {
-		return apierrors.NewNotFound(corev1.Resource("secret"), key.Name)
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
-
-// TestUpsertAdoptsUnlabeledSecretThroughAPIReader pins the read-through
-// from the review: the manager cache only holds Secrets with the
-// managed-by label, so a Secret that lost the label reads as NotFound from
-// the cached client. The upsert must read through the API reader, adopt the
-// Secret (standard labels + controller reference) and keep its existing
-// passwords instead of failing with AlreadyExists on every reconcile or
-// generating fresh keys the running nodes do not know.
-func TestUpsertAdoptsUnlabeledSecretThroughAPIReader(t *testing.T) {
-	cluster, _, objs := systemPasswordFixture(true)
-	r, c := systemPasswordReconciler(t, objs)
-	r.Client = cacheMissClient{Client: c}
-	r.APIReader = c
-
-	updated, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.NoError(t, err)
-	require.Equal(t, []byte("op-old"), updated.Data[operatorUser], "an adopted Secret keeps its passwords")
-	require.Equal(t, []byte("re-old"), updated.Data[replicationUser], "an adopted Secret keeps its passwords")
-
-	stored := &corev1.Secret{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
-	require.Equal(t, "valkey-operator", stored.Labels["app.kubernetes.io/managed-by"], "adoption restores the label the cache selects on")
-	require.True(t, metav1.IsControlledBy(stored, cluster), "adoption restores the controller reference")
 }

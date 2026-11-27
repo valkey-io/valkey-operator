@@ -121,9 +121,11 @@ var _ = Describe("TLS client auth admission rules", Label("tls", "cel"), func() 
 		node := &valkeyiov1alpha1.ValkeyNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "cel-node-disabled-cn", Namespace: "default"},
 			Spec: valkeyiov1alpha1.ValkeyNodeSpec{
+				SharedConfigMapName: testSharedConfigMapName,
+				ConfigRevision:      testConfigRevision,
 				TLS: &valkeyiov1alpha1.NodeTLSSpec{
 					Certificates: valkeyiov1alpha1.NodeTLSCertificates{Server: valkeyiov1alpha1.NodeCertificateRef{SecretName: "tls-secret"}},
-					ClientAuth: &valkeyiov1alpha1.TLSClientAuthSpec{
+					ClientAuth: &valkeyiov1alpha1.NodeTLSClientAuthSpec{
 						Mode:            valkeyiov1alpha1.TLSAuthClientsDisabled,
 						CertificateUser: valkeyiov1alpha1.TLSAuthClientsUserCN,
 					},
@@ -244,7 +246,7 @@ var _ = Describe("When TLS client auth is configured", Label("tls"), func() {
 var _ = Describe("Live config", Label("liveconfig"), func() {
 	newNode := func(cfg map[string]string) *valkeyiov1alpha1.ValkeyNode {
 		return &valkeyiov1alpha1.ValkeyNode{
-			Spec: valkeyiov1alpha1.ValkeyNodeSpec{Config: cfg},
+			Spec: valkeyiov1alpha1.ValkeyNodeSpec{SharedConfigMapName: testSharedConfigMapName, ConfigRevision: testConfigRevision, Config: cfg},
 		}
 	}
 
@@ -259,11 +261,11 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 	})
 
 	It("keeps the roll hash stable when only an allowlisted key changes", func() {
-		before := nodeServerConfigRollHash(newNode(map[string]string{
+		before := renderPinnedConfig(newNode(map[string]string{
 			"maxmemory-policy": "allkeys-lru",
 			"appendonly":       "yes",
 		}))
-		after := nodeServerConfigRollHash(newNode(map[string]string{
+		after := renderPinnedConfig(newNode(map[string]string{
 			"maxmemory-policy": "volatile-lru",
 			"appendonly":       "yes",
 		}))
@@ -271,8 +273,8 @@ var _ = Describe("Live config", Label("liveconfig"), func() {
 	})
 
 	It("changes the roll hash when a non-allowlisted key changes", func() {
-		before := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "yes"}))
-		after := nodeServerConfigRollHash(newNode(map[string]string{"appendonly": "no"}))
+		before := renderPinnedConfig(newNode(map[string]string{"appendonly": "yes"}))
+		after := renderPinnedConfig(newNode(map[string]string{"appendonly": "no"}))
 		Expect(after).NotTo(Equal(before))
 	})
 
@@ -480,3 +482,9 @@ var _ = Describe("Discovery managed config", func() {
 		Expect(getBaseConfig(tls, cluster.PrefersHostnameAnnounce(), cluster.Spec.Image)["cluster-preferred-endpoint-type"]).To(Equal("hostname"))
 	})
 })
+
+// buildServerConfig renders the cluster's full server config, live keys included.
+func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
+	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
+	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
+}

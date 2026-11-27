@@ -51,8 +51,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: true
     resources:
@@ -312,8 +318,14 @@ kind: ValkeyCluster
 metadata:
   name: %s
 spec:
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
   shards: 1
-  replicas: 0
+  replicasPerShard: 0
   exporter:
     enabled: false
 `, valkeyName)
@@ -341,7 +353,7 @@ spec:
 
 			By("Verifying the exporter user password is not created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", "internal-"+valkeyName+"-system-passwords",
+				cmd := exec.Command("kubectl", "get", "secret", "valkey-"+valkeyName+"-system-passwords",
 					"-o", "jsonpath={.data._exporter}",
 				)
 				out, err := utils.Run(cmd)

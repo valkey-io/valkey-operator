@@ -1,0 +1,227 @@
+#!/bin/sh
+#
+# Starts the server of a cluster node without persistence
+# (POSIX sh, works with bash, dash & busybox ash).
+#
+# Usage: primary-handoff.sh <valkey.conf> <further valkey-server arguments>
+#
+# Without persistence /data is an emptyDir, which outlives a restart of the
+# server container while the dataset in memory does not. A primary whose
+# server crashed would reload nodes.conf and come back as the same node, with
+# the same slots and only the data it can reload from disk. Its replicas
+# could then full-sync to that older or empty dataset. When the previous run
+# was a primary with a replica that can be promoted, this script:
+#
+#   1. waits until every such replica is a primary with a slot assignment or
+#      follows another node. Replicas reconnect by address, and the restarted
+#      container keeps the pod address, so a wiped server that started at
+#      once would be synced from before the failover. The wait is capped at
+#      six cluster-node-timeouts, at most 300s, which the default startup
+#      probe allows for;
+#   2. then empties /data, so the server starts as a new, empty node, like a
+#      recreated pod, and the operator attaches it to the promoted primary.
+#      If a replica has not moved on by the cap, the identity and the
+#      snapshot are kept instead: an empty new node would leave the slots
+#      with a dead ID, while the old identity keeps the cluster serving.
+#
+# Any other node, a replica, a primary without such a replica, or a first
+# start, runs the server untouched.
+set -e
+# Exit on SIGTERM instead of finishing the wait: the shell is PID 1 here.
+trap 'exit 143' TERM
+
+conf=$1
+data_dir=${VALKEY_DATA_DIR:-/data}
+nodes_conf="$data_dir/nodes.conf"
+cli_timeout=3 # seconds one valkey-cli call may take, connection and reply included
+operator_password_file=${VALKEY_OPERATOR_PASSWORD_FILE:-/etc/valkey/system-passwords/_operator}
+# Read before load_operator_auth unsets them. See load_operator_auth.
+legacy_user=${VALKEY_USER:-}
+legacy_pw=${VALKEYCLI_AUTH:-}
+
+case $data_dir in ""|/) echo "Refusing to use '$data_dir' as the data dir" >&2; exit 1 ;; esac
+
+# handoff_timeout_ms reads the last cluster-node-timeout as a decimal number.
+# Cap the input at 50000ms before multiplying it by six in the shell.
+handoff_timeout_ms() {
+    awk '
+        $1 == "cluster-node-timeout" { value = $2 }
+        END {
+            quote = substr(value, 1, 1)
+            if ((quote == sprintf("%c", 34) || quote == sprintf("%c", 39)) &&
+                substr(value, length(value), 1) == quote)
+                value = substr(value, 2, length(value) - 2)
+            if (value !~ /^[0-9]+$/) value = 15000
+            print (value + 0 > 50000 ? 50000 : value + 0)
+        }
+    ' "$conf" 2>/dev/null
+}
+
+# timeout_cmd SECONDS COMMAND... runs the command with a time limit, as in the
+# probe scripts: its exit code, or 124 on timeout.
+timeout_cmd() {
+    duration=$1; shift
+    "$@" &
+    cmdpid=$!
+    count=0
+    max_count=$((duration * 10))
+    while [ $count -lt $max_count ]; do
+        if ! kill -0 $cmdpid 2>/dev/null; then
+            wait $cmdpid
+            return $?
+        fi
+        sleep 0.1
+        count=$((count + 1))
+    done
+    kill -TERM $cmdpid 2>/dev/null
+    sleep 0.1
+    kill -0 $cmdpid 2>/dev/null && sleep 1 && kill -KILL $cmdpid 2>/dev/null
+    wait $cmdpid 2>/dev/null
+    return 124
+}
+
+# The functions below read nodes.conf, one line per node:
+#   <id> <ip:port@cport[,hostname[,...]]> <flags> <primary-id> ... <slots>
+# This node's flags contain "myself", a replica's contain "slave" (the legacy
+# name) and its fourth field is the id of its primary.
+
+# previous_primary_id prints this node's id if the previous run was a primary.
+previous_primary_id() {
+    awk '$3 ~ /myself/ && $3 ~ /master/ { print $1 }' "$nodes_conf"
+}
+
+# promotable_replicas ID prints the replicas of primary ID that can take over,
+# as ip:port per line: not flagged fail or noaddr (unreachable). A nofailover
+# replica counts too: the operator promotes it with TAKEOVER.
+promotable_replicas() {
+    awk -v me="$1" '
+        $4 != me || $3 !~ /slave/ { next }
+        $3 ~ /(^|,)fail(,|$)/ || $3 ~ /noaddr/ { next }
+        {
+            split($2, parts, "@")
+            address = parts[1]                # ip:port
+            if (match($2, /tls-port=[0-9]+/)) {
+                tls_port = substr($2, RSTART + 9, RLENGTH - 9)
+                if (tls_port != "0") sub(/:[0-9]+$/, ":" tls_port, address)
+            }
+            print address
+        }' "$nodes_conf"
+}
+
+# load_operator_auth sets the _operator credentials for the next call. As
+# in the probe scripts, the mounted file is the current password and updates
+# when the Secret rotates. It is read before every call, so a rotation during
+# the wait is picked up. VALKEYCLI_USER and VALKEYCLI_AUTH in the environment
+# are for valkey-cli run in the pod and may name another user, so they are not
+# used here. A pod created before the operator mounted the file has none: it
+# falls back to the VALKEY_USER and VALKEYCLI_AUTH pair the operator set then.
+load_operator_auth() {
+    unset VALKEYCLI_USER VALKEYCLI_AUTH REDISCLI_AUTH
+    pw=""
+    if [ -f "$operator_password_file" ]; then
+        # An unreadable file must not end the script; set -e would exit here.
+        pw=$(cat "$operator_password_file" 2>/dev/null) || true
+    fi
+    auth_args=""
+    if [ -n "$pw" ]; then
+        auth_args="--user _operator"
+    elif [ -n "$legacy_user" ] && [ -n "$legacy_pw" ]; then
+        pw=$legacy_pw
+        auth_args="--user $legacy_user"
+    fi
+    if [ -n "$auth_args" ]; then
+        VALKEYCLI_AUTH=$pw
+        export VALKEYCLI_AUTH
+    fi
+}
+
+# replica_moved_on IP PORT succeeds once the replica reports itself a primary
+# with a slot assignment, or a replica of another node. One CLUSTER NODES
+# reply supplies the role, the primary ID and the assignment from the same
+# view, as resolveRole does. A restarting replica can report master before
+# rejoining its primary, without owning slots.
+# Replies use the data dir: the root filesystem may be read-only, and a call
+# cut short by the timeout must not hold a pipe open.
+replica_moved_on() {
+    reply="$data_dir/.cluster-reply"
+    load_operator_auth
+    if ! timeout_cmd "$cli_timeout" valkey-cli -t "$cli_timeout" -h "$1" -p "$2" ${VALKEY_TLS_ARGS:-} ${auth_args:-} CLUSTER NODES > "$reply" 2>/dev/null; then
+        rm -f "$reply"
+        return 1
+    fi
+    rc=0
+    awk -v me="$me" '
+        { sub(/\r$/, "") }
+        $3 ~ /(^|,)myself(,|$)/ {
+            # A malformed self entry must not count as a slot assignment: the
+            # node ID is 40 hex characters and the config epoch is numeric.
+            if (NF < 8 || length($1) != 40 || $1 ~ /[^0-9a-fA-F]/ || $7 !~ /^[0-9]+$/) exit
+            is_master = ($3 ~ /(^|,)master(,|$)/)
+            is_slave = ($3 ~ /(^|,)slave(,|$)/)
+            if (is_master == is_slave) exit
+            if (is_slave) {
+                # The fourth field is the primary node ID. Prefixes keep the
+                # comparison textual when both IDs are all digits.
+                found = (length($4) == 40 && $4 !~ /[^0-9a-fA-F]/ && ("id:" $4) != ("id:" me))
+                exit
+            }
+            for (i = 9; i <= NF; i++) {
+                if ($i ~ /^\[[0-9]+-[<>]-[0-9a-fA-F]+\]$/ && length($i) - index($i, "-") == 43 && substr($i, 2) + 0 <= 16383) marker = 1
+                else if (substr($i, 1, 1) == "[") continue
+                else if ($i ~ /^[0-9]+$/) {
+                    if ($i + 0 <= 16383) owned = 1
+                    else ranges_invalid = 1
+                } else if ($i ~ /^[0-9]+-[0-9]+$/) {
+                    split($i, bounds, "-")
+                    if (bounds[1] + 0 <= bounds[2] + 0 && bounds[2] + 0 <= 16383) owned = 1
+                    else ranges_invalid = 1
+                } else ranges_invalid = 1
+            }
+            # An invalid plain field discards the owned ranges of the line,
+            # not the markers, as the Go parser does.
+            found = marker || (owned && !ranges_invalid)
+            exit
+        }
+        END { exit !found }
+    ' "$reply" || rc=$?
+    rm -f "$reply"
+    return "$rc"
+}
+
+# wait_for_handoff SECONDS succeeds once every replica in $replicas has moved
+# on, and fails on the first that has not by the deadline.
+wait_for_handoff() {
+    deadline=$(( $(date +%s) + $1 ))
+    for replica in $replicas; do
+        ip=${replica%:*}
+        port=${replica##*:}
+        until replica_moved_on "$ip" "$port"; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "Replica $ip:$port still follows this node" >&2
+                return 1
+            fi
+            sleep 1
+        done
+    done
+}
+
+if [ -f "$nodes_conf" ] && me=$(previous_primary_id) && [ -n "$me" ]; then
+    replicas=$(promotable_replicas "$me")
+    if [ -n "$replicas" ]; then
+        # Six cluster-node-timeouts, at most 300s, which the default startup
+        # probe of the container allows for (startupFailureThreshold).
+        cap=$(( $(handoff_timeout_ms) * 6 / 1000 ))
+        [ "$cap" -lt 1 ] && cap=1
+        echo "Previous run was primary $me with a replica; waiting up to ${cap}s for the replica hand-off" >&2
+        started=$(date +%s)
+        if wait_for_handoff "$cap"; then
+            echo "Replica hand-off done after $(( $(date +%s) - started ))s; starting as a new node" >&2
+            # Empty the data dir, hidden names included, for a start as a new node.
+            find "${data_dir:?}" -mindepth 1 -delete
+        else
+            echo "Keeping the previous identity after $(( $(date +%s) - started ))s" >&2
+        fi
+    fi
+fi
+
+exec valkey-server "$@"

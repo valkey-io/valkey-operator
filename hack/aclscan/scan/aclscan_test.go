@@ -44,6 +44,7 @@ func TestOperatorCommands(t *testing.T) {
 		"ACL GETUSER",
 		"ACL LOAD",
 		"ACL USERS",
+		"CLIENT KILL",
 		"CLUSTER ADDSLOTSRANGE",
 		"CLUSTER FAILOVER",
 		"CLUSTER FORGET",
@@ -58,6 +59,7 @@ func TestOperatorCommands(t *testing.T) {
 		"CLUSTER SET-CONFIG-EPOCH",
 		"CONFIG SET",
 		"INFO",
+		"TIME",
 	}
 	assert.ElementsMatch(t, want, got)
 }

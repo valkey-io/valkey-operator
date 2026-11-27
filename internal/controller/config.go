@@ -38,11 +38,12 @@ import (
 
 const (
 	scriptsHashKey = "valkey.io/script-hash"
-	configHashKey  = "valkey.io/config-hash"
 	configFileKey  = "valkey.conf"
 
-	readinessScriptKey = "readiness-check.sh"
-	livenessScriptKey  = "liveness-check.sh"
+	readinessScriptKey      = "readiness-check.sh"
+	livenessScriptKey       = "liveness-check.sh"
+	initScriptKey           = "init.sh"
+	primaryHandoffScriptKey = "primary-handoff.sh"
 
 	// Average-ish length of Valkey parameter + value
 	averageParameterLength = 20
@@ -74,16 +75,16 @@ var tlsAuthClientsUserDirective = map[valkeyiov1alpha1.TLSAuthClientsUser]string
 	valkeyiov1alpha1.TLSAuthClientsUserURI: "URI",
 }
 
-//go:embed scripts/*
+//go:embed scripts/*.sh
 var scripts embed.FS
 var scriptsHash string
 
-func GetServerConfigMapName(clusterName string) string {
+func GetSharedConfigMapName(clusterName string) string {
 	return resourcePrefix + clusterName
 }
 
-// buildManagedConfig returns the operator-managed directives shared by the
-// cluster and standalone ValkeyNode config paths.
+// buildManagedConfig returns the operator-managed directives of the node
+// config.
 //
 //nolint:goconst
 func buildManagedConfig(includeACL bool, tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, image string) map[string]string {
@@ -137,11 +138,6 @@ func renderConfig(config map[string]string) string {
 	builder.Grow(len(config) * averageParameterLength)
 	writeSortedConfig(&builder, config)
 	return builder.String()
-}
-
-func generateValkeyNodeConfig(node *valkeyiov1alpha1.ValkeyNode) string {
-	hostname := node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname
-	return renderConfig(buildManagedConfig(node.Spec.UsersACLSecretName != "", node.Spec.TLS, hostname, node.Spec.Image))
 }
 
 // Return a base config of parameters that users shouldn't be able to override.
@@ -282,27 +278,7 @@ func renderServerConfig(userConfig, baseConfig map[string]string, excludeUserKey
 	return configBuilder.String()
 }
 
-// buildServerConfig renders the full config written to the shared ConfigMap.
-func buildServerConfig(cluster *valkeyiov1alpha1.ValkeyCluster) string {
-	excludeKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-	return renderServerConfig(cluster.Spec.Config, getBaseConfig(nodeTLSFromCluster(cluster), cluster.PrefersHostnameAnnounce(), cluster.Spec.Image), excludeKeys)
-}
-
-// nodeServerConfigRollHash derives the config roll hash from the node spec:
-// the rendered server config minus live-settable keys. Parents copy Config and
-// TLS verbatim onto the node spec, so this hash is byte-identical to the hash
-// the ValkeyCluster controller computes from its own spec — a hard requirement,
-// since a divergence would change every pod template on operator upgrade and
-// roll every pod (see config_rollhash_test.go).
-func nodeServerConfigRollHash(node *valkeyiov1alpha1.ValkeyNode) string {
-	excludedKeys := maps.Clone(liveConfigAllowlist)
-	maps.Copy(excludedKeys, gatedUserKeysToSuppress(node.Spec.Image, node.Spec.Config))
-	rendered := renderServerConfig(node.Spec.Config, getBaseConfig(node.Spec.TLS, node.Spec.PreferredEndpointType == valkeyiov1alpha1.PreferredEndpointTypeHostname, node.Spec.Image), excludedKeys)
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(rendered)))
-}
-
-// Create or update a default valkey.conf
-// If additional config is provided, append to the default map
+// upsertConfigMap creates or updates the cluster's scripts ConfigMap.
 func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) error {
 
 	log := logf.FromContext(ctx)
@@ -319,17 +295,22 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return fmt.Errorf("reading embedded liveness-check.sh: %w", err)
 	}
 
-	// Get the new server config
-	newServerConfig := buildServerConfig(cluster)
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded init.sh: %w", err)
+	}
 
-	// Calculate hash of constructed configMap contents (ie: updated scripts, changed/added parameters)
-	newServerConfigHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newServerConfig)))
+	// Embed the primary handoff script
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	if err != nil {
+		return fmt.Errorf("reading embedded primary-handoff.sh: %w", err)
+	}
 
 	// Look for, and fetch existing configMap for this cluster
-	serverConfigMapName := GetServerConfigMapName(cluster.Name)
+	sharedConfigMapName := GetSharedConfigMapName(cluster.Name)
 	serverConfigMap := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      serverConfigMapName,
+		Name:      sharedConfigMapName,
 		Namespace: cluster.Namespace,
 	}, serverConfigMap); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -338,22 +319,22 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		}
 
 		// ConfigMap not found; This happens on cluster init
-		log.V(2).Info("creating server configMap", "name", serverConfigMapName)
+		log.V(2).Info("creating shared configMap", "name", sharedConfigMapName)
 
 		// Create configMap object with contents
 		serverConfigMap.ObjectMeta = metav1.ObjectMeta{
-			Name:      serverConfigMapName,
+			Name:      sharedConfigMapName,
 			Namespace: cluster.Namespace,
 			Labels:    labels(cluster),
 			Annotations: map[string]string{
-				configHashKey:  newServerConfigHash,
 				scriptsHashKey: scriptsHash,
 			},
 		}
 		serverConfigMap.Data = map[string]string{
-			readinessScriptKey: string(readiness),
-			livenessScriptKey:  string(liveness),
-			configFileKey:      newServerConfig,
+			readinessScriptKey:      string(readiness),
+			livenessScriptKey:       string(liveness),
+			initScriptKey:           string(initScript),
+			primaryHandoffScriptKey: string(primaryHandoff),
 		}
 
 		// Register ownership of the configMap
@@ -374,30 +355,27 @@ func (r *ValkeyClusterReconciler) upsertConfigMap(ctx context.Context, cluster *
 		return nil
 	}
 
-	// ConfigMap exists
+	// ConfigMap exists. A node ConfigMap can share the name: cluster cache-0-0
+	// and node cache-0-0 of cluster cache both use valkey-cache-0-0. A
+	// ConfigMap this cluster does not control is left alone and reported.
+	if !metav1.IsControlledBy(serverConfigMap, cluster) {
+		return fmt.Errorf("configmap %s/%s exists and is not owned by ValkeyCluster %s", serverConfigMap.Namespace, serverConfigMap.Name, cluster.Name)
+	}
 
 	// Compare scripts hash in existing configMap to const value in operator; update scripts contents if different
 	updatedScripts := upsertAnnotation(serverConfigMap, scriptsHashKey, scriptsHash)
 	if updatedScripts {
-		log.V(1).Info("updated readiness, and liveness scripts")
+		log.V(1).Info("updated readiness, liveness, init and primary handoff scripts")
 		serverConfigMap.Data[readinessScriptKey] = string(readiness)
 		serverConfigMap.Data[livenessScriptKey] = string(liveness)
+		serverConfigMap.Data[initScriptKey] = string(initScript)
+		serverConfigMap.Data[primaryHandoffScriptKey] = string(primaryHandoff)
 	}
 
-	// Evaluate both upsertAnnotation calls unconditionally so the configHashKey
-	// annotation is always updated when the config changes — even when updatedScripts
-	// is true and would otherwise short-circuit the && below.
-	updatedConfig := upsertAnnotation(serverConfigMap, configHashKey, newServerConfigHash)
-
-	// If the generated config contents hash (from above) matches the hash of the current
-	// config contents, and we did not update the scripts contents, exit early
-	if !updatedScripts && !updatedConfig {
-		log.V(1).Info("server config unchanged")
+	if !updatedScripts {
+		log.V(1).Info("server configMap unchanged")
 		return nil
 	}
-
-	// Update the configMap with the generated config contents
-	serverConfigMap.Data[configFileKey] = newServerConfig
 
 	// Update
 	if err := r.Update(ctx, serverConfigMap); err != nil {
@@ -434,6 +412,17 @@ func init() {
 		panic("failure reading embedded liveness-check.sh")
 	}
 
-	// Calculate hash of both files
-	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(append(readiness, liveness...)))
+	initScript, err := scripts.ReadFile("scripts/init.sh")
+	if err != nil {
+		panic("failure reading embedded init.sh")
+	}
+
+	// Read the primary handoff script
+	primaryHandoff, err := scripts.ReadFile("scripts/primary-handoff.sh")
+	if err != nil {
+		panic("failure reading embedded primary-handoff.sh")
+	}
+
+	// Calculate hash of all scripts
+	scriptsHash = fmt.Sprintf("%x", sha256.Sum256(slices.Concat(readiness, liveness, initScript, primaryHandoff)))
 }

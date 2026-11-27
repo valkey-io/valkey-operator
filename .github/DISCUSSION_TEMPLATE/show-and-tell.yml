@@ -46,7 +46,7 @@ body:
           name: my-cluster
         spec:
           shards: 3
-          replicas: 2
+          replicasPerShard: 2
           # ...
       render: yaml
     validations:

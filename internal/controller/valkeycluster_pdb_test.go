@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,9 +44,11 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		reconciler = &ValkeyClusterReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(100),
+			Client:        k8sClient,
+			APIReader:     k8sClient,
+			Scheme:        k8sClient.Scheme(),
+			Recorder:      events.NewFakeRecorder(100),
+			ValkeyClients: testValkeyClients(k8sClient),
 		}
 		cluster = &valkeyiov1alpha1.ValkeyCluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -53,8 +56,8 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
+				Shards:           1,
+				ReplicasPerShard: 0,
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -62,6 +65,9 @@ var _ = Describe("reconcilePodDisruptionBudget", func() {
 
 		DeferCleanup(func() {
 			_ = k8sClient.Delete(ctx, cluster)
+			// envtest does not garbage-collect, and the next spec's cluster of
+			// the same name does not own this one.
+			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: GetSharedConfigMapName(cluster.Name), Namespace: cluster.Namespace}})
 			pdb := &policyv1.PodDisruptionBudget{}
 			if err := k8sClient.Get(ctx, pdbKey, pdb); err == nil {
 				_ = k8sClient.Delete(ctx, pdb)

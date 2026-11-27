@@ -21,14 +21,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/moby/patternmatcher"
+	"github.com/moby/patternmatcher/ignorefile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	valkeyv1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func getEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) *corev1.EnvVar {
@@ -59,7 +65,7 @@ func newTestValkeyNode(name, namespace string) *valkeyv1.ValkeyNode {
 		},
 		Spec: valkeyv1.ValkeyNodeSpec{
 			Image:               "valkey/valkey:9.0.0",
-			ServerConfigMapName: "valkey-config",
+			SharedConfigMapName: "valkey-config",
 			// Off by default here so the exporter-agnostic cases assert on the
 			// server container alone. A nil Enabled means enabled.
 			Exporter: valkeyv1.ExporterSpec{Enabled: new(false)},
@@ -80,6 +86,7 @@ func TestValkeyNodeResourceName_Simple(t *testing.T) {
 
 func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.ConfigRevision = "0123456789ab"
 	lbls := valkeyNodeLabels(node)
 	pts, err := buildValkeyNodePodTemplateSpec(node, lbls)
 	require.NoError(t, err)
@@ -98,11 +105,16 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	// Image
 	assert.Equal(t, "valkey/valkey:9.0.0", c.Image)
 
-	// Command
-	assert.Equal(t, []string{"valkey-server", "/config/valkey.conf",
+	// Command: a standalone node starts the server without primary-handoff.sh.
+	// The shell reads the replication password at process start. Kubelet must
+	// not expand it, or a rotation would stay on the value from the last
+	// container start.
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
 		"--cluster-announce-ip", "$(POD_IP)",
-		"--primaryuser", replicationUser,
-		"--primaryauth", "$(PRIMARY_AUTH)"}, c.Command)
+		"--primaryuser", replicationUser}, c.Command)
+	assert.NotContains(t, strings.Join(c.Command, "\n"), primaryHandoffScriptKey)
+	assert.NotContains(t, c.Command, "$(PRIMARY_AUTH)")
+	assert.Contains(t, strings.Join(c.Command, "\n"), systemPasswordMountPath)
 
 	// Env
 	require.Len(t, c.Env, 2)
@@ -128,7 +140,7 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// LivenessProbe
 	require.NotNil(t, c.LivenessProbe)
-	assert.Equal(t, int32(5), c.LivenessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.LivenessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.LivenessProbe.FailureThreshold)
 	assert.Equal(t, int32(5), c.LivenessProbe.TimeoutSeconds)
@@ -136,14 +148,14 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 
 	// ReadinessProbe
 	require.NotNil(t, c.ReadinessProbe)
-	assert.Equal(t, int32(5), c.ReadinessProbe.InitialDelaySeconds)
+	assert.Zero(t, c.ReadinessProbe.InitialDelaySeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.PeriodSeconds)
 	assert.Equal(t, int32(5), c.ReadinessProbe.FailureThreshold)
 	assert.Equal(t, int32(2), c.ReadinessProbe.TimeoutSeconds)
 	assert.Contains(t, c.ReadinessProbe.Exec.Command, "/scripts/readiness-check.sh")
 
-	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence)
-	require.Len(t, c.VolumeMounts, 3)
+	// VolumeMounts: scripts + valkey-conf + /data (emptyDir fallback when no persistence) + init output
+	require.Len(t, c.VolumeMounts, 4)
 	assert.Equal(t, "scripts", c.VolumeMounts[0].Name)
 	assert.Equal(t, "/scripts", c.VolumeMounts[0].MountPath)
 	assert.Equal(t, "valkey-conf", c.VolumeMounts[1].Name)
@@ -152,17 +164,30 @@ func TestBuildValkeyNodePodTemplateSpec(t *testing.T) {
 	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
 	assert.Equal(t, dataMountPath, c.VolumeMounts[2].MountPath)
 	assert.False(t, c.VolumeMounts[2].ReadOnly, "/data must be writable for nodes.conf")
+	assert.Equal(t, initVolumeName, c.VolumeMounts[3].Name)
+	assert.Equal(t, initMountPath, c.VolumeMounts[3].MountPath)
 
-	// Volumes: scripts + valkey-conf + /data emptyDir
-	require.Len(t, pts.Spec.Volumes, 3)
+	// Volumes: scripts + valkey-conf + /data emptyDir + init output emptyDir
+	require.Len(t, pts.Spec.Volumes, 4)
 	assert.Equal(t, "scripts", pts.Spec.Volumes[0].Name)
 	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
 	assert.Equal(t, int32(0755), *pts.Spec.Volumes[0].ConfigMap.DefaultMode)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: readinessScriptKey, Path: readinessScriptKey},
+		{Key: livenessScriptKey, Path: livenessScriptKey},
+		{Key: initScriptKey, Path: initScriptKey},
+		{Key: primaryHandoffScriptKey, Path: primaryHandoffScriptKey},
+	}, pts.Spec.Volumes[0].ConfigMap.Items, "scripts mount the script keys only")
 	assert.Equal(t, "valkey-conf", pts.Spec.Volumes[1].Name)
-	assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
+	assert.Equal(t, []corev1.KeyToPath{
+		{Key: configRevisionFileKey(node.Spec.ConfigRevision), Path: "valkey.conf"},
+		{Key: "live.conf", Path: "live.conf"},
+	}, pts.Spec.Volumes[1].ConfigMap.Items)
 	assert.Equal(t, dataVolumeName, pts.Spec.Volumes[2].Name)
 	require.NotNil(t, pts.Spec.Volumes[2].EmptyDir, "/data should default to emptyDir when persistence is not configured")
 	assert.Nil(t, pts.Spec.Volumes[2].PersistentVolumeClaim, "/data should not be a PVC when persistence is unset")
+	assert.Equal(t, initVolumeName, pts.Spec.Volumes[3].Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *testing.T) {
@@ -193,6 +218,170 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutPersistence_DataIsEmptyDir(t *tes
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
 	assert.False(t, dataMount.ReadOnly)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_InitContainer(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.InitContainers, 1)
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, "server-init", ic.Name)
+	assert.Equal(t, initContainerCommand("/scripts/init.sh"), ic.Command)
+	assert.Equal(t, "valkey/valkey:9.0.0", ic.Image)
+	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
+	assert.Equal(t, corev1.TerminationMessagePathDefault, ic.TerminationMessagePath)
+	assert.Equal(t, corev1.TerminationMessageReadFile, ic.TerminationMessagePolicy)
+	assert.Equal(t, pts.Spec.Containers[0].VolumeMounts, ic.VolumeMounts)
+	assert.Equal(t, pts.Spec.Containers[0].Env, ic.Env)
+
+	var initVol *corev1.Volume
+	for i := range pts.Spec.Volumes {
+		if pts.Spec.Volumes[i].Name == initVolumeName {
+			initVol = &pts.Spec.Volumes[i]
+		}
+	}
+	require.NotNil(t, initVol, "init-conf volume must exist")
+	assert.NotNil(t, initVol.EmptyDir, "init-conf should be an emptyDir")
+
+	assert.Contains(t, pts.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: initVolumeName, MountPath: initMountPath},
+		"server container must mount the init container's output directory")
+}
+
+func TestBuildValkeyNodePodTemplateSpec_InitContainerFollowsServerPatches(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Spec.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+	}
+	securityContext := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+	node.Spec.Containers = []corev1.Container{
+		{Name: "server", Image: "custom-valkey:latest", SecurityContext: securityContext},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	require.Len(t, pts.Spec.InitContainers, 1)
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, "custom-valkey:latest", ic.Image)
+	assert.Equal(t, corev1.PullAlways, ic.ImagePullPolicy)
+	assert.Equal(t, node.Spec.Resources, ic.Resources, "matching the server keeps the pod's QoS class")
+	assert.Equal(t, securityContext, ic.SecurityContext, "restricted PSA checks init containers too")
+}
+
+// TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts
+// covers the env and mounts added after the base container is built. A later
+// init.sh that needs one of them must not have to change the pod template.
+func TestBuildValkeyNodePodTemplateSpec_InitContainerSeesServerEnvAndMounts(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+	node.Labels = map[string]string{LabelCluster: "mycluster"}
+	node.Spec.UsersACLSecretName = "users-acl-secret"
+	node.Spec.TLS = &valkeyv1.NodeTLSSpec{
+		Certificates: valkeyv1.NodeTLSCertificates{
+			Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
+		},
+	}
+	node.Spec.Containers = []corev1.Container{
+		{Name: "server", Env: []corev1.EnvVar{{Name: "MY_VAR", Value: "example"}}},
+	}
+
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+
+	server := pts.Spec.Containers[0]
+	ic := pts.Spec.InitContainers[0]
+	assert.Equal(t, server.Env, ic.Env)
+	assert.Equal(t, server.EnvFrom, ic.EnvFrom)
+	assert.Equal(t, server.VolumeMounts, ic.VolumeMounts)
+	for _, path := range []string{dataMountPath, tlsCertMountPath, "/config/users", initMountPath} {
+		assert.True(t, slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool { return m.MountPath == path }),
+			"init container must mount %s", path)
+	}
+	for _, name := range []string{"MY_VAR", "VALKEY_TLS_ARGS", "VALKEYCLI_AUTH"} {
+		assert.True(t, hasEnvVar(ic.Env, name), "init container must have env %s", name)
+	}
+}
+
+func TestBuildValkeyNodeWorkloads_HaveInitContainer(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns")
+
+	dep, err := buildValkeyNodeDeployment(node)
+	require.NoError(t, err)
+	require.Len(t, dep.Spec.Template.Spec.InitContainers, 1)
+	assert.Equal(t, "server-init", dep.Spec.Template.Spec.InitContainers[0].Name)
+
+	sts, err := buildValkeyNodeStatefulSet(node)
+	require.NoError(t, err)
+	require.Len(t, sts.Spec.Template.Spec.InitContainers, 1)
+	assert.Equal(t, "server-init", sts.Spec.Template.Spec.InitContainers[0].Name)
+}
+
+// TestInitContainerCommand runs the init container's command against a
+// temporary script path.
+func TestInitContainerCommand(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "init.sh")
+	run := func() (string, int) {
+		cmd := initContainerCommand(script)
+		out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return string(out), exitErr.ExitCode()
+		}
+		require.NoError(t, err)
+		return string(out), 0
+	}
+
+	require.NoError(t, os.WriteFile(script, []byte("echo ran\nexit 3\n"), 0o644))
+	out, code := run()
+	assert.Equal(t, 3, code, "a present script runs and its exit code stands")
+	assert.Contains(t, out, "ran")
+}
+
+func TestInitScript(t *testing.T) {
+	out, err := exec.Command("sh", filepath.Join("scripts", "init.sh")).CombinedOutput()
+	require.NoError(t, err, "init.sh must succeed: %s", out)
+}
+
+// TestDockerignoreIncludesScripts guards the image build: .dockerignore
+// excludes everything by default, and a script missing from the build context
+// is missing from the embed FS, so the operator panics at startup.
+func TestDockerignoreIncludesScripts(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", ".dockerignore"))
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir("scripts")
+	require.NoError(t, err)
+	for _, e := range entries {
+		path := "internal/controller/scripts/" + e.Name()
+		assert.True(t, dockerContextIncludes(t, string(data), path),
+			"%s is embedded but excluded from the image build by .dockerignore", path)
+	}
+
+	// A later rule that excludes a script again must be caught: in
+	// .dockerignore the last matching rule wins.
+	reExcluded := string(data) + "\ninternal/controller/scripts/init.sh\n"
+	assert.False(t, dockerContextIncludes(t, reExcluded, "internal/controller/scripts/init.sh"))
+}
+
+// dockerContextIncludes reports whether path survives the .dockerignore rules,
+// using the matcher Docker uses for the build context.
+func dockerContextIncludes(t *testing.T, dockerignore, path string) bool {
+	t.Helper()
+	patterns, err := ignorefile.ReadAll(strings.NewReader(dockerignore))
+	require.NoError(t, err)
+	pm, err := patternmatcher.New(patterns)
+	require.NoError(t, err)
+	excluded, err := pm.MatchesOrParentMatches(path)
+	require.NoError(t, err)
+	return !excluded
 }
 
 func TestBuildValkeyNodeDeployment(t *testing.T) {
@@ -240,6 +429,40 @@ func TestBuildValkeyNodeStatefulSet(t *testing.T) {
 	// Verify the template has the right container
 	require.Len(t, ss.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, "server", ss.Spec.Template.Spec.Containers[0].Name)
+}
+
+// maxUnavailable is defaulted by Kubernetes 1.35 and later and dropped by
+// servers without the feature, so the desired spec follows the live one.
+func TestMatchServerDefaultedMaxUnavailable(t *testing.T) {
+	one, two := intstr.FromInt32(1), intstr.FromInt32(2)
+	withMaxUnavailable := func(v *intstr.IntOrString) *appsv1.StatefulSetSpec {
+		return &appsv1.StatefulSetSpec{UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+			Type:          appsv1.RollingUpdateStatefulSetStrategyType,
+			RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{MaxUnavailable: v},
+		}}
+	}
+	for _, tt := range []struct {
+		name          string
+		live, desired *appsv1.StatefulSetSpec
+		want          *intstr.IntOrString
+	}{
+		{"a server that defaults it gets the default", withMaxUnavailable(&one), withMaxUnavailable(nil), &one},
+		{"a value changed on the live object is set back to the default", withMaxUnavailable(&two), withMaxUnavailable(nil), &one},
+		{"a server without the feature leaves it unset", withMaxUnavailable(nil), withMaxUnavailable(nil), nil},
+		{"a live object without rollingUpdate leaves it unset", &appsv1.StatefulSetSpec{}, withMaxUnavailable(nil), nil},
+		{"a value the desired spec sets is kept", withMaxUnavailable(&one), withMaxUnavailable(&two), &two},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			matchServerDefaultedMaxUnavailable(tt.desired, tt.live)
+			assert.Equal(t, tt.want, tt.desired.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		})
+	}
+
+	// The built StatefulSet leaves it unset, for servers without the feature.
+	ss, err := buildValkeyNodeStatefulSet(newTestValkeyNode("mynode", "test-ns"))
+	require.NoError(t, err)
+	require.NotNil(t, ss.Spec.UpdateStrategy.RollingUpdate)
+	assert.Nil(t, ss.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable)
 }
 
 func TestBuildValkeyNodeStatefulSet_ClusterOwnedUsesHeadlessServiceName(t *testing.T) {
@@ -305,35 +528,27 @@ func TestStatefulSetAfterServiceNameChange(t *testing.T) {
 }
 
 func TestRefuseDesiredSTSCreate(t *testing.T) {
-	ctrl := true
-	owned := newTestValkeyNode("c-0-0", "ns")
-	owned.OwnerReferences = []metav1.OwnerReference{{
-		Kind:       "ValkeyCluster",
-		Controller: &ctrl,
-	}}
+	node := newTestValkeyNode("c-0-0", "ns")
 	pod := &corev1.Pod{}
 	hash := "abc"
 
 	t.Run("missing STS with live pod and WR mismatch", func(t *testing.T) {
-		assert.True(t, refuseDesiredSTSCreate(owned, pod, hash))
+		assert.True(t, refuseDesiredSTSCreate(node, pod, hash))
 	})
 	t.Run("WR matches", func(t *testing.T) {
-		n := owned.DeepCopy()
+		n := node.DeepCopy()
 		n.Spec.WorkloadRevision = hash
 		assert.False(t, refuseDesiredSTSCreate(n, pod, hash))
 	})
 	t.Run("no pod is first create", func(t *testing.T) {
-		assert.False(t, refuseDesiredSTSCreate(owned, nil, hash))
-	})
-	t.Run("standalone", func(t *testing.T) {
-		assert.False(t, refuseDesiredSTSCreate(newTestValkeyNode("solo", "ns"), pod, hash))
+		assert.False(t, refuseDesiredSTSCreate(node, nil, hash))
 	})
 }
 
 func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 	base := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, Replicas: 0},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 1, ReplicasPerShard: 0},
 	}
 
 	t.Run("default IP leaves PreferredEndpointType empty and still sets ClusterDomain", func(t *testing.T) {
@@ -341,6 +556,7 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		assert.Empty(t, n.Spec.PreferredEndpointType)
 		assert.Equal(t, valkeyv1.DefaultClusterDomain, n.Spec.ClusterDomain)
 		assert.Equal(t, "c", n.Labels[LabelCluster])
+		assert.Nil(t, n.Spec.Service)
 	})
 
 	t.Run("IP with custom ClusterDomain still sets ClusterDomain", func(t *testing.T) {
@@ -362,6 +578,15 @@ func TestBuildClusterValkeyNode_DiscoveryPrimitives(t *testing.T) {
 		n := buildClusterValkeyNode(c, 0, 0)
 		assert.Equal(t, valkeyv1.PreferredEndpointTypeHostname, n.Spec.PreferredEndpointType)
 		assert.Equal(t, "example.local", n.Spec.ClusterDomain)
+		assert.Nil(t, n.Spec.Service)
+	})
+
+	t.Run("perNodeServices is copied onto the node", func(t *testing.T) {
+		c := base.DeepCopy()
+		c.Spec.Networking = &valkeyv1.NetworkingSpec{PerNodeServices: &valkeyv1.PerNodeServicesSpec{}}
+		n := buildClusterValkeyNode(c, 1, 2)
+		assert.NotNil(t, n.Spec.Service)
+		assert.Equal(t, "valkey-c-1-2", valkeyNodeResourceName(n))
 	})
 }
 
@@ -533,32 +758,16 @@ func TestBuildValkeyNodePodTemplateSpec_Resources(t *testing.T) {
 	assert.Equal(t, resources, pts.Spec.Containers[0].Resources, "resource requirements should pass through")
 }
 
-func TestBuildValkeyNodeConfigMap(t *testing.T) {
-	node := newTestValkeyNode("mynode", "test-ns")
-	cm, err := buildValkeyNodeConfigMap(node)
-
-	require.NoError(t, err)
-	assert.Equal(t, GetServerConfigMapName("mynode"), cm.Name)
-	assert.Equal(t, "test-ns", cm.Namespace)
-	assert.Equal(t, valkeyNodeLabels(node), cm.Labels)
-
-	// Must contain both script keys and valkey.conf
-	assert.Contains(t, cm.Data, "valkey.conf")
-	assert.Contains(t, cm.Data, "liveness-check.sh")
-	assert.Contains(t, cm.Data, "readiness-check.sh")
-}
-
-func TestBuildValkeyNodeConfigMap_WithPersistence(t *testing.T) {
+func TestRenderPinnedConfig_WithPersistence(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 
-	cm, err := buildValkeyNodeConfigMap(node)
-	require.NoError(t, err)
-	assert.Contains(t, cm.Data["valkey.conf"], "dir /data")
-	assert.Contains(t, cm.Data["valkey.conf"], "cluster-config-file /data/nodes.conf")
+	conf := renderPinnedConfig(node)
+	assert.Contains(t, conf, "dir /data")
+	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
 }
 
-func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
+func TestRenderPinnedConfig_WithManagedConfig(t *testing.T) {
 	node := newTestValkeyNode("mynode", "test-ns")
 	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
 	node.Spec.UsersACLSecretName = "mynode-users"
@@ -568,10 +777,7 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 		},
 	}
 
-	cm, err := buildValkeyNodeConfigMap(node)
-	require.NoError(t, err)
-
-	conf := cm.Data["valkey.conf"]
+	conf := renderPinnedConfig(node)
 	assert.Contains(t, conf, "aclfile /config/users/users.acl")
 	assert.Contains(t, conf, "dir /data")
 	assert.Contains(t, conf, "cluster-config-file /data/nodes.conf")
@@ -579,7 +785,7 @@ func TestBuildValkeyNodeConfigMap_WithManagedConfig(t *testing.T) {
 	assert.Contains(t, conf, "port 0")
 }
 
-func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
+func TestRenderPinnedConfig_WithClientCertAuth(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		authClients     valkeyv1.TLSAuthClients
@@ -618,16 +824,13 @@ func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
 				Certificates: valkeyv1.NodeTLSCertificates{
 					Server: valkeyv1.NodeCertificateRef{SecretName: "tls-secret"},
 				},
-				ClientAuth: &valkeyv1.TLSClientAuthSpec{
+				ClientAuth: &valkeyv1.NodeTLSClientAuthSpec{
 					Mode:            tc.authClients,
 					CertificateUser: tc.authClientsUser,
 				},
 			}
 
-			cm, err := buildValkeyNodeConfigMap(node)
-			require.NoError(t, err)
-
-			conf := cm.Data["valkey.conf"]
+			conf := renderPinnedConfig(node)
 			for _, want := range tc.want {
 				assert.Contains(t, conf, want)
 			}
@@ -638,23 +841,12 @@ func TestBuildValkeyNodeConfigMap_WithClientCertAuth(t *testing.T) {
 	}
 }
 
-func TestBuildValkeyNodePodTemplateSpec_ConfigMapNameFallback(t *testing.T) {
-	t.Run("uses ServerConfigMapName when set", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns") // ServerConfigMapName = "valkey-config"
-		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-		require.NoError(t, err)
-		assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, "valkey-config", pts.Spec.Volumes[1].ConfigMap.Name)
-	})
-
-	t.Run("falls back to resource name when ServerConfigMapName is empty", func(t *testing.T) {
-		node := newTestValkeyNode("mynode", "test-ns")
-		node.Spec.ServerConfigMapName = ""
-		pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
-		require.NoError(t, err)
-		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[0].ConfigMap.Name)
-		assert.Equal(t, GetServerConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
-	})
+func TestBuildValkeyNodePodTemplateSpec_ConfigMapNames(t *testing.T) {
+	node := newTestValkeyNode("mynode", "test-ns") // SharedConfigMapName = "valkey-config"
+	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
+	require.NoError(t, err)
+	assert.Equal(t, "valkey-config", pts.Spec.Volumes[0].ConfigMap.Name)
+	assert.Equal(t, nodeConfigMapName("mynode"), pts.Spec.Volumes[1].ConfigMap.Name)
 }
 
 func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
@@ -664,7 +856,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 3)
+	require.Len(t, pts.Spec.Volumes, 4)
 	var dataVol *corev1.Volume
 	for i := range pts.Spec.Volumes {
 		if pts.Spec.Volumes[i].Name == dataVolumeName {
@@ -677,7 +869,7 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	assert.Equal(t, "valkey-mynode-data", dataVol.PersistentVolumeClaim.ClaimName)
 
 	server := pts.Spec.Containers[0]
-	require.Len(t, server.VolumeMounts, 3)
+	require.Len(t, server.VolumeMounts, 4)
 	var dataMount *corev1.VolumeMount
 	for i := range server.VolumeMounts {
 		if server.VolumeMounts[i].Name == dataVolumeName {
@@ -686,6 +878,65 @@ func TestBuildValkeyNodePodTemplateSpec_WithPersistence(t *testing.T) {
 	}
 	require.NotNil(t, dataMount, "server container must mount /data")
 	assert.Equal(t, dataMountPath, dataMount.MountPath)
+}
+
+// clusterMember labels the node as buildClusterValkeyNode does.
+func clusterMember(node *valkeyv1.ValkeyNode) *valkeyv1.ValkeyNode {
+	node.Labels = map[string]string{LabelCluster: "c", LabelShardIndex: "0", LabelNodeIndex: "0"}
+	return node
+}
+
+func TestBuildContainersDef_ClusterNodeWithoutPersistenceStartsThroughPrimaryHandoffScript(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(true), "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser}, containers[0].Command)
+	// The startup probe allows for the replica hand-off wait of up to 300s.
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestStartupFailureThreshold(t *testing.T) {
+	// A cluster-node-timeout in the config must not change the probe, since
+	// that would roll the pod on a change of the value.
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Config = map[string]string{"cluster-node-timeout": "200000"}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(80), containers[0].StartupProbe.FailureThreshold)
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	containers, err = buildContainersDef(node)
+	require.NoError(t, err)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestBuildContainersDef_PersistentClusterNodeSkipsPrimaryHandoffScript(t *testing.T) {
+	node := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	node.Spec.Persistence = &valkeyv1.PersistenceSpec{Size: resource.MustParse("5Gi")}
+	containers, err := buildContainersDef(node)
+	require.NoError(t, err)
+	require.Len(t, containers, 1)
+	assert.Equal(t, []string{shellPath, "-c", replicationAuthShell(false), "valkey-server", "/config/valkey.conf",
+		"--cluster-announce-ip", "$(POD_IP)",
+		"--primaryuser", replicationUser}, containers[0].Command)
+	assert.Equal(t, int32(20), containers[0].StartupProbe.FailureThreshold)
+}
+
+func TestBuildValkeyNodePodTemplateSpec_InitialSyncGate(t *testing.T) {
+	member := clusterMember(newTestValkeyNode("mynode", "test-ns"))
+	pts, err := buildValkeyNodePodTemplateSpec(member, valkeyNodeLabels(member))
+	require.NoError(t, err)
+	assert.Equal(t, []corev1.PodReadinessGate{{ConditionType: initialSyncGate}}, pts.Spec.ReadinessGates)
+
+	// A standalone ValkeyNode has no cluster controller to set the gate, even
+	// when it carries the cluster label.
+	standalone := newTestValkeyNode("mynode", "test-ns")
+	standalone.Labels = map[string]string{LabelCluster: "mynode"}
+	pts, err = buildValkeyNodePodTemplateSpec(standalone, valkeyNodeLabels(standalone))
+	require.NoError(t, err)
+	assert.Empty(t, pts.Spec.ReadinessGates)
 }
 
 func TestBuildContainersDef_DefaultImage(t *testing.T) {
@@ -723,6 +974,33 @@ func TestMergePatchContainers(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, out, 1)
 		assert.Equal(t, "server", out[0].Name)
+	})
+
+	t.Run("patch env var replaces the base one of the same name", func(t *testing.T) {
+		secretRef := func(name, key string) *corev1.EnvVarSource {
+			return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}}
+		}
+		baseEnv := []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", Value: "_operator"},
+			{Name: "VALKEYCLI_AUTH", ValueFrom: secretRef("system", "_operator")},
+		}
+		base := []corev1.Container{{Name: "server", Env: baseEnv}}
+		patches := []corev1.Container{{Name: "server", Env: []corev1.EnvVar{
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}}}
+		out, err := mergePatchContainers(base, patches)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.ElementsMatch(t, []corev1.EnvVar{
+			{Name: "KEEP", Value: "1"},
+			{Name: "VALKEYCLI_USER", ValueFrom: secretRef("users", "name")},
+			{Name: "VALKEYCLI_AUTH", Value: "literal"},
+		}, out[0].Env)
+		assert.Len(t, base[0].Env, 3, "base env must not be modified")
+		assert.Equal(t, baseEnv[1], corev1.EnvVar{Name: "VALKEYCLI_USER", Value: "_operator"})
 	})
 }
 
@@ -939,7 +1217,7 @@ func TestBuildExporterContainer(t *testing.T) {
 			Certificates: valkeyv1.NodeTLSCertificates{
 				Server: valkeyv1.NodeCertificateRef{SecretName: "my-tls-secret"},
 			},
-			ClientAuth: &valkeyv1.TLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
+			ClientAuth: &valkeyv1.NodeTLSClientAuthSpec{Mode: valkeyv1.TLSAuthClientsRequired},
 		}
 
 		c := generateMetricsExporterContainerDef(exporter, "mycluster", tlsSpec)
@@ -1019,8 +1297,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir
-	require.Len(t, pts.Spec.Volumes, 4)
+	// Volumes: scripts, valkey-conf, users-acl, /data emptyDir, init output
+	require.Len(t, pts.Spec.Volumes, 5)
 	aclVol := pts.Spec.Volumes[2]
 	assert.Equal(t, "users-acl", aclVol.Name)
 	require.NotNil(t, aclVol.Secret)
@@ -1029,11 +1307,11 @@ func TestBuildValkeyNodePodTemplateSpec_WithACLSecret(t *testing.T) {
 	require.NotNil(t, pts.Spec.Volumes[3].EmptyDir)
 
 	// VolumeMounts on the server container (always Containers[0]):
-	// scripts, valkey-conf, /data, users-acl
+	// scripts, valkey-conf, /data, init output, users-acl
 	c := pts.Spec.Containers[0]
-	require.Len(t, c.VolumeMounts, 4)
+	require.Len(t, c.VolumeMounts, 5)
 	assert.Equal(t, dataVolumeName, c.VolumeMounts[2].Name)
-	aclMount := c.VolumeMounts[3]
+	aclMount := c.VolumeMounts[4]
 	assert.Equal(t, "users-acl", aclMount.Name)
 	assert.Equal(t, "/config/users", aclMount.MountPath)
 	assert.True(t, aclMount.ReadOnly)
@@ -1045,8 +1323,8 @@ func TestBuildValkeyNodePodTemplateSpec_WithoutACLSecret(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 
-	require.Len(t, pts.Spec.Volumes, 3, "scripts, valkey-conf, /data emptyDir")
-	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 3, "scripts, valkey-conf, /data")
+	require.Len(t, pts.Spec.Volumes, 4, "scripts, valkey-conf, /data emptyDir, init output")
+	require.Len(t, pts.Spec.Containers[0].VolumeMounts, 4, "scripts, valkey-conf, /data, init output")
 }
 
 func TestLivenessCheckScript(t *testing.T) {
@@ -1100,10 +1378,10 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards:       3,
-			Replicas:     1,
-			Image:        "valkey/valkey:9.1.0",
-			WorkloadType: valkeyv1.WorkloadTypeStatefulSet,
+			Shards:           3,
+			ReplicasPerShard: 1,
+			Image:            "valkey/valkey:9.1.0",
+			WorkloadType:     valkeyv1.WorkloadTypeStatefulSet,
 			Persistence: &valkeyv1.PersistenceSpec{
 				Size:             resource.MustParse("10Gi"),
 				StorageClassName: &storageClassName,
@@ -1161,14 +1439,14 @@ func TestBuildClusterValkeyNode_PropagatesSpecFields(t *testing.T) {
 	assert.Equal(t, cluster.Spec.Scheduling.PriorityClassName, node.Spec.PriorityClassName, "PriorityClassName must be propagated")
 	assert.Equal(t, cluster.Spec.Exporter, node.Spec.Exporter, "Exporter must be propagated")
 	assert.Equal(t, cluster.Spec.Containers, node.Spec.Containers, "Containers must be propagated")
-	assert.Equal(t, GetServerConfigMapName(cluster.Name), node.Spec.ServerConfigMapName, "ServerConfigMapName must match configmap name")
+	assert.Equal(t, GetSharedConfigMapName(cluster.Name), node.Spec.SharedConfigMapName, "SharedConfigMapName must match configmap name")
 	assert.Equal(t, getInternalSecretName(cluster.Name), node.Spec.UsersACLSecretName, "UsersACLSecretName must match internal secret name")
 }
 
 func TestBuildClusterValkeyNode_NodeSpreadDefaultsRenderNothing(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)
@@ -1182,7 +1460,7 @@ func TestBuildClusterValkeyNode_RendersExplicitNodeSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1211,7 +1489,7 @@ func TestBuildClusterValkeyNode_MergesCurationWithPassthrough(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				Affinity:                  &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}},
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
@@ -1237,7 +1515,7 @@ func TestBuildClusterValkeyNode_RendersExplicitZoneSpread(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{Zone: &valkeyv1.ZoneScheduling{Spread: valkeyv1.ZoneSpread{
 				Shard:     valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadRequired},
 				Primaries: valkeyv1.SpreadConstraint{Mode: valkeyv1.SpreadPreferred},
@@ -1268,7 +1546,7 @@ func TestBuildClusterValkeyNode_MergesNodeAndZoneCuration(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 1, Replicas: 0,
+			Shards: 1, ReplicasPerShard: 0,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{userTSC},
 				Node: &valkeyv1.NodeScheduling{Spread: valkeyv1.NodeSpread{
@@ -1330,15 +1608,15 @@ func TestBuildValkeyNodePodTemplateSpec_OperatorUserProbeEnv(t *testing.T) {
 		envByName[server.Env[i].Name] = server.Env[i]
 	}
 
-	user, ok := envByName["VALKEY_USER"]
-	require.True(t, ok, "VALKEY_USER env should be set")
+	user, ok := envByName["VALKEYCLI_USER"]
+	require.True(t, ok, "VALKEYCLI_USER env should be set")
 	assert.Equal(t, "_operator", user.Value)
 
 	e, ok := envByName["VALKEYCLI_AUTH"]
 	require.True(t, ok, "VALKEYCLI_AUTH env should be set")
 	require.NotNil(t, e.ValueFrom)
 	require.NotNil(t, e.ValueFrom.SecretKeyRef)
-	assert.Equal(t, "internal-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, "valkey-mycluster-system-passwords", e.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "_operator", e.ValueFrom.SecretKeyRef.Key)
 }
 
@@ -1349,47 +1627,70 @@ func TestBuildValkeyNodePodTemplateSpec_NoOperatorUserProbeEnv(t *testing.T) {
 	pts, err := buildValkeyNodePodTemplateSpec(node, valkeyNodeLabels(node))
 	require.NoError(t, err)
 	for _, e := range pts.Spec.Containers[0].Env {
-		assert.NotEqual(t, "VALKEY_USER", e.Name)
+		assert.NotEqual(t, "VALKEYCLI_USER", e.Name)
 		assert.NotEqual(t, "VALKEYCLI_AUTH", e.Name)
 	}
 }
 
-// TestProbeScriptOperatorUserArgs verifies the probe scripts pass --user for the
-// probe user when set, while the password itself never appears on the command line.
+// TestProbeScriptOperatorUserArgs verifies the probe scripts authenticate as
+// _operator with the mounted password file, ignore VALKEYCLI_USER and
+// VALKEYCLI_AUTH from the environment, and keep the password off the command line.
 func TestProbeScriptOperatorUserArgs(t *testing.T) {
 	for _, name := range []string{"liveness-check.sh", "readiness-check.sh"} {
 		t.Run(name, func(t *testing.T) {
 			scriptPath := filepath.Join("scripts", name)
 			binDir := t.TempDir()
 			argsFile := filepath.Join(binDir, "args.txt")
-			stub := "#!/bin/sh\nprintf '%s' \"$*\" > \"" + argsFile + "\"\necho PONG\n"
+			stub := "#!/bin/sh\nprintf '%s|%s|%s' \"${VALKEYCLI_USER:-}\" \"${VALKEYCLI_AUTH:-}\" \"$*\" > \"" + argsFile + "\"\necho PONG\n"
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "valkey-cli"), []byte(stub), 0o755))
 			pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+			userEnv := []string{"VALKEYCLI_USER=alice", "VALKEYCLI_AUTH=alice-pw", "REDISCLI_AUTH=alice-pw"}
+			// A pod created before the system-password mount.
+			legacyEnv := []string{"VALKEY_USER=_operator", "VALKEYCLI_AUTH=env-pw"}
+			run := func(passwordFile string, env []string) string {
+				cmd := exec.Command(scriptPath)
+				cmd.Env = append(os.Environ(), pathEnv, "VALKEY_OPERATOR_PASSWORD_FILE="+passwordFile)
+				cmd.Env = append(cmd.Env, env...)
+				require.NoError(t, cmd.Run())
+				got, err := os.ReadFile(argsFile)
+				require.NoError(t, err)
+				return string(got)
+			}
 
-			// With probe user + auth env: --user present, password absent from argv.
-			cmd := exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=s3cr3t")
-			require.NoError(t, cmd.Run())
-			got, err := os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.Contains(t, string(got), "-user _operator")
-			assert.NotContains(t, string(got), "s3cr3t", "password must not be passed on the command line")
+			// With the mounted password: _operator and the file's password, never the user's.
+			passwordFile := filepath.Join(binDir, operatorUser)
+			require.NoError(t, os.WriteFile(passwordFile, []byte("s3cr3t\n"), 0o644))
+			got := run(passwordFile, userEnv)
+			fields := strings.SplitN(got, "|", 3)
+			require.Len(t, fields, 3)
+			assert.Empty(t, fields[0], "VALKEYCLI_USER must not reach valkey-cli")
+			assert.Equal(t, "s3cr3t", fields[1])
+			assert.Contains(t, fields[2], "--user _operator")
+			assert.NotContains(t, fields[2], "s3cr3t", "password must not be passed on the command line")
+			assert.NotContains(t, got, "alice")
 
-			// Without any probe env: no --user.
-			cmd = exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=", "VALKEYCLI_AUTH=")
-			require.NoError(t, cmd.Run())
-			got, err = os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.NotContains(t, string(got), "-user")
+			// The file wins over the legacy pair.
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|s3cr3t|"), got)
 
-			// With probe user but empty auth env: no --user.
-			cmd = exec.Command(scriptPath)
-			cmd.Env = append(os.Environ(), pathEnv, "VALKEY_USER=_operator", "VALKEYCLI_AUTH=")
-			require.NoError(t, cmd.Run())
-			got, err = os.ReadFile(argsFile)
-			require.NoError(t, err)
-			assert.NotContains(t, string(got), "-user")
+			// Without the file, the legacy pair authenticates.
+			got = run(filepath.Join(binDir, "missing"), legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			assert.Contains(t, got, "--user _operator")
+
+			// Without the file or VALKEY_USER: no credentials at all.
+			got = run(filepath.Join(binDir, "missing"), userEnv)
+			assert.Equal(t, "||", got[:2])
+			assert.NotContains(t, got, "-user")
+			assert.NotContains(t, got, "alice")
+
+			// With an empty file, the legacy pair authenticates, else nothing does.
+			require.NoError(t, os.WriteFile(passwordFile, nil, 0o644))
+			got = run(passwordFile, legacyEnv)
+			assert.True(t, strings.HasPrefix(got, "|env-pw|"), got)
+			got = run(passwordFile, userEnv)
+			assert.Equal(t, "||", got[:2])
+			assert.NotContains(t, got, "-user")
 		})
 	}
 }
@@ -1449,6 +1750,66 @@ func TestBuildValkeyNodePodTemplateSpec_ServiceAccountName_EmptyIsNoop(t *testin
 	assert.Empty(t, pts.Spec.ServiceAccountName, "omitting ServiceAccountName must leave the field unset so existing templates stay unchanged")
 }
 
+func TestBuildNodePodTemplate_PodMetadata(t *testing.T) {
+	for _, workloadType := range []valkeyv1.WorkloadType{valkeyv1.WorkloadTypeStatefulSet, valkeyv1.WorkloadTypeDeployment} {
+		t.Run(string(workloadType), func(t *testing.T) {
+			node := newTestValkeyNode("mycluster-0-0", "test-ns")
+			node.Labels = map[string]string{LabelCluster: "mycluster"}
+			node.Spec.WorkloadType = workloadType
+			node.Spec.ConfigRevision = "aaaaaaaaaaaa"
+			node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{
+				Labels: map[string]valkeyv1.LabelValue{
+					"team":       "data",
+					LabelCluster: "spoofed",
+				},
+				Annotations: map[string]string{
+					"example.com/scrape": "true",
+				},
+			}
+
+			tmpl, err := buildNodePodTemplate(node)
+			require.NoError(t, err)
+
+			assert.Equal(t, "data", tmpl.Labels["team"])
+			assert.Equal(t, "mycluster", tmpl.Labels[LabelCluster], "operator labels win over podMetadata")
+			assert.Equal(t, "true", tmpl.Annotations["example.com/scrape"])
+
+			var selector map[string]string
+			if workloadType == valkeyv1.WorkloadTypeDeployment {
+				dep, err := buildValkeyNodeDeployment(node)
+				require.NoError(t, err)
+				selector = dep.Spec.Selector.MatchLabels
+			} else {
+				sts, err := buildValkeyNodeStatefulSet(node)
+				require.NoError(t, err)
+				selector = sts.Spec.Selector.MatchLabels
+			}
+			assert.Equal(t, valkeyNodeLabels(node), selector, "podMetadata must stay out of the immutable selector")
+		})
+	}
+}
+
+func TestComputeWorkloadRevision_PodMetadata(t *testing.T) {
+	node := newTestValkeyNode("mycluster-0-0", "test-ns")
+	base, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+
+	node.Spec.PodMetadata = &valkeyv1.EmbeddedObjectMetadata{}
+	empty, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.Equal(t, base, empty, "an empty podMetadata must not roll pods")
+
+	node.Spec.PodMetadata.Labels = map[string]valkeyv1.LabelValue{"team": "data"}
+	withLabel, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.NotEqual(t, base, withLabel, "a pod label change must roll pods")
+
+	node.Spec.PodMetadata.Annotations = map[string]string{"example.com/scrape": "true"}
+	withAnnotation, err := computeWorkloadRevision(node)
+	require.NoError(t, err)
+	assert.NotEqual(t, withLabel, withAnnotation, "a pod annotation change must roll pods")
+}
+
 // TestDefaultImagePullPolicy pins the mirror of the API server's defaulting
 // rule branch by branch — a silent divergence on any of these makes that
 // container churn on every reconcile (#315). Rule: the effective tag is the
@@ -1479,7 +1840,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
 		Spec: valkeyv1.ValkeyClusterSpec{
-			Shards: 3, Replicas: 1,
+			Shards: 3, ReplicasPerShard: 1,
 			Scheduling: &valkeyv1.SchedulingSpec{
 				NodeSelector: map[string]string{"node.kubernetes.io/instance-type": "m6i.xlarge"},
 				Zone: &valkeyv1.ZoneScheduling{
@@ -1508,7 +1869,7 @@ func TestBuildClusterValkeyNode_RendersZonePinning(t *testing.T) {
 func TestBuildClusterValkeyNode_NoPinningLeavesNodeSelectorNil(t *testing.T) {
 	cluster := &valkeyv1.ValkeyCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
-		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, Replicas: 1},
+		Spec:       valkeyv1.ValkeyClusterSpec{Shards: 3, ReplicasPerShard: 1},
 	}
 
 	node := buildClusterValkeyNode(cluster, 1, 0)

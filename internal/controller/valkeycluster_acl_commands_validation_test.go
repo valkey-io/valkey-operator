@@ -50,14 +50,17 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Users: []valkeyiov1alpha1.UserAclSpec{{
-					Name:       "alice",
-					Enabled:    true,
-					NoPassword: true,
-					Commands:   valkeyiov1alpha1.CommandsAclSpec{Allow: []string{entry}},
-				}},
+				Shards:           1,
+				ReplicasPerShard: 0,
+				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name: "alice",
+					Password: &valkeyiov1alpha1.ACLUserPassword{
+						Type: valkeyiov1alpha1.ACLPasswordTypeAny,
+					},
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						Commands: valkeyiov1alpha1.CommandsAclSpec{Allow: []string{entry}},
+					},
+				}}},
 			},
 		}
 		err := k8sClient.Create(ctx, cluster)
@@ -147,14 +150,17 @@ var _ = Describe("users commands validation", func() {
 				Namespace: "default",
 			},
 			Spec: valkeyiov1alpha1.ValkeyClusterSpec{
-				Shards:   1,
-				Replicas: 0,
-				Users: []valkeyiov1alpha1.UserAclSpec{{
-					Name:       "alice",
-					Enabled:    true,
-					NoPassword: true,
-					Commands:   valkeyiov1alpha1.CommandsAclSpec{Deny: []string{"NOT A COMMAND"}},
-				}},
+				Shards:           1,
+				ReplicasPerShard: 0,
+				ACL: &valkeyiov1alpha1.ACLSpec{Users: []valkeyiov1alpha1.ACLUserSpec{{
+					Name: "alice",
+					Password: &valkeyiov1alpha1.ACLUserPassword{
+						Type: valkeyiov1alpha1.ACLPasswordTypeAny,
+					},
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						Commands: valkeyiov1alpha1.CommandsAclSpec{Deny: []string{"NOT A COMMAND"}},
+					},
+				}}},
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).NotTo(Succeed())

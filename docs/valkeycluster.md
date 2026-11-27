@@ -272,7 +272,7 @@ After takeover, check the node roles and application data, then inspect any rema
 
 Without `persistence`, `/data` is an `emptyDir`. It survives a server container restart within the same pod. If Valkey's `save` rules have written an RDB snapshot, Valkey can reload it on restart when the data directory is kept. Writes after the snapshot can be lost. Replacing the pod removes its `emptyDir`.
 
-When a primary crashes, the restarted container waits for its reachable replicas to stop following it. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
+When a primary crashes, the restarted container waits until each of its reachable replicas has a slot assignment as a primary or follows another node. It waits up to six `cluster-node-timeout` intervals, capped at five minutes. After the hand-off, it clears `/data`, including any local snapshot, and joins as a replica of the promoted primary. A replica with `cluster-replica-no-failover` also counts because the operator can promote it with `CLUSTER FAILOVER TAKEOVER`.
 
 If there are no reachable replicas or the wait expires, the server keeps its node ID, slots, and local files. In this case, an RDB snapshot can restore data through the last save.
 
@@ -363,7 +363,7 @@ probes:
 | `liveness` | `liveness-check.sh` | not settable | 5 | 4 | 1, fixed | 5 |
 | `readiness` | `readiness-check.sh` | not settable | 5 | 1 | 1 | 5 |
 
-`timeoutSeconds` is how long Valkey has to answer, at most 3600. The operator passes it to the check script and sets the probe's own timeout one second higher, so that the script normally gives up first; the defaults above appear in the pod as 5, 5 and 2. The script counts 0.1-second polls, which run late with a long timeout or a CPU-throttled container, and a check that runs past the extra second fails on the probe's timeout instead, which counts as a failed check all the same. Liveness and readiness have no `initialDelaySeconds` because they start only after the startup probe passes, and Kubernetes requires a `successThreshold` of 1 for startup and liveness.
+`timeoutSeconds` is how long Valkey has to answer, at most 3600. The operator passes it, or its default, to the check script and sets the probe's own timeout one second higher, so that the script normally gives up first; the defaults above appear in the pod as 5, 5 and 2. The script counts 0.1-second polls, which run late with a long timeout or a CPU-throttled container, and a check that runs past the extra second fails on the probe's timeout instead, which counts as a failed check all the same. Liveness and readiness have no `initialDelaySeconds` because they start only after the startup probe passes, and Kubernetes requires a `successThreshold` of 1 for startup and liveness.
 
 Both checks run `valkey-cli` against the local server. The liveness check passes on `PONG`, `LOADING` and `MASTERDOWN`, so a slow load of the dataset does not fail it, but a blocked event loop does: a slow command, a fork, or a CPU-throttled container where `valkey-cli` itself runs slowly. The readiness check passes only on `PONG`. A pod is Ready only once the [initial sync gate](#pod-disruption-budget) is set as well. After a restart of the server container the pod keeps its gate until the operator sees the new container and clears it, so a startup probe that passes sooner, with a shorter `initialDelaySeconds` or `periodSeconds`, leaves the operator less time to clear the gate before the pod reads Ready.
 
@@ -383,9 +383,11 @@ The startup probe checks first after `initialDelaySeconds`, then every `periodSe
 
 #### Changing probes
 
-Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. A cluster that does not set `probes` keeps the pod template it had, so upgrading the operator does not roll it.
+Changing `probes` changes the pod template, so the pods roll as for any other template change: one at a time, replicas before their primary, with a failover before each primary. Upgrading to a release whose probe commands always pass the check timeout rolls each pod once, whether or not the cluster sets `probes`.
 
-[`containers`](#containers) patches are applied after `probes`, so a probe field set in both takes the `containers` value, and `containers` remains the way to use your own check. A `timeoutSeconds` patch changes only the probe's own timeout: the check script keeps the `probes` value, or its default, unless the patch replaces the command too. To replace the liveness check, set `liveness.mode: Disabled` and give the `server` container a complete `livenessProbe`, handler included, in `containers`. Take that patch out before you set the mode back to `BuiltIn`: its handler would be merged into the operator's check, giving the probe two handlers. With liveness disabled there is no operator probe for a patch to merge into, so a `livenessProbe` patch that sets only timings leaves a probe without a handler. Either way the roll deletes the node's pod and its replacement cannot be created, so the node stays down until the patch is fixed.
+[`containers`](#containers) patches are applied after `probes`, so a probe field set in both takes the `containers` value, and `containers` remains the way to use your own check. A `timeoutSeconds` patch changes only the probe's own timeout: the check script keeps the `probes` value, or its default, unless the patch replaces the command too. To replace the liveness check, set `liveness.mode: Disabled` and give the `server` container a complete `livenessProbe`, handler included, in `containers`. Take that patch out before you set the mode back to `BuiltIn`: an `httpGet`, `tcpSocket` or `grpc` handler in it would be merged next to the operator's `exec` check, giving the probe two handlers. With liveness disabled there is no operator probe for a patch to merge into, so a `livenessProbe` patch that sets only timings leaves a probe without a handler.
+
+Kubernetes rejects a probe with no handler or more than one, so before it writes a node's StatefulSet or Deployment the operator checks every probe of the merged containers, sidecars included. If one fails, the operator leaves the workload as it is, so the node's pod keeps running on its current template, and the ValkeyNode reports `Ready=False` with reason `InvalidPodTemplate` and a message naming the container and the probe. The roll waits at that node, and a node created with the patch gets no pod, until the patch is fixed. The API server alone would not always keep the pod: it refuses such a Deployment, and from Kubernetes 1.34 such a StatefulSet, but before 1.34 it accepts the StatefulSet, and the roll deletes the pod without being able to create its replacement.
 
 ### Shards and replicas
 
@@ -398,7 +400,7 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
 
 #### Migrating from `spec.replicas`
 
-`replicas` is the deprecated name of `replicasPerShard` and is removed in `v1beta1`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a spec that sets both fields.
+`replicas` is the deprecated name of `replicasPerShard`. A cluster with a non-zero `replicas` gets a `ConfigurationWarning` condition with reason `DeprecatedField`. `replicas: 0` does not warn. The API server rejects a new or changed `replicas`, and it rejects a spec that sets both fields. Removing `replicas` is accepted only when the same update sets `replicasPerShard` to that stored count. An absent `replicasPerShard` counts as 0, so removing a stored `replicas: 0` needs no replacement field.
 
 1. Check that the installed CRD has the new field: `kubectl explain valkeyclusters.spec.replicasPerShard` must print it. Helm does not upgrade CRDs from a chart's `crds` directory. On an old CRD the API server drops `replicasPerShard` from the patch in step 3, which then leaves the cluster with 0 replicas.
 2. Wait until the new operator release runs and the old operator pod is gone.
@@ -408,6 +410,8 @@ replicasPerShard: 1  # 3 primaries + 3 replicas
    n=$(kubectl get valkeycluster <name> -o jsonpath='{.spec.replicas}') && \
    kubectl patch valkeycluster <name> --type=merge -p "{\"spec\":{\"replicas\":null,\"replicasPerShard\":${n:?spec.replicas is not set}}}"
    ```
+
+To change the replica count of a cluster that still stores `replicas`, migrate first, then set the new count on `replicasPerShard` in a second update. A single update that removes `replicas` and sets a different `replicasPerShard` is rejected.
 
 Applying an edited manifest works only if the apply removes `replicas`. Two cases keep it, and the API server rejects the update: client side `kubectl apply` on a cluster that was not created with `kubectl apply`, and server side apply when another field manager owns `spec.replicas`, for example after a `kubectl patch`. The merge patch works in both cases.
 
@@ -803,11 +807,11 @@ ACL changes are applied to running nodes with `ACL LOAD` (no pod restart), the s
 - `password.secret` is only valid with `password.type: Secret`
 - An enabled user with `password.type: Secret`, the default, must set `password.secret.name` (`passwordSecret.name` in the deprecated `spec.users`, unless `nopass` or `resetpass` is set). A disabled user needs no Secret
 
-> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone, so set `password.secret.name: <cluster>-users` on every such user before upgrading.
+> **Upgrade note:** Earlier releases read the Secret `<cluster>-users` for a user without `password.secret.name`. That default is gone. On `spec.acl.users`, set `password.secret.name: <cluster>-users` on every such user. A stored `spec.users` cannot be changed, so move those users to `spec.acl.users` and set `password.secret.name` there.
 
 #### Migrating from `spec.users`
 
-`spec.users` is deprecated and will be removed in `v1beta1`. It still works in this release, and a cluster that uses it reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event.
+`spec.users` is deprecated. A cluster that already has it still reconciles, and reports a [`ConfigurationWarning`](status-conditions.md#configurationwarning) condition with reason `DeprecatedField` and a `Warning` event. A new or changed `spec.users` is rejected. Removing it is accepted only when every user name is on `spec.acl.users` in that same update.
 
 Move the list under `spec.acl.users`, replace the booleans and nest `passwordSecret` under `password`:
 

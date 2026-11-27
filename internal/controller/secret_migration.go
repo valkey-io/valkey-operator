@@ -116,9 +116,15 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 // controller when it lacks them, as a Secret restored from a backup or by hand
 // does. Without the managed-by label the cache never sees it, and without the
 // controller reference it outlives the cluster. A Secret another object
-// controls is refused and not written.
+// controls is refused and not written, except one an earlier cluster of the
+// same name controls.
 func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
 	if owner := metav1.GetControllerOf(secret); owner != nil && owner.UID != cluster.UID {
+		// An earlier cluster of the same name: garbage collection removes
+		// the Secret, and until then it is used as it is.
+		if owner.Kind == "ValkeyCluster" && owner.Name == cluster.Name {
+			return nil
+		}
 		return fmt.Errorf("%w: secret %s is controlled by %s %s; the operator manages this Secret itself", errOperatorSecretForeignController, secret.Name, owner.Kind, owner.Name)
 	}
 	changed := false

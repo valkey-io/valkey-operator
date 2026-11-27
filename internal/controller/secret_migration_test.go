@@ -643,3 +643,23 @@ func TestFetchSystemUserPasswordFallsBackToTheLegacySecret(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey-c-system-passwords", "the error names the Secret the operator expects")
 }
+
+// A cluster deleted and created again under the same name finds the old
+// Secret until garbage collection removes it. It is used as it is, as before,
+// and is not refused as another controller's.
+func TestOperatorSecretUsesTheSecretOfAnEarlierClusterWithTheSameName(t *testing.T) {
+	ctx := context.Background()
+	earlier := migrationCluster()
+	earlier.UID = "earlier-uid"
+	secret := operatorOwned(t, earlier, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-c-system-passwords", Namespace: "ns"},
+		Data:       map[string][]byte{operatorUser: []byte("earlier-pw")},
+	})
+	r, c := newMigrationReconciler(t, secret)
+
+	got, err := r.operatorSecret(ctx, migrationCluster(), "valkey-c-system-passwords", "internal-c-system-passwords")
+	require.NoError(t, err)
+	assert.Equal(t, "earlier-pw", string(got.Data[operatorUser]))
+	stored, _ := getSecret(t, c, "valkey-c-system-passwords")
+	assert.Equal(t, secret.OwnerReferences, stored.OwnerReferences)
+}

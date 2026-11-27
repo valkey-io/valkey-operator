@@ -39,8 +39,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -945,11 +947,7 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNode(ctx context.Context, clust
 	if currentExists {
 		existing = current
 	}
-	if err := r.setDesiredConfigRevision(ctx, cluster, desired, existing, live.configRevision); err != nil {
-		if errors.Is(err, errLiveConfigRevisionNotCached) {
-			log.V(1).Info("live config revision not cached yet, waiting", "name", desired.Name, "revision", live.configRevision)
-			return nodeRequeued, nil
-		}
+	if err := r.setDesiredConfigRevision(ctx, desired, existing, live.configRevision); err != nil {
 		return nodeUnchanged, err
 	}
 	if err := setDesiredWorkloadRevision(desired); err != nil {
@@ -2412,6 +2410,13 @@ func (r *ValkeyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&valkeyiov1alpha1.ValkeyNode{}).
 		Owns(&corev1.Secret{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		// Each node's ConfigMap is owned by the ValkeyNode. The parent reads
+		// its revision keys to pick spec.configRevision.
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(nodeConfigToCluster),
+			builder.WithPredicates(configRevisionKeysPredicate()),
+		).
 		Named("valkeycluster").
 		Complete(r)
 }

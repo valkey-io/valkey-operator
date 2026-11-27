@@ -958,6 +958,7 @@ const (
 	ReasonGracePeriodTooShort           = "GracePeriodTooShort"
 	ReasonStartupProbeTooShort          = "StartupProbeTooShort"
 	ReasonPrimaryLost                   = "PrimaryLost"
+	ReasonAwaitingManualTakeover        = "AwaitingManualTakeover"
 	ReasonNoSlots                       = "NoSlotsAvailable"
 	ReasonRebalancingSlots              = "RebalancingSlots"
 	ReasonRebalanceFailed               = "RebalanceFailed"

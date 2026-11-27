@@ -19,12 +19,14 @@ package controller
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
@@ -74,11 +76,15 @@ type ValkeyClusterReconciler struct {
 	// ValkeyClients hands out pooled Valkey clients. SetupWithManager
 	// requires it.
 	ValkeyClients ClientProvider
+	// Only suppresses duplicate recovery warnings; authorization lives in the API.
+	takeoverWarnings sync.Map // client.ObjectKey -> [32]byte
 
 	// clusterStateFunc stands in for the scrape of the live cluster. It is
 	// nil in production; tests set it, since envtest has no Valkey to dial.
 	clusterStateFunc func(ctx context.Context, nodes *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState
 }
+
+const forceTakeoverAnnotation = "valkey.io/force-takeover"
 
 // scrapeClusterState returns the live cluster state, from the test hook when
 // one is set and from the nodes otherwise.
@@ -125,8 +131,9 @@ func (r *ValkeyClusterReconciler) scrapeClusterState(ctx context.Context, nodes 
 //     replicas updated before the primary (reconcileValkeyNodes). A shard whose
 //     primary cannot be identified has its roll skipped; other shards still roll,
 //     and once none is mid-roll the phases below run to repair it.
-//   - Promote orphaned replicas via CLUSTER FAILOVER TAKEOVER when quorum
-//     is lost (promoteOrphanedReplicas).
+//   - Handle orphaned replicas with native failover where possible. Persistent
+//     clusters without quorum require valkey.io/force-takeover before the
+//     operator issues CLUSTER FAILOVER TAKEOVER (promoteOrphanedReplicas).
 //   - Forget stale nodes that no longer have a backing ValkeyNode.
 //   - MEET: batch-introduce all isolated pending nodes to the cluster via
 //     CLUSTER MEET. Requeue to let gossip propagate.
@@ -151,6 +158,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	cluster := &valkeyiov1alpha1.ValkeyCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.takeoverWarnings.Delete(req.NamespacedName)
 			deleteClusterMetrics(req.Name, req.Namespace)
 			return ctrl.Result{}, nil
 		}
@@ -161,6 +169,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// collector removes dependents before the cluster itself) reconciling would
 	// recreate the very children being deleted and deadlock the delete
 	if !cluster.DeletionTimestamp.IsZero() {
+		r.takeoverWarnings.Delete(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -308,6 +317,24 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
 	}
 
+	orphanCandidates := orphansToTakeOver(state)
+	manualTakeover := cluster.Spec.Persistence != nil && !state.HasFailoverQuorum()
+	if manualTakeover {
+		stabilizeManualTakeoverReplicas(state, orphanCandidates)
+	}
+	awaitingManualTakeover := manualTakeover && len(orphanCandidates) > 0
+	if cluster.Spec.Persistence != nil {
+		if err := r.pruneRecoveredForceTakeoverIDs(ctx, cluster, state); err != nil {
+			return ctrl.Result{}, fmt.Errorf("clear recovered takeover approvals: %w", err)
+		}
+	}
+	if awaitingManualTakeover {
+		noteReplacementPrimaries(state, orphanCandidates)
+		r.setAwaitingManualTakeover(cluster, nodes, orphanCandidates)
+	} else {
+		r.clearAwaitingManualTakeover(cluster)
+	}
+
 	// Before the walk, which returns early on many paths. A failure leaves
 	// each gate as it is until a later pass (initialSyncGateFailedMessage).
 	gatesPending, gateErr := r.syncInitialSyncGates(ctx, nodes, state, readyBefore)
@@ -349,6 +376,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{}, err
 	} else if requeue {
+		if manualTakeover {
+			if hasAuthorizedOrphan(cluster, orphanCandidates) {
+				result, _ := r.promoteOrphanedReplicas(ctx, cluster, state, nodes, orphanCandidates)
+				_ = r.updateStatus(ctx, cluster, state)
+				return result, nil
+			}
+			if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+				r.recordStaleAddressesHealed(cluster, healed)
+				_ = r.updateStatus(ctx, cluster, state)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		}
 		// An unschedulable pod is reported first, whether the roll is under
 		// way or held. The pod it reports belongs to a later shard or sits
 		// outside the shard loop: a shard's own replica that is not Ready
@@ -364,7 +403,9 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if deferred != nil {
 			msg = fmt.Sprintf("%s: %s", msg, deferred.Error())
 		}
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
+		if !awaitingManualTakeover {
+			setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionFalse)
+		}
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonUpdatingNodes, msg, metav1.ConditionTrue)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -372,10 +413,11 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Promote replicas of dead primaries when quorum is lost.
 	// TAKEOVER before FORGET so slots remain continuously owned.
-	if result, handled := r.promoteOrphanedReplicas(ctx, cluster, state); handled {
-		// Reports via an event, not status, so persist any conditions set above.
+	orphanResult, handled := r.promoteOrphanedReplicas(ctx, cluster, state, nodes, orphanCandidates)
+	if handled {
+		// Persist the manual-recovery condition and any other conditions set above.
 		_ = r.updateStatus(ctx, cluster, state)
-		return result, nil
+		return orphanResult, nil
 	}
 
 	// Re-introduce members whose addresses changed while every peer's
@@ -384,9 +426,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// entries look failing, and CLUSTER FORGET would ban the live node
 	// from rejoining for a minute.
 	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
-		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
-		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+		r.recordStaleAddressesHealed(cluster, healed)
 		_ = r.updateStatus(ctx, cluster, state)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -658,8 +698,11 @@ func (r *ValkeyClusterReconciler) handlePodSchedulingIssues(ctx context.Context,
 		message = fmt.Sprintf("%s: %s", message, issue.message)
 	}
 	r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "PodUnschedulable", "SchedulePod", "%s", message)
-	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
-	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
+	ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover {
+		setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionTrue)
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonPodUnschedulable, message, metav1.ConditionFalse)
+	}
 	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Waiting for unschedulable pods to be scheduled", metav1.ConditionTrue)
 	if err := r.updateStatus(ctx, cluster, state); err != nil {
 		return ctrl.Result{}, false, err
@@ -820,6 +863,11 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 			}
 			switch result {
 			case nodeDeferred:
+				// Manual recovery must run before MEET or replication can change
+				// the data or topology the user is inspecting.
+				if cluster.Spec.Persistence != nil && !clusterState.HasFailoverQuorum() && len(orphansToTakeOver(clusterState)) > 0 {
+					return true, deferred
+				}
 				// Roll deferred; MEET and REPLICATE isolated nodes so they
 				// rejoin the shard before next reconcile.
 				if _, meetErr := r.meetIsolatedNodes(ctx, cluster, clusterState); meetErr != nil {
@@ -1324,6 +1372,14 @@ func (r *ValkeyClusterReconciler) healStaleAddressPeers(ctx context.Context, clu
 	return healed
 }
 
+func (r *ValkeyClusterReconciler) recordStaleAddressesHealed(cluster *valkeyiov1alpha1.ValkeyCluster, healed int) {
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "StaleAddressesHealed", "ClusterMeet", "Re-introduced %d peer link(s) whose addresses changed", healed)
+	setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, "Re-introducing peers with changed addresses", metav1.ConditionTrue)
+	if ready := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady); ready == nil || ready.Reason != valkeyiov1alpha1.ReasonAwaitingManualTakeover {
+		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Cluster is Reconciling", metav1.ConditionFalse)
+	}
+}
+
 // findMeetTarget picks the best node to MEET all isolated nodes against.
 // Priority:
 //  1. a live shard primary, it owns slots and is an established cluster
@@ -1655,48 +1711,298 @@ func (r *ValkeyClusterReconciler) replicateToShardPrimary(ctx context.Context, c
 	return nil
 }
 
-// promoteOrphanedReplicas recovers shards whose primary is dead. It prefers
-// Valkey's own coordinated failover, which is epoch-safe and cannot fragment
-// slots, and forces a CLUSTER FAILOVER TAKEOVER only when native failover
-// cannot proceed. orphansToTakeOver decides which shards those are.
-//
-// The candidates are tried in order until one TAKEOVER succeeds, so a replica
-// that keeps rejecting it does not hold back the other shards.
-//
-// With persistence enabled the pod returns with the same node ID, so recovery
-// is left entirely to Valkey.
-// Returns (result, true) if it acted and reconcile should requeue.
-func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) (ctrl.Result, bool) {
-	if cluster.Spec.Persistence != nil {
+// promoteOrphanedReplicas handles eligible orphans. Persistent clusters without
+// quorum require approval; persistent clusters with quorum are left to Valkey.
+// Returns true when recovery is pending or a takeover ran.
+func (r *ValkeyClusterReconciler) promoteOrphanedReplicas(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) (ctrl.Result, bool) {
+	manual := cluster.Spec.Persistence != nil
+	if len(candidates) == 0 || (manual && state.HasFailoverQuorum()) {
 		return ctrl.Result{}, false
 	}
 	log := logf.FromContext(ctx)
-	candidates := orphansToTakeOver(state)
-	if len(candidates) == 0 {
-		return ctrl.Result{}, false
-	}
-	for _, c := range candidates {
-		log.Info("promoting orphaned replica via TAKEOVER", "node", c.replica.Address, "deadPrimary", c.primaryId)
-		if err := c.replica.Client.Do(ctx, c.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
-			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", c.replica.Address)
+	for _, candidate := range candidates {
+		if manual {
+			if !hasTakeoverApproval(cluster.Annotations[forceTakeoverAnnotation], candidate.primaryId) {
+				continue
+			}
+			approved, err := r.removeTakeoverApprovals(ctx, cluster, map[string]bool{candidate.primaryId: true})
+			if err != nil {
+				log.Error(err, "failed to consume takeover approval", "primaryId", candidate.primaryId)
+				continue
+			}
+			if !approved {
+				continue
+			}
+		}
+
+		log.Info("promoting orphaned replica via TAKEOVER", "node", candidate.replica.Address, "deadPrimary", candidate.primaryId)
+		if err := candidate.replica.Client.Do(ctx, candidate.replica.Client.B().ClusterFailover().Takeover().Build()).Error(); err != nil {
+			log.Error(err, "CLUSTER FAILOVER TAKEOVER failed", "node", candidate.replica.Address)
+			if manual {
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "ForceTakeoverFailed", "ForceTakeover/"+candidate.primaryId+"/"+candidate.replica.Id,
+					"TAKEOVER for primary %s via replica %s failed: %v. Check the topology before approving another attempt.", candidate.primaryId, candidate.replica.Id, err)
+				// A lost reply can hide a promotion that restored quorum.
+				r.setAwaitingManualTakeover(cluster, nodes, candidates)
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+			}
 			continue
 		}
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover", "Promoted orphaned replica via TAKEOVER for dead primary %s", c.primaryId)
-		break // one takeover per reconcile; requeue and re-evaluate
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "ReplicasTakenOver", "FailoverTakeover",
+			"Promoted orphaned replica via TAKEOVER for dead primary %s", candidate.primaryId)
+		if manual {
+			remaining := slices.DeleteFunc(slices.Clone(candidates), func(o orphan) bool {
+				return o.primaryId == candidate.primaryId
+			})
+			if len(remaining) == 0 {
+				r.clearAwaitingManualTakeover(cluster)
+				setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, "Waiting for topology after manual takeover", metav1.ConditionFalse)
+			} else {
+				r.setAwaitingManualTakeover(cluster, nodes, remaining)
+			}
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
 	}
-	return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	if !manual {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+	r.setAwaitingManualTakeover(cluster, nodes, candidates)
+	if healed := r.healStaleAddressPeers(ctx, cluster, state); healed > 0 {
+		r.recordStaleAddressesHealed(cluster, healed)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true
+	}
+	// Hold later topology repairs in every shard until takeover or the
+	// primary's return, preserving the slot map while approval is pending.
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, true
 }
 
-// orphan is an orphaned replica and the ID of its dead primary.
+func (r *ValkeyClusterReconciler) clearAwaitingManualTakeover(cluster *valkeyiov1alpha1.ValkeyCluster) {
+	r.takeoverWarnings.Delete(client.ObjectKeyFromObject(cluster))
+	removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
+	removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonAwaitingManualTakeover)
+}
+
+// takeoverWarningKey tracks recovery targets, not changing replication observations.
+func takeoverWarningKey(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) [32]byte {
+	items := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		_, shard := nodeRoleAndShard(candidate.replica.Address, nodes)
+		replicaID := cmp.Or(candidate.replica.Id, candidate.replica.Address)
+		items = append(items, fmt.Sprintf("%s/%s/%d/%s", candidate.primaryId, replicaID, shard, candidate.replacementID))
+	}
+	slices.Sort(items)
+	return sha256.Sum256([]byte(string(cluster.UID) + "\n" + strings.Join(items, "\n")))
+}
+
+// setAwaitingManualTakeover records why a persistent orphan needs operator action.
+func (r *ValkeyClusterReconciler) setAwaitingManualTakeover(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) {
+	message := manualTakeoverMessage(cluster, nodes, candidates)
+	key := takeoverWarningKey(cluster, nodes, candidates)
+	previous, seen := r.takeoverWarnings.Swap(client.ObjectKeyFromObject(cluster), key)
+	warningChanged := !seen || previous != key
+	if warningChanged {
+		for _, candidate := range candidates {
+			single := []orphan{candidate}
+			item := manualTakeoverInstructions(cluster, nodes, single)[0]
+			// The broadcaster ignores the message when grouping events.
+			// Include the recovery target so changed instructions survive.
+			action := fmt.Sprintf("ManualTakeover/%x", takeoverWarningKey(cluster, nodes, single))
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonAwaitingManualTakeover, action, "%s", item)
+		}
+	}
+	setCondition(cluster, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonAwaitingManualTakeover, message, metav1.ConditionTrue)
+	setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonAwaitingManualTakeover, message, metav1.ConditionFalse)
+}
+
+// manualTakeoverMessage builds the condition text for orphaned shards.
+func manualTakeoverMessage(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) string {
+	items := manualTakeoverInstructions(cluster, nodes, candidates)
+	var message strings.Builder
+	message.WriteString("Persistent primary orphaned without failover quorum. ")
+	// metav1.Condition limits messages to 32768 characters. Reserve room for
+	// the omitted count and keep each recovery instruction intact.
+	for i, item := range items {
+		if message.Len()+len(item)+2 > 32000 {
+			return message.String() + fmt.Sprintf("; %d more orphaned primaries; see AwaitingManualTakeover events for recovery instructions", len(items)-i)
+		}
+		if i > 0 {
+			message.WriteString("; ")
+		}
+		message.WriteString(item)
+	}
+	return message.String()
+}
+
+func manualTakeoverInstructions(cluster *valkeyiov1alpha1.ValkeyCluster, nodes *valkeyiov1alpha1.ValkeyNodeList, candidates []orphan) []string {
+	items := make([]string, 0, len(candidates))
+	requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
+	for _, candidate := range candidates {
+		_, shard := nodeRoleAndShard(candidate.replica.Address, nodes)
+		primary := "primary " + candidate.primaryId
+		if shard >= 0 {
+			primary = fmt.Sprintf("shard %d %s", shard, primary)
+		}
+		replica := cmp.Or(candidate.replica.Id, candidate.replica.Address)
+		details := manualTakeoverReplicaDetails(candidate.replica)
+		if candidate.replacementID != "" {
+			details += fmt.Sprintf(". Replica points to a different node (%s) at the primary's address. A full sync can replace its data", candidate.replacementID)
+		}
+		if requested[candidate.primaryId] {
+			items = append(items, fmt.Sprintf("%s takeover is authorized via replica %s (%s); awaiting an attempt", primary, replica, details))
+			continue
+		}
+		command := fmt.Sprintf("kubectl annotate valkeycluster %s -n %s %s=%s --resource-version=<resourceVersion> --overwrite", cluster.Name, cluster.Namespace, forceTakeoverAnnotation, candidate.primaryId)
+		items = append(items, fmt.Sprintf("%s can be recovered by replica %s (%s); read current approvals and resourceVersion before accepting possible data loss: %s", primary, replica, details, command))
+	}
+	slices.Sort(items)
+	if len(items) > 0 && (len(candidates) > 1 || len(requested) > 0) {
+		items[len(items)-1] += ". For multiple approvals, use one comma-separated value including existing IDs; --overwrite replaces earlier approvals"
+	}
+	return items
+}
+
+func manualTakeoverReplicaDetails(replica *valkey.NodeState) string {
+	const unknown = "unknown"
+	const yes = "yes"
+	offset := unknown
+	if value := replica.ReplicationOffset(); value >= 0 {
+		offset = strconv.FormatInt(value, 10)
+	}
+	syncing := unknown
+	switch replica.Info["master_sync_in_progress"] {
+	case "0":
+		syncing = "no"
+	case "1":
+		syncing = yes
+	}
+	link := replica.Info["master_link_status"]
+	if link != "up" && link != "down" {
+		link = unknown
+	}
+	return fmt.Sprintf("offset %s, sync in progress: %s, primary link: %s", offset, syncing, link)
+}
+
+func hasTakeoverApproval(value, primaryID string) bool {
+	for id := range strings.SplitSeq(value, ",") {
+		if strings.TrimSpace(id) == primaryID {
+			return true
+		}
+	}
+	return false
+}
+
+// parseForceTakeoverIDs parses the comma-separated primary IDs in the annotation.
+func parseForceTakeoverIDs(value string) map[string]bool {
+	ids := map[string]bool{}
+	for id := range strings.SplitSeq(value, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func hasAuthorizedOrphan(cluster *valkeyiov1alpha1.ValkeyCluster, candidates []orphan) bool {
+	requested := parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation])
+	for _, candidate := range candidates {
+		if requested[candidate.primaryId] {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneRecoveredForceTakeoverIDs clears approvals after a scrape proves that
+// the named primary is reachable again. Missing nodes in an incomplete scrape
+// leave their approval intact.
+func (r *ValkeyClusterReconciler) pruneRecoveredForceTakeoverIDs(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
+	if cluster.Annotations[forceTakeoverAnnotation] == "" {
+		return nil
+	}
+	var recovered map[string]bool
+	for id := range parseForceTakeoverIDs(cluster.Annotations[forceTakeoverAnnotation]) {
+		if state.FindNodeById(id) != nil {
+			if recovered == nil {
+				recovered = make(map[string]bool)
+			}
+			recovered[id] = true
+		}
+	}
+	if len(recovered) == 0 {
+		return nil
+	}
+	_, err := r.removeTakeoverApprovals(ctx, cluster, recovered)
+	return err
+}
+
+// Read the current approvals and remove only the requested IDs. A concurrent
+// edit must win over this patch, so callers only act after the patch succeeds.
+func (r *ValkeyClusterReconciler) removeTakeoverApprovals(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, ids map[string]bool) (bool, error) {
+	current := &valkeyiov1alpha1.ValkeyCluster{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+		return false, err
+	}
+	if current.UID != cluster.UID || !current.DeletionTimestamp.IsZero() || reconciliationPaused(current) {
+		return false, nil
+	}
+	cluster.Annotations = current.Annotations
+	requested := parseForceTakeoverIDs(current.Annotations[forceTakeoverAnnotation])
+	remaining := make([]string, 0, len(requested))
+	for id := range requested {
+		if !ids[id] {
+			remaining = append(remaining, id)
+		}
+	}
+	if len(remaining) == len(requested) {
+		return false, nil
+	}
+	updated := current.DeepCopy()
+	if len(remaining) == 0 {
+		delete(updated.Annotations, forceTakeoverAnnotation)
+	} else {
+		slices.Sort(remaining)
+		updated.Annotations[forceTakeoverAnnotation] = strings.Join(remaining, ",")
+	}
+	if err := r.Patch(ctx, updated, client.MergeFromWithOptions(current, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, err
+	}
+	cluster.Annotations = updated.Annotations
+	return true, nil
+}
+
+// orphan is an orphaned replica and the ID of its unreachable primary.
 type orphan struct {
-	replica   *valkey.NodeState
-	primaryId string
+	replica       *valkey.NodeState
+	primaryId     string
+	replacementID string
+}
+
+// A replacement can serve the old endpoint before gossip recognizes its new
+// ID. Warn about the replication source without using it to authorize takeover.
+func noteReplacementPrimaries(state *valkey.ClusterState, candidates []orphan) {
+	type endpoint struct {
+		host string
+		port int
+	}
+	nodeIDs := make(map[endpoint]string)
+	for _, node := range state.AllNodes() {
+		nodeIDs[endpoint{node.Address, node.Port}] = node.Id
+	}
+	for i, candidate := range candidates {
+		info := candidate.replica.Info
+		port, err := strconv.Atoi(info["master_port"])
+		if err != nil {
+			continue
+		}
+		if id := nodeIDs[endpoint{info["master_host"], port}]; id != "" && id != candidate.primaryId && id != candidate.replica.Id {
+			candidates[i].replacementID = id
+		}
+	}
 }
 
 // orphansToTakeOver returns, in a stable order, the orphaned replicas to
-// promote with TAKEOVER: for each qualifying dead primary, its most caught-up
-// replica. It returns none when native failover can or will recover every
-// dead primary.
+// promote with TAKEOVER: for each qualifying unreachable primary, its most
+// caught-up replica. It returns none when native failover can or will recover
+// every orphaned primary.
 //
 // Native failover needs a majority of primaries to vote:
 //   - Without quorum (a majority of primaries dead at once), no election can
@@ -1754,6 +2060,23 @@ func orphansToTakeOver(state *valkey.ClusterState) []orphan {
 		}
 	}
 	return orphans
+}
+
+// Stabilize manual recovery instructions when replicas have equal offsets.
+// Automatic recovery keeps BestReplicaOf's existing selection order.
+func stabilizeManualTakeoverReplicas(state *valkey.ClusterState, candidates []orphan) {
+	for i := range candidates {
+		candidate := &candidates[i]
+		for _, shard := range state.Shards {
+			for _, node := range shard.Nodes {
+				if node.PrimaryIdFromSelf() == candidate.primaryId &&
+					node.ReplicationOffset() == candidate.replica.ReplicationOffset() &&
+					node.Id < candidate.replica.Id {
+					candidate.replica = node
+				}
+			}
+		}
+	}
 }
 
 // Check each cluster node and forget stale nodes (noaddr or status fail)

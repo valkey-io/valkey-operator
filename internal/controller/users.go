@@ -81,6 +81,7 @@ var (
 			"+acl|users",                 // read the user set to verify membership after a reload
 			"+info",                      // node info and replication status
 			"+role",                      // current replication role
+			"+time",                      // node clock, to age failed slot migrations
 		}, " "),
 		// the ACL rawstring for exporter is taken from the redis_exporter documentation: https://github.com/oliver006/redis_exporter#authenticating-with-redis
 		// plus +command|info and +commandlog|len: redis_exporter probes for COMMANDLOG with COMMAND INFO (v1.89.0+) and reads COMMANDLOG LEN (Valkey 8.1+).

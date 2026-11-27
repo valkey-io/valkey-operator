@@ -27,7 +27,7 @@ For the user-facing API see [valkeycluster.md](valkeycluster.md). For the Valkey
 3. Ensures a StatefulSet or Deployment (determined by `spec.workloadType`, immutable)
 4. Deletes config revision keys that nothing uses any more
 5. Updates `status.ready`, `status.podIP`, `status.role`, and `status.observedGeneration`
-6. Once the pod is ready, applies live config with CONFIG SET and records it in `status.appliedLiveConfig`
+6. Once the pod is ready, applies live config with CONFIG SET, records it in `status.appliedLiveConfig`, and rewrites `live.conf` to match
 
 #### Role resolution
 
@@ -88,16 +88,18 @@ The pinned file holds the user's restart-only keys and the base config: everythi
 
 ### Who writes what
 
-The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist rolls nothing. If its cache lacks the live revision's key, the parent requeues until the cache catches up.
+The ValkeyCluster controller sets `spec.configRevision` on each node, and nothing else writes it. It renders the pinned file from the desired node spec. When the node's live workload template references a different revision, it reads that revision's content from `valkey-<node>` and keeps the live revision unless a key outside the allowlist differs (`pinnedConfigRef`). Changing a live value or growing the allowlist rolls nothing. If its cache lacks the live revision's key, it reads the ConfigMap through the APIReader and uses the content the API server returns. The node writes a revision key only when it is missing and only with content that hashes to the revision, so a lagging cache can miss the key but never hold other content for it. When the ConfigMap or the key is gone, for example because a user deleted it, the parent uses the desired revision and the node rolls through the usual one-at-a-time gate.
 
 The ValkeyNode controller owns `valkey-<node>` through a controller reference and is its only writer. A ConfigMap of that name it does not control, such as the shared ConfigMap of a cluster named `<node>`, is left alone and the node reports `Ready=False` with reason `ConfigMapError`. The ConfigMap carries the node's labels, including `valkey.io/cluster`. Before it builds the workload, the node controller:
 
-- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes nothing and leaves the workload alone. The schema requires `spec.configRevision`, but a node stored before the field existed has none until the parent reaches it in the upgrade roll. Until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
+- writes `valkey-<rev>.conf` for `spec.configRevision` when the key is missing, and only when the pinned file it renders from its own spec hashes to that revision. Otherwise it sets `Ready=False` with reason `ConfigRevisionMismatch`, writes no revision key and leaves the workload alone. It still writes `live.conf` after it applies live config. The schema requires `spec.configRevision`, but a node stored before the field existed has none until the parent reaches it in the upgrade roll. Until then the node controller leaves its ConfigMap and workload alone and reports status as usual.
 - never rewrites an existing revision key, and merge-patches the keys it changes, so other revision keys are kept.
 - writes `live.conf` when the key is missing or its content differs from the render.
 - removes any key that is neither a revision key nor `live.conf`, such as scripts an older operator left under the same name.
 
-The node controller writes `status.appliedLiveConfig` in the same status update that sets `LiveConfigApplied=True`, after CONFIG SET succeeds. When `spec.config` holds no allowlisted key, the update that clears the condition also clears `status.appliedLiveConfig`.
+The node controller writes `status.appliedLiveConfig` in the same status update that sets `LiveConfigApplied=True`, after CONFIG SET succeeds. When `spec.config` holds no allowlisted key, the update that clears the condition also clears `status.appliedLiveConfig`. After either write it rewrites `live.conf` in the same reconcile, again only when the content differs.
+
+The ValkeyCluster controller watches ConfigMaps and maps them to the cluster in their `valkey.io/cluster` label. Its predicate passes creates, deletes and updates that change the set of `valkey-<rev>.conf` keys, so a `live.conf` write does not wake it.
 
 ### Pods
 

@@ -48,7 +48,7 @@ cluster-sample-2-0   true    primary   valkey-cluster-sample-2-0-0   130m
 cluster-sample-2-1   true    replica   valkey-cluster-sample-2-1-0   130m
 ```
 
-`kubectl get valkeynode -o wide` adds the pod IP and `spec.configRevision` in the `CONFIG` column.
+`kubectl get valkeynode -o wide` also shows the pod IP.
 
 This also makes it straightforward to build admin console tooling that queries the Kubernetes API for cluster state.
 

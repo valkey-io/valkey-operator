@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -239,6 +240,7 @@ func main() {
 		}
 	}
 
+	gracefulShutdownTimeout := time.Duration(-1)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -253,6 +255,10 @@ func main() {
 		// reconciler and runnable before releasing, and main only closes its
 		// Valkey connections afterwards.
 		LeaderElectionReleaseOnCancel: true,
+		// A negative timeout makes the manager wait for every runnable to stop
+		// before it returns and releases the lease; the kubelet's kill at the
+		// end of the grace period bounds a shutdown that hangs.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -314,9 +320,8 @@ func main() {
 
 	setupLog.Info("Starting manager")
 	startErr := mgr.Start(ctrl.SetupSignalHandler()) // blocks until shutdown
-	// Reconciles and poller ticks have returned, unless the shutdown timeout
-	// expired or the lease was lost. Close before the exit below, which would
-	// skip a deferred call.
+	// Reconciles and poller ticks have returned, unless the lease was lost.
+	// Close before the exit below, which would skip a deferred call.
 	valkeyPool.Close()
 	if startErr != nil {
 		setupLog.Error(startErr, "Failed to run manager")

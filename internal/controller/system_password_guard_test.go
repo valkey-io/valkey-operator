@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -109,8 +110,7 @@ func TestUpsertRefusesRegenerationWhileAServerRuns(t *testing.T) {
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
-	require.Contains(t, err.Error(), "valkey-h1-system-passwords")
-	require.Contains(t, err.Error(), "_operator, _replication")
+	require.Contains(t, err.Error(), "valkey-h1-system-passwords does not exist")
 	require.Contains(t, err.Error(), "restore the Secret")
 
 	_, exists := storedSystemPasswords(t, c)
@@ -442,4 +442,29 @@ func TestUpsertAcceptsUnmatchedPasswordsWhenNoServerRuns(t *testing.T) {
 
 	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
+}
+
+// Keys removed from a Secret that still exists are named.
+func TestUpsertNamesTheKeysRemovedWhileAServerRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	delete(secret.Data, operatorUser)
+	delete(secret.Data, replicationUser)
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, _ := newMigrationReconciler(t, objs...)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "valkey-h1-system-passwords is missing _operator, _replication")
+}
+
+// Degraded carries the refusal's own message, the same text as its event.
+func TestReportSystemPasswordSecretMissingUsesTheRefusalMessage(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, _ := newMigrationReconciler(t, objs...)
+
+	_, err := r.createSystemUsersAcl(context.Background(), cluster)
+	require.True(t, reportSystemPasswordSecretMissing(cluster, err))
+	degraded := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
+	require.True(t, strings.HasPrefix(degraded.Message, "valkey-h1-system-passwords does not exist"), degraded.Message)
 }

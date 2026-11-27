@@ -132,6 +132,9 @@ func (r *ValkeyClusterReconciler) guardSystemPasswords(ctx context.Context, clus
 	}
 	if serverRunning {
 		switch {
+		case secret.ResourceVersion == "":
+			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s does not exist while the cluster's servers run with its passwords; restore the Secret to recover the cluster",
+				secret.Name))
 		case len(missing) > 0:
 			return false, r.refuseSystemPasswords(cluster, fmt.Sprintf("%s is missing %s while the cluster's servers run with them; restore the Secret to recover the cluster",
 				secret.Name, strings.Join(missing, ", ")))
@@ -153,12 +156,23 @@ func (r *ValkeyClusterReconciler) warnExporterPasswordRegenerated(cluster *valke
 // refuseSystemPasswords returns the refusal, and emits its warning when the
 // cluster does not already report it: the refusal retries every 10s.
 func (r *ValkeyClusterReconciler) refuseSystemPasswords(cluster *valkeyiov1alpha1.ValkeyCluster, msg string) error {
-	err := fmt.Errorf("%w: %s", errSystemPasswordSecretMissing, msg)
 	c := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded)
-	if c == nil || c.Reason != valkeyiov1alpha1.ReasonSystemPasswordSecretMissing || c.Message != err.Error() {
+	if c == nil || c.Reason != valkeyiov1alpha1.ReasonSystemPasswordSecretMissing || c.Message != msg {
 		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, valkeyiov1alpha1.ReasonSystemPasswordSecretMissing, "ReconcileUsers", "%s", msg)
 	}
-	return err
+	return &systemPasswordRefusal{msg: msg}
+}
+
+// systemPasswordRefusal is errSystemPasswordSecretMissing with its message
+// alone, which Degraded and the event both carry.
+type systemPasswordRefusal struct {
+	msg string
+}
+
+func (e *systemPasswordRefusal) Error() string { return e.msg }
+
+func (e *systemPasswordRefusal) Is(target error) bool {
+	return target == errSystemPasswordSecretMissing
 }
 
 // reportSystemPasswordSecretMissing sets Degraded and Ready for a refused

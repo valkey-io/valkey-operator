@@ -67,11 +67,13 @@ var _ = Describe("initial sync gate patch", func() {
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 		DeferCleanup(k8sClient.Delete, ctx, cluster)
-		state := &valkey.ClusterState{}
+		var shards []*valkey.ShardState
 		r := &ValkeyClusterReconciler{
 			Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
 			Recorder: events.NewFakeRecorder(100), ValkeyClients: testValkeyClients(k8sClient),
-			clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState { return state },
+			clusterStateFunc: func(context.Context, *valkeyiov1alpha1.ValkeyNodeList) *valkey.ClusterState {
+				return &valkey.ClusterState{Shards: shards}
+			},
 		}
 		key := client.ObjectKeyFromObject(cluster)
 		reconcileOnce := func() reconcile.Result {
@@ -97,7 +99,7 @@ var _ = Describe("initial sync gate patch", func() {
 		node.Status.PodName, node.Status.PodIP = pod.Name, pod.Status.PodIP
 		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 		primary := gatePrimary(pod.Status.PodIP, "0-16383", nil)
-		state.Shards = []*valkey.ShardState{{
+		shards = []*valkey.ShardState{{
 			Id: primary.Id, PrimaryId: primary.Id, Nodes: []*valkey.NodeState{primary},
 			Slots: []valkey.SlotsRange{{Start: 0, End: valkey.TotalSlots - 1}},
 		}}

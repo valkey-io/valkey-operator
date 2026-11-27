@@ -1122,7 +1122,7 @@ type BootstrapSource struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MinLength=3
 	// +kubebuilder:validation:items:MaxLength=261
-	// +kubebuilder:validation:items:Pattern=`^\S+:[0-9]{1,5}$`
+	// +kubebuilder:validation:items:Pattern=`^([^\s:\[\]]+|\[[0-9A-Fa-f:.]+\]):([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$`
 	Endpoints []string `json:"endpoints"`
 
 	// PasswordSecretRef names a Secret key holding the source cluster password.

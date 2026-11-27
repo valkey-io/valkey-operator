@@ -105,13 +105,13 @@ var _ = Describe("ValkeyClusterSpec bootstrap CEL validation", func() {
 	})
 
 	It("rejects an endpoint that is not host:port", func() {
-		for _, endpoint := range []string{"", "old-0", "old-0:", ":6379", "old-0:abc", "old 0:6379"} {
+		for _, endpoint := range []string{"", "old-0", "old-0:", ":6379", "old-0:abc", "old 0:6379", "[::1:6379", "[::1]6379", "::1:6379", "old-0:65536", "old-0:99999"} {
 			cluster := bootstrapCluster("bootstrap-endpoint", valkeyiov1alpha1.BootstrapStageBootstrap)
 			cluster.Spec.Bootstrap.Source.Endpoints = []string{endpoint}
 			Expect(apierrors.IsInvalid(create(cluster))).To(BeTrue(), "endpoint %q should be rejected", endpoint)
 		}
 		cluster := bootstrapCluster("bootstrap-endpoint-ok", valkeyiov1alpha1.BootstrapStageBootstrap)
-		cluster.Spec.Bootstrap.Source.Endpoints = []string{"old-0.ns.svc:6379", "10.0.0.1:6379", "[fd00::1]:6379"}
+		cluster.Spec.Bootstrap.Source.Endpoints = []string{"old-0.ns.svc:6379", "10.0.0.1:6379", "[fd00::1]:6379", "old-0:65535", "old-0:1"}
 		Expect(create(cluster)).To(Succeed())
 	})
 

@@ -238,6 +238,8 @@ Check whether the primary's pod or storage can return, and whether the problem i
 
 Before approving takeover, stop the old primary or isolate it from clients that can write to it. Do not assume that deleting a pod on a partitioned host stopped its process; confirm it has stopped, or block client access on that side of the partition. Writes it accepts after the replica is promoted can be discarded when it rejoins. The operator does not fence the old process for you.
 
+Manual takeover provides a recovery path when too few slot-owning primaries remain available for Valkey's normal failover election. This includes a single-shard cluster whose primary is down, or a three-primary cluster with two primaries down. If multiple primaries are lost, you may need to approve more than one takeover until a majority of slot-owning primaries is available to vote.
+
 Each approval authorizes one operator-issued TAKEOVER. This takeover bypasses Valkey's normal failover election. Promoting that replica can give the cluster failover quorum again. Valkey can then promote replicas of the other orphaned primaries through its own election, without further approval. Before approving any takeover, check every orphaned shard in the condition and confirm you would accept its replica as the new primary. If you want to wait for one of those primaries to return, approve nothing until it does. See Valkey’s [CLUSTER FAILOVER documentation](https://valkey.io/commands/cluster-failover/) and [replica election and promotion specification](https://valkey.io/topics/cluster-spec/#replica-election-and-promotion).
 
 To accept the possible data loss, annotate the ValkeyCluster with the failed primary's node ID:

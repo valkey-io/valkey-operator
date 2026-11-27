@@ -101,15 +101,8 @@ var (
 	errUnknownSystemUser = errors.New("unknown system user")
 	errMissingSystemUser = errors.New("missing system user")
 
-	// errSystemPasswordSecretMissing marks a refused regeneration: the
-	// system passwords Secret is gone (or lacks keys the running nodes
-	// depend on) on a cluster whose nodes already run the old passwords,
-	// or one whose node state could not be verified.
-	// Regenerating would push a new aclfile the running servers cannot load
-	// (the operator authenticates with the new _operator password while the
-	// nodes still hold the old hash), locking the operator out of every node
-	// until each pod restarts. The caller must surface this as a condition
-	// and stop, not regenerate.
+	// errSystemPasswordSecretMissing is a refused regeneration of a system
+	// password that a running server or exporter still holds.
 	errSystemPasswordSecretMissing = errors.New("system password secret missing")
 )
 
@@ -496,62 +489,6 @@ func generatePassword(length int) ([]byte, error) {
 	return ret, nil
 }
 
-// systemPasswordKeysNeedingGeneration lists the system user keys the Secret
-// still lacks and whose regeneration would lock a running cluster out. The
-// _operator and _replication passwords are baked into the live servers'
-// ACLs, so regenerating them against running nodes bricks the operator's own
-// authentication. The _exporter key is regenerable only while no node
-// actually runs the exporter sidecar: the key rides the pod environment
-// through a secretKeyRef resolved at pod start, so once a sidecar runs it
-// holds the old value while a regenerated key would reach the servers' ACL,
-// breaking the exporter's authentication with no pod roll (Secret data is
-// not part of WorkloadRevision). On the disabled-to-enabled transition the
-// spec change rolls the pods first, so the regenerated key is adopted
-// together with the new sidecar.
-func systemPasswordKeysNeedingGeneration(secret *corev1.Secret, nodes *valkeyiov1alpha1.ValkeyNodeList) []string {
-	var missing []string
-	exporterRunning := exporterRunsOnAnyNode(nodes)
-	for _, user := range systemUsers {
-		if user == exporterUser {
-			if exporterRunning {
-				if _, ok := secret.Data[exporterUser]; !ok {
-					// A live sidecar holds the old key in its environment; a
-					// regenerated key would reach the servers ACL and break the
-					// exporter with no pod roll to adopt it.
-					missing = append(missing, user)
-				}
-			}
-			continue
-		}
-		if _, ok := secret.Data[user]; ok {
-			continue
-		}
-		missing = append(missing, user)
-	}
-	return missing
-}
-
-// exporterRunsOnAnyNode reports whether any of the cluster's ValkeyNodes
-// already runs the exporter sidecar. node.Spec.Exporter.Enabled is set by
-// the parent controller (valkeycluster today), not by the node controller,
-// and only when the sidecar is in the applied pod template, so a true
-// value means the sidecar is deployed and its environment holds the
-// _exporter password read at pod start.
-func exporterRunsOnAnyNode(nodes *valkeyiov1alpha1.ValkeyNodeList) bool {
-	if nodes == nil {
-		// A failed node list cannot prove the sidecar is absent; fail
-		// closed and treat the key as locked to regeneration.
-		return true
-	}
-	for i := range nodes.Items {
-		enabled := nodes.Items[i].Spec.Exporter.Enabled
-		if enabled != nil && *enabled {
-			return true
-		}
-	}
-	return false
-}
-
 // validateSystemUserPasswordSecret verifies that the system user password secret
 // contains exactly the expected system user entries. It rejects any unknown users
 // and ensures all required system users are present.
@@ -610,43 +547,8 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
-	// Refuse to regenerate _operator or _replication on a cluster whose
-	// nodes already run: their running servers hold ACLs built from the old
-	// passwords, and a regenerated Secret feeds the operator and the new
-	// aclfile a password those servers reject (WRONGPASS on every call,
-	// replicas unable to AUTH to their primary after a restart). Until the
-	// Secret is restored the cluster must surface the loss instead of
-	// silently locking the operator out.
-	nodes := &valkeyiov1alpha1.ValkeyNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(cluster.Namespace), client.MatchingLabels(map[string]string{LabelCluster: cluster.Name})); err != nil {
-		log.Error(err, "failed to list ValkeyNodes")
-		// A list failure is not proof of a fresh cluster; treat it as
-		// running so the guard fails closed.
-		nodes = nil
-	}
-	missing := systemPasswordKeysNeedingGeneration(systemUsersSecret, nodes)
-	running := nodes == nil || len(nodes.Items) > 0
-	if len(missing) > 0 && running {
-		var err error
-		if nodes == nil {
-			// Live nodes cannot be ruled out, so refuse as well, but say
-			// what actually happened instead of calling the cluster
-			// running: the restore instruction only fits a Secret the
-			// cluster actually had.
-			err = fmt.Errorf(
-				"%w: %s is missing %s and the node state could not be checked; not regenerating system user passwords until the node list can be read",
-				errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
-			log.Error(err, "refusing to regenerate system user passwords: node state could not be checked")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
-				"%s is missing %s but the node state could not be checked; not regenerating system user passwords until the node list can be read", secretName, strings.Join(missing, ", "))
-		} else {
-			err = fmt.Errorf(
-				"%w: %s is missing %s on a running cluster; restore the Secret to recover the cluster",
-				errSystemPasswordSecretMissing, secretName, strings.Join(missing, ", "))
-			log.Error(err, "refusing to regenerate system user passwords on a running cluster")
-			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, "SystemPasswordSecretMissing", "ReconcileUsers",
-				"%s is missing %s on a running cluster; restore the Secret to recover the cluster", secretName, strings.Join(missing, ", "))
-		}
+	if err := r.refuseLockedSystemPasswords(ctx, cluster, systemUsersSecret); err != nil {
+		log.Error(err, "refusing to generate system user passwords")
 		return nil, err
 	}
 

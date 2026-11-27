@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,15 +56,27 @@ func systemPasswordFixture(withSecret bool) (*valkeyiov1alpha1.ValkeyCluster, *c
 	return cluster, secret, objs
 }
 
-// systemPasswordNode builds one ValkeyNode owned by the cluster.
-func systemPasswordNode(cluster *valkeyiov1alpha1.ValkeyCluster) *valkeyiov1alpha1.ValkeyNode {
-	return &valkeyiov1alpha1.ValkeyNode{
+// systemPasswordPod builds a pod of clusterName with a server and an exporter
+// container. The containers named in running are Running; the others wait,
+// the way they do when their Secret is missing.
+func systemPasswordPod(clusterName, name string, running ...string) *corev1.Pod {
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "h1-0-0",
-			Namespace: cluster.Namespace,
-			Labels:    map[string]string{LabelCluster: cluster.Name, LabelShardIndex: "0", LabelNodeIndex: "0"},
+			Name:      name,
+			Namespace: "ns",
+			Labels:    map[string]string{LabelCluster: clusterName},
 		},
 	}
+	for _, container := range []string{serverContainerName, metricsExporterContainerName} {
+		status := corev1.ContainerStatus{Name: container}
+		if slices.Contains(running, container) {
+			status.State.Running = &corev1.ContainerStateRunning{}
+		} else {
+			status.State.Waiting = &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}
+		}
+		pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, status)
+	}
+	return pod
 }
 
 func systemPasswordReconciler(t *testing.T, objs []client.Object) (*ValkeyClusterReconciler, client.Client) {
@@ -75,169 +88,183 @@ func systemPasswordReconciler(t *testing.T, objs []client.Object) (*ValkeyCluste
 	return &ValkeyClusterReconciler{Client: c, APIReader: c, Scheme: scheme, Recorder: events.NewFakeRecorder(64)}, c
 }
 
-// TestUpsertRefusesRegenerationOnRunningCluster pins the reported regression: a
-// cluster with live nodes must not adopt new system passwords, because the
-// running servers still authorize the old ones and the operator would be
-// locked out (WRONGPASS on every call) until every pod restarts.
-func TestUpsertRefusesRegenerationOnRunningCluster(t *testing.T) {
-	cluster, _, objs := systemPasswordFixture(false)
-	node := systemPasswordNode(cluster)
-	objs = append(objs, node)
-	r, c := systemPasswordReconciler(t, objs)
+func storedSystemPasswords(t *testing.T, c client.Client) (*corev1.Secret, bool) {
+	t.Helper()
+	return getSecret(t, c, getSystemPasswordSecretName("h1"))
+}
 
-	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
-	require.Contains(t, err.Error(), getSystemPasswordSecretName(cluster.Name))
-	require.Contains(t, err.Error(), "_operator")
-	require.Contains(t, err.Error(), "_replication")
-	require.Contains(t, err.Error(), "restore the Secret to recover the cluster",
-		"a confirmed running cluster must keep the restore instruction")
-
-	// No Secret may be created: a regenerated Secret would replace the only
-	// copy of the passwords the running nodes still accept.
-	secret := &corev1.Secret{}
-	apiErr := c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, secret)
-	require.Error(t, apiErr, "a regenerated Secret would overwrite the only copy of the old passwords")
-
-	// The refusal must be observable in the event stream.
+func requireWarningEvent(t *testing.T, r *ValkeyClusterReconciler, contains ...string) {
+	t.Helper()
 	recorder := r.Recorder.(*events.FakeRecorder)
 	select {
 	case e := <-recorder.Events:
 		require.Contains(t, e, "SystemPasswordSecretMissing")
-		require.Contains(t, e, getSystemPasswordSecretName(cluster.Name))
+		for _, s := range contains {
+			require.Contains(t, e, s)
+		}
 	default:
 		t.Fatal("expected a SystemPasswordSecretMissing warning event")
 	}
 }
 
-// TestUpsertRegeneratesOnFreshCluster keeps the bootstrap path: a brand-new
-// cluster has no nodes to lock out, so the Secret is generated as today.
+// A running server holds an ACL built from the old passwords. New ones would
+// lock the operator out of it, so the Secret is not recreated.
+func TestUpsertRefusesRegenerationWhileAServerRuns(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "valkey-h1-system-passwords")
+	require.Contains(t, err.Error(), "_operator, _replication")
+	require.Contains(t, err.Error(), "restore the Secret")
+
+	_, exists := storedSystemPasswords(t, c)
+	require.False(t, exists, "a regenerated Secret would replace the only copy of the passwords the servers accept")
+	requireWarningEvent(t, r, "valkey-h1-system-passwords", "restore the Secret")
+}
+
 func TestUpsertRegeneratesOnFreshCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
 	r, c := systemPasswordReconciler(t, objs)
 
-	secret, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
 	require.NoError(t, err)
-	require.NotEmpty(t, secret.Data[operatorUser])
-	require.NotEmpty(t, secret.Data[replicationUser])
+	stored, exists := storedSystemPasswords(t, c)
+	require.True(t, exists)
+	require.NotEmpty(t, stored.Data[operatorUser])
+	require.NotEmpty(t, stored.Data[replicationUser])
+}
 
-	stored := &corev1.Secret{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
+// ValkeyNodes and pods exist, but no server has started: a hibernated or
+// restored cluster. Every server that starts later loads the new aclfile.
+func TestUpsertRegeneratesWhenNoServerRuns(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	node := &valkeyiov1alpha1.ValkeyNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "h1-0-0", Namespace: "ns", Labels: map[string]string{LabelCluster: "h1"},
+	}}
+	objs = append(objs, node, systemPasswordPod("h1", "valkey-h1-0-0-0"))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	stored, exists := storedSystemPasswords(t, c)
+	require.True(t, exists)
 	require.NotEmpty(t, stored.Data[operatorUser])
 }
 
-// TestUpsertRegeneratesExporterKeyOnRunningCluster keeps the exporter-enable
-// path intact: a missing _exporter key on a running cluster is regenerable,
-// because enabling the exporter rolls the pods and the new key rides the pod
-// environment together with the new aclfile.
-func TestUpsertRegeneratesExporterKeyOnRunningCluster(t *testing.T) {
-	cluster, secret, objs := systemPasswordFixture(true)
-	delete(secret.Data, exporterUser)
-	node := systemPasswordNode(cluster)
-	objs = append(objs, node)
-	enabled := true
-	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
-	r, c := systemPasswordReconciler(t, objs)
+func TestUpsertRefusesWhileATerminatingPodRunsAServer(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	pod := systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName)
+	pod.Finalizers = []string{"test"}
+	pod.DeletionTimestamp = &metav1.Time{}
+	objs = append(objs, pod)
+	r, _ := systemPasswordReconciler(t, objs)
 
-	updated, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.NoError(t, err)
-	require.Equal(t, []byte("op-old"), updated.Data[operatorUser], "the operator password must not change")
-	require.Equal(t, []byte("re-old"), updated.Data[replicationUser], "the replication password must not change")
-	require.NotEmpty(t, updated.Data[exporterUser], "the exporter key is regenerated")
-
-	stored := &corev1.Secret{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
-	require.Equal(t, []byte("op-old"), stored.Data[operatorUser])
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
 }
 
-// TestCreateSystemUsersAclRefusesOnRunningCluster pins the integration: the
-// guard must flow through createSystemUsersAcl, so the cluster surfaces
-// UsersACLError instead of freezing every node out of its ACL.
-func TestCreateSystemUsersAclRefusesOnRunningCluster(t *testing.T) {
+// _operator.next is not the password the servers authenticate the operator
+// with yet, so a lost _operator is refused mid-rotation too.
+func TestUpsertRefusesMidRotationWhileAServerRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	secret.Data = map[string][]byte{
+		systemPasswordNextKey(operatorUser): []byte("op-next"),
+		replicationUser:                     []byte("re-old"),
+	}
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "missing _operator ")
+	require.NotContains(t, err.Error(), "_replication")
+	stored, _ := storedSystemPasswords(t, c)
+	require.Equal(t, map[string][]byte{
+		systemPasswordNextKey(operatorUser): []byte("op-next"),
+		replicationUser:                     []byte("re-old"),
+	}, stored.Data)
+}
+
+// Enabling the exporter generates _exporter before the pods roll onto the
+// sidecar, so the key is generated while only the servers run.
+func TestUpsertRegeneratesExporterKeyWhileNoExporterRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	delete(secret.Data, exporterUser)
+	enabled := true
+	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	stored, _ := storedSystemPasswords(t, c)
+	require.Equal(t, "op-old", string(stored.Data[operatorUser]))
+	require.Equal(t, "re-old", string(stored.Data[replicationUser]))
+	require.NotEmpty(t, stored.Data[exporterUser])
+}
+
+// A running exporter read REDIS_PASSWORD at start and keeps it, so a new
+// _exporter would lock it out.
+func TestUpsertRefusesExporterKeyWhileTheExporterRuns(t *testing.T) {
+	cluster, secret, objs := systemPasswordFixture(true)
+	delete(secret.Data, exporterUser)
+	enabled := true
+	cluster.Spec.Exporter = valkeyiov1alpha1.ExporterSpec{Enabled: &enabled}
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName, metricsExporterContainerName))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "_exporter")
+	stored, _ := storedSystemPasswords(t, c)
+	require.Empty(t, stored.Data[exporterUser])
+	requireWarningEvent(t, r, "_exporter")
+}
+
+// The pods are matched on the exact cluster label, so h10's servers do not
+// hold h1's passwords.
+func TestUpsertIgnoresPodsOfAnotherCluster(t *testing.T) {
 	cluster, _, objs := systemPasswordFixture(false)
-	node := systemPasswordNode(cluster)
-	objs = append(objs, node)
+	objs = append(objs, systemPasswordPod("h10", "valkey-h10-0-0-0", serverContainerName))
+	r, c := systemPasswordReconciler(t, objs)
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.NoError(t, err)
+	_, exists := storedSystemPasswords(t, c)
+	require.True(t, exists)
+}
+
+// listErrorReader fails every List.
+type listErrorReader struct {
+	client.Reader
+}
+
+func (listErrorReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	return fmt.Errorf("api unavailable")
+}
+
+// An operator that cannot see the pods cannot rule out a running server, so
+// it refuses, without claiming the servers run or that a Secret existed.
+func TestUpsertRefusesWhenThePodListFails(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	r, c := systemPasswordReconciler(t, objs)
+	r.APIReader = listErrorReader{Reader: c}
+
+	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
+	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
+	require.Contains(t, err.Error(), "pod state could not be checked")
+	require.NotContains(t, err.Error(), "restore the Secret")
+	requireWarningEvent(t, r, "pod state could not be checked")
+}
+
+func TestCreateSystemUsersAclRefusesWhileAServerRuns(t *testing.T) {
+	cluster, _, objs := systemPasswordFixture(false)
+	objs = append(objs, systemPasswordPod("h1", "valkey-h1-0-0-0", serverContainerName))
 	r, _ := systemPasswordReconciler(t, objs)
 
 	_, err := r.createSystemUsersAcl(context.Background(), cluster)
-	require.Error(t, err)
 	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
-}
-
-// TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns pins the live-sidecar
-// half of the guard: once a node actually runs the exporter sidecar, its
-// environment holds the _exporter password read at pod start and a
-// regenerated key would reach the servers' ACL without any pod roll (Secret
-// data is not part of WorkloadRevision), breaking the exporter's
-// authentication. The key must be refused until the Secret is restored.
-func TestUpsertRefusesExporterKeyRegenerationWhenSidecarRuns(t *testing.T) {
-	cluster, secret, objs := systemPasswordFixture(true)
-	delete(secret.Data, exporterUser)
-	node := systemPasswordNode(cluster)
-	enabled := true
-	node.Spec.Exporter.Enabled = &enabled
-	objs = append(objs, node)
-	r, c := systemPasswordReconciler(t, objs)
-
-	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing)
-	require.Contains(t, err.Error(), "_exporter")
-
-	// The Secret must be untouched: no partial regeneration may replace the
-	// keys the running nodes still accept.
-	stored := &corev1.Secret{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: getSystemPasswordSecretName(cluster.Name), Namespace: cluster.Namespace}, stored))
-	require.Equal(t, []byte("op-old"), stored.Data[operatorUser], "the operator password must not change")
-	require.Empty(t, stored.Data[exporterUser], "the exporter key must not be regenerated while the sidecar runs")
-
-	recorder := r.Recorder.(*events.FakeRecorder)
-	select {
-	case e := <-recorder.Events:
-		require.Contains(t, e, "SystemPasswordSecretMissing")
-		require.Contains(t, e, "_exporter")
-	default:
-		t.Fatal("expected a SystemPasswordSecretMissing warning event")
-	}
-}
-
-// listErrorClient fails every List call, pinning the fail-closed path: an
-// operator that cannot check whether nodes exist must not regenerate.
-type listErrorClient struct {
-	client.Client
-}
-
-func (listErrorClient) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
-	return fmt.Errorf("list nodes: api unavailable")
-}
-
-// TestUpsertRefusesWhenTheNodeListFails pins the list-error branch of the
-// guard: the regeneration decision comes from the one node list it makes,
-// so when that list fails the upsert must refuse instead of regenerating.
-func TestUpsertRefusesWhenTheNodeListFails(t *testing.T) {
-	cluster, _, objs := systemPasswordFixture(false)
-	r, _ := systemPasswordReconciler(t, objs)
-	r.Client = listErrorClient{Client: r.Client}
-
-	_, err := r.upsertSystemUsersPasswordSecret(context.Background(), cluster)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errSystemPasswordSecretMissing, "the upsert must refuse to regenerate when its node list cannot be read")
-	require.Contains(t, err.Error(), "node state could not be checked",
-		"an unreadable node list must not be reported as a running cluster")
-	require.NotContains(t, err.Error(), "restore the Secret",
-		"a cluster whose Secret was never confirmed missing must not be told to restore one")
-	require.NotContains(t, err.Error(), "running cluster",
-		"an unreadable node list is not proof the cluster is running")
-
-	// The warning event must carry the same distinction.
-	recorder := r.Recorder.(*events.FakeRecorder)
-	select {
-	case e := <-recorder.Events:
-		require.Contains(t, e, "SystemPasswordSecretMissing")
-		require.Contains(t, e, "node state could not be checked")
-		require.NotContains(t, e, "restore the Secret")
-	default:
-		t.Fatal("expected a SystemPasswordSecretMissing warning event")
-	}
 }

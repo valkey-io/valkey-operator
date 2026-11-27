@@ -142,7 +142,7 @@ var _ = Describe("clientAuth.ca validation", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, cluster)).To(Succeed()) })
 
 		r := &ValkeyClusterReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme(), Recorder: events.NewFakeRecorder(10)}
-		name, err := r.reconcileTrustBundle(ctx, cluster)
+		name, err := r.reconcileTrustBundle(ctx, cluster, false)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(name).To(BeEmpty())
 		cond := meta.FindStatusCondition(cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)

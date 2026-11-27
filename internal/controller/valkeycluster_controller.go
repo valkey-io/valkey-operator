@@ -211,8 +211,8 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// handling).
 	aclErr := r.reconcileUsersAcl(ctx, cluster)
 	var unresolved *userSecretUnresolvedError
-	fallback := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
-	if aclErr != nil && !fallback {
+	usingLastGoodACL := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
+	if aclErr != nil && !usingLastGoodACL {
 		// A fallback that stops being usable (the aclfile entry removed from
 		// the internal Secret, say) must not keep reporting the old reason.
 		removeConditionIfReason(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionDegraded, valkeyiov1alpha1.ReasonUsersACLUnresolved)
@@ -237,7 +237,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Written before any ValkeyNode references it, so a pod never starts
 	// against a trust bundle volume that does not exist yet.
-	trustBundle, err := r.reconcileTrustBundle(ctx, cluster)
+	trustBundle, err := r.reconcileTrustBundle(ctx, cluster, usingLastGoodACL)
 	if err != nil {
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonTrustBundleError, err.Error(), metav1.ConditionFalse)
 		_ = r.updateStatus(ctx, cluster, nil)

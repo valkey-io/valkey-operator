@@ -393,10 +393,10 @@ func (r *ValkeyClusterReconciler) retireTrustBundle(ctx context.Context, cluster
 }
 
 // holdNewRoots returns the bundle to write now. A new clientAuth.ca root waits
-// until every node runs the current ACL. The ACL and the bundle are separate
-// mounted Secrets, so a container that restarts after its bundle mount refreshed
-// but before its ACL mount did would otherwise trust the new root under the old
-// ACL, for example a permissive default removed in the same update.
+// until the desired ACL can be built and every node runs it. The ACL and the
+// bundle are separate mounted Secrets, so a container that restarts after its
+// bundle mount refreshed but before its ACL mount did would trust the new root
+// under the old ACL, for example a permissive default removed in the same update.
 //
 // Only those roots wait, so they are left out of what is written and everything
 // else in the bundle takes effect at once. A removed root stops being trusted.
@@ -405,16 +405,21 @@ func (r *ValkeyClusterReconciler) retireTrustBundle(ctx context.Context, cluster
 // refreshes it, and it would break the cluster bus while a node lags, because
 // peers present certificates renewed onto that root.
 //
-// A bundle nothing mounts is not held, since nodes roll onto it with both mounts
-// fresh. A Secret deleted while nodes still mount it is not that case: their pods
-// keep running and pick up its replacement through the mount, so it holds only
-// the server root until the ACL has caught up.
+// Once the desired ACL is built, a bundle nothing mounts is not held, since
+// nodes roll onto it with both mounts fresh. A Secret deleted while nodes still
+// mount it is not that case: their pods keep running and pick up its replacement
+// through the mount, so it holds only the server root until the ACL has caught up.
 //
 // It also returns how many roots wait and the nodes they wait for.
-func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, current, bundle, serverRoot []byte) ([]byte, int, []string, error) {
+func (r *ValkeyClusterReconciler) holdNewRoots(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name string, current, bundle, serverRoot []byte, usingLastGoodACL bool) ([]byte, int, []string, error) {
 	kept, held := withoutNewRoots(current, bundle, serverRoot)
 	if held == 0 {
 		return bundle, 0, nil, nil
+	}
+	// Hold even an unused bundle while using the last good ACL: new pods
+	// would mount the old aclfile too.
+	if usingLastGoodACL {
+		return kept, held, nil, nil
 	}
 	inUse, err := r.trustBundleInUse(ctx, cluster, name)
 	if err != nil {
@@ -491,7 +496,7 @@ func (r *ValkeyClusterReconciler) writeTrustBundle(ctx context.Context, cluster 
 // written: one created by anyone else under the same name is never trusted.
 //
 // When clientAuth.ca is emptied, see retireTrustBundle.
-func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) (string, error) {
+func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, usingLastGoodACL bool) (string, error) {
 	if len(cluster.GetTLS().ClientAuthCA()) == 0 {
 		meta.RemoveStatusCondition(&cluster.Status.Conditions, valkeyiov1alpha1.ConditionTLSConfigured)
 		// Reported, not returned: a failure here must not stop the reconcile,
@@ -560,7 +565,7 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 	if err != nil {
 		return "", err
 	}
-	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem)
+	toWrite, held, behind, err := r.holdNewRoots(ctx, cluster, name, existing.Data[tlsSecretKeyCA], bundle, sources[0].pem, usingLastGoodACL)
 	if err != nil {
 		return "", err
 	}
@@ -589,9 +594,11 @@ func (r *ValkeyClusterReconciler) reconcileTrustBundle(ctx context.Context, clus
 		return name, nil
 	}
 	if held > 0 {
-		setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending,
-			fmt.Sprintf("holding %d new root(s) until node(s) %s confirm the current ACL is live", held, strings.Join(behind, ", ")),
-			metav1.ConditionFalse)
+		message := fmt.Sprintf("holding %d new root(s) until node(s) %s confirm the current ACL is live", held, strings.Join(behind, ", "))
+		if len(behind) == 0 {
+			message = fmt.Sprintf("holding %d new root(s) until UsersACLUnresolved clears and the desired ACL can be applied", held)
+		}
+		setCondition(cluster, valkeyiov1alpha1.ConditionTLSConfigured, valkeyiov1alpha1.ReasonTrustBundlePending, message, metav1.ConditionFalse)
 		return name, nil
 	}
 	msg := fmt.Sprintf("%s holds the server root and %d clientAuth.ca source(s): %s", name, len(sources)-1, describeTrustSources(sources[1:]))

@@ -52,7 +52,7 @@ metadata:
   name: %s
 spec:
   shards: %d
-  replicas: 0
+  replicasPerShard: 0
   acl:
     users:
 %s`, clusterName, shards, users)

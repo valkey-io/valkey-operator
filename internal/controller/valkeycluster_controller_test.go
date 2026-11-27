@@ -772,20 +772,20 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:           1,
 					ReplicasPerShard: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
-						{
-							Name:    "testuser",
-							Enabled: true,
-							PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
-								Name: "nonexistent-secret",
-								Keys: []string{"password"},
-							},
-						},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+			cluster.Spec.Users = []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+				{
+					Name:    "testuser",
+					Enabled: true,
+					PasswordSecret: valkeyiov1alpha1.PasswordSecretSpec{
+						Name: "nonexistent-secret",
+						Keys: []string{"password"},
+					},
+				},
+			}
 
 			reconciler := &ValkeyClusterReconciler{
 				Client:    k8sClient,
@@ -809,20 +809,20 @@ var _ = Describe("reconcileUsersAcl", func() {
 				Spec: valkeyiov1alpha1.ValkeyClusterSpec{
 					Shards:           1,
 					ReplicasPerShard: 0,
-					Users: []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
-						{
-							Name:       "testuser",
-							Enabled:    true,
-							NoPassword: true,
-							ACLPermissions: valkeyiov1alpha1.ACLPermissions{
-								RawAcl: "+@all",
-							},
-						},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cluster) }()
+			cluster.Spec.Users = []valkeyiov1alpha1.UserAclSpec{ //nolint:staticcheck // legacy spec.users
+				{
+					Name:       "testuser",
+					Enabled:    true,
+					NoPassword: true,
+					ACLPermissions: valkeyiov1alpha1.ACLPermissions{
+						RawAcl: "+@all",
+					},
+				},
+			}
 
 			reconciler := &ValkeyClusterReconciler{
 				Client:    k8sClient,
@@ -848,7 +848,12 @@ var _ = Describe("reconcileUsersAcl", func() {
 		// declaredUserLines reconciles the cluster's users and returns the
 		// aclfile lines for the declared (non-system) users.
 		declaredUserLines := func(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster) []string {
+			// A new spec.users is rejected. The function reads the object it is
+			// given, so store the cluster without that field and put it back.
+			legacy := cluster.Spec.Users //nolint:staticcheck // legacy spec.users
+			cluster.Spec.Users = nil     //nolint:staticcheck // legacy spec.users
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			cluster.Spec.Users = legacy //nolint:staticcheck // legacy spec.users
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cluster) })
 
 			reconciler := &ValkeyClusterReconciler{

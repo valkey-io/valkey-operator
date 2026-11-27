@@ -144,11 +144,12 @@ spec:
         ca:
           - configMapName: spire-bundle  # as SPIRE publishes it
             key: bundle.spiffe
-  users:
-    - name: spiffe://example.org/ns/default/sa/api
-      enabled: true
-      resetpass: true
-      permissions: "+@read ~app:*"
+  acl:
+    users:
+      - name: spiffe://example.org/ns/default/sa/api
+        password:
+          type: Disabled
+        permissions: "+@read ~app:*"
 ```
 
 A client presenting an SVID for `spiffe://example.org/ns/default/sa/api` signed by a root in SPIRE's bundle is authenticated as that ACL user. SPIRE's bundle ConfigMap is not in the cluster's namespace by default: copy or distribute it there (for example with a Kyverno generate policy), since a source is read from the cluster's own namespace.

@@ -861,11 +861,11 @@ While a server or exporter container of the cluster runs, the operator does not 
 
 To recover, restore the Secret from a backup. The operator adopts it and the cluster returns to `Ready` within about 10 seconds.
 
-Without a backup, rebuild the current passwords from a running server container. `VALKEYCLI_AUTH` holds `_operator`, unless you set it to your own user, and `PRIMARY_AUTH` holds `_replication`:
+Without a backup, rebuild the current passwords from the files mounted in a running server container. Read the files, not `VALKEYCLI_AUTH` or `PRIMARY_AUTH`: the environment holds the passwords from when the container started, which are out of date after a rotation.
 
 ```sh
-OP=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- printenv VALKEYCLI_AUTH)
-RE=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- printenv PRIMARY_AUTH)
+OP=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_operator)
+RE=$(kubectl exec valkey-<cluster>-0-0-0 -c server -- cat /etc/valkey/system-passwords/_replication)
 EX=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 kubectl create secret generic valkey-<cluster>-system-passwords \
   --from-literal=_operator="$OP" --from-literal=_replication="$RE" --from-literal=_exporter="$EX"

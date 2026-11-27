@@ -468,6 +468,10 @@ const (
 	// ValkeyNodeReasonConfigRevisionMismatch indicates spec.configRevision is
 	// not in the node's ConfigMap and the node's spec does not render to it.
 	ValkeyNodeReasonConfigRevisionMismatch = "ConfigRevisionMismatch"
+	// ValkeyNodeReasonInvalidPodTemplate indicates a container probe in the
+	// node's pod template, after the spec.containers patches, has no handler
+	// or more than one, so the node keeps its current workload.
+	ValkeyNodeReasonInvalidPodTemplate = "InvalidPodTemplate"
 	// ValkeyNodeReasonAwaitingWorkloadRevision indicates a pod-template change is
 	// ready but blocked until Spec.WorkloadRevision matches the desired template hash.
 	ValkeyNodeReasonAwaitingWorkloadRevision = "AwaitingWorkloadRevision"

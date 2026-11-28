@@ -286,6 +286,25 @@ func (s *ClusterState) GetUnassignedSlots() []SlotsRange {
 	return remaining
 }
 
+// UnlistedSlots returns the slots that no entry in any scraped CLUSTER NODES
+// table lists, failed owners included. A node learns a primary's slots only
+// from that primary's own messages, so a slot can be owned and still unlisted.
+func (s *ClusterState) UnlistedSlots() []SlotsRange {
+	remaining := []SlotsRange{{0, 16383}}
+	for _, node := range s.AllNodes() {
+		for _, entry := range node.nodes {
+			for _, slot := range entry.Slots {
+				var next []SlotsRange //nolint:prealloc
+				for _, base := range remaining {
+					next = append(next, SubtractSlotsRange(base, slot)...)
+				}
+				remaining = next
+			}
+		}
+	}
+	return remaining
+}
+
 // AssignableSlots returns the unassigned slots a new primary can be given. It
 // leaves out ranges a scraped node's CLUSTER NODES table gives to a primary
 // this pass did not scrape, at one of the pod addresses it set out to scrape.
@@ -686,6 +705,86 @@ func (s *ClusterState) FindNodeById(id string) *NodeState {
 	return nil
 }
 
+// NodeView is what the scraped nodes report for one node ID.
+type NodeView struct {
+	Scraped   bool     // the node answered and its own myself line is the view
+	Hosts     []string // its scrape address, or every host the tables list for it
+	OwnsSlots bool
+	// ListedWithSlots is whether any scraped table, its own or a peer's, lists
+	// it with slots. The scrape is not one snapshot, so a peer can show a
+	// promotion the node's own earlier line does not.
+	ListedWithSlots bool
+	PrimaryIDs      []string // primaries it is listed as replicating; at most one when Scraped
+}
+
+// NodeViews returns one view per node ID any scraped node knows. A node that
+// answered is judged by its own myself line alone, since a cut-off peer can
+// hold a stale entry for it. Any other ID takes the union of the entries
+// across all scraped tables.
+func (s *ClusterState) NodeViews() map[string]NodeView {
+	nodes := s.AllNodes()
+	views := make(map[string]NodeView)
+
+	for _, n := range nodes {
+		myself := n.Myself()
+		if myself == nil {
+			continue
+		}
+		owns := myself.HasSlotAssignment()
+		v := NodeView{Scraped: true, Hosts: []string{n.Address}, OwnsSlots: owns, ListedWithSlots: owns}
+		if p := primaryIDOf(myself); p != "" {
+			v.PrimaryIDs = []string{p}
+		}
+		views[n.Id] = v
+	}
+
+	merge := func(id, host string, entry *ClusterNode) {
+		v := views[id]
+		if entry != nil && entry.HasSlotAssignment() {
+			v.ListedWithSlots = true
+		}
+		if v.Scraped {
+			views[id] = v
+			return
+		}
+		if host != "" && !slices.Contains(v.Hosts, host) {
+			v.Hosts = append(v.Hosts, host)
+		}
+		if entry != nil {
+			v.OwnsSlots = v.OwnsSlots || entry.HasSlotAssignment()
+			if p := primaryIDOf(entry); p != "" && !slices.Contains(v.PrimaryIDs, p) {
+				v.PrimaryIDs = append(v.PrimaryIDs, p)
+			}
+		}
+		views[id] = v
+	}
+
+	for _, n := range nodes {
+		if n.Myself() == nil {
+			merge(n.Id, n.Address, nil)
+		}
+		for i := range n.nodes {
+			merge(n.nodes[i].Id, n.nodes[i].Host, &n.nodes[i])
+		}
+	}
+
+	for id, v := range views {
+		slices.Sort(v.Hosts)
+		slices.Sort(v.PrimaryIDs)
+		views[id] = v
+	}
+	return views
+}
+
+// primaryIDOf returns the primary a CLUSTER NODES entry replicates, or "" for a
+// primary.
+func primaryIDOf(e *ClusterNode) string {
+	if e.PrimaryId == "-" {
+		return ""
+	}
+	return e.PrimaryId
+}
+
 // hostFromClusterNodesEndpoint extracts the bare host from a CLUSTER NODES
 // endpoint field (<ip:port@cport[,hostname]>). Valkey writes the endpoint with a
 // bare IP, so an IPv6 host carries its own colons (fd00::2:6379@16379) and
@@ -860,8 +959,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		log.Error(err, "command failed: CLUSTER NODES")
 		return nil
 	}
-	// Remove the encoding string included in a verbatim string.
-	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	node.nodes = ParseClusterNodes(cnodes)
 	myself := node.Myself()
 	if myself == nil {
 		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")

@@ -400,6 +400,16 @@ func TestParseClusterNodesMyself(t *testing.T) {
 	}
 }
 
+// TestParseClusterNodesMyselfStripsVerbatimPrefix: over RESP3 the reply is a
+// verbatim string whose "txt:" prefix sits on the first line.
+func TestParseClusterNodesMyselfStripsVerbatimPrefix(t *testing.T) {
+	const viewer = "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 5461-10922\n"
+	got := ParseClusterNodesMyself("txt:" + viewer)
+	if got == nil || got.Id != "abc123" {
+		t.Errorf("expected id abc123, got %+v", got)
+	}
+}
+
 func BenchmarkParseClusterNodesMyself(b *testing.B) {
 	var raw strings.Builder
 	for i := range 200 {

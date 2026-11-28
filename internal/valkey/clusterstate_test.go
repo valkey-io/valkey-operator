@@ -1613,3 +1613,107 @@ func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 		t.Fatalf("INFO failure should leave replication fields unknown, got %v", node.Info)
 	}
 }
+
+func TestNodeViews(t *testing.T) {
+	node := func(id, address, table string) *NodeState {
+		n := &NodeState{Id: id, Address: address}
+		n.SetClusterNodesForTesting(table)
+		return n
+	}
+	state := func(nodes ...*NodeState) *ClusterState {
+		return &ClusterState{PendingNodes: nodes}
+	}
+
+	t.Run("a scraped node is judged by its own line", func(t *testing.T) {
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n")
+		b := node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n"+
+			"a 10.0.0.1:6379@16379 master - 0 0 1 connected\n")
+		v := state(a, b).NodeViews()["a"]
+		if !v.Scraped || !v.OwnsSlots {
+			t.Errorf("got %+v, want Scraped and OwnsSlots", v)
+		}
+	})
+
+	t.Run("a cut-off peer's stale entry does not give a scraped node slots", func(t *testing.T) {
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n")
+		b := node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n"+
+			"a 10.0.0.1:6379@16379 master - 0 0 1 connected 0-100\n")
+		if v := state(a, b).NodeViews()["a"]; v.OwnsSlots || !v.ListedWithSlots {
+			t.Errorf("got %+v, want OwnsSlots false, ListedWithSlots", v)
+		}
+	})
+
+	t.Run("an unscraped node takes the union of the tables", func(t *testing.T) {
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n"+
+			"x 10.0.0.9:6379@16379 master,fail - 0 0 3 disconnected 200-300\n")
+		b := node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected 101-199\n"+
+			"x 10.0.0.9:6379@16379 master - 0 0 3 connected\n")
+		v := state(a, b).NodeViews()["x"]
+		if v.Scraped || !v.OwnsSlots || !slices.Equal(v.Hosts, []string{"10.0.0.9"}) {
+			t.Errorf("got %+v, want unscraped, OwnsSlots, Hosts [10.0.0.9]", v)
+		}
+	})
+
+	t.Run("an unscraped replica lists its primary", func(t *testing.T) {
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n"+
+			"r 10.0.0.8:6379@16379 slave x 0 0 3 connected\n")
+		if v := state(a).NodeViews()["r"]; !slices.Equal(v.PrimaryIDs, []string{"x"}) {
+			t.Errorf("got %+v, want PrimaryIDs [x]", v)
+		}
+	})
+
+	t.Run("a scraped replica's own line wins over what peers list", func(t *testing.T) {
+		r := node("r", "10.0.0.8", "r 10.0.0.8:6379@16379 myself,slave x 0 0 3 connected\n")
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-100\n"+
+			"r 10.0.0.8:6379@16379 slave y 0 0 3 connected\n")
+		v := state(a, r).NodeViews()["r"]
+		if !v.Scraped || !slices.Equal(v.PrimaryIDs, []string{"x"}) {
+			t.Errorf("got %+v, want Scraped, PrimaryIDs [x]", v)
+		}
+	})
+
+	t.Run("a scraped node without a myself line is judged by the tables", func(t *testing.T) {
+		n := node("n", "10.0.0.7", "")
+		a := node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n"+
+			"n 10.0.0.7:6379@16379 master - 0 0 4 connected 400-500\n")
+		v := state(a, n).NodeViews()["n"]
+		if v.Scraped || !v.OwnsSlots || !slices.Contains(v.Hosts, "10.0.0.7") {
+			t.Errorf("got %+v, want unscraped, OwnsSlots, scrape address in Hosts", v)
+		}
+	})
+}
+
+func TestUnlistedSlots(t *testing.T) {
+	node := func(id, address, table string) *NodeState {
+		n := &NodeState{Id: id, Address: address}
+		n.SetClusterNodesForTesting(table)
+		return n
+	}
+	for _, tc := range []struct {
+		name  string
+		nodes []*NodeState
+		want  []SlotsRange
+	}{
+		{"every slot listed", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"b 10.0.0.2:6379@16379 master - 0 0 2 connected 8192-16383\n"),
+		}, nil},
+		{"a range no table lists", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"+
+				"x 10.0.0.9:6379@16379 master,fail? - 0 0 3 connected\n"),
+		}, []SlotsRange{{8192, 16383}}},
+		{"a failed peer's slots count as listed", []*NodeState{
+			node("a", "10.0.0.1", "a 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-8191\n"),
+			node("b", "10.0.0.2", "b 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n"+
+				"x 10.0.0.9:6379@16379 master,fail - 0 0 3 disconnected 8192-16383\n"),
+		}, nil},
+		{"no node answered", nil, []SlotsRange{{0, 16383}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &ClusterState{PendingNodes: tc.nodes}
+			if got := state.UnlistedSlots(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("unlisted slots = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

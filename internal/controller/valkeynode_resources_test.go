@@ -1096,12 +1096,14 @@ func TestParseClusterNodesRole(t *testing.T) {
 		name         string
 		clusterNodes string
 		expected     string
+		expectedID   string
 	}{
 		{
 			// A real primary owns a slot range.
 			name:         "myself master owning slots is primary",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 5462-10922\n",
 			expected:     RolePrimary,
+			expectedID:   "76dcce4b40c3114323dd077db7aa98151222b9a0",
 		},
 		{
 			// Regression (issue #261 follow-up): a just-restarted replica reports
@@ -1110,6 +1112,7 @@ func TestParseClusterNodesRole(t *testing.T) {
 			name:         "myself master owning no slots is replica (restart transient)",
 			clusterNodes: "37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,master - 0 0 1 connected\n",
 			expected:     RoleReplica,
+			expectedID:   "37349cd33fe18465f36b46f09e392f6bb90688e1",
 		},
 		{
 			// Scale-out: a new shard's primary has joined the cluster but has no
@@ -1118,6 +1121,7 @@ func TestParseClusterNodesRole(t *testing.T) {
 			name:         "myself master before slot assignment is replica (scale-out)",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 0 connected\n",
 			expected:     RoleReplica,
+			expectedID:   "76dcce4b40c3114323dd077db7aa98151222b9a0",
 		},
 		{
 			// ...and flips to primary as soon as CLUSTER ADDSLOTSRANGE lands, even
@@ -1125,17 +1129,20 @@ func TestParseClusterNodesRole(t *testing.T) {
 			name:         "myself master becomes primary once it owns a slot",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 0\n",
 			expected:     RolePrimary,
+			expectedID:   "76dcce4b40c3114323dd077db7aa98151222b9a0",
 		},
 		{
 			name:         "myself slave is replica",
 			clusterNodes: "37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
 			expected:     RoleReplica,
+			expectedID:   "37349cd33fe18465f36b46f09e392f6bb90688e1",
 		},
 		{
 			name: "picks the myself line among peers",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n" +
 				"37349cd33fe18465f36b46f09e392f6bb90688e1 10.244.2.6:6379@16379 myself,slave 76dcce4b40c3114323dd077db7aa98151222b9a0 0 0 1 connected\n",
-			expected: RoleReplica,
+			expected:   RoleReplica,
+			expectedID: "37349cd33fe18465f36b46f09e392f6bb90688e1",
 		},
 		{
 			// A master mid-reshard holds only a migration marker, no owned
@@ -1144,16 +1151,26 @@ func TestParseClusterNodesRole(t *testing.T) {
 			name:         "myself master holding only a migration marker is primary",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected [5461-<-37349cd33fe18465f36b46f09e392f6bb90688e1]\n",
 			expected:     RolePrimary,
+			expectedID:   "76dcce4b40c3114323dd077db7aa98151222b9a0",
+		},
+		{
+			name:         "verbatim string prefix on a myself first line",
+			clusterNodes: "txt:76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 myself,master - 0 0 1 connected 0-5461\n",
+			expected:     RolePrimary,
+			expectedID:   "76dcce4b40c3114323dd077db7aa98151222b9a0",
 		},
 		{
 			name:         "no myself line returns empty",
 			clusterNodes: "76dcce4b40c3114323dd077db7aa98151222b9a0 10.244.1.3:6379@16379 master - 0 0 1 connected 5462-10922\n",
 			expected:     "",
+			expectedID:   "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, parseClusterNodesRole(tt.clusterNodes))
+			role, id := parseClusterNodesRole(tt.clusterNodes)
+			assert.Equal(t, tt.expected, role)
+			assert.Equal(t, tt.expectedID, id)
 		})
 	}
 }

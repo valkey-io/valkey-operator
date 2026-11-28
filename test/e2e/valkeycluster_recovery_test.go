@@ -58,6 +58,15 @@ var _ = Describe("ValkeyCluster recovery", Label("ValkeyCluster", "recovery", "s
 		return n.Status.Role, nil
 	}
 
+	// dbsizeOf reads the key count of one node.
+	dbsizeOf := func(g Gomega, pod string) int {
+		out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
+		g.Expect(err).NotTo(HaveOccurred())
+		n, err := strconv.Atoi(strings.TrimSpace(out))
+		g.Expect(err).NotTo(HaveOccurred(), out)
+		return n
+	}
+
 	applyCluster := func(manifest string) {
 		GinkgoHelper()
 		cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -459,15 +468,6 @@ spec:
 			deleteCluster(clusterName)
 		})
 
-		// dbsizeOf reads the key count of one node.
-		dbsizeOf := func(g Gomega, pod string) int {
-			out, err := utils.ValkeyCLI(pod, cliOpts, "DBSIZE")
-			g.Expect(err).NotTo(HaveOccurred())
-			n, err := strconv.Atoi(strings.TrimSpace(out))
-			g.Expect(err).NotTo(HaveOccurred(), out)
-			return n
-		}
-
 		// restartsOf reads the restart count of the server container of a pod.
 		restartsOf := func(g Gomega, pod string) int {
 			out, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-o",
@@ -853,6 +853,108 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).To(Equal(keyCount), "test keys were lost after the primary was deleted during the scale-out")
 			}, time.Minute).Should(Succeed())
+		})
+	})
+
+	// Scale-in drains an excess shard before deleting it. When the shard's
+	// primary crashes during the drain, its replica holds the only other copy of
+	// the slots that have not moved yet. The operator keeps the replica, which is
+	// promoted, and the drain continues from it.
+	Context("when an excess shard's primary crashes during scale-in", Label("scale-in-crash"), func() {
+		const clusterName = "valkeycluster-scale-in-crash-e2e"
+		const keyPrefix = "e2e:scalein-crash"
+		const seedKeys = 60
+
+		AfterEach(func() {
+			collectOnFailure(clusterName)
+			deleteCluster(clusterName)
+		})
+
+		It("keeps the shard's replica, drains from it and loses no keys", func() {
+			primary := podFor(clusterName, 2, 0)
+			replica := podFor(clusterName, 2, 1)
+
+			By("creating a 3-shard cluster with 1 replica and no persistence")
+			applyCluster(fmt.Sprintf(`apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 3
+  replicasPerShard: 1
+  acl:
+    users:
+      - name: default
+        password:
+          type: Any
+        permissions: "~* &* +@all"
+  config:
+    enable-debug-command: local
+`, clusterName))
+
+			By("waiting for the cluster to become Ready")
+			waitForReady(clusterName)
+
+			By("seeding keys across all shards")
+			// Few enough writes that no default save rule fires: a snapshot
+			// would mask the empty restart this test is about.
+			Eventually(func(g Gomega) {
+				g.Expect(utils.WriteValkeyKeys(podFor(clusterName, 0, 0), keyPrefix, seedKeys, cliOpts)).To(Succeed())
+			}).Should(Succeed())
+
+			By("waiting for shard 2's replica to hold the shard's keys")
+			var replicaIP string
+			Eventually(func(g Gomega) {
+				keys := dbsizeOf(g, primary)
+				g.Expect(keys).To(BeNumerically(">", 0))
+				g.Expect(dbsizeOf(g, replica)).To(Equal(keys))
+				out, err := utils.Run(exec.Command("kubectl", "get", "pod", replica, "-o", "jsonpath={.status.podIP}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				replicaIP = strings.TrimSpace(out)
+				g.Expect(replicaIP).NotTo(BeEmpty())
+			}).Should(Succeed())
+
+			By("crashing shard 2's primary server")
+			// The connection dies with the server, so the command itself fails.
+			_, _ = utils.ValkeyCLI(primary, cliOpts, "DEBUG", "SEGFAULT")
+
+			By("scaling in to 2 shards while the primary is down")
+			// The restarted container waits at least one cluster-node-timeout
+			// for the replica hand-off, so the first scale-in reconcile cannot
+			// reach the primary.
+			_, err := utils.Run(exec.Command("kubectl", "patch", "valkeycluster", clusterName,
+				"--type=merge", "-p", `{"spec":{"shards":2}}`))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the drain continues from the promoted replica")
+			// The primary is down from before the scale-in, so the first batch
+			// already comes from the replica. Later batches may be folded into
+			// that first event.
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "events", "--field-selector",
+					fmt.Sprintf("reason=SlotsDraining,involvedObject.name=%s", clusterName),
+					"-o", "jsonpath={.items[*].message}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring(fmt.Sprintf("from %s to", replicaIP)))
+			}, 5*time.Minute).Should(Succeed())
+
+			By("waiting for shard 2's ValkeyNodes to be deleted")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "valkeynodes", "-l",
+					fmt.Sprintf("valkey.io/cluster=%s,valkey.io/shard-index=2", clusterName), "-o", "name"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(out)).To(BeEmpty())
+			}, 5*time.Minute).Should(Succeed())
+
+			By("waiting for the cluster to return to Ready")
+			waitForReady(clusterName)
+
+			By("verifying no keys were lost")
+			Eventually(func(g Gomega) {
+				found, err := utils.CountValkeyKeys(podFor(clusterName, 0, 0), keyPrefix, seedKeys, cliOpts)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(Equal(seedKeys))
+			}).Should(Succeed())
 		})
 	})
 })

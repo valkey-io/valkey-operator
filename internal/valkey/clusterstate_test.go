@@ -26,6 +26,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	vclient "github.com/valkey-io/valkey-go"
 	vmock "github.com/valkey-io/valkey-go/mock"
@@ -1611,5 +1612,26 @@ func TestGetClusterStateKeepsNodeWhenInfoFails(t *testing.T) {
 	}
 	if node.Info["master_link_status"] == "up" || node.Info["role"] != "" {
 		t.Fatalf("INFO failure should leave replication fields unknown, got %v", node.Info)
+	}
+}
+
+// Every scraped node lists every member, so the scrape keeps one copy of each
+// id and host for all the tables rather than one per table.
+func TestGetClusterStateSharesPeerStrings(t *testing.T) {
+	addresses, dial := benchCluster(gomock.NewController(t), 3)
+	state := GetClusterState(context.Background(), addresses, 6379, dial)
+	nodes := state.AllNodes()
+	if len(nodes) != 6 {
+		t.Fatalf("got %d nodes, want 6", len(nodes))
+	}
+	first := nodes[0].nodes
+	for _, node := range nodes[1:] {
+		for i, entry := range node.nodes {
+			for _, pair := range [][2]string{{entry.Id, first[i].Id}, {entry.Host, first[i].Host}, {entry.PrimaryId, first[i].PrimaryId}} {
+				if unsafe.StringData(pair[0]) != unsafe.StringData(pair[1]) {
+					t.Fatalf("%s's entry %d holds its own copy of %q", node.Address, i, pair[0])
+				}
+			}
+		}
 	}
 }

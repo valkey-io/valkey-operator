@@ -219,6 +219,7 @@ const scrapeConcurrency = 32
 // caller's context.
 func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFunc) []*NodeState {
 	results := make([]*NodeState, len(addresses))
+	strs := &stringTable{}
 	var g errgroup.Group
 	g.SetLimit(scrapeConcurrency)
 	var panicked any
@@ -233,7 +234,7 @@ func scrapeNodes(ctx context.Context, addresses []string, port int, dial DialFun
 				}
 			}()
 			// Attempt to connect to the Valkey node and extract information.
-			results[i] = getNodeState(ctx, address, port, dial)
+			results[i] = getNodeState(ctx, address, port, dial, strs)
 			return nil
 		})
 	}
@@ -782,7 +783,7 @@ func (n *NodeState) GetFailingNodes() []ClusterNode {
 }
 
 // Connect to a single Valkey node and scrapes its current state.
-func getNodeState(ctx context.Context, address string, port int, dial DialFunc) *NodeState {
+func getNodeState(ctx context.Context, address string, port int, dial DialFunc, strs *stringTable) *NodeState {
 	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
 	log := logf.FromContext(ctx).WithValues("address", hostPort)
 
@@ -861,7 +862,7 @@ func getNodeState(ctx context.Context, address string, port int, dial DialFunc) 
 		return nil
 	}
 	// Remove the encoding string included in a verbatim string.
-	node.nodes = ParseClusterNodes(strings.TrimPrefix(cnodes, "txt:"))
+	node.nodes = parseClusterNodes(strings.TrimPrefix(cnodes, "txt:"), strs)
 	myself := node.Myself()
 	if myself == nil {
 		log.Error(fmt.Errorf("CLUSTER NODES reply has no myself entry"), "command failed: CLUSTER NODES")

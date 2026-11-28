@@ -91,7 +91,9 @@ spec:
                   users:
                     description: Users managed by the operator
                     items:
-                      description: ACLUserSpec defines a Valkey ACL user.
+                      description: |-
+                        ACLUserSpec defines a Valkey ACL user.
+                        An unchanged stored user stays valid.
                       properties:
                         channels:
                           description: Channel restrictions
@@ -213,12 +215,13 @@ spec:
                       - fieldPath: .password.secret.name
                         message: password.secret.name is required for an enabled user
                           whose password.type is Secret, the default
+                        optionalOldSelf: true
                         reason: FieldValueRequired
-                        rule: (has(self.state) && self.state == 'Disabled') || (has(self.password)
-                          && has(self.password.type) && self.password.type in ['Any',
-                          'Disabled']) || (has(self.password) && has(self.password.secret)
-                          && has(self.password.secret.name) && size(self.password.secret.name)
-                          > 0)
+                        rule: (oldSelf.hasValue() && oldSelf.value() == self) || ((has(self.state)
+                          && self.state == 'Disabled') || (has(self.password) && has(self.password.type)
+                          && self.password.type in ['Any', 'Disabled']) || (has(self.password)
+                          && has(self.password.secret) && has(self.password.secret.name)
+                          && size(self.password.secret.name) > 0))
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -231,6 +234,7 @@ spec:
                   Config holds additional Valkey configuration parameters.
                   Keys the operator owns are rejected. See docs/valkeycluster.md for the list.
                   Keys may contain only lowercase letters, digits, '.', '_' and '-'.
+                  An unchanged stored value stays valid.
                 maxProperties: 1000
                 type: object
                 x-kubernetes-validations:
@@ -238,12 +242,16 @@ spec:
                     sets these itself and a user value would be ignored or would break
                     its connection to the nodes. See docs/valkeycluster.md for the
                     full list'
-                  rule: self.all(key, !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication']))
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && oldSelf.value() == self) || (self.all(key,
+                    !(key.lowerAscii() in ['aclfile','cluster-allow-replica-migration','cluster-announce-hostname','cluster-announce-ip','cluster-config-file','cluster-enabled','cluster-preferred-endpoint-type','cluster-replica-validity-factor','dir','port','primaryauth','primaryuser','protected-mode','shutdown-on-sigterm','tls-auth-clients','tls-auth-clients-user','tls-ca-cert-file','tls-cert-file','tls-cluster','tls-key-file','tls-port','tls-replication'])))
                 - message: spec.config keys may contain only lowercase letters, digits,
                     '.', '_' and '-'. Valkey unquotes and trims keys, so quoted or
                     padded keys are rejected. The operator matches keys as written,
                     so they must be lowercase
-                  rule: self.all(key, key.matches('^[a-z0-9._-]+$'))
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && oldSelf.value() == self) || (self.all(key,
+                    key.matches('^[a-z0-9._-]+$')))
               containers:
                 description: Additional containers or overrides for existing containers,
                   applied using strategic merge patch
@@ -4209,6 +4217,7 @@ spec:
                   description: |-
                     An UserAclSpec contains user, authorization, and permissions-related configurations.
                     It is the legacy spec.users entry, replaced by ACLUserSpec.
+                    An unchanged stored user stays valid.
                   properties:
                     channels:
                       description: Channel restrictions
@@ -4314,11 +4323,12 @@ spec:
                   - fieldPath: .passwordSecret.name
                     message: passwordSecret.name is required for an enabled user without
                       nopass or resetpass
+                    optionalOldSelf: true
                     reason: FieldValueRequired
-                    rule: (has(self.enabled) && !self.enabled) || (has(self.nopass)
-                      && self.nopass) || (has(self.resetpass) && self.resetpass) ||
-                      (has(self.passwordSecret) && has(self.passwordSecret.name) &&
-                      size(self.passwordSecret.name) > 0)
+                    rule: (oldSelf.hasValue() && oldSelf.value() == self) || ((has(self.enabled)
+                      && !self.enabled) || (has(self.nopass) && self.nopass) || (has(self.resetpass)
+                      && self.resetpass) || (has(self.passwordSecret) && has(self.passwordSecret.name)
+                      && size(self.passwordSecret.name) > 0))
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

@@ -119,7 +119,8 @@ type ACLPermissions struct {
 }
 
 // ACLUserSpec defines a Valkey ACL user.
-// +kubebuilder:validation:XValidation:rule="(has(self.state) && self.state == 'Disabled') || (has(self.password) && has(self.password.type) && self.password.type in ['Any', 'Disabled']) || (has(self.password) && has(self.password.secret) && has(self.password.secret.name) && size(self.password.secret.name) > 0)",message="password.secret.name is required for an enabled user whose password.type is Secret, the default",fieldPath=".password.secret.name",reason="FieldValueRequired"
+// An unchanged stored user stays valid.
+// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && oldSelf.value() == self) || ((has(self.state) && self.state == 'Disabled') || (has(self.password) && has(self.password.type) && self.password.type in ['Any', 'Disabled']) || (has(self.password) && has(self.password.secret) && has(self.password.secret.name) && size(self.password.secret.name) > 0))",optionalOldSelf=true,message="password.secret.name is required for an enabled user whose password.type is Secret, the default",fieldPath=".password.secret.name",reason="FieldValueRequired"
 type ACLUserSpec struct {
 	// Username
 	// +required
@@ -153,7 +154,8 @@ func (u ACLUserSpec) PasswordType() ACLPasswordType {
 
 // An UserAclSpec contains user, authorization, and permissions-related configurations.
 // It is the legacy spec.users entry, replaced by ACLUserSpec.
-// +kubebuilder:validation:XValidation:rule="(has(self.enabled) && !self.enabled) || (has(self.nopass) && self.nopass) || (has(self.resetpass) && self.resetpass) || (has(self.passwordSecret) && has(self.passwordSecret.name) && size(self.passwordSecret.name) > 0)",message="passwordSecret.name is required for an enabled user without nopass or resetpass",fieldPath=".passwordSecret.name",reason="FieldValueRequired"
+// An unchanged stored user stays valid.
+// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && oldSelf.value() == self) || ((has(self.enabled) && !self.enabled) || (has(self.nopass) && self.nopass) || (has(self.resetpass) && self.resetpass) || (has(self.passwordSecret) && has(self.passwordSecret.name) && size(self.passwordSecret.name) > 0))",optionalOldSelf=true,message="passwordSecret.name is required for an enabled user without nopass or resetpass",fieldPath=".passwordSecret.name",reason="FieldValueRequired"
 type UserAclSpec struct {
 
 	// Username

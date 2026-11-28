@@ -1031,9 +1031,84 @@ func TestClusterState_IsNodeFailedByMajority(t *testing.T) {
 			t.Error("expected false with no viewers")
 		}
 	})
+	t.Run("a flag on a node's own line does not count", func(t *testing.T) {
+		self := &NodeState{Id: "target", Flags: FlagMyself | FlagSlave,
+			nodes: ParseClusterNodes("target 10.0.0.9:6379@16379 myself,slave,fail p1 0 0 1 connected\n")}
+		st := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			self, primary("a", healthy), primary("b", healthy), primary("c", healthy),
+		}}}}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: a node is not a viewer of itself")
+		}
+	})
 	t.Run("any single report still satisfies IsNodeFailed", func(t *testing.T) {
 		if !build(failing, healthy, healthy).IsNodeFailed("target") {
 			t.Error("expected the any-viewer rule to report true")
+		}
+	})
+	t.Run("a confirmed fail from a replica's table is authoritative", func(t *testing.T) {
+		st := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			target, replica("r", confirmed), primary("a", healthy), primary("b", healthy),
+		}}}}
+		if !st.IsNodeFailedByMajority("target") {
+			t.Error("expected true: fail counts from any viewer")
+		}
+	})
+	t.Run("a pending node is not a viewer", func(t *testing.T) {
+		st := build(healthy, healthy, healthy)
+		st.PendingNodes = []*NodeState{replica("pending", confirmed)}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: only shard members' tables count")
+		}
+	})
+	t.Run("a primary that owns no slots does not vote", func(t *testing.T) {
+		drained := func(id string) *NodeState {
+			return &NodeState{Id: id, Flags: FlagMyself | FlagMaster, ClusterInfo: size("3"),
+				nodes: ParseClusterNodes(id + " 10.0.0.1:6379@16379 myself,master - 0 0 1 connected\n" + failing)}
+		}
+		st := &ClusterState{Shards: []*ShardState{{Nodes: []*NodeState{
+			target, primary("a", failing), drained("d1"), drained("d2"),
+		}}}}
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: one voting report out of three")
+		}
+	})
+	t.Run("without cluster_size fail? never reaches a quorum", func(t *testing.T) {
+		withoutSize := func(st *ClusterState) *ClusterState {
+			for _, n := range st.Shards[0].Nodes {
+				n.ClusterInfo = nil
+			}
+			return st
+		}
+		if withoutSize(build(failing, failing, failing)).IsNodeFailedByMajority("target") {
+			t.Error("expected false with no cluster_size")
+		}
+		if !withoutSize(build(confirmed, healthy, healthy)).IsNodeFailedByMajority("target") {
+			t.Error("expected true: a confirmed fail needs no cluster_size")
+		}
+	})
+	t.Run("the largest cluster_size any member reports sets the quorum", func(t *testing.T) {
+		// a and b say three primaries own slots, c says five. Two reports
+		// are a majority of three but not of five.
+		st := build(failing, failing, healthy)
+		st.Shards[0].Nodes[3].ClusterInfo = size("5")
+		if st.IsNodeFailedByMajority("target") {
+			t.Error("expected false: two reports out of five")
+		}
+	})
+	t.Run("one state answers each node ID on its own evidence", func(t *testing.T) {
+		view := func(x, y, z string) string {
+			return "x 10.0.0.2:6379@16379 slave" + x + " p1 0 0 1 connected\n" +
+				"y 10.0.0.3:6379@16379 slave" + y + " p1 0 0 1 connected\n" +
+				"z 10.0.0.4:6379@16379 slave" + z + " p1 0 0 1 connected\n"
+		}
+		// x: one confirmed fail. y: fail? from two of three voters. z: fail?
+		// from one.
+		st := build(view(",fail", ",fail?", ",fail?"), view("", ",fail?", ""), view("", "", ""))
+		for id, want := range map[string]bool{"x": true, "y": true, "z": false, "unknown": false, "a": false} {
+			if got := st.IsNodeFailedByMajority(id); got != want {
+				t.Errorf("IsNodeFailedByMajority(%q) = %v, want %v", id, got, want)
+			}
 		}
 	})
 }

@@ -528,7 +528,7 @@ func TestDeleteExcessValkeyNodesKeepsUnscrapedPrimary(t *testing.T) {
 	assert.Zero(t, *failoverCalls)
 	assert.True(t, nodeExists(t, r.Client, wedgeNode(0, 2, "")))
 
-	state.Shards[0] = shard0WithPrimaryAt("node-0-0")
+	state = &valkey.ClusterState{Shards: []*valkey.ShardState{shard0WithPrimaryAt("node-0-0"), state.Shards[1]}}
 	deleted, deferred, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
 	assert.True(t, deleted, "deleted once another node of its shard is the primary")
@@ -551,7 +551,7 @@ func TestDeleteExcessValkeyNodesKeepsPodlessNodeWithoutOtherPrimary(t *testing.T
 	assert.Equal(t, "Scale-in is waiting to delete ValkeyNode wedge-0-2: this scrape cannot tell whether it is the primary of shard 0",
 		meta.FindStatusCondition(cluster.Status.Conditions, valkeyv1.ConditionProgressing).Message)
 
-	state.Shards = append(state.Shards, shard0WithPrimaryAt("node-0-0"))
+	state = &valkey.ClusterState{Shards: append(state.Shards, shard0WithPrimaryAt("node-0-0"))}
 	deleted, _, _, err := r.deleteExcessValkeyNodes(context.Background(), cluster, state, nodes)
 	require.NoError(t, err)
 	assert.True(t, deleted)

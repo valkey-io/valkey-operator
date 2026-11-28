@@ -152,15 +152,23 @@ func getBaseConfig(tls *valkeyiov1alpha1.NodeTLSSpec, hostnameAnnounce bool, ima
 		"protected-mode":                  "no",
 		"cluster-allow-replica-migration": "no",
 		"cluster-replica-validity-factor": "0",
-		// On SIGTERM (graceful pod shutdown from a node drain, eviction, or
-		// preemption), a cluster primary hands its slots off to a replica as
-		// part of shutdown. This covers out-of-band descheduling that the
-		// operator's own rolling failover never observes. Requires Valkey 9.0+.
-		"shutdown-on-sigterm": "failover",
 	})
+	// On SIGTERM (graceful pod shutdown from a node drain, eviction, or
+	// preemption), a cluster primary hands its slots off to a replica as
+	// part of shutdown. This covers out-of-band descheduling that the
+	// operator's own rolling failover never observes. An older server refuses
+	// to start on the directive, so it is left out for an image whose tag is
+	// below 9.0, and kept when the version cannot be read from the tag.
+	if version, ok := valkey.VersionFromImage(effectiveImage(image)); !ok || !version.LessThan(shutdownOnSigtermMinVersion) {
+		baseConfig["shutdown-on-sigterm"] = "failover"
+	}
 
 	return baseConfig
 }
+
+// shutdownOnSigtermMinVersion is the first Valkey release that accepts
+// shutdown-on-sigterm failover.
+var shutdownOnSigtermMinVersion = semver.MustParse("9.0.0-rc1")
 
 // liveConfigAllowlist is the set of user-config keys the operator applies live
 // via CONFIG SET. Keys outside this set roll the pod when changed.
@@ -186,12 +194,14 @@ func liveConfigToApply(config map[string]string) map[string]string {
 // features are not supported by the detected Valkey version. It reports exactly
 // the settings the renderer drops.
 func versionGateConfigWarnings(cluster *valkeyiov1alpha1.ValkeyCluster) []configWarning {
-	droppedKeys := gatedUserKeysToSuppress(cluster.Spec.Image, cluster.Spec.Config)
-
-	image := effectiveImage(cluster.Spec.Image)
+	image := effectiveServerImage(cluster.Spec.Image, cluster.Spec.Containers)
+	droppedKeys := gatedUserKeysToSuppress(image, cluster.Spec.Config)
 	imageSource := "spec.image"
 	if cluster.Spec.Image == "" {
 		imageSource = "default image"
+	}
+	if image != effectiveImage(cluster.Spec.Image) {
+		imageSource = "spec.containers[server].image"
 	}
 
 	versionDetail := fmt.Sprintf("no version could be detected from %s %q", imageSource, image)

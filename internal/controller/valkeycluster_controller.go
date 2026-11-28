@@ -165,6 +165,10 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// Every status write below sends status.failback whole, so take it from
+	// the stored object before the first one rather than from the cache.
+	r.refreshFailbackStatus(ctx, cluster)
+
 	// During deletion (e.g. a foreground cascading delete, where the garbage
 	// collector removes dependents before the cluster itself) reconciling would
 	// recreate the very children being deleted and deadlock the delete
@@ -295,6 +299,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// was already ready when its INFO was read.
 	readyBefore := r.readyServerContainers(ctx, nodes)
 	state := r.scrapeClusterState(ctx, nodes, dial)
+	trackFailback(cluster, state, nodes, nowFn())
 
 	// A node that rejects the operator's password is missing from state, so
 	// the steps below would act on a partial view and blame the topology.
@@ -628,6 +633,18 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonReconciling, waiting, metav1.ConditionFalse)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconciling, waiting, metav1.ConditionTrue)
 	} else {
+		// The cluster is otherwise healthy: fail back one shard whose quiet period
+		// has ended, then re-read the topology.
+		for _, f := range cluster.Status.Failback {
+			if r.maybeFailback(ctx, cluster, state, nodes, int(f.Shard), false) {
+				// Surface a lost write so a failed attempt cannot skip backoff.
+				if err := r.updateStatus(ctx, cluster, state); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+		}
+
 		setCondition(cluster, valkeyiov1alpha1.ConditionReady, valkeyiov1alpha1.ReasonClusterHealthy, "Cluster is healthy", metav1.ConditionTrue)
 		setCondition(cluster, valkeyiov1alpha1.ConditionProgressing, valkeyiov1alpha1.ReasonReconcileComplete, "No changes needed", metav1.ConditionFalse)
 	}
@@ -674,7 +691,7 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.V(1).Info("cluster pod readiness pending, rechecking", "after", initialSyncGateRecheck)
 		return ctrl.Result{RequeueAfter: initialSyncGateRecheck}, nil
 	}
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: failbackRequeueAfter(cluster, 30*time.Second)}, nil
 }
 
 type podSchedulingIssue struct {
@@ -884,6 +901,12 @@ func (r *ValkeyClusterReconciler) reconcileValkeyNodes(ctx context.Context, clus
 				totalCreated++
 			}
 		}
+		// Every member of the shard is settled. When the roll moved its primary
+		// away and node-index 0 has synced, hand it back now. The roll does not
+		// wait for that sync: the next pass that finds it synced fails back.
+		if r.maybeFailback(ctx, cluster, clusterState, nodes, shardIndex, true) {
+			return true, nil
+		}
 	}
 
 	if totalCreated > 0 {
@@ -999,6 +1022,9 @@ func (r *ValkeyClusterReconciler) maybeProactiveFailoverBeforeRoll(ctx context.C
 			log.Info("proactive failover did not complete, deferring roll",
 				"name", current.Name, "err", err)
 			return fmt.Sprintf("the proactive failover to a synced replica did not complete (%v)", err)
+		}
+		if shardIndex, err := strconv.Atoi(current.Labels[LabelShardIndex]); err == nil {
+			markRollHandoff(cluster, shardIndex)
 		}
 		return ""
 	}
@@ -2130,9 +2156,13 @@ func (r *ValkeyClusterReconciler) forgetStaleNodes(ctx context.Context, cluster 
 // updateStatus updates the status with the current conditions and computes the Valkey Cluster state
 func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, state *valkey.ClusterState) error {
 	log := logf.FromContext(ctx)
-	// Fetch the latest version to avoid conflicts from stale resourceVersion
+	// Read the stored status: a stale patch base can hide a failback clock reset.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	current := &valkeyiov1alpha1.ValkeyCluster{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(cluster), current); err != nil {
 		return err
 	}
 
@@ -2146,8 +2176,9 @@ func (r *ValkeyClusterReconciler) updateStatus(ctx context.Context, cluster *val
 		current.Status.Shards = int32(len(state.Shards))
 	}
 
-	// Apply conditions from the in-memory cluster object
+	// Apply conditions and failback tracking from the in-memory cluster object
 	current.Status.Conditions = cluster.Status.Conditions
+	current.Status.Failback = cluster.Status.Failback
 
 	// compute Valkey Cluster state from conditions (priority order: Degraded > Ready > Progressing > Failed)
 	readyCondition := meta.FindStatusCondition(current.Status.Conditions, valkeyiov1alpha1.ConditionReady)

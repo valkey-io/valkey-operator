@@ -704,6 +704,65 @@ func TestRebalanceSlotsWaitsForDestinationToKnowSource(t *testing.T) {
 	}
 }
 
+// knowSourceWithoutSlots gives the destination a peer table that lists the
+// source but none of its slots, as gossip leaves it between learning the
+// source's ID and learning what it owns.
+func knowSourceWithoutSlots(dst *valkey.ShardState) {
+	dst.Nodes[0].SetClusterNodesForTesting(
+		"dst-primary-id 10.0.0.2:6379@16379 myself,master - 0 0 2 connected\n" +
+			"src-primary-id 127.0.0.1:6379@16379 master - 0 0 0 connected\n")
+}
+
+// TestRebalanceSlotsWaitsForDestinationToSeeSourceSlots: the destination
+// refuses the handshake with "Slot 0 has no node served" until it sees the
+// source owning the slots, so knowing the source is not enough.
+func TestRebalanceSlotsWaitsForDestinationToSeeSourceSlots(t *testing.T) {
+	server := newMigrationStateServer(t, func() [][]string { return nil })
+	src, dst := rebalanceFixture(t, server)
+	knowDestination(src)
+	knowSourceWithoutSlots(dst)
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	cluster := &valkeyiov1alpha1.ValkeyCluster{}
+	cluster.Spec.Shards = 2
+
+	move, err := r.rebalanceSlots(context.Background(), cluster, []*valkey.ShardState{src, dst})
+	if err != nil {
+		t.Fatalf("waiting on gossip must not error, got %v", err)
+	}
+	if move == nil {
+		t.Fatal("expected the rebalance to report the pending move")
+	}
+	if sentMigrateSlots(server) {
+		t.Fatalf("MIGRATESLOTS must wait until the destination sees the source's slots, got %q", server.commands())
+	}
+	want := "Waiting for 10.0.0.2 to learn that " + src.Nodes[0].Address + " owns the slots to move"
+	if got := recorderEvents(r.Recorder); !slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, want) }) {
+		t.Fatalf("expected an event containing %q, got %q", want, got)
+	}
+}
+
+// TestDrainExcessShardsWaitsForDestinationToSeeSourceSlots: the same for a
+// scale-in drain.
+func TestDrainExcessShardsWaitsForDestinationToSeeSourceSlots(t *testing.T) {
+	server := newMigrationStateServer(t, func() [][]string { return nil })
+	cluster, state, nodes := migrationScaleInFixture(t, server)
+	knowDestination(state.Shards[0])
+	knowSourceWithoutSlots(state.Shards[1])
+
+	r := &ValkeyClusterReconciler{Recorder: events.NewFakeRecorder(64)}
+	drained, err := r.drainExcessShards(context.Background(), cluster, state, nodes)
+	if err != nil {
+		t.Fatalf("waiting on gossip must not error, got %v", err)
+	}
+	if !drained {
+		t.Fatal("expected the drain to report work pending")
+	}
+	if sentMigrateSlots(server) {
+		t.Fatalf("MIGRATESLOTS must wait until the destination sees the source's slots, got %q", server.commands())
+	}
+}
+
 // TestDrainExcessShardsWaitsForDestinationToKnowSource: the same for a
 // scale-in drain.
 func TestDrainExcessShardsWaitsForDestinationToKnowSource(t *testing.T) {

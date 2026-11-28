@@ -348,11 +348,11 @@ func shared(s string, strs *stringTable) string {
 	return strs.intern(s)
 }
 
-// stringTable holds one copy of each id and host a scrape parses. Every
-// scraped node parses a table that lists all the nodes, so the same values
-// repeat in each of them; with one copy per scrape, N tables of N entries keep
-// N strings instead of N*N. It is safe for the scrape's parallel parses, and it
-// lives only as long as the scrape.
+// stringTable holds one copy of each node id, host, primary id and migration
+// peer a scrape parses. Every scraped node parses a table that lists all the
+// nodes, so the same values repeat in each of them; with one copy per scrape,
+// N tables of N entries keep N strings instead of N*N. It is safe for the
+// scrape's parallel parses, and it lives only as long as the scrape.
 type stringTable struct {
 	m sync.Map // string -> string
 }
@@ -361,7 +361,8 @@ func (t *stringTable) intern(s string) string {
 	if v, ok := t.m.Load(s); ok {
 		return v.(string)
 	}
-	c := strings.Clone(s)
+	// One conversion to any, used as both key and value.
+	c := any(strings.Clone(s))
 	v, _ := t.m.LoadOrStore(c, c)
 	return v.(string)
 }

@@ -2311,7 +2311,9 @@ func (r *ValkeyClusterReconciler) rebalanceSlots(ctx context.Context, cluster *v
 	}
 	if slotOwnershipUnseen(move) {
 		log.V(1).Info("destination does not yet see the source owning the slots via gossip; will retry", "src", move.Src.Address, "dst", move.Dst.Address)
-		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "RebalanceSlots", "Waiting for %s to learn that %s owns the slots to move", move.Dst.Address, move.Src.Address)
+		// The recorder groups events by reason and action, not note, so this
+		// wait has its own action to get an event of its own.
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsRebalancePending", "AwaitSlotOwnership", "Waiting for %s to learn that %s owns the slots to move", move.Dst.Address, move.Src.Address)
 		return move, nil
 	}
 
@@ -2479,10 +2481,12 @@ func (r *ValkeyClusterReconciler) drainExcessShards(ctx context.Context, cluster
 
 	if node, peer := unknownPeer(move); node != nil {
 		log.V(1).Info("drain source and destination do not yet know each other", "node", node.Address, "peer", peer.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsDrainPending", "ScaleIn", "Waiting for %s to learn node %s", node.Address, peer.Address)
 		return true, nil
 	}
 	if slotOwnershipUnseen(move) {
 		log.V(1).Info("drain destination does not yet see the source owning the slots", "src", move.Src.Address, "dst", move.Dst.Address)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, "SlotsDrainPending", "AwaitSlotOwnership", "Waiting for %s to learn that %s owns the slots to move", move.Dst.Address, move.Src.Address)
 		return true, nil
 	}
 

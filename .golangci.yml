@@ -2,6 +2,7 @@ version: "2"
 run:
   allow-parallel-runners: true
   go: "1.26"
+  relative-path-mode: gomod
 linters:
   default: none
   enable:
@@ -25,11 +26,26 @@ linters:
     - unparam
     - unused
     - logcheck
+    - kubeapilinter
   settings:
     custom:
       logcheck:
         type: "module"
         description: Checks Go logging calls for Kubernetes logging conventions.
+      kubeapilinter:
+        type: "module"
+        description: Checks Kubernetes API types against Kubernetes API conventions.
+        original-url: sigs.k8s.io/kube-api-linter
+        settings:
+          linters:
+            disable:
+              - "*"
+            enable:
+              - arrayofstruct
+              - duplicatemarkers
+              - optionalorrequired
+              - ssatags
+              - uniquemarkers
     depguard:
       rules:
         forbid-sort-pkg:
@@ -60,6 +76,19 @@ linters:
         # Allow repeated strings in tests.
         linters:
           - goconst
+      - linters:
+          - kubeapilinter
+        path-except: ^api/
+      - linters:
+          - kubeapilinter
+        path: _test\.go$
+      - linters:
+          - kubeapilinter
+        path: ^api/v1alpha1/valkeycluster_types\.go$
+        # TODO(#476): TrustSource enforces its union via a hand-written XValidation CEL rule
+        # rather than +kubebuilder:validation:ExactlyOneOf. Migrate TrustSource to ExactlyOneOf
+        # in a follow-up PR or during v1beta1 promotion (#662) and remove this exclusion.
+        text: "^arrayofstruct: TLSClientAuthSpec\\.CA\\b"
     paths:
       - third_party$
       - builtin$

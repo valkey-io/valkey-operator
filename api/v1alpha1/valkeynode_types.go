@@ -46,6 +46,7 @@ type ValkeyNodeSpec struct {
 
 	// ImagePullSecrets is a list of references to Secrets used for pulling the pod's
 	// images from private registries.
+	// +listType=atomic
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
@@ -73,6 +74,7 @@ type ValkeyNodeSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// Tolerations defines the pod tolerations.
+	// +listType=atomic
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
@@ -84,6 +86,7 @@ type ValkeyNodeSpec struct {
 	// TopologySpreadConstraints defines pod topology spread constraints applied
 	// to the ValkeyNode workload. The operator augments these constraints with
 	// shard-aware selectors derived from node labels.
+	// +listType=atomic
 	// +optional
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
@@ -107,6 +110,7 @@ type ValkeyNodeSpec struct {
 	// Containers allows patching the default containers via a strategic merge
 	// patch. Existing containers (e.g. "server", "metrics-exporter") are merged
 	// by name; any container name not present in the defaults is appended.
+	// +listType=atomic
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
@@ -177,7 +181,6 @@ type ValkeyNodeSpec struct {
 	// PreferredEndpointType is set by the ValkeyCluster controller from
 	// spec.networking.discovery. PreferredEndpointTypeHostname switches announce
 	// flags and managed config to hostname mode. Empty means IP announce.
-	// +kubebuilder:validation:Enum=IP;Hostname
 	// +optional
 	PreferredEndpointType PreferredEndpointType `json:"preferredEndpointType,omitempty"`
 
@@ -214,7 +217,7 @@ type NodeTLSSpec struct {
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots mounted into the node pod.
-	// +kubebuilder:validation:Required
+	// +required
 	Certificates NodeTLSCertificates `json:"certificates"`
 
 	// ClientAuth is the resolved client certificate authentication settings
@@ -287,7 +290,7 @@ type NodeTLSCertificates struct {
 	// Server is the node identity presented to clients and peers, and the
 	// trust root for the node. The referenced secret must contain `ca.crt`,
 	// `tls.crt` and `tls.key`.
-	// +kubebuilder:validation:Required
+	// +required
 	Server NodeCertificateRef `json:"server"`
 
 	// TrustBundle, when set, replaces the server secret's `ca.crt` as the
@@ -304,7 +307,7 @@ type NodeTLSCertificates struct {
 // `ca.crt`.
 type NodeTrustBundleRef struct {
 	// SecretName is the name of the secret.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
@@ -317,7 +320,7 @@ type NodeTrustBundleRef struct {
 // the ValkeyNode, so this side only ever names something the node can mount.
 type NodeCertificateRef struct {
 	// SecretName is the name of the secret.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
@@ -381,10 +384,12 @@ type ValkeyNodeStatus struct {
 // AppliedLiveConfigEntry is one live-settable directive the server accepted.
 type AppliedLiveConfigEntry struct {
 	// Name is the directive name.
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Value is the directive's value.
+	// +required
 	Value string `json:"value"`
 }
 
@@ -503,7 +508,10 @@ const (
 // +kubebuilder:printcolumn:name="IP",type="string",JSONPath=".status.podIP",description="Pod IP",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 type ValkeyNode struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+
+	// metadata is a standard object metadata
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
 	// +required

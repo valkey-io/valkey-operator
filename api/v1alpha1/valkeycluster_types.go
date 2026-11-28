@@ -102,6 +102,7 @@ func (c *PodDisruptionBudgetConfig) UnmarshalJSON(data []byte) error {
 // These fields are rendered onto each ValkeyNode workload the cluster creates.
 type SchedulingSpec struct {
 	// Tolerations to apply to the pods
+	// +listType=atomic
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
@@ -116,6 +117,7 @@ type SchedulingSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// TopologySpreadConstraints to apply to the pods
+	// +listType=atomic
 	// +optional
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
@@ -264,6 +266,7 @@ type ZonePinning struct {
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	// +listType=atomic
+	// +required
 	Zones []string `json:"zones"`
 }
 
@@ -347,16 +350,18 @@ var ReservedConfigKeys = []string{
 type ValkeyClusterSpec struct {
 
 	// Override the default Valkey image
+	// +optional
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets is a list of references to Secrets in the same namespace used for
 	// pulling any of the images (Valkey server, metrics exporter, and any additional
 	// containers) from private registries.
+	// +listType=atomic
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// The number of shards groups. Each shard group contains one primary and N replicas.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Minimum=1
 	Shards int32 `json:"shards"`
 
@@ -405,6 +410,7 @@ type ValkeyClusterSpec struct {
 	//
 	// +listType=map
 	// +listMapKey=name
+	// +optional
 	Users []UserAclSpec `json:"users,omitempty"`
 
 	// ACL configures the Valkey access control the operator manages.
@@ -412,6 +418,7 @@ type ValkeyClusterSpec struct {
 	ACL *ACLSpec `json:"acl,omitempty"`
 
 	// Additional containers or overrides for existing containers, applied using strategic merge patch
+	// +listType=atomic
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="!self.exists(c, c.name == 'server-init')",message="container name 'server-init' is reserved for the operator-managed init container",reason="FieldValueForbidden"
 	Containers []corev1.Container `json:"containers,omitempty"`
@@ -676,7 +683,7 @@ type TLSSpec struct {
 	ServerName string `json:"serverName,omitempty"`
 
 	// Certificates holds the certificate slots used by the cluster.
-	// +kubebuilder:validation:Required
+	// +required
 	Certificates TLSCertificates `json:"certificates"`
 
 	// ClientAuth configures client certificate authentication. When omitted,
@@ -719,7 +726,7 @@ type TLSCertificates struct {
 	// - `ca.crt`: The certificate authority.
 	// - `tls.crt`: The certificate (or a chain).
 	// - `tls.key`: The private key to the first certificate in the certificate chain.
-	// +kubebuilder:validation:Required
+	// +required
 	Server CertificateSource `json:"server"`
 }
 
@@ -773,7 +780,7 @@ func (c *ValkeyCluster) PerNodeServicesEnabled() bool {
 // are added as sibling fields forming a union where exactly one may be set.
 type CertificateSource struct {
 	// SecretName is the name of the secret.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
@@ -782,6 +789,7 @@ type CertificateSource struct {
 type ExporterSpec struct {
 
 	// Override the default exporter image
+	// +optional
 	Image string `json:"image,omitempty"`
 
 	// Override resource requirements for the exporter container in each pod
@@ -799,6 +807,7 @@ type ExporterSpec struct {
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// Additional cmdline arguments passed to exporter sidecar container.
+	// +listType=atomic
 	// +optional
 	Args []string `json:"args,omitempty"`
 }

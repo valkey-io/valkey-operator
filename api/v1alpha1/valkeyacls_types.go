@@ -166,6 +166,7 @@ type UserAclSpec struct {
 
 	// If the user is enabled or not
 	// +kubebuilder:default=true
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Reference information to a Secret containing user passwords
@@ -174,10 +175,12 @@ type UserAclSpec struct {
 
 	// Do not apply a password to this user
 	// +kubebuilder:default=false
+	// +optional
 	NoPassword bool `json:"nopass,omitempty"`
 
 	// Apply the resetpass flag to this user
 	// +kubebuilder:default=false
+	// +optional
 	ResetPass bool `json:"resetpass,omitempty"`
 
 	ACLPermissions `json:",inline"`
@@ -216,6 +219,7 @@ type PasswordSecretSpec struct {
 
 	// An array of keys inside the referencing Secret to find passwords; defaults to username
 	// Valkey supports multiple passwords per user for rotation
+	// +listType=atomic
 	// +optional
 	Keys []string `json:"keys,omitempty"`
 }
@@ -229,10 +233,14 @@ type CommandsAclSpec struct {
 
 	// Allowed commands for this user
 	// +kubebuilder:validation:items:Pattern=`^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$`
+	// +listType=atomic
+	// +optional
 	Allow []string `json:"allow,omitempty"`
 
 	// Denied commands for this user
 	// +kubebuilder:validation:items:Pattern=`^(@[A-Za-z]+|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*(\|[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*(\.[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*)*)?)$`
+	// +listType=atomic
+	// +optional
 	Deny []string `json:"deny,omitempty"`
 }
 
@@ -240,16 +248,19 @@ type KeysAclSpec struct {
 
 	// Keys on which this user can read, and write; maps to Valkey: ~pattern
 	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
+	// +listType=atomic
 	// +optional
 	ReadWrite []string `json:"readWrite,omitempty"`
 
 	// Keys restricted to read-only; maps to Valkey: %R~pattern
 	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
+	// +listType=atomic
 	// +optional
 	ReadOnly []string `json:"readOnly,omitempty"`
 
 	// Keys restricted to write-only; maps to Valkey: %W~pattern
 	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
+	// +listType=atomic
 	// +optional
 	WriteOnly []string `json:"writeOnly,omitempty"`
 }
@@ -258,6 +269,7 @@ type ChannelsAclSpec struct {
 
 	// Pub/Sub channel patterns - maps to Valkey: &pattern
 	// +kubebuilder:validation:items:Pattern=`^[^\s]+$`
+	// +listType=atomic
 	// +optional
 	Patterns []string `json:"patterns,omitempty"`
 }

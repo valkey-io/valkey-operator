@@ -9,3 +9,10 @@ plugins:
   - module: "sigs.k8s.io/logtools"
     import: "sigs.k8s.io/logtools/logcheck/gclplugin"
     version: latest
+  # kube-api-linter checks Kubernetes API types in api/ against Kubernetes API conventions.
+  # Pinned to the latest commit compatible with golangci-lint v2.13.1 (KAL has no tagged
+  # releases yet; newer commits require golangci-lint v2.14.0).
+  # NOTE: When upgrading golangci-lint (e.g. via kubebuilder alpha update / auto_update.yml),
+  # update GOLANGCI_LINT_VERSION in Makefile, `version` above, and this KAL pseudo-version together.
+  - module: "sigs.k8s.io/kube-api-linter"
+    version: "v0.0.0-20261009155318-ec17fa1c2713"

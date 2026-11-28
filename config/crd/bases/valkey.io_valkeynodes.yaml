@@ -988,12 +988,14 @@ spec:
                   owning cluster's Spec.Config. The controller applies the subset of these
                   keys that are live-settable (see the operator's allowlist) via CONFIG SET;
                   the rest take effect on the next pod roll. Keys are lowercase, as the
-                  cluster's are.
+                  cluster's are. An unchanged stored value stays valid.
                 maxProperties: 1000
                 type: object
                 x-kubernetes-validations:
                 - message: spec.config keys must be lowercase
-                  rule: self.all(key, key == key.lowerAscii())
+                  optionalOldSelf: true
+                  rule: (oldSelf.hasValue() && oldSelf.value() == self) || (self.all(key,
+                    key == key.lowerAscii()))
               configRevision:
                 description: |-
                   ConfigRevision names the pinned config revision the pod template

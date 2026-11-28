@@ -124,9 +124,9 @@ type ValkeyNodeSpec struct {
 	// owning cluster's Spec.Config. The controller applies the subset of these
 	// keys that are live-settable (see the operator's allowlist) via CONFIG SET;
 	// the rest take effect on the next pod roll. Keys are lowercase, as the
-	// cluster's are.
+	// cluster's are. An unchanged stored value stays valid.
 	// +kubebuilder:validation:MaxProperties=1000
-	// +kubebuilder:validation:XValidation:rule="self.all(key, key == key.lowerAscii())",message="spec.config keys must be lowercase"
+	// +kubebuilder:validation:XValidation:rule="(oldSelf.hasValue() && oldSelf.value() == self) || (self.all(key, key == key.lowerAscii()))",optionalOldSelf=true,message="spec.config keys must be lowercase"
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 

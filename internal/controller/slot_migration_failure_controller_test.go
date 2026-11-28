@@ -761,6 +761,11 @@ func TestDrainExcessShardsWaitsForDestinationToSeeSourceSlots(t *testing.T) {
 	if sentMigrateSlots(server) {
 		t.Fatalf("MIGRATESLOTS must wait until the destination sees the source's slots, got %q", server.commands())
 	}
+	src, dst := state.Shards[0].Nodes[0], state.Shards[1].Nodes[0]
+	want := "SlotsDrainPending Waiting for " + dst.Address + " to learn that " + src.Address + " owns the slots to move"
+	if got := recorderEvents(r.Recorder); !slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, want) }) {
+		t.Fatalf("expected an event containing %q, got %q", want, got)
+	}
 }
 
 // TestDrainExcessShardsWaitsForDestinationToKnowSource: the same for a
@@ -780,5 +785,10 @@ func TestDrainExcessShardsWaitsForDestinationToKnowSource(t *testing.T) {
 	}
 	if sentMigrateSlots(server) {
 		t.Fatalf("MIGRATESLOTS must wait until the destination knows the source, got %q", server.commands())
+	}
+	src, dst := state.Shards[0].Nodes[0], state.Shards[1].Nodes[0]
+	want := "SlotsDrainPending Waiting for " + dst.Address + " to learn node " + src.Address
+	if got := recorderEvents(r.Recorder); !slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, want) }) {
+		t.Fatalf("expected an event containing %q, got %q", want, got)
 	}
 }

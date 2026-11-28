@@ -445,7 +445,7 @@ These events are emitted during scale-out slot rebalancing.
 | Event Type | Type | Description |
 |---|---|---|
 | `SlotsRebalancing` | Normal | Slot migration is in progress between shards |
-| `SlotsRebalancePending` | Normal | Waiting for the migration source and target to learn each other through gossip before moving slots |
+| `SlotsRebalancePending` | Normal | Waiting on gossip before moving slots: for the migration source and target to learn each other, or for the target to see the source owning the slots to move (action `AwaitSlotOwnership`) |
 | `SlotRebalanceFailed` | Warning | Slot rebalancing failed, including an asynchronous `CLUSTER MIGRATESLOTS` job failure read back from `CLUSTER GETSLOTMIGRATIONS`; a scale-in drain whose migration failed asynchronously emits this event too |
 
 ### Scale-in events
@@ -455,6 +455,7 @@ These events are emitted during scale-in operations.
 | Event Type | Type | Description |
 |---|---|---|
 | `SlotsDraining` | Normal | Slots are being migrated away from a draining shard |
+| `SlotsDrainPending` | Normal | Waiting on gossip before draining slots: for the migration source and target to learn each other, or for the target to see the source owning the slots to move (action `AwaitSlotOwnership`) |
 | `ValkeyNodeDeleted` | Normal | ValkeyNode for a drained shard is deleted |
 | `DrainFailed` | Warning | Failed to drain excess shards for a reason other than an asynchronously failed slot migration |
 | `SlotRebalanceFailed` | Warning | A drain migration failed asynchronously after `CLUSTER MIGRATESLOTS` accepted it; same failure class as the rebalance event above |

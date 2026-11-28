@@ -185,29 +185,45 @@ func TestParseClusterNodes_Memory(t *testing.T) {
 	})
 
 	// A node keeps its table for the whole scrape, so an entry that points into
-	// the reply would keep the reply alive too.
-	t.Run("entries do not point into the reply", func(t *testing.T) {
-		raw := strings.Clone("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-9 [5461->-def456] [5462-<-ghi789]\n" +
-			"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
-		start := uintptr(unsafe.Pointer(unsafe.StringData(raw)))
-		end := start + uintptr(len(raw))
-		inReply := func(s string) bool {
-			p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
-			return s != "" && p >= start && p < end
-		}
-		for _, node := range ParseClusterNodes(raw) {
-			texts := []string{node.Id, node.Host, node.PrimaryId}
-			for _, m := range node.Migrating {
-				texts = append(texts, m.Peer)
+	// the reply would keep the reply alive too. The scrape parses through a
+	// stringTable, which must keep its own copies as well.
+	for name, strs := range map[string]*stringTable{"without a table": nil, "with a table": {}} {
+		t.Run("entries do not point into the reply "+name, func(t *testing.T) {
+			raw := strings.Clone("abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-9 [5461->-def456] [5462-<-ghi789]\n" +
+				"def456 10.0.0.2:6379@16379 slave abc123 0 0 1 connected\n")
+			start := uintptr(unsafe.Pointer(unsafe.StringData(raw)))
+			end := start + uintptr(len(raw))
+			inReply := func(s string) bool {
+				p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+				return s != "" && p >= start && p < end
 			}
-			for _, m := range node.Importing {
-				texts = append(texts, m.Peer)
-			}
-			for _, s := range texts {
-				if inReply(s) {
-					t.Errorf("%q points into the reply", s)
+			for _, node := range parseClusterNodes(raw, strs) {
+				texts := []string{node.Id, node.Host, node.PrimaryId}
+				for _, m := range node.Migrating {
+					texts = append(texts, m.Peer)
+				}
+				for _, m := range node.Importing {
+					texts = append(texts, m.Peer)
+				}
+				for _, s := range texts {
+					if inReply(s) {
+						t.Errorf("%q points into the reply", s)
+					}
 				}
 			}
+		})
+	}
+
+	// Two nodes of one scrape report the same migration; their entries share
+	// the peer ids through the scrape's table.
+	t.Run("a table shares migration peers across tables", func(t *testing.T) {
+		raw := "abc123 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-9 [5461->-def456] [5462-<-ghi789]\n"
+		strs := &stringTable{}
+		a := parseClusterNodes(strings.Clone(raw), strs)[0]
+		b := parseClusterNodes(strings.Clone(raw), strs)[0]
+		if unsafe.StringData(a.Migrating[0].Peer) != unsafe.StringData(b.Migrating[0].Peer) ||
+			unsafe.StringData(a.Importing[0].Peer) != unsafe.StringData(b.Importing[0].Peer) {
+			t.Error("each table holds its own copy of the migration peers")
 		}
 	})
 }

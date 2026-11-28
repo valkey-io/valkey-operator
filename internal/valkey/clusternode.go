@@ -19,7 +19,7 @@ package valkey
 import (
 	"strconv"
 	"strings"
-	"unique"
+	"sync"
 )
 
 // clusterNodesMinFields is the number of fields every CLUSTER NODES line has
@@ -198,7 +198,7 @@ func ParseClusterNodesMyself(raw string) *ClusterNode {
 			continue
 		}
 		// The substring can also sit in an id or hostname; the flag decides.
-		if node, ok := parseClusterNodesLine(line); ok && node.IsMyself() {
+		if node, ok := parseClusterNodesLine(line, nil); ok && node.IsMyself() {
 			return &node
 		}
 	}
@@ -209,12 +209,18 @@ func ParseClusterNodesMyself(raw string) *ClusterNode {
 // Lines with fewer than clusterNodesMinFields fields are skipped, which covers
 // the trailing empty line and any partial output.
 func ParseClusterNodes(raw string) []ClusterNode {
+	return parseClusterNodes(raw, nil)
+}
+
+// parseClusterNodes is ParseClusterNodes with the node ids, hosts, primary ids
+// and migration peers taken from strs, or copied when strs is nil.
+func parseClusterNodes(raw string, strs *stringTable) []ClusterNode {
 	// One entry per line at most. Growing the slice by append would allocate
 	// about twice the final size on every one of the scrape's node tables. A
 	// table beyond the cap still parses; the slice grows by append past it.
 	nodes := make([]ClusterNode, 0, min(strings.Count(raw, "\n")+1, clusterNodesPreallocMax))
 	for line := range strings.SplitSeq(raw, "\n") {
-		if node, ok := parseClusterNodesLine(line); ok {
+		if node, ok := parseClusterNodesLine(line, strs); ok {
 			nodes = append(nodes, node)
 		}
 	}
@@ -223,7 +229,7 @@ func ParseClusterNodes(raw string) []ClusterNode {
 
 // parseClusterNodesLine parses a single CLUSTER NODES line. The bool is false
 // when the line is too short to describe a node.
-func parseClusterNodesLine(line string) (ClusterNode, bool) {
+func parseClusterNodesLine(line string, strs *stringTable) (ClusterNode, bool) {
 	// The leading fields are read in place; the slot fields that follow are
 	// handled one at a time, so no slice of fields is built.
 	var head [clusterNodesMinFields]string
@@ -236,10 +242,10 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 	}
 
 	node := ClusterNode{
-		Id:        shared(head[0]),
-		Host:      shared(hostFromClusterNodesEndpoint(head[1])),
+		Id:        shared(head[0], strs),
+		Host:      shared(hostFromClusterNodesEndpoint(head[1]), strs),
 		Flags:     parseNodeFlags(head[2]),
-		PrimaryId: shared(head[3]),
+		PrimaryId: shared(head[3], strs),
 	}
 
 	// Owned ranges and migration markers are interleaved in the same trailing
@@ -254,7 +260,7 @@ func parseClusterNodesLine(line string) (ClusterNode, bool) {
 		if field == "" {
 			break
 		}
-		migration, direction, ok := parseSlotMigration(field)
+		migration, direction, ok := parseSlotMigration(field, strs)
 		switch {
 		case !ok:
 			if !rangesOK || strings.HasPrefix(field, "[") {
@@ -308,7 +314,7 @@ const (
 // slot leaving this node and "[5461-<-<id>]" for one arriving. The bool is
 // false for any field that is not a well-formed marker, including a plain slot
 // range.
-func parseSlotMigration(field string) (SlotMigration, slotMigrationDirection, bool) {
+func parseSlotMigration(field string, strs *stringTable) (SlotMigration, slotMigrationDirection, bool) {
 	if !strings.HasPrefix(field, "[") || !strings.HasSuffix(field, "]") {
 		return SlotMigration{}, slotMigrating, false
 	}
@@ -328,15 +334,35 @@ func parseSlotMigration(field string) (SlotMigration, slotMigrationDirection, bo
 	if err != nil || peer == "" {
 		return SlotMigration{}, slotMigrating, false
 	}
-	return SlotMigration{Slot: slot, Peer: shared(peer)}, direction, true
+	return SlotMigration{Slot: slot, Peer: shared(peer, strs)}, direction, true
 }
 
-// shared returns s as a copy that is not part of the reply it was cut from.
-// Equal values share one copy until the next garbage collection, because unique
-// forgets a value once no Handle to it is held. Every scraped node parses a
-// table that lists all the nodes, so the ids and hosts repeat in each of them.
-// Cutting them from the reply would keep each reply alive, and copying them per
-// entry would keep one copy per node and table.
-func shared(s string) string {
-	return unique.Make(s).Value()
+// shared returns s as a copy that is not part of the reply it was cut from,
+// since cutting it from the reply would keep each reply alive. With strs,
+// equal values share its copy. Without it each value gets its own copy, which
+// suits a single line or table parsed outside a scrape.
+func shared(s string, strs *stringTable) string {
+	if strs == nil {
+		return strings.Clone(s)
+	}
+	return strs.intern(s)
+}
+
+// stringTable holds one copy of each node id, host, primary id and migration
+// peer a scrape parses. Every scraped node parses a table that lists all the
+// nodes, so the same values repeat in each of them; with one copy per scrape,
+// N tables of N entries keep N strings instead of N*N. It is safe for the
+// scrape's parallel parses, and it lives only as long as the scrape.
+type stringTable struct {
+	m sync.Map // string -> string
+}
+
+func (t *stringTable) intern(s string) string {
+	if v, ok := t.m.Load(s); ok {
+		return v.(string)
+	}
+	// One conversion to any, used as both key and value.
+	c := any(strings.Clone(s))
+	v, _ := t.m.LoadOrStore(c, c)
+	return v.(string)
 }

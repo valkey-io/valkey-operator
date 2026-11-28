@@ -147,7 +147,7 @@ func BenchmarkGetClusterState(b *testing.B) {
 	// getNodeState builds a logger per node, as in production; without a sink
 	// controller-runtime prints a warning after 30s.
 	logf.SetLogger(zap.New(zap.WriteTo(io.Discard)))
-	for _, shards := range []int{25, 50, 100, 125} {
+	for _, shards := range []int{50, 125, 250, 500} {
 		b.Run(fmt.Sprintf("nodes=%d", 2*shards), func(b *testing.B) {
 			ctrl := gomock.NewController(b)
 			addresses, dial := benchCluster(ctrl, shards)

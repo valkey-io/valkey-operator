@@ -212,8 +212,8 @@ func ParseClusterNodes(raw string) []ClusterNode {
 	return parseClusterNodes(raw, nil)
 }
 
-// parseClusterNodes is ParseClusterNodes with the ids and hosts taken from
-// strs, or copied when strs is nil.
+// parseClusterNodes is ParseClusterNodes with the node ids, hosts, primary ids
+// and migration peers taken from strs, or copied when strs is nil.
 func parseClusterNodes(raw string, strs *stringTable) []ClusterNode {
 	// One entry per line at most. Growing the slice by append would allocate
 	// about twice the final size on every one of the scrape's node tables. A
@@ -351,8 +351,8 @@ func shared(s string, strs *stringTable) string {
 // stringTable holds one copy of each id and host a scrape parses. Every
 // scraped node parses a table that lists all the nodes, so the same values
 // repeat in each of them; with one copy per scrape, N tables of N entries keep
-// N strings instead of N². It is safe for the scrape's parallel parses, and it
-// is dropped with the scrape rather than kept process-wide.
+// N strings instead of N*N. It is safe for the scrape's parallel parses, and it
+// lives only as long as the scrape.
 type stringTable struct {
 	m sync.Map // string -> string
 }

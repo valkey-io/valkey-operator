@@ -210,6 +210,12 @@ func (r *ValkeyClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// still return here (#500 replaces the first-reconcile case with per-user
 	// handling).
 	aclErr := r.reconcileUsersAcl(ctx, cluster)
+	// Returns before nodesRejectingOperator, so a refusal is not also
+	// reported as OperatorAuthenticationFailed.
+	if reportSystemPasswordSecretMissing(cluster, aclErr) {
+		_ = r.updateStatus(ctx, cluster, nil)
+		return ctrl.Result{RequeueAfter: authRetryInterval}, nil
+	}
 	var unresolved *userSecretUnresolvedError
 	fallback := errors.As(aclErr, &unresolved) && r.internalAclSecretExists(ctx, cluster)
 	if aclErr != nil && !fallback {

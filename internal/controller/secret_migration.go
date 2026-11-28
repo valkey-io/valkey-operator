@@ -22,16 +22,23 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	valkeyiov1alpha1 "github.com/valkey-io/valkey-operator/api/v1alpha1"
 )
+
+// errOperatorSecretForeignController is an operator Secret that another
+// object controls.
+var errOperatorSecretForeignController = errors.New("operator secret controlled by another object")
 
 // legacyInternalSecretName is the name the ACL Secret had before it took the
 // valkey- prefix.
@@ -67,10 +74,10 @@ func renamedSecrets(clusterName string) []renamedSecret {
 // not have seen one created moments ago, so a miss is read again through the
 // APIReader before anything is copied or generated.
 //
-// A Secret under the new name that the cluster does not control is used, as
-// one under the legacy name always was, unless the cluster still controls the
+// A Secret under the new name that the cluster does not control is adopted,
+// as one restored from a backup is, unless the cluster still controls the
 // legacy Secret. Then the copy did not create it, and its passwords may not be
-// the ones the nodes hold, so it is refused.
+// the ones the nodes hold, so it is refused. See adoptOperatorSecret.
 func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, name, legacyName string) (*corev1.Secret, error) {
 	key := client.ObjectKey{Namespace: cluster.Namespace, Name: name}
 	secret := &corev1.Secret{}
@@ -84,19 +91,19 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 	legacyKey := client.ObjectKey{Namespace: cluster.Namespace, Name: legacyName}
 	legacy := &corev1.Secret{}
 	if err == nil {
-		if metav1.IsControlledBy(secret, cluster) {
-			return secret, nil
-		}
-		// Uncached: a legacy Secret the cluster still controls may have lost
-		// the managed-by label the cache selects on.
-		if err := r.uncachedReader().Get(ctx, legacyKey, legacy); err != nil {
-			if apierrors.IsNotFound(err) {
-				return secret, nil
+		if !metav1.IsControlledBy(secret, cluster) {
+			// Uncached: a legacy Secret the cluster still controls may have
+			// lost the managed-by label the cache selects on.
+			legacyErr := r.uncachedReader().Get(ctx, legacyKey, legacy)
+			if client.IgnoreNotFound(legacyErr) != nil {
+				return nil, legacyErr
 			}
-			return nil, err
+			if legacyErr == nil && metav1.IsControlledBy(legacy, cluster) {
+				return nil, fmt.Errorf("secret %s exists but this cluster does not control it, while it still controls %s: delete %s so the operator can copy %s to it", name, legacyName, name, legacyName)
+			}
 		}
-		if metav1.IsControlledBy(legacy, cluster) {
-			return nil, fmt.Errorf("secret %s exists but this cluster does not control it, while it still controls %s: delete %s so the operator can copy %s to it", name, legacyName, name, legacyName)
+		if err := r.adoptOperatorSecret(ctx, cluster, secret); err != nil {
+			return nil, err
 		}
 		return secret, nil
 	}
@@ -105,6 +112,53 @@ func (r *ValkeyClusterReconciler) operatorSecret(ctx context.Context, cluster *v
 		return nil, client.IgnoreNotFound(err)
 	}
 	return r.copyLegacySecret(ctx, cluster, legacy, name)
+}
+
+// adoptOperatorSecret gives secret the operator's labels and the cluster as
+// controller when it lacks them, as a Secret restored from a backup or by hand
+// does. Without the managed-by label the cache never sees it, and without the
+// controller reference it outlives the cluster. A Secret an earlier cluster
+// of the same name controls is taken over. One another object controls is
+// refused and not written.
+func (r *ValkeyClusterReconciler) adoptOperatorSecret(ctx context.Context, cluster *valkeyiov1alpha1.ValkeyCluster, secret *corev1.Secret) error {
+	before := secret.DeepCopy()
+	owner := metav1.GetControllerOf(secret)
+	if owner != nil && owner.UID != cluster.UID {
+		if !earlierCluster(owner, cluster) {
+			return fmt.Errorf("%w: secret %s is controlled by %s %s; the operator manages this Secret itself", errOperatorSecretForeignController, secret.Name, owner.Kind, owner.Name)
+		}
+		// That cluster is gone, since the name is this one's. Taking the
+		// Secret over stops garbage collection deleting passwords this
+		// cluster's servers may already run with.
+		secret.OwnerReferences = slices.DeleteFunc(secret.OwnerReferences, func(ref metav1.OwnerReference) bool {
+			return ref.UID == owner.UID
+		})
+		owner = nil
+	}
+	if secret.Labels == nil {
+		secret.Labels = map[string]string{}
+	}
+	maps.Copy(secret.Labels, labels(cluster))
+	if owner == nil {
+		if err := controllerutil.SetControllerReference(cluster, secret, r.Scheme); err != nil {
+			return err
+		}
+	}
+	if equality.Semantic.DeepEqual(before, secret) {
+		return nil
+	}
+	if err := r.Update(ctx, secret); err != nil {
+		return fmt.Errorf("adopting secret %s: %w", secret.Name, err)
+	}
+	logf.FromContext(ctx).Info("adopted the Secret", "name", secret.Name)
+	return nil
+}
+
+// earlierCluster reports whether owner is a ValkeyCluster with cluster's name.
+func earlierCluster(owner *metav1.OwnerReference, cluster *valkeyiov1alpha1.ValkeyCluster) bool {
+	gv, err := schema.ParseGroupVersion(owner.APIVersion)
+	return err == nil && gv.Group == valkeyiov1alpha1.GroupVersion.Group &&
+		owner.Kind == "ValkeyCluster" && owner.Name == cluster.Name
 }
 
 // copyLegacySecret creates name as a copy of the legacy Secret, with every key,

@@ -965,6 +965,7 @@ const (
 	ReasonScaleInBlocked                = "ScaleInBlocked"
 	ReasonACLApplyFailed                = "ACLApplyFailed"
 	ReasonUsersAclError                 = "UsersACLError"
+	ReasonSystemPasswordSecretMissing   = "SystemPasswordSecretMissing"
 	ReasonUpdatingNodes                 = "UpdatingNodes"
 	ReasonSystemUsersAclError           = "SystemUsersACLError"
 	ReasonPodDisruptionBudgetError      = "PodDisruptionBudgetError"

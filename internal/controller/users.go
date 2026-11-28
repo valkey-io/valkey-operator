@@ -543,9 +543,15 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 		systemUsersSecret.Data = make(map[string][]byte)
 	}
 
+	exporterLost, err := r.guardSystemPasswords(ctx, cluster, systemUsersSecret)
+	if err != nil {
+		return nil, err
+	}
+
 	filled := map[string]bool{}
 	for _, user := range systemUsers {
-		if _, alreadyExist := systemUsersSecret.Data[user]; alreadyExist {
+		// An empty password is never valid, so it is generated like a missing one.
+		if len(systemUsersSecret.Data[user]) > 0 {
 			continue
 		}
 		if user == exporterUser && !cluster.Spec.ExporterEnabled() {
@@ -594,6 +600,9 @@ func (r *ValkeyClusterReconciler) upsertSystemUsersPasswordSecret(ctx context.Co
 	}
 	if err != nil {
 		return systemUsersSecret, err
+	}
+	if exporterLost {
+		r.warnExporterPasswordRegenerated(cluster, systemUsersSecret.Name)
 	}
 	// Only after a successful write, so the condition matches the stored Secret.
 	if !rotationHeld {
